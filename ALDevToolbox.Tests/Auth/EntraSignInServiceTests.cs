@@ -282,6 +282,189 @@ public sealed class EntraSignInServiceTests : IDisposable
 
     private const string OidB = "bbbbbbbb-0000-0000-0000-000000000001";
 
+    // ===== Accepting an invite with Microsoft (#1336) =====
+
+    [Fact]
+    public async Task Accepting_an_invite_creates_the_active_account_with_its_role_and_link_without_xms_edov()
+    {
+        // The invite link proved the person holds the address, so the tenant
+        // need not send xms_edov for this one account.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.Editor);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "Kirsten@cronus.com", "K"), Ip,
+            new EntraInviteAcceptance(invite!, "  Kirsten Jensen  "));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "kirsten@cronus.com");
+        user.Status.Should().Be(UserStatus.Active);
+        user.Role.Should().Be(UserRole.Editor);
+        user.DisplayName.Should().Be("Kirsten Jensen");
+        var link = await read.UserExternalLogins.IgnoreQueryFilters().SingleAsync();
+        (link.UserId, link.Issuer, link.Subject).Should().Be((user.Id, TenantA, Oid));
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().NotBeNull();
+        (await read.SignupRequests.IgnoreQueryFilters().AnyAsync()).Should().BeFalse("an invite needs no approval");
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_with_a_microsoft_account_for_another_address_creates_nothing()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.User);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "someone.else@cronus.com", "Someone"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.InviteEmailMismatch);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email.EndsWith("@cronus.com") && u.Email != "invite-admin@cronus.com"))
+            .Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull("the invite stays usable");
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_from_a_tenant_the_organisation_does_not_allow_creates_nothing()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        await SeedOrgEntraAsync(TestDb.OtherOrgId, TenantB);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.User);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        // TenantB is allowed somewhere, just not by the organisation the invite names.
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantB, Oid, "kirsten@cronus.com", "Kirsten"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.TenantNotAllowed);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "kirsten@cronus.com")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_with_a_microsoft_account_already_linked_here_is_refused()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var holderId = await SeedUserAsync(TestDb.DefaultOrgId, "holder@cronus.com");
+        await SeedLinkAsync(holderId, TenantA, Oid);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.Admin);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "kirsten@cronus.com", "Kirsten"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.IdentityTakenElsewhere);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "kirsten@cronus.com")).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_for_an_address_that_already_has_an_account_signs_in_without_the_invites_role()
+    {
+        // The invite does not apply: the existing account is resolved as an
+        // ordinary sign-in, so it binds only on xms_edov and keeps its role.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var existingId = await SeedUserAsync(TestDb.DefaultOrgId, "kirsten@cronus.com");
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.Admin);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "kirsten@cronus.com", "Kirsten", EmailVerified: true), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
+        result.User!.Id.Should().Be(existingId);
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == existingId);
+        user.Role.Should().Be(UserRole.User);
+        user.DisplayName.Should().Be("Existing User");
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_that_loses_a_race_for_the_address_creates_nothing_and_leaves_the_invite_usable()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.User);
+        // Another account for the address lands between the lookup and the save.
+        var racer = new InsertUserBeforeFirstSave(_db, TestDb.DefaultOrgId, "kirsten@cronus.com");
+        await using var ctx = _db.NewContext(racer);
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "kirsten@cronus.com", "Kirsten"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.EmailTakenElsewhere);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().CountAsync(u => u.Email == "kirsten@cronus.com")).Should().Be(1, "only the racer's row");
+        (await read.UserExternalLogins.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull();
+        (await read.LoginAttempts.AnyAsync(a => a.Email == "kirsten@cronus.com" && !a.Succeeded)).Should().BeTrue();
+    }
+
+    /// <summary>Inserts a user from another context just before the first save it sees, once.</summary>
+    private sealed class InsertUserBeforeFirstSave(TestDb db, int orgId, string email) : SaveChangesInterceptor
+    {
+        private bool _done;
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!_done)
+            {
+                _done = true;
+                await using var other = db.NewContext();
+                other.Users.Add(new User
+                {
+                    OrganizationId = orgId,
+                    Email = email,
+                    DisplayName = "Racer",
+                    PasswordHash = "x",
+                    Role = UserRole.User,
+                    Status = UserStatus.Active,
+                    CreatedAt = DateTime.UtcNow,
+                });
+                await other.SaveChangesAsync(cancellationToken);
+            }
+            return result;
+        }
+    }
+
+    private InviteService NewInvites(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System),
+            TimeProvider.System, NullLogger<InviteService>.Instance);
+
+    private async Task<string> SeedInviteAsync(int orgId, string email, UserRole role)
+    {
+        var inviterId = await SeedUserAsync(orgId, "invite-admin@cronus.com");
+        var (raw, hash) = TokenIssuer.Issue();
+        await using var ctx = _db.NewContext();
+        ctx.Invites.Add(new Invite
+        {
+            OrganizationId = orgId,
+            Email = email,
+            Role = role,
+            TokenHash = hash,
+            CreatedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            InvitedByUserId = inviterId,
+        });
+        await ctx.SaveChangesAsync();
+        return raw;
+    }
+
     private async Task SetUserStateAsync(string email, UserStatus status, DateTime? lastLoginAt = null)
     {
         await using var ctx = _db.NewContext();
@@ -745,5 +928,78 @@ public sealed class EntraSignInServiceTests : IDisposable
             .Should().BeFalse("nothing may be committed when the link loses");
         (await ctx.SignupRequests.IgnoreQueryFilters().AsNoTracking().AnyAsync(r => r.Email == "new@cronus.com"))
             .Should().BeFalse();
+    }
+
+    // IsLinkedAsync is the identity check behind Microsoft step-up: the forced
+    // re-sign-in must come back as an identity linked to the step-up user, in
+    // a tenant their organisation still allows (#1346).
+
+    private async Task<bool> IsLinkedAsync(int userId, string tid, string oid)
+    {
+        await using var ctx = _db.NewContext();
+        return await NewService(ctx).IsLinkedAsync(userId, new EntraTokenIdentity(tid, oid, "mette@cronus.com", "Mette"));
+    }
+
+    [Fact]
+    public async Task IsLinked_accepts_the_users_own_identity_in_an_allowed_tenant()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+
+        (await IsLinkedAsync(userId, TenantA.ToUpperInvariant(), Oid))
+            .Should().BeTrue("the tenant id is compared case-insensitively, as at sign-in");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_an_identity_linked_to_another_user()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        var colleagueId = await SeedUserAsync(TestDb.DefaultOrgId, "jonas@cronus.com");
+        await SeedLinkAsync(colleagueId, TenantA, OidB);
+
+        (await IsLinkedAsync(userId, TenantA, OidB))
+            .Should().BeFalse("a colleague signing in at the prompt must not confirm someone else's step-up");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_the_same_object_id_from_another_tenant()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+
+        (await IsLinkedAsync(userId, TenantB, Oid))
+            .Should().BeFalse("an object id is only unique inside its own tenant");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_once_the_tenant_is_removed_from_the_allow_list()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+        // The admin swaps the allowed tenant out; the link row is left behind.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantB);
+
+        (await IsLinkedAsync(userId, TenantA, Oid))
+            .Should().BeFalse("the allow-list is the boundary for step-up as it is for sign-in");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_once_microsoft_sign_in_is_turned_off()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.OrganizationSettings.SingleAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            row.EntraEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+
+        (await IsLinkedAsync(userId, TenantA, Oid)).Should().BeFalse();
     }
 }

@@ -882,6 +882,11 @@ public class ObjectExplorerService
         var row = await _db.OeReleases.AsNoTracking()
             .Where(visible)
             .Where(r => r.Label == label && r.DeletedAt == null)
+            // Labels are not unique: a failed import and its retry share one. Prefer
+            // a ready release, then the newest, so a label never lands on one that
+            // cannot be searched while a working one exists (#1344).
+            .OrderByDescending(r => r.Status == "ready")
+            .ThenByDescending(r => r.Id)
             .Select(r => new { r.Id })
             .FirstOrDefaultAsync(ct);
         if (row is null)
@@ -975,16 +980,24 @@ public class ObjectExplorerService
 
     /// <summary>
     /// The full per-module row the <c>list_release_modules</c> MCP tool
-    /// returns, capped at <paramref name="maxResults"/>. Distinct from
+    /// returns, at most <paramref name="maxResults"/> rows ordered by name. The
+    /// caller asks for one past its cap so it can tell the agent more were left
+    /// out (#1344). <paramref name="namePattern"/> is an optional case-insensitive
+    /// substring of the module name. Distinct from
     /// <see cref="ListModuleSummariesAsync"/>, which is the three-column form
     /// the search-filter dropdown needs. The release must already have come
     /// from <see cref="ResolveReleaseAsync"/>.
     /// </summary>
     public async Task<List<McpReleaseModuleRow>> ListReleaseModulesForMcpAsync(
-        int releaseId, int maxResults, CancellationToken ct = default)
+        int releaseId, int maxResults, string? namePattern = null, CancellationToken ct = default)
     {
-        return await _db.OeModules.AsNoTracking()
-            .Where(m => m.ReleaseId == releaseId)
+        var query = _db.OeModules.AsNoTracking().Where(m => m.ReleaseId == releaseId);
+        if (!string.IsNullOrWhiteSpace(namePattern))
+        {
+            var pattern = namePattern.Trim().ToLower();
+            query = query.Where(m => m.Name.ToLower().Contains(pattern));
+        }
+        return await query
             .OrderBy(m => m.Name)
             .Take(maxResults)
             .Select(m => new McpReleaseModuleRow(

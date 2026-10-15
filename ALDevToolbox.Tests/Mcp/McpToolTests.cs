@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Mcp;
@@ -1033,7 +1034,7 @@ public sealed class McpToolTests : IDisposable
         var importer = new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
             new ALDevToolbox.Services.ObjectExplorer.Import.TranslationImportService(
-                ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), NullLogger<ALDevToolbox.Services.ObjectExplorer.Import.TranslationImportService>.Instance),
+                ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<ALDevToolbox.Services.ObjectExplorer.Import.TranslationImportService>.Instance),
             new ALDevToolbox.Services.ObjectExplorer.Import.CallSiteReferenceEmitter(ctx, NullLogger<ALDevToolbox.Services.ObjectExplorer.Import.CallSiteReferenceEmitter>.Instance),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportService>.Instance);
         await using var s1 = File.OpenRead(Path.Combine(OeFixtureRoot, appFileName));
@@ -1152,9 +1153,11 @@ public sealed class McpToolTests : IDisposable
             .SingleAsync();
         var tools = NewOeTools(ctx);
 
-        var rows = await tools.ListReleaseModulesAsync(releaseId.ToString());
+        var result = await tools.ListReleaseModulesAsync(releaseId.ToString());
 
-        var row = rows.Should().ContainSingle().Subject;
+        result.Truncated.Should().BeFalse();
+        result.Note.Should().BeNull();
+        var row = result.Rows.Should().ContainSingle().Subject;
         row.Name.Should().Be(module.Name);
         row.HasStoredSymbolReference.Should().BeTrue("the seed imported with storeSymbolReference: true");
     }
@@ -1166,11 +1169,120 @@ public sealed class McpToolTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewOeTools(ctx);
 
-        var rows = await tools.ListReleaseModulesAsync(releaseId.ToString());
+        var rows = (await tools.ListReleaseModulesAsync(releaseId.ToString())).Rows;
 
         rows.Should().ContainSingle()
             .Which.HasStoredSymbolReference.Should().BeFalse();
     }
+
+    [Fact]
+    public async Task ListReleaseModules_says_when_modules_past_the_cap_were_left_out()
+    {
+        // A full Business Central release has more modules than the cap, and the
+        // ones late in the alphabet used to vanish without a word (#1344, MCP-3).
+        var releaseId = await SeedDkCoreReleaseAsync(label: "MCP list modules cap");
+        await using (var seed = _db.NewContext())
+        {
+            for (var i = 0; i < 201; i++)
+            {
+                seed.OeModules.Add(new OeModule
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    ReleaseId = releaseId,
+                    AppId = Guid.NewGuid(),
+                    Name = $"Bulk Module {i:D3}",
+                    Publisher = "CRONUS",
+                    Version = "1.0.0.0",
+                    CreatedAt = DateTime.UtcNow,
+                });
+            }
+            seed.OeModules.Add(new OeModule
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ReleaseId = releaseId,
+                AppId = Guid.NewGuid(),
+                Name = "Zz System Application",
+                Publisher = "CRONUS",
+                Version = "1.0.0.0",
+                CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+        var tools = NewOeTools(ctx);
+
+        var all = await tools.ListReleaseModulesAsync(releaseId.ToString());
+        all.Rows.Should().HaveCount(200);
+        all.Truncated.Should().BeTrue();
+        all.Note.Should().Contain("namePattern");
+        all.Rows.Should().NotContain(r => r.Name == "Zz System Application");
+
+        var narrowed = await tools.ListReleaseModulesAsync(releaseId.ToString(), namePattern: "system app");
+        narrowed.Truncated.Should().BeFalse();
+        narrowed.Rows.Should().ContainSingle().Which.Name.Should().Be("Zz System Application");
+    }
+
+    [Fact]
+    public async Task ListReleases_shows_what_the_releases_page_shows()
+    {
+        // A failed or importing release cannot be searched, and the empty symbol
+        // packages builds pull would grow the list without bound (#1344, MCP-8).
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeReleases.AddRange(
+                NewRelease("MCP list ready", "ready"),
+                NewRelease("MCP list failed", "failed"),
+                NewRelease("MCP list importing", "importing"),
+                NewRelease("MCP list empty symbols", "ready",
+                    dedupKey: OeRelease.SymbolFeedDedupPrefix + "cronus-empty"));
+            await seed.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+
+        var labels = (await NewOeTools(ctx).ListReleasesAsync()).Select(r => r.Label).ToList();
+
+        labels.Should().Contain("MCP list ready");
+        labels.Should().NotContain(new[] { "MCP list failed", "MCP list importing", "MCP list empty symbols" });
+    }
+
+    [Fact]
+    public async Task A_release_label_shared_with_a_failed_import_resolves_to_the_ready_release()
+    {
+        int readyId;
+        await using (var seed = _db.NewContext())
+        {
+            var ready = NewRelease("MCP shared label", "ready");
+            seed.OeReleases.Add(ready);
+            await seed.SaveChangesAsync();
+            readyId = ready.Id;
+            // The retry that failed comes after the one that worked, so "newest"
+            // alone would pick the wrong one.
+            seed.OeReleases.Add(NewRelease("MCP shared label", "failed"));
+            await seed.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+        var explorer = new ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService(
+            ctx,
+            new ALDevToolbox.Services.ObjectExplorer.Explore.ReferenceQueryService(
+                ctx, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), _db.OrgContext,
+                NullLogger<ALDevToolbox.Services.ObjectExplorer.Explore.ReferenceQueryService>.Instance),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext),
+            NullLogger<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService>.Instance);
+
+        (await explorer.ResolveReleaseAsync("MCP shared label")).Should().Be(readyId);
+    }
+
+    private static OeRelease NewRelease(string label, string status, string? dedupKey = null) => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId,
+        Label = label,
+        Kind = "first_party",
+        Status = status,
+        DedupKey = dedupKey,
+        ImportedAt = DateTime.UtcNow,
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow,
+    };
 
     [Fact]
     public async Task DownloadSymbolReference_returns_link_to_streaming_endpoint()

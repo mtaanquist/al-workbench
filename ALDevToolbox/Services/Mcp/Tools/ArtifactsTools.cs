@@ -126,8 +126,8 @@ public sealed class ArtifactsTools
 
         return new ProjectBuildDetailResult(
             BuildId: detail.Id,
-            ProjectId: detail.ProjectId,
-            ProjectName: detail.ProjectName,
+            SolutionId: detail.ProjectId,
+            SolutionName: detail.ProjectName,
             PipelineId: detail.PipelineId,
             PipelineName: detail.PipelineName,
             Status: detail.Status,
@@ -188,8 +188,8 @@ public sealed class ArtifactsTools
 /// <summary>One build's detail for the <c>get_solution_build</c> MCP tool, with download paths for its deliverables.</summary>
 public sealed record ProjectBuildDetailResult(
     int BuildId,
-    int ProjectId,
-    string ProjectName,
+    int SolutionId,
+    string SolutionName,
     int? PipelineId,
     string? PipelineName,
     string Status,

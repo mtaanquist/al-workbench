@@ -30,9 +30,12 @@ public sealed class McpSetupPageTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly Bunit.TestDoubles.BunitAuthorizationContext _auth;
 
     public McpSetupPageTests()
     {
+        _auth = _ctx.AddAuthorization();
+        _auth.SetAuthorized("kirsten.jensen@cronus.example");
         _db.McpAvailability.Set(true);
         _db.OrgContext.CurrentUserId = 1;
 
@@ -44,6 +47,7 @@ public sealed class McpSetupPageTests : IDisposable
             .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
         _ctx.Services.AddScoped<PersonalAccessTokenService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.OAuth.OAuthConsentService>();
+        _ctx.Services.AddScoped(sp => _db.NewToolEnablement(sp.GetRequiredService<AppDbContext>()));
         _ctx.Services.AddSingleton(TimeProvider.System);
         _ctx.Services.AddSingleton(_db.DataProtectionProvider);
         _ctx.Services.AddSingleton<IHttpContextAccessor>(
@@ -241,6 +245,33 @@ public sealed class McpSetupPageTests : IDisposable
 
         var listed = page.FindAll(".mcp-tools table code").Select(e => e.TextContent.Trim());
         listed.Should().BeEquivalentTo(McpToolCatalog.All.Select(t => t.Name));
+    }
+
+    /// <summary>
+    /// The assistant is not offered a tool its organisation switched off (#1245),
+    /// so the page does not list one either (#1344): a consultant reading the list
+    /// would otherwise ask for something the assistant cannot do. The page reads
+    /// the switch off the signed-in user's claim, as the sidebar does.
+    /// </summary>
+    [Fact]
+    public void A_switched_off_tool_is_left_out_of_the_reference_and_its_count()
+    {
+        _auth.SetClaims(new System.Security.Claims.Claim(
+            ALDevToolbox.Endpoints.EndpointHelpers.DisabledToolsClaim,
+            nameof(ToolKey.Translator)));
+
+        var page = _ctx.Render<ALDevToolbox.Components.Pages.Mcp>();
+
+        var offered = McpToolCatalog.All.Where(t => t.Tool != ToolKey.Translator).ToList();
+        page.WaitForAssertion(() =>
+        {
+            var listed = page.FindAll(".mcp-tools table code").Select(e => e.TextContent.Trim());
+            listed.Should().BeEquivalentTo(offered.Select(t => t.Name));
+            page.FindAll(".mcp-tools__group").Select(e => e.TextContent.Trim())
+                .Should().NotContain(McpToolCatalog.Translator, "every tool in it is switched off");
+            page.Find("details.mcp-tools summary").TextContent
+                .Should().Contain($"{offered.Count} tools across {McpToolCatalog.Groups.Count - 1} areas");
+        });
     }
 
     /// <summary>

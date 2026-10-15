@@ -130,6 +130,8 @@ public static class AdminPageHelpers
         // environment setting" - the row is only ever written for a deliberate change.
         AuditEntityType.ProjectEnvironment => "Environment setting",
         AuditEntityType.GitHubRepository => "GitHub repository",
+        // British spelling, as everywhere else a reader sees it.
+        AuditEntityType.Organization => "Organisation",
         _ => type.ToString(),
     };
 

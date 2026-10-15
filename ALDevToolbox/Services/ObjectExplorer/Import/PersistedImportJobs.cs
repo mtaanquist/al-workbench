@@ -147,6 +147,7 @@ public sealed class PersistedImportJobs
         // every org's job rows here is the design.
         // A build's row comes along so it resumes in its place in the build queue (#1137).
         // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
+        // Fence category 3 (startup, no request org): each job carries its own org id.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
             // Oldest first, so waiting push builds resume in the order they were pushed.
@@ -287,11 +288,14 @@ public sealed class PersistedImportJobs
     /// <see cref="OeImportJob.DownloadUrl"/> lets a retry re-run without the admin
     /// re-pasting the link, and the kind / DVD flag tell the UI whether a
     /// re-upload is required (the staged-zip / cal-txt temp file is gone).
+    /// Backfill jobs are skipped: they never carry a source (#1338).
     /// </summary>
     public async Task<ImportJobOrigin?> GetLatestForReleaseAsync(int releaseId, CancellationToken ct = default)
     {
         return await _db.OeImportJobs.AsNoTracking()
-            .Where(j => j.ReleaseId == releaseId)
+            // A maintenance backfill re-scans stored source; it is never how the
+            // release got its content, so it can't be the source a retry reuses.
+            .Where(j => j.ReleaseId == releaseId && j.Kind != "backfill_system_references")
             // Newest first; tie-break on the serial id so two jobs created within
             // the clock's resolution still resolve to the genuinely-latest row.
             .OrderByDescending(j => j.CreatedAt)
@@ -315,6 +319,7 @@ public sealed class PersistedImportJobs
         // Resolve release labels cross-org (this is the SiteAdmin console) so
         // the workers page can name each import rather than show a bare id.
         var releaseIds = jobs.Select(j => j.ReleaseId).Distinct().ToList();
+        // Fence category 2 (SiteAdmin cross-org console): pinned to the job rows' release ids.
         var labels = await _db.OeReleases.IgnoreQueryFilters()
             .Where(r => releaseIds.Contains(r.Id))
             .Select(r => new { r.Id, r.Label })

@@ -74,11 +74,16 @@ export async function putBaseStream(fileName, sourceLang, targetLang, streamRef)
     await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {} });
 }
 
-// Debounced incremental edit save (for resume). `editsJson` is the full overlay.
-export async function putEdits(editsJson) {
+// Debounced incremental edit save (for resume). `editsJson` is the full overlay;
+// `learnedJson` is what each unit last taught the translation memory, kept
+// beside it so a reload does not teach the same units again (#1343).
+export async function putEdits(editsJson, learnedJson) {
     const rec = await getRec();
     if (!rec) return;
-    try { rec.edits = JSON.parse(editsJson); } catch { return; }
+    try {
+        rec.edits = JSON.parse(editsJson);
+        if (learnedJson) rec.learned = JSON.parse(learnedJson);
+    } catch { return; }
     await putRec(rec);
 }
 
@@ -107,6 +112,7 @@ export async function loadMeta() {
         sourceLang: rec.sourceLang || null,
         targetLang: rec.targetLang || null,
         edits: rec.edits || {},
+        learned: rec.learned || null,
     };
 }
 
@@ -134,7 +140,9 @@ export async function clear() {
 // it + the (authoritative) edit overlay + the chosen file name, and submits.
 // The original never crosses the SignalR circuit — this is a plain browser POST
 // that returns the file as a download.
-export async function exportNow(fileName, editsJson) {
+// learnJson lists the unit ids the translation memory should learn from this
+// export: the edits whose text changed since the last save (#1343).
+export async function exportNow(fileName, editsJson, learnJson) {
     const rec = await getRec();
     if (!rec || !rec.originalXml) return false;
     const form = document.getElementById("tr-export-form");
@@ -146,6 +154,8 @@ export async function exportNow(fileName, editsJson) {
     form.querySelector("#tr-export-filename").value = fileName;
     form.querySelector("#tr-export-original").value = rec.originalXml;
     form.querySelector("#tr-export-edits").value = editsJson;
+    const learn = form.querySelector("#tr-export-learn");
+    if (learn) learn.value = learnJson || "[]";
     // The language being translated into. The server only uses it to name the
     // language of a file still marked as untranslated (one started from the
     // generated .g.xlf); every other file already says its language.
@@ -231,7 +241,7 @@ async function ensureWritePermission(handle) {
 // path posts to) so XliffTargetWriter stays the single source of truth — we
 // just fetch the result instead of navigating to it, then write the bytes to
 // the handle. Returns a status: "saved" | "empty" | "no-handle" | "denied" | "error".
-export async function saveInPlace(fileName, editsJson) {
+export async function saveInPlace(fileName, editsJson, learnJson) {
     const rec = await getRec();
     if (!rec || !rec.originalXml) return "empty";
     if (!rec.handle) return "no-handle";
@@ -251,6 +261,7 @@ export async function saveInPlace(fileName, editsJson) {
     body.append("FileName", fileName);
     body.append("OriginalXml", rec.originalXml);
     body.append("Edits", editsJson);
+    body.append("Learn", learnJson || "[]");
     if (token) body.append("__RequestVerificationToken", token.value);
 
     let bytes;

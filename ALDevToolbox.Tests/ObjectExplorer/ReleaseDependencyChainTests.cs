@@ -325,7 +325,7 @@ public sealed class ReleaseDependencyChainTests : IDisposable
             new TranslationImportService(ctx, _db.OrgContext,
                 new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext,
                     NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-                NullLogger<TranslationImportService>.Instance),
+                _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance);
 

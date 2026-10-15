@@ -386,27 +386,43 @@ public sealed partial class GitHubAppClient
 
     /// <summary>
     /// Throws when a refused repository read says nothing about the person who
-    /// asked: a rate limit (429, or 403 with no requests left), a server error, or
-    /// any other status that is not one of GitHub's ways of saying no (401, 403,
-    /// 404). Returns for those, which are a definite no.
+    /// asked: a rate limit, a server error, or any other status that is not one of
+    /// GitHub's ways of saying no (401, 403, 404). Returns for those, which are a
+    /// definite no.
+    ///
+    /// <para>A rate limit comes in two shapes. The primary limit answers 403 (or
+    /// 429) with <c>x-ratelimit-remaining: 0</c>; the secondary limit - the one a
+    /// burst of per-repository checks trips - answers 403 or 429 with a
+    /// <c>retry-after</c> header and requests still left, and says so in the
+    /// message ("You have exceeded a secondary rate limit"). Either means "ask
+    /// again later", never "no", so the body is read before deciding.</para>
     /// </summary>
     private async Task ThrowIfNoVerdictAsync(HttpResponseMessage response, HttpRequestMessage request, CancellationToken ct)
     {
+        var (message, documentationUrl) = ReadError(await response.Content.ReadAsStringAsync(ct));
         var rateLimited = response.StatusCode == HttpStatusCode.TooManyRequests
-            || (response.StatusCode == HttpStatusCode.Forbidden
-                && response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining)
-                && remaining.Any(r => r.Trim() == "0"));
+            || (response.StatusCode == HttpStatusCode.Forbidden && IsRateLimitRefusal(response, message));
         if (!rateLimited && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
             return;
         }
 
-        var (message, documentationUrl) = ReadError(await response.Content.ReadAsStringAsync(ct));
         _logger.LogWarning(
             "GitHub gave no answer about access for {Method} {Path}: {Status} {Message}",
             request.Method, request.RequestUri, (int)response.StatusCode, message);
         throw new GitHubApiException(response.StatusCode, message, documentationUrl);
     }
+
+    /// <summary>
+    /// Whether a 403 is GitHub's rate limiter speaking rather than a refusal: no
+    /// requests left, a <c>retry-after</c> header (the secondary limit), or a
+    /// message naming a rate limit.
+    /// </summary>
+    private static bool IsRateLimitRefusal(HttpResponseMessage response, string message) =>
+        (response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining)
+            && remaining.Any(r => r.Trim() == "0"))
+        || response.Headers.Contains("retry-after")
+        || message.Contains("rate limit", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether <paramref name="username"/> is a member of <paramref name="org"/>,

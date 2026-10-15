@@ -409,9 +409,13 @@ public class AppDbContext : DbContext
         // bootstrap-admin inserts happen before any org context exists. The
         // filter therefore admits null-org rows alongside the current org's,
         // so those system rows stay visible while a tenant still cannot read
-        // another tenant's audit history (#678). AuditService keeps its
-        // explicit predicates as belt and braces; the SiteAdmin console reads
-        // cross-org and calls IgnoreQueryFilters() explicitly.
+        // another tenant's audit history (#678). For another org's rows
+        // AuditService's explicit predicates are belt and braces; for the
+        // null-org rows they are the only guard, because SystemSettings and
+        // Backup rows (SMTP host, off-site bucket) are filed under no org since
+        // #1260 and this filter lets every tenant see them. CrossOrgIsolationTests
+        // pins both. The SiteAdmin console reads cross-org and calls
+        // IgnoreQueryFilters() explicitly.
         ScopeToOrganization<AuditLogEntry>(
             modelBuilder,
             e => e.OrganizationId == _orgContext.OrganizationIdForFilter || e.OrganizationId == null);

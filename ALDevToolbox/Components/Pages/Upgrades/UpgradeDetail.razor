@@ -1112,11 +1112,21 @@
         }
     }
 
-    /// <summary>What a change to several lines did, in one line: the count, then each refusal in its own words.</summary>
-    internal static UpgradeNotice LinesNotice(UpgradeLinesChangeResult result, string done) =>
-        result.Refused.Count == 0
-            ? new UpgradeNotice(done, "info", false)
-            : new UpgradeNotice(done + " " + string.Join(" ", result.Refused.Values), "warn", false);
+    /// <summary>
+    /// What a change to several lines did, in one line: the count, then each refusal in its
+    /// own words - except lines that were already gone, which share one counted sentence
+    /// instead of the same unnamed one per line.
+    /// </summary>
+    internal static UpgradeNotice LinesNotice(UpgradeLinesChangeResult result, string done)
+    {
+        if (result.Refused.Count == 0) return new UpgradeNotice(done, "info", false);
+        var gone = result.Refused.Values.Count(v => v == EnvironmentUpgradeService.NoLongerOnUpgrade);
+        var parts = new List<string> { done };
+        parts.AddRange(result.Refused.Values.Where(v => v != EnvironmentUpgradeService.NoLongerOnUpgrade));
+        if (gone == 1) parts.Add(EnvironmentUpgradeService.NoLongerOnUpgrade);
+        else if (gone > 1) parts.Add($"{gone} of the environments you picked were already taken off the upgrade. Reload to see it as it is now.");
+        return new UpgradeNotice(string.Join(" ", parts), "warn", false);
+    }
 
     private Task AssignAsync(EnvironmentUpgradeLineRow line, int? userId) =>
         WriteAsync(() => Upgrades.AssignAsync(line.LineId, userId));

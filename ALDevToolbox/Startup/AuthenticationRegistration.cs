@@ -139,6 +139,14 @@ public static class AuthenticationRegistration
                             ctx.ProtocolMessage.Prompt = "login";
                             ctx.ProtocolMessage.MaxAge = "0";
                         }
+                        // Accepting an invite needs the Microsoft account for the
+                        // invited address. A browser already signed in to another
+                        // one would otherwise be handed straight back with it,
+                        // refused, and sent round again (#1336).
+                        else if (ctx.Properties.Items.ContainsKey(ALDevToolbox.Endpoints.EntraAuthEndpoints.InviteTokenItem))
+                        {
+                            ctx.ProtocolMessage.Prompt = "select_account";
+                        }
                         return Task.CompletedTask;
                     },
                     OnAuthorizationCodeReceived = async ctx =>

@@ -384,6 +384,189 @@ public sealed class TemplateServiceWriteSideTests : IDisposable
         await act.Should().ThrowAsync<PlanValidationException>();
     }
 
+    [Fact]
+    public async Task Create_rejects_a_module_dependency_whose_key_names_no_module()
+    {
+        // #1342: generation drops a module dependency whose module is not in
+        // the workspace, so a typo used to save fine and then vanish.
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.Add(ModuleBuilder.Default("document-capture"));
+            var deleted = ModuleBuilder.Default("payroll");
+            deleted.DeletedAt = DateTime.UtcNow;
+            seed.Modules.Add(deleted);
+            await seed.SaveChangesAsync();
+        }
+        var input = NewAuthoring("runtime-module-dep", extensions: new[]
+        {
+            new ExtensionAuthoring(
+                Path: "Core",
+                NameTemplate: "Core",
+                Required: true,
+                Application: null, Runtime: null,
+                IdRangeFrom: null, IdRangeTo: null,
+                Folders: Array.Empty<FolderAuthoring>(),
+                Dependencies: new[]
+                {
+                    ModuleDependency("document-capture"),
+                    ModuleDependency("documnet-capture"),
+                    ModuleDependency("payroll"),
+                }),
+        });
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).CreateAsync(input);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Keys.Should().BeEquivalentTo(
+            "Extensions[0].Dependencies[1].Module", "Extensions[0].Dependencies[2].Module");
+        ex.Which.Errors["Extensions[0].Dependencies[1].Module"].Should().Contain("'documnet-capture'");
+    }
+
+    [Fact]
+    public async Task Create_accepts_a_module_dependency_on_a_live_module()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.Add(ModuleBuilder.Default("document-capture"));
+            await seed.SaveChangesAsync();
+        }
+        var input = NewAuthoring("runtime-module-dep-ok", extensions: new[]
+        {
+            new ExtensionAuthoring(
+                Path: "Core",
+                NameTemplate: "Core",
+                Required: true,
+                Application: null, Runtime: null,
+                IdRangeFrom: null, IdRangeTo: null,
+                Folders: Array.Empty<FolderAuthoring>(),
+                Dependencies: new[] { ModuleDependency("document-capture") }),
+        });
+
+        await using var ctx = _db.NewContext();
+        var saved = await NewService(ctx).CreateAsync(input);
+
+        saved.WorkspaceExtensions.Single().Dependencies.Single().RefModuleKey.Should().Be("document-capture");
+    }
+
+    [Fact]
+    public async Task Create_rejects_a_blank_module_dependency_key_with_a_clear_message()
+    {
+        var input = NewAuthoring("runtime-module-dep-blank", extensions: new[]
+        {
+            CoreWithDependencies(ModuleDependency("   ")),
+        });
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).CreateAsync(input);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Extensions[0].Dependencies[0].Module")
+            .WhoseValue.Should().NotContain("''");
+    }
+
+    /// <summary>
+    /// A module deleted after the template was saved must not lock the template
+    /// against further edits - the #1326 trap, for dependencies (#1342).
+    /// </summary>
+    [Fact]
+    public async Task Update_keeps_a_dependency_on_a_since_deleted_module_when_something_else_changes()
+    {
+        var id = await CreateTemplateDependingOnPayrollThenDeletePayrollAsync("runtime-dep-deleted-rename");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var current = await NewService(ctx).GetAuthoringByKeyAsync("runtime-dep-deleted-rename");
+            await NewService(ctx).UpdateAsync(id, current! with { Name = "Renamed" });
+        }
+
+        await using var verify = _db.NewContext();
+        var saved = await verify.RuntimeTemplates
+            .Include(t => t.WorkspaceExtensions).ThenInclude(e => e.Dependencies)
+            .SingleAsync(t => t.Id == id);
+        saved.Name.Should().Be("Renamed");
+        saved.WorkspaceExtensions.Single().Dependencies.Select(d => d.RefModuleKey).Should().Equal("payroll");
+    }
+
+    [Fact]
+    public async Task Update_refuses_a_newly_added_module_key_that_names_no_module()
+    {
+        var id = await CreateTemplateDependingOnPayrollThenDeletePayrollAsync("runtime-dep-new-typo");
+
+        await using var ctx = _db.NewContext();
+        var current = await NewService(ctx).GetAuthoringByKeyAsync("runtime-dep-new-typo");
+        var core = current!.Extensions.Single();
+        var withTypo = current with
+        {
+            Extensions = new[]
+            {
+                core with { Dependencies = core.Dependencies.Append(ModuleDependency("documnet-capture")).ToList() },
+            },
+        };
+        var act = () => NewService(ctx).UpdateAsync(id, withTypo);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Keys.Should().BeEquivalentTo("Extensions[0].Dependencies[1].Module");
+        ex.Which.Errors["Extensions[0].Dependencies[1].Module"].Should().Contain("'documnet-capture'");
+    }
+
+    [Fact]
+    public async Task Toml_export_and_reimport_saves_a_template_depending_on_a_since_deleted_module()
+    {
+        var id = await CreateTemplateDependingOnPayrollThenDeletePayrollAsync("runtime-dep-deleted-toml");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var current = await NewService(ctx).GetAuthoringByKeyAsync("runtime-dep-deleted-toml");
+            var toml = TemplateTomlMapper.ToToml(current!);
+            await NewService(ctx).UpdateAsync(id, TemplateTomlMapper.FromToml(toml, deprecated: false));
+        }
+
+        await using var verify = _db.NewContext();
+        var deps = await verify.WorkspaceExtensionDependencies
+            .Where(d => d.Extension!.TemplateId == id)
+            .Select(d => d.RefModuleKey)
+            .ToListAsync();
+        deps.Should().Equal("payroll");
+    }
+
+    private async Task<int> CreateTemplateDependingOnPayrollThenDeletePayrollAsync(string key)
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.Add(ModuleBuilder.Default("payroll"));
+            await seed.SaveChangesAsync();
+        }
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            id = (await NewService(ctx).CreateAsync(NewAuthoring(key, extensions: new[]
+            {
+                CoreWithDependencies(ModuleDependency("payroll")),
+            }))).Id;
+        }
+        await using (var del = _db.NewContext())
+        {
+            var module = await del.Modules.SingleAsync(m => m.Key == "payroll");
+            module.DeletedAt = DateTime.UtcNow;
+            await del.SaveChangesAsync();
+        }
+        return id;
+    }
+
+    private static ExtensionAuthoring CoreWithDependencies(params DependencyAuthoring[] deps) => new(
+        Path: "Core",
+        NameTemplate: "Core",
+        Required: true,
+        Application: null, Runtime: null,
+        IdRangeFrom: null, IdRangeTo: null,
+        Folders: Array.Empty<FolderAuthoring>(),
+        Dependencies: deps);
+
+    private static DependencyAuthoring ModuleDependency(string key) => new(
+        RefExtensionPath: null, RefModuleKey: key,
+        LitId: null, LitName: null, LitPublisher: null, LitVersion: null);
+
     // ===== Helpers =====
 
     private TemplateService NewService(Data.AppDbContext ctx) =>

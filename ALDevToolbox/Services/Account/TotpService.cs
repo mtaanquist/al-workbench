@@ -94,7 +94,7 @@ public sealed class TotpService
             // factor out from under the user.
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Totp"] = "TOTP is already enabled. Disable it first if you want to re-enroll."
+                ["Totp"] = "The authenticator app is already turned on. Turn it off first if you want to set it up again."
             });
         }
         await _db.SaveChangesAsync(ct);
@@ -115,10 +115,10 @@ public sealed class TotpService
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId.
         var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.UserId == userId, ct)
-            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start a TOTP enrollment first." });
+            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start setting up the authenticator app first." });
 
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
-        if (!VerifyCode(base32, code))
+        if (VerifyCode(base32, code) is not { } step)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Code"] = "That code didn't match. Check your authenticator and try again." });
         }
@@ -126,6 +126,8 @@ public sealed class TotpService
         var now = _clock.GetUtcNow().UtcDateTime;
         secret.ConfirmedAt = now;
         secret.LastUsedAt = now;
+        // The code that confirmed setup counts as used, like any other.
+        secret.LastUsedTimeStep = step;
         // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
         user.TotpEnabled = true;
@@ -137,20 +139,30 @@ public sealed class TotpService
     /// <summary>
     /// Verifies a code against the user's confirmed TOTP secret. Returns false
     /// when there's no confirmed enrollment or the code is wrong / out of
-    /// window. Stamps <c>last_used_at</c> on success.
+    /// window, and when the code's time step is not later than the last one
+    /// accepted: a code works once, so one someone else saw or relayed (a
+    /// screen share during a step-up, a phishing proxy) cannot be replayed
+    /// inside its ~90-second window. The step is claimed with a conditional
+    /// update, like a recovery code, so two posts racing with the same code
+    /// cannot both win. Stamps <c>last_used_at</c> on success.
     /// </summary>
     public async Task<bool> VerifyAsync(int userId, string code, CancellationToken ct = default)
     {
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId
         // (the half-authenticated MFA state).
-        var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.UserId == userId && s.ConfirmedAt != null, ct);
+        var confirmed = _db.UserTotpSecrets.IgnoreQueryFilters()
+            .Where(s => s.UserId == userId && s.ConfirmedAt != null);
+        var secret = await confirmed.AsNoTracking().FirstOrDefaultAsync(ct);
         if (secret is null) return false;
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
-        if (!VerifyCode(base32, code)) return false;
-        secret.LastUsedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct);
-        return true;
+        if (VerifyCode(base32, code) is not { } step) return false;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var claimed = await confirmed
+            .Where(s => s.Id == secret.Id && (s.LastUsedTimeStep == null || s.LastUsedTimeStep < step))
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.LastUsedTimeStep, step)
+                .SetProperty(s => s.LastUsedAt, now), ct);
+        return claimed == 1;
     }
 
     /// <summary>
@@ -174,17 +186,20 @@ public sealed class TotpService
         await _db.SaveChangesAsync(ct);
     }
 
-    private bool VerifyCode(string secretBase32, string code)
+    /// <summary>The matched time step, or null when the code does not match.</summary>
+    private long? VerifyCode(string secretBase32, string code)
     {
-        if (string.IsNullOrWhiteSpace(code)) return false;
+        if (string.IsNullOrWhiteSpace(code)) return null;
         var trimmed = code.Replace(" ", "").Trim();
-        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return false;
+        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return null;
         var secretBytes = Base32Encoding.ToBytes(secretBase32);
         var totp = new Totp(secretBytes);
         // VerificationWindow.RfcSpecifiedNetworkDelay accepts the current step
         // and one on either side (±30s), which is RFC-recommended to handle
         // clock skew without opening a brute-force window.
-        return totp.VerifyTotp(_clock.GetUtcNow().UtcDateTime, trimmed, out _, VerificationWindow.RfcSpecifiedNetworkDelay);
+        return totp.VerifyTotp(_clock.GetUtcNow().UtcDateTime, trimmed, out var step, VerificationWindow.RfcSpecifiedNetworkDelay)
+            ? step
+            : null;
     }
 
     private static byte[] RenderQr(string content)

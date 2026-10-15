@@ -55,9 +55,10 @@
     <div class="card">
         <div class="card__body">
             <div class="form-grid">
+                @* The patterns mirror the GUID checks in ProjectConnectionService.SaveConnectionAsync. *@
                 <section class="field">
                     <label class="field__label" for="bc-tenant">Tenant ID</label>
-                    <input id="bc-tenant" type="text" class="input" @bind="_bcEdit.TenantId" disabled="@_bcSaving"
+                    <input id="bc-tenant" type="text" class="input" pattern="[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}" title="A tenant ID looks like 11111111-2222-3333-4444-555555555555" @bind="_bcEdit.TenantId" disabled="@_bcSaving"
                            placeholder="00000000-0000-0000-0000-000000000000" />
                     <small class="field__hint">The Microsoft Entra tenant that owns the Business Central environments — its Directory (tenant) ID. The customer finds it on the Overview page of their Entra admin center.</small>
                 </section>
@@ -85,7 +86,7 @@
                 {
                     <section class="field">
                         <label class="field__label" for="bc-client">Client ID</label>
-                        <input id="bc-client" type="text" class="input" @bind="_bcEdit.ClientId" disabled="@_bcSaving"
+                        <input id="bc-client" type="text" class="input" pattern="[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}" title="A client ID looks like 11111111-2222-3333-4444-555555555555" @bind="_bcEdit.ClientId" disabled="@_bcSaving"
                                placeholder="00000000-0000-0000-0000-000000000000" />
                         <small class="field__hint">The Application (client) ID of the app registration set up for this customer.</small>
                     </section>

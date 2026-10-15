@@ -135,6 +135,18 @@ public sealed class UserAdministrationService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["LastAdmin"] = "You can't disable the last active admin in this organisation." });
         }
+        // A SiteAdmin's last-one guard is deployment-wide, so the org lock above
+        // doesn't cover it: a demote on /site-admin never takes that row. Take
+        // the SiteAdmin guard's own lock too, after the org one, so both paths
+        // queue on it (#1337). Taken only for a SiteAdmin, so ordinary disables
+        // never serialise across organisations.
+        if (user.IsSiteAdmin)
+        {
+            await SiteAdminService.LockSiteAdminGuardAsync(_db, ct);
+            // Re-read under the lock: a demote that committed while we waited
+            // has already taken the flag away.
+            await _db.Entry(user).ReloadAsync(ct);
+        }
         // The acting SiteAdmin is an active SiteAdmin in this org, so this only
         // bites when they disable themselves with nobody else to fall back on.
         // Counted inside the query filter (the request's own org): a SiteAdmin
@@ -291,10 +303,19 @@ public sealed class UserAdministrationService
     /// second waits for the first to commit and then counts what it left.
     /// Locking the one organisations row rather than the admin rows means an
     /// admin added in the meantime can't slip past either.
+    /// <para>
+    /// <c>FOR NO KEY UPDATE</c>, not <c>FOR UPDATE</c>: two guards still queue
+    /// on each other, but an insert that only references the organisation (an
+    /// audit row, whose foreign key takes <c>FOR KEY SHARE</c> on it) is not
+    /// blocked. With <c>FOR UPDATE</c>, a SiteAdmin demote in the same
+    /// organisation held the SiteAdmin guard's lock while its audit insert
+    /// waited on this row, and the disable holding this row then waited on the
+    /// SiteAdmin lock: a deadlock (#1337).
+    /// </para>
     /// </summary>
     private async Task LockAdminGuardAsync(int orgId, CancellationToken ct) =>
         await _db.Database.ExecuteSqlInterpolatedAsync(
-            $"SELECT 1 FROM organizations WHERE id = {orgId} FOR UPDATE", ct);
+            $"SELECT 1 FROM organizations WHERE id = {orgId} FOR NO KEY UPDATE", ct);
 
     private async Task<int> CountActiveAdminsAsync(int orgId, CancellationToken ct)
     {

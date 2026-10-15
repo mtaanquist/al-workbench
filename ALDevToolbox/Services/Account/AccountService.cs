@@ -325,6 +325,8 @@ public sealed class AccountService
         // Race: a user for this email could have appeared between verification
         // and completion (e.g. an admin invite was accepted in the meantime).
         // Refuse rather than duplicate — mirrors the SignupAsync guard.
+        // Fence category 1 (pre-auth routing): signup completes before any cookie
+        // exists; existence-only probe pinned to the verified email.
         var existingUser = await _db.Users.IgnoreQueryFilters()
             .AnyAsync(u => u.Email == normalised, ct);
         if (existingUser)
@@ -343,6 +345,8 @@ public sealed class AccountService
             // Verified ownership of a claimed domain joins active immediately
             // only when the org opted in; otherwise it's the historical
             // Pending-awaiting-approval behaviour.
+            // Fence category 1 (pre-auth routing): no cookie yet; pinned to
+            // s.OrganizationId == org.Id, the org the verified domain routed to.
             autoActive = await _db.OrganizationSettings.IgnoreQueryFilters()
                 .Where(s => s.OrganizationId == org.Id)
                 .Select(s => (bool?)s.AutoJoinVerifiedDomainUsers)
@@ -431,7 +435,8 @@ public sealed class AccountService
     /// <summary>Self-service password change. Verifies the current password before applying the new one.</summary>
     public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default)
     {
-        var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
+        // Filtered: the signed-in user's own row is in their own organisation.
+        var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
         if (!_auth.VerifyPassword(currentPassword, user.PasswordHash))
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
@@ -505,7 +510,8 @@ public sealed class AccountService
     /// <summary>Self-service display-name change.</summary>
     public async Task ChangeDisplayNameAsync(int userId, string newDisplayName, CancellationToken ct = default)
     {
-        var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
+        // Filtered: the signed-in user's own row is in their own organisation.
+        var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
         var errors = new Dictionary<string, string>();
         ValidateDisplayName(newDisplayName, errors);
         if (errors.Count > 0) throw new PlanValidationException(errors);

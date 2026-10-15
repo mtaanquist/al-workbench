@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Translation;
 using Microsoft.EntityFrameworkCore;
@@ -60,7 +61,7 @@ public sealed class TranslatorTools
     }
 
     [McpServerTool(Name = "machine_translate", ReadOnly = true)]
-    [Description("Translates a string with the organisation's configured third-party machine-translation provider (e.g. DeepL), if one is set up. Use it to draft a target for a source string that has no good translation-memory match. Pass the developer note or field context to improve domain accuracy. Returns the translated text, the provider name, and the detected source language. Errors if the org hasn't configured machine translation.")]
+    [Description("Translates a string with the organisation's configured third-party machine-translation provider (e.g. DeepL), if one is set up. Use it to draft a target for a source string that has no good translation-memory match. Pass the developer note or field context to improve domain accuracy. Returns the translated text, the provider name, and the detected source language. Errors if the org hasn't configured machine translation, or if the provider refuses or fails the request.")]
     public async Task<MachineTranslationResult> MachineTranslateAsync(
         [Description("The source text to translate.")] string sourceText,
         [Description("Target language (BCP-47, e.g. 'da-DK').")] string targetLanguage,
@@ -77,10 +78,17 @@ public sealed class TranslatorTools
             throw new McpException("targetLanguage is required.");
         }
 
+        // The service answers null both when nothing is set up and when the provider
+        // call failed. Telling those apart here keeps a used-up quota or a refused
+        // language from sending the agent (and the admin) to the settings page (#1344).
+        if (await _machineTranslation.GetTriggerAsync(ct) == MtTrigger.Off)
+        {
+            throw new McpException("Machine translation is not configured for this organisation. An admin can enable it under Administration → Translation.");
+        }
         var result = await _machineTranslation.TranslateAsync(sourceText, sourceLanguage, targetLanguage, context, ct);
         if (result is null)
         {
-            throw new McpException("Machine translation is not configured for this organisation. An admin can enable it under Administration · Translation.");
+            throw new McpException("The translation provider refused or failed to translate this text. Try again later; if it keeps failing, check that the provider supports the language.");
         }
         return new MachineTranslationResult(result.TargetText, result.ProviderName, result.DetectedSourceLanguage);
     }

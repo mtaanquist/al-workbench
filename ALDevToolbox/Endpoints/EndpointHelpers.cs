@@ -274,9 +274,15 @@ internal static class EndpointHelpers
         return false;
     }
 
-    public static void WriteAttachmentHeaders(HttpContext ctx, string fileName)
+    /// <summary>
+    /// Writes <c>Content-Type</c> and an attachment <c>Content-Disposition</c>.
+    /// Goes through <c>SetHttpFileName</c>, which adds an RFC 5987
+    /// <c>filename*</c> for names with non-ASCII letters (ae, o-slash, a-ring...);
+    /// Kestrel refuses a raw non-ASCII header value with a 500 (#1339).
+    /// </summary>
+    public static void WriteAttachmentHeaders(HttpContext ctx, string fileName, string contentType = "application/zip")
     {
-        ctx.Response.ContentType = "application/zip";
+        ctx.Response.ContentType = contentType;
         var cd = new Microsoft.Net.Http.Headers.ContentDispositionHeaderValue("attachment");
         cd.SetHttpFileName(fileName);
         ctx.Response.Headers.ContentDisposition = cd.ToString();

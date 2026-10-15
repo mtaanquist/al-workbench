@@ -43,6 +43,7 @@ public sealed class AuthCardTests : IDisposable
         _ctx.Services.AddSingleton<ISingleTenantMode>(_singleTenant);
         _ctx.Services.AddSingleton(TimeProvider.System);
         _ctx.Services.AddSingleton(_db.DataProtectionProvider);
+        _ctx.Services.AddScoped<AuthService>();
         _ctx.Services.AddScoped<InviteService>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
@@ -354,7 +355,7 @@ public sealed class AuthCardTests : IDisposable
         seed.SaveChanges();
 
         _db.OrgContext.CurrentUserId = inviter.Id;
-        var invites = new InviteService(seed, _db.OrgContext, TimeProvider.System, NullLogger<InviteService>.Instance);
+        var invites = new InviteService(seed, _db.OrgContext, new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System), TimeProvider.System, NullLogger<InviteService>.Instance);
         var (token, _) = invites.CreateAsync("new.consultant@cronus.example", UserRole.User, null)
             .GetAwaiter().GetResult();
         return token;
