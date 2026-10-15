@@ -169,8 +169,8 @@
                    not taken as a pass. *@
                 @if (_licence is { IsOutside: true } outside)
                 {
-                    <Alert Tone="AlertTone.Danger" Block="true" Class="rb-restart">
-                        <div class="rb-restart__body">
+                    <Alert Tone="AlertTone.Danger" Block="true" Class="rb-licence">
+                        <div class="rb-licence__body">
                             <p>
                                 <b>@(outside.OutsideCount == 1
                                     ? $"This build can't be deployed to {_envName}: 1 object is outside {_customerName}'s licence there."
@@ -188,7 +188,7 @@
                 }
                 else if (_licence is { IsNotChecked: true } notChecked)
                 {
-                    <Alert Tone="AlertTone.Info" Class="rb-restart">
+                    <Alert Tone="AlertTone.Info" Class="rb-licence">
                         <span><b>Licence not checked:</b> @notChecked.Reason If the licence doesn't cover every object in the build, Business Central refuses the install.</span>
                     </Alert>
                 }
