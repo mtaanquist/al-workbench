@@ -25,4 +25,13 @@ public static class EnvironmentQueries
     /// </summary>
     public static readonly Expression<Func<OeProjectEnvironment, bool>> NotSoftDeleted =
         e => e.SoftDeletedOn == null && (e.Status == null || e.Status.ToUpper() != "SOFTDELETED");
+
+    /// <summary>
+    /// An environment in Business Central online, the only kind Microsoft's platform
+    /// updates, update notices, deferred installs and Admin Center reads apply to. Every
+    /// reader that is about those leaves linked on-premises service tiers out with it.
+    /// See <c>.design/on-prem-gateway.md</c>, "Readers of OeProjectEnvironments".
+    /// </summary>
+    public static readonly Expression<Func<OeProjectEnvironment, bool>> Online =
+        e => e.Kind == OeEnvironmentKind.Online;
 }

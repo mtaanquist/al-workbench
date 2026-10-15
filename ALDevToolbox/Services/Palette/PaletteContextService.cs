@@ -123,7 +123,7 @@ public sealed partial class PaletteContextService
     /// A solution's tabs, as <c>ProjectDetail.razor</c> draws them for this
     /// caller, then its environments and its latest build. The tab conditions
     /// are the page's, line for line: Customer, General and Repositories for
-    /// anyone who can open it; Business Central (not on-premises) and Pipelines
+    /// anyone who can open it, and Environments on-premises; Business Central (not on-premises) and Pipelines
     /// for whoever manages it; Access for its owner and the admins.
     /// </summary>
     private async Task<PaletteContextBlock?> SolutionContextAsync(
@@ -149,6 +149,7 @@ public sealed partial class PaletteContextService
             Tab("General", root + "/general"),
             Tab("Repositories", root + "/repositories"),
         };
+        if (OeProject.IsOnPremisesHosting(project.HostingType)) items.Add(Tab("Environments", root + "/environments"));
         if (canManage)
         {
             if (!OeProject.IsOnPremisesHosting(project.HostingType)) items.Add(Tab("Business Central", root + "/bc"));
@@ -219,7 +220,7 @@ public sealed partial class PaletteContextService
     };
 
     /// <summary>
-    /// An environment's tabs - all five are open to anyone who can open the page -
+    /// An environment's tabs - all five (three for an on-premises tier) are open to anyone who can open the page -
     /// then the two ways out to Microsoft, each only when the page itself offers
     /// it (the tenant is known), then its solution. Read through
     /// <see cref="UpgradeFleetService.GetEnvironmentAsync"/>, the page's own read,
@@ -235,14 +236,15 @@ public sealed partial class PaletteContextService
         var row = detail.Fleet;
 
         var root = $"/environments/{row.EnvironmentId.ToString(CultureInfo.InvariantCulture)}";
-        var items = new List<PaletteResultItem>
+        // The page's own tabs: an on-premises service tier has no Operations or
+        // Sessions, which are Business Central online's live reads.
+        var items = new List<PaletteResultItem> { Tab("Overview", root), Tab("Apps", root + "/apps") };
+        if (!row.IsOnPremises)
         {
-            Tab("Overview", root),
-            Tab("Apps", root + "/apps"),
-            Tab("Operations", root + "/operations"),
-            Tab("Sessions", root + "/sessions"),
-            Tab("Workbench history", root + "/history"),
-        };
+            items.Add(Tab("Operations", root + "/operations"));
+            items.Add(Tab("Sessions", root + "/sessions"));
+        }
+        items.Add(Tab("Workbench history", root + "/history"));
         if (row.BusinessCentralUrl is { } bcUrl)
         {
             items.Add(new PaletteResultItem("external", "Open in Business Central", "Opens in a new tab", bcUrl));

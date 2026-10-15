@@ -201,6 +201,9 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .Where(a => a.Status == UpgradeActionStatus.Pending
                             && a.SentAt == null
                             && a.ExecuteAfter <= now)
+                // Admin Center actions only; nothing books one for an on-premises service
+                // tier, and should a row ever name one it waits rather than being sent.
+                .Where(a => a.Environment!.Kind == OeEnvironmentKind.Online)
                 .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp ? uploads : updates)
                 // Platform-update moves first: they are a date the customer agreed and
                 // take seconds, and must not queue behind an app install that takes minutes.

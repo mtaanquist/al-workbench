@@ -59,8 +59,10 @@ public sealed class EnvironmentUpdateNotifier
         var recipients = await _follows.ListFollowerIdsAsync(change.ProjectId, ct);
         if (recipients.Count == 0) return;
 
+        // Microsoft's update notices only; an on-premises service tier has none.
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == change.EnvironmentId)
+            .Where(EnvironmentQueries.Online)
             .Select(e => new
             {
                 e.Name,

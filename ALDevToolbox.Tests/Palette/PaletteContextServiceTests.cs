@@ -117,11 +117,12 @@ public sealed class PaletteContextServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task An_on_premises_solution_has_no_Business_Central_tab()
+    public async Task An_on_premises_solution_has_an_Environments_tab_and_no_Business_Central_tab()
     {
         var result = await ResolveAsync(OwnerId, "User", at: $"solution:{_onPremId}");
 
-        Titles(result.Context!, "tab").Should().Equal("Customer", "General", "Repositories", "Pipelines", "Symbols", "Access");
+        Titles(result.Context!, "tab").Should().Equal("Customer", "General", "Repositories", "Environments", "Pipelines", "Symbols", "Access");
+        result.Context!.Items.Single(i => i.Title == "Environments").Href.Should().Be($"/solutions/{_onPremId}/environments");
     }
 
     [Fact]

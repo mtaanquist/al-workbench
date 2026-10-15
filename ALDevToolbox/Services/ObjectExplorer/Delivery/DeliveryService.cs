@@ -29,6 +29,10 @@ public sealed class DeliveryService
     /// <summary>Why a deployment through a disabled deployment pipeline is refused (#1131).</summary>
     public const string DisabledRefusal = "This deployment pipeline is disabled. Enable it to deploy.";
 
+    /// <summary>Why a deployment to a linked on-premises service tier is refused until the gateway can deploy (#1367).</summary>
+    internal static string OnPremisesNotYet(string environmentName) =>
+        $"{environmentName} is an on-premises service tier. Deploying to on-premises through the gateway isn't available yet, so nothing was sent.";
+
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
@@ -384,6 +388,7 @@ public sealed class DeliveryService
                 TimeZone = r.Project.BcTimeZone,
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvMissing = r.ProjectEnvironment.MissingSince != null,
+                EnvOnPremises = r.ProjectEnvironment.Kind == OeEnvironmentKind.OnPremises,
                 EnvStatus = r.ProjectEnvironment.Status,
                 EnvType = r.ProjectEnvironment.Type,
                 WindowStart = r.ProjectEnvironment.UpdateWindowStart,
@@ -405,8 +410,16 @@ public sealed class DeliveryService
 
         if (rp.EnvMissing)
         {
-            throw Validation("ProjectEnvironment",
-                "This deployment pipeline's target environment is no longer present in Business Central. Refresh the environments and try again.");
+            throw Validation("ProjectEnvironment", rp.EnvOnPremises
+                ? "This deployment pipeline's target service tier is no longer linked to the solution. An administrator can link it again on the solution's Environments tab."
+                : "This deployment pipeline's target environment is no longer present in Business Central. Refresh the environments and try again.");
+        }
+        // Deploying to a linked on-premises service tier goes through the gateway, which
+        // is not built yet (#1374, #1367). Until then the service refuses it, whatever
+        // the page offers. See .design/on-prem-gateway.md, "Deploying to on-premises".
+        if (rp.EnvOnPremises)
+        {
+            throw Validation("ProjectEnvironment", OnPremisesNotYet(rp.EnvName));
         }
         // The cached status catches the obvious cases at the point the user is looking
         // at the screen. The live re-read before the upload (see PublishAsync) is the
@@ -2364,8 +2377,10 @@ public sealed class DeliveryService
     {
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
-            .Select(e => new { e.Id, e.ApplicationFamily, e.Type })
+            .Select(e => new { e.Id, e.ApplicationFamily, e.Type, e.Kind })
             .FirstOrDefaultAsync(ct);
+        // The claim-time half of the on-premises refusal in ResolveReleaseAsync.
+        if (env?.Kind == OeEnvironmentKind.OnPremises) return OnPremisesNotYet(delivery.EnvironmentName);
 
         BcEnvironment? live;
         try

@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -86,6 +87,7 @@ public sealed class EnvironmentPaletteSource : IPaletteSource
                 e.Id,
                 e.Name,
                 e.Type,
+                e.Kind,
                 e.Version,
                 e.Status,
                 ProjectName = e.Project!.Name,
@@ -96,7 +98,7 @@ public sealed class EnvironmentPaletteSource : IPaletteSource
         var candidates = rows.Select(r => new PaletteCandidate(
             "environment",
             r.Name,
-            Describe(r.ProjectName, r.Type, r.Version, r.Status),
+            Describe(r.ProjectName, TypeWord(r.Kind, r.Type), r.Version, r.Status),
             $"/environments/{r.Id}",
             // No short name of its own: an environment is not abbreviated, its
             // customer is. The customer's abbreviation is searched instead, so
@@ -117,6 +119,14 @@ public sealed class EnvironmentPaletteSource : IPaletteSource
     /// list's own rows do not: writing "Running" on almost every row would
     /// bury the one that says something else.</para>
     /// </summary>
+    /// <summary>
+    /// An on-premises service tier says so: its Sandbox is the customer's Test or
+    /// Development server, which "Sandbox" would misname.
+    /// </summary>
+    internal static string? TypeWord(OeEnvironmentKind kind, string? type) =>
+        kind != OeEnvironmentKind.OnPremises ? type
+        : string.Equals(type, "Production", StringComparison.OrdinalIgnoreCase) ? "On-premises Production" : "On-premises";
+
     internal static string? Describe(string? projectName, string? type, string? version, string? status)
     {
         var parts = new List<string>(4);

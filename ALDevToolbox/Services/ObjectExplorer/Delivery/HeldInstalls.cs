@@ -71,7 +71,9 @@ internal static class HeldInstalls
         // it - preferring the pipeline's own environment when two share the name.
         var projectIds = rows.Select(r => r.ProjectId).Distinct().ToList();
         var names = rows.Select(r => r.EnvironmentName).Distinct().ToList();
+        // Microsoft's deferred schedules only: on-premises has no "held" install.
         var environments = await db.OeProjectEnvironments.AsNoTracking()
+            .Where(ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentQueries.Online)
             .Where(e => projectIds.Contains(e.ProjectId) && names.Contains(e.Name))
             .Select(e => new { e.Id, e.ProjectId, e.Name })
             .ToListAsync(ct);

@@ -84,7 +84,7 @@ public sealed class DeliverTools
     // ── Solutions ───────────────────────────────────────────────────────
 
     [McpServerTool(Name = "get_solution", ReadOnly = true)]
-    [Description("Returns one solution's basics: where its Business Central runs (hosting, and whether that is on-premises), the Business Central version and web client address, visibility, license and user experience, the customer's Microsoft tenant id, whether the Business Central online connection is set up, and a one-line summary of each of its environments. For an online solution with a working connection, the version and address are what the production environment last reported (versionFromBusinessCentral = true, with versionReadAt); otherwise they are what somebody typed. Environment facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read. Use get_environment for one environment in full.")]
+    [Description("Returns one solution's basics: where its Business Central runs (hosting, and whether that is on-premises), the Business Central version and web client address, visibility, license and user experience, the customer's Microsoft tenant id, whether the Business Central online connection is set up, and a one-line summary of each of its environments. An on-premises solution's environments are the service tiers linked to it, marked onPremises = true with gatewayOnline saying whether the on-premises gateway that reports them is online now. For an online solution with a working connection, or an on-premises one with a linked Production service tier, the version and address are what that production environment last reported (versionFromBusinessCentral = true, with versionReadAt); otherwise they are what somebody typed. Environment facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read. Use get_environment for one environment in full.")]
     public async Task<SolutionDetail> GetSolutionAsync(
         [Description("Solution name or numeric id (from list_solutions).")] string solution,
         CancellationToken ct = default)
@@ -104,11 +104,13 @@ public sealed class DeliverTools
             }
         }
 
-        var environments = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct))
+        var now = DateTime.UtcNow;
+        var environments = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct, includeOnPremises: true))
             .Where(r => r.ProjectId == id)
             .Select(r => new SolutionEnvironmentBrief(
                 r.EnvironmentId, r.EnvironmentName, r.EnvironmentType, r.Status, r.Version,
-                r.IsSoftDeleted, r.EnvironmentFetchedAt))
+                r.IsSoftDeleted, r.EnvironmentFetchedAt,
+                r.IsOnPremises, r.OnPremises is { } tier ? !tier.IsGatewayOffline(now) : null))
             .ToList();
 
         return new SolutionDetail(
@@ -133,7 +135,7 @@ public sealed class DeliverTools
     // ── Environments ────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_environments", ReadOnly = true)]
-    [Description("Lists the Business Central environments of every solution you can see, with filters. Each row gives the solution, the environment's name, type (Production/Sandbox), status, version, database size and the customer tenant's storage use against its quota (tenantStorageUse is a fraction: 0.8 = 80%, above 1 = over the quota), Microsoft's update window, and the next platform update (target version, date, the latest date it can be moved to, and its status). Everything is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read: each row says when its facts were read (environmentReadAt, nextUpdateReadAt, updateWindowReadAt). Deleted environments are left out unless includeDeleted is true. Use an environmentId with get_environment.")]
+    [Description("Lists the Business Central environments of every solution you can see, with filters. Online environments and linked on-premises service tiers are both listed; an on-premises one is marked onPremises = true, with onPremisesTier naming its gateway (and whether that gateway is online now), server, instance, tenant and the customer's own word for it (Production, Test or Development), and has no storage, update window or next update. Each row gives the solution, the environment's name, type (Production/Sandbox), status, version, database size and the customer tenant's storage use against its quota (tenantStorageUse is a fraction: 0.8 = 80%, above 1 = over the quota), Microsoft's update window, and the next platform update (target version, date, the latest date it can be moved to, and its status). Everything is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read: each row says when its facts were read (environmentReadAt, nextUpdateReadAt, updateWindowReadAt). Deleted environments are left out unless includeDeleted is true. Use an environmentId with get_environment.")]
     public async Task<IReadOnlyList<EnvironmentSummary>> ListEnvironmentsAsync(
         [Description("Optional solution name or numeric id, to list only that solution's environments.")] string? solution = null,
         [Description("Optional environment type, e.g. 'Production' or 'Sandbox'.")] string? type = null,
@@ -148,7 +150,7 @@ public sealed class DeliverTools
         var before = ParseDate(nextUpdateBefore, "nextUpdateBefore");
         var prefix = version?.Trim();
 
-        IEnumerable<EnvironmentDetailRow> rows = await _fleet.ListFleetDetailsAsync(includeDeleted, ct);
+        IEnumerable<EnvironmentDetailRow> rows = await _fleet.ListFleetDetailsAsync(includeDeleted, ct, includeOnPremises: true);
         if (projectId is { } pid) rows = rows.Where(r => r.Fleet.ProjectId == pid);
         if (!string.IsNullOrWhiteSpace(type))
             rows = rows.Where(r => string.Equals(r.Fleet.EnvironmentType, type.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -166,7 +168,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "get_environment", ReadOnly = true)]
-    [Description("Returns one Business Central environment in full: everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
+    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
     public async Task<EnvironmentDetail> GetEnvironmentAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         CancellationToken ct = default)
@@ -515,7 +517,26 @@ public sealed class DeliverTools
             r.EnvironmentFetchedAt,
             r.FetchedAt,
             row.BcUpdateWindowFetchedAt,
-            r.BusinessCentralUrl);
+            r.BusinessCentralUrl,
+            r.IsOnPremises,
+            r.OnPremises is { } tier ? ToTier(tier) : null);
+    }
+
+    private static OnPremisesTierSummary ToTier(Gateways.OnPremisesTierFacts tier)
+    {
+        var now = DateTime.UtcNow;
+        return new OnPremisesTierSummary(
+            tier.GatewayName,
+            !tier.IsGatewayOffline(now),
+            tier.GatewayLastSeenAt,
+            tier.Machine,
+            tier.InstanceName,
+            tier.TenantId,
+            tier.EnvironmentLabel,
+            tier.Database,
+            tier.ReadAt,
+            tier.InstanceMissingSince is not null,
+            tier.LicenceExpiresOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
     }
 
     private static NextPlatformUpdate? ToNextUpdate(UpgradeFleetRow r) => r.HasUpdate
@@ -615,8 +636,32 @@ public sealed record BusinessCentralConnection(
     bool Configured, DateTime? VerifiedAt, DateTime? SecretExpiresAt, bool UsesOrganizationRegistration);
 
 /// <summary>One environment of a solution, in a line.</summary>
+/// <param name="OnPremises">True for a linked on-premises service tier.</param>
+/// <param name="GatewayOnline">For an on-premises one, whether its gateway is online now; null for online environments.</param>
 public sealed record SolutionEnvironmentBrief(
-    int EnvironmentId, string Name, string Type, string? Status, string? Version, bool Deleted, DateTime? ReadAt);
+    int EnvironmentId, string Name, string Type, string? Status, string? Version, bool Deleted, DateTime? ReadAt,
+    bool OnPremises = false, bool? GatewayOnline = null);
+
+/// <summary>
+/// The service tier behind an on-premises environment, as its gateway last reported it.
+/// </summary>
+/// <param name="GatewayOnline">Whether the gateway has been heard from in the last few minutes.</param>
+/// <param name="Environment">The customer's own word for the tier: Production, Test or Development.</param>
+/// <param name="ReadAt">When the gateway last read the tier; null when it never has.</param>
+/// <param name="NoLongerReported">True when the gateway stopped reporting the tier; the facts are the last ones known.</param>
+/// <param name="LicenceExpiresOn">The licence's expiry date (yyyy-MM-dd) as the licence states it; null when none or unread.</param>
+public sealed record OnPremisesTierSummary(
+    string Gateway,
+    bool GatewayOnline,
+    DateTime? GatewayLastSeenAt,
+    string Server,
+    string Instance,
+    string Tenant,
+    string Environment,
+    string? Database,
+    DateTime? ReadAt,
+    bool NoLongerReported,
+    string? LicenceExpiresOn);
 
 /// <summary>A daily window, as clock times in <paramref name="TimeZone"/> (IANA).</summary>
 public sealed record TimeWindow(string Start, string End, string TimeZone);
@@ -653,7 +698,9 @@ public sealed record EnvironmentSummary(
     DateTime? EnvironmentReadAt,
     DateTime? NextUpdateReadAt,
     DateTime? UpdateWindowReadAt,
-    string? BusinessCentralUrl);
+    string? BusinessCentralUrl,
+    bool OnPremises = false,
+    OnPremisesTierSummary? OnPremisesTier = null);
 
 /// <summary>One environment in full, for <c>get_environment</c>.</summary>
 /// <param name="DeliveryWindow">The daily window our own deliveries prefer, in the solution's time zone; null for "any time".</param>

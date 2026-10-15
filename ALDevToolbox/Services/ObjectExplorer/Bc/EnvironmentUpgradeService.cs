@@ -567,8 +567,10 @@ public sealed class EnvironmentUpgradeService
 
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+        // Microsoft's platform updates only: an on-premises service tier never joins a wave.
         var environments = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => wanted.Contains(e.Id))
+            .Where(EnvironmentQueries.Online)
             .Where(e => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
             .Select(e => new

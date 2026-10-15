@@ -624,6 +624,40 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             .Should().NotBeNull("an environment the customer removed is flagged, not deleted");
     }
 
+    [Fact]
+    public async Task Refresh_never_marks_a_linked_on_premises_tier_missing_nor_takes_its_name()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        int tierId;
+        await using (var seed = _db.NewContext())
+        {
+            var tier = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, Name = "Production", Type = "Production",
+                Kind = OeEnvironmentKind.OnPremises, TenantId = "default", Version = "25.4.0.0", FetchedAt = DateTime.UtcNow,
+            };
+            seed.OeProjectEnvironments.Add(tier);
+            await seed.SaveChangesAsync();
+            tierId = tier.Id;
+        }
+
+        // Business Central online reports a Production of its own, and not the tier.
+        var admin = new FakeAdminClient { OnList = () => new[] { new BcEnvironment("Production", "Production"), new BcEnvironment("Sandbox", "Sandbox") } };
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsAsync(id);
+
+        await using var verify = _db.NewContext();
+        var rows = await verify.OeProjectEnvironments.AsNoTracking().Where(e => e.ProjectId == id).ToListAsync();
+        var kept = rows.Single(e => e.Id == tierId);
+        kept.MissingSince.Should().BeNull("the refresh reads Business Central online, which never reports an on-premises tier");
+        kept.Kind.Should().Be(OeEnvironmentKind.OnPremises);
+        kept.Version.Should().Be("25.4.0.0");
+        rows.Should().ContainSingle(e => e.Name == "Production", "a fetched name that collides with a tier is skipped, not merged into it");
+        rows.Should().Contain(e => e.Name == "Sandbox" && e.Kind == OeEnvironmentKind.Online);
+    }
+
     // ── Default delivery windows for new environments (issue #962) ─────────
 
     private async Task SetDefaultWindowsAsync(DefaultDeliveryWindows windows)

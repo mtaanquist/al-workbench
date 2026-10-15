@@ -540,7 +540,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 e.Status,
                 e.AppSourceAppsUpdateCadence,
                 e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana, e.BcUpdateWindowFetchedAt,
-                e.Version, e.WebClientLoginUrl))
+                e.Version, e.WebClientLoginUrl,
+                e.Kind == OeEnvironmentKind.OnPremises))
             .ToListAsync(ct);
     }
 
@@ -595,9 +596,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == environmentId && e.ProjectId == projectId)
-            .Select(e => new { e.Name, e.ApplicationFamily })
+            .Select(e => new { e.Name, e.ApplicationFamily, e.Kind })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Environment", "That environment no longer exists. Refresh the list and try again.");
+        if (env.Kind == OeEnvironmentKind.OnPremises) throw OnPremisesRefusal();
 
         var creds = await ResolveCredentialsAsync(project, ct)
             ?? throw Validation("Environment", "Enter the Business Central connection details first.");
@@ -801,9 +803,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == environmentId && e.ProjectId == projectId)
-            .Select(e => new { e.Id, e.Name, e.ApplicationFamily })
+            .Select(e => new { e.Id, e.Name, e.ApplicationFamily, e.Kind })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Environment", "That environment no longer exists. Refresh the list and try again.");
+        if (env.Kind == OeEnvironmentKind.OnPremises) throw OnPremisesRefusal();
 
         var creds = await ResolveCredentialsAsync(project, ct)
             ?? throw Validation("Environment", "Enter the Business Central connection details first.");
@@ -1722,9 +1725,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == environmentId && e.ProjectId == projectId)
-            .Select(e => new { e.Name, e.ApplicationFamily })
+            .Select(e => new { e.Name, e.ApplicationFamily, e.Kind })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Environment", "That environment no longer exists.");
+        if (env.Kind == OeEnvironmentKind.OnPremises) throw OnPremisesRefusal();
 
         var creds = await ResolveCredentialsAsync(project, ct)
             ?? throw Validation("Environment", "Enter the Business Central connection details first.");
@@ -2479,9 +2483,29 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// </summary>
     private async Task UpsertEnvironmentsAsync(OeProject project, IReadOnlyList<BcEnvironment> fetched, CancellationToken ct)
     {
+        // Online rows only: a linked on-premises service tier is the gateway's to report,
+        // and a refresh must never stamp one missing. See .design/on-prem-gateway.md,
+        // "Readers of OeProjectEnvironments".
         var existing = await _db.OeProjectEnvironments
-            .Where(e => e.ProjectId == project.Id)
+            .Where(e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.Online)
             .ToListAsync(ct);
+        // A name an on-premises row holds cannot be inserted (the name is unique per
+        // Solution), so such an environment is left out with a warning rather than
+        // failing the whole refresh. Only a Solution that is online and has linked tiers
+        // left over can meet it, which the hosting rules otherwise refuse.
+        var onPremisesNames = (await _db.OeProjectEnvironments.AsNoTracking()
+                .Where(e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.OnPremises)
+                .Select(e => e.Name)
+                .ToListAsync(ct))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        fetched = fetched.Where(f =>
+        {
+            if (!onPremisesNames.Contains(f.Name)) return true;
+            _logger.LogWarning(
+                "Business Central online reports environment {EnvironmentName} for project {ProjectId}, a name a linked on-premises service tier already has; left out.",
+                f.Name, project.Id);
+            return false;
+        }).ToList();
         var byName = existing.ToDictionary(e => e.Name, StringComparer.OrdinalIgnoreCase);
         var now = DateTime.UtcNow;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2672,7 +2696,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     private async Task MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
     {
         var rows = await _db.OeProjectEnvironments
-            .Where(e => e.ProjectId == project.Id && e.MissingSince == null)
+            .Where(e => e.ProjectId == project.Id && e.MissingSince == null && e.Kind == OeEnvironmentKind.Online)
             .ToListAsync(ct);
 
         // Storage is the tenant's: one read covers every environment's size and the one
@@ -2938,6 +2962,15 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
     }
 
+    /// <summary>
+    /// Every action here goes through Microsoft's Admin Center, which does not know an
+    /// on-premises service tier. The pages do not offer them on one; this is the
+    /// service-side half. See <c>.design/on-prem-gateway.md</c>.
+    /// </summary>
+    private static PlanValidationException OnPremisesRefusal() => Validation(
+        "Environment",
+        "This is an on-premises service tier. Business Central online's admin actions don't apply to it.");
+
     private static PlanValidationException Validation(string field, string message) =>
         new(new Dictionary<string, string> { [field] = message });
 }
@@ -3072,7 +3105,9 @@ public sealed record ProjectEnvironmentRow(
     /// <summary>The environment's Business Central version from the last fetch.</summary>
     string? Version,
     /// <summary>Deep link into the environment's web client, for "Open in Business Central".</summary>
-    string? WebClientLoginUrl);
+    string? WebClientLoginUrl,
+    /// <summary>A linked on-premises service tier rather than an online environment. Deployment pipelines cannot target one until #1367.</summary>
+    bool IsOnPremises = false);
 
 /// <summary>
 /// A live snapshot of one Business Central environment, for the panel on the project's
