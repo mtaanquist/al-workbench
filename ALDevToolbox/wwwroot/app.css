@@ -356,18 +356,24 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
    held the name, Follow and All solutions on one line and pushed the buttons off
    screen, and its seven tabs ran past the edge with the last ones unreachable. The
    head wraps like the upgrade page's, and the tab row scrolls sideways inside the
-   page instead of widening it - a label never breaks onto two lines. */
+   page instead of widening it - a label never breaks onto two lines. An environment's
+   page ("env-detail") has five tabs and takes the tab row's rules. */
 .page.sol .detail-head { flex-wrap: wrap; gap: var(--space-3); }
 .page.sol .detail-head > div:first-child { flex: 1 1 260px; min-width: 0; }
 .page.sol .detail-head > .page-head__actions { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .page.sol .settings > * { min-width: 0; }
-.page.sol .settings__tabs { min-width: 0; }
-.page.sol .header-tabs { min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
-.page.sol .header-tab { flex: none; white-space: nowrap; }
+.page.sol .settings__tabs,
+.page.env-detail .settings__tabs { min-width: 0; }
+.page.sol .header-tabs,
+.page.env-detail .header-tabs { min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+.page.sol .header-tab,
+.page.env-detail .header-tab { flex: none; white-space: nowrap; }
 /* A scrolling row clips to inside its own border, so the active tab's underline sits
    on the border's inner edge rather than over it. */
-.page.sol .header-tab::after { bottom: 0; }
-.page.sol .header-tab:focus-visible { outline-offset: -2px; }
+.page.sol .header-tab::after,
+.page.env-detail .header-tab::after { bottom: 0; }
+.page.sol .header-tab:focus-visible,
+.page.env-detail .header-tab:focus-visible { outline-offset: -2px; }
 
 /* The modal scrim in the dark theme. The hand-off's recipe mixes --ink into
    transparent, which dims a light page and does the opposite to a dark one: --ink is

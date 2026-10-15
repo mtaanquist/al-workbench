@@ -296,26 +296,32 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.Find("h1.detail-head__title").TextContent.Should().Be("Production");
         cut.Find(".detail-head__title-row .status-pill").ClassList.Should().Contain("status-pill--success");
         cut.Find(".detail-head__title-row .tag").TextContent.Should().Be("Production");
-        cut.Find(".page-head__sub").TextContent.Trim().Should()
-            .Be("Business Central environment in CRONUS Denmark - BC version 28.2 - West Europe");
+        cut.FindAll(".page-head__sub").Should().BeEmpty("the solution and the region moved into the facts");
         cut.FindAll(".page-head__crumbs a").Select(a => a.GetAttribute("href")).Should()
             .Equal("/solutions", $"/solutions/{projectId}", "/environments");
 
-        cut.FindAll(".meta-row .meta-item__label").Select(l => l.TextContent).Should()
-            .Equal("Type", "BC version", "Country", "Delivery window", "Next update", "Database", "Apps installed");
-        var meta = cut.FindAll(".meta-row .meta-item__value").Select(v => v.TextContent.Trim()).ToList();
-        meta[1].Should().Be("28.2.41125.0");
-        meta[2].Should().Be("Denmark (DK)");
-        meta[3].Should().Be("22:00-04:00 (Copenhagen)");
-        meta[4].Should().Be("12 Oct 2026");
-        meta[5].Should().Be("—", "storage has not been read for this one");
-        meta[6].Should().Be("3");
+        cut.FindAll(".env-detail__facts .meta-item__label").Select(l => l.TextContent).Should()
+            .Equal("Solution", "Type", "BC version", "Region", "Country", "Delivery window", "Next update", "Database", "Apps installed");
+        var meta = cut.FindAll(".env-detail__facts .meta-item__value").Select(v => v.TextContent.Trim()).ToList();
+        meta[0].Should().Be("CRONUS Denmark");
+        cut.Find(".env-detail__facts a").GetAttribute("href").Should().Be($"/solutions/{projectId}");
+        meta[2].Should().Be("28.2.41125.0");
+        meta[3].Should().Be("West Europe");
+        meta[4].Should().Be("Denmark (DK)");
+        meta[5].Should().Be("22:00-04:00 (Copenhagen)");
+        meta[6].Should().Be("12 Oct 2026");
+        meta[7].Should().Be("—", "storage has not been read for this one");
+        meta[8].Should().Be("3");
+
+        cut.FindAll(".env-detail__actions .btn").Select(b => b.TextContent.Trim()).Should()
+            .Contain("Copy environment...", "the head's buttons moved to the end of the tab row");
+        cut.FindAll(".page-head__actions").Should().BeEmpty();
 
         cut.FindAll(".kv-grid .meta-item__label").Select(l => l.TextContent).Should().Equal(
             "Current version", "Next update version", "Scheduled for", "Latest possible date",
             "Our delivery window", "BC update window");
 
-        var open = cut.Find(".page-head__actions a");
+        var open = cut.Find(".env-detail__actions a");
         open.GetAttribute("href").Should().Be($"https://businesscentral.dynamics.com/{TenantId:D}/Production");
     }
 
@@ -403,19 +409,19 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
     /// <summary>
     /// The commonest thing this page's reader would otherwise open the admin centre for,
-    /// so it sits in the head beside the other two. An outline button: it writes to the
+    /// so it sits at the end of the tab row beside the other two. An outline button: it writes to the
     /// customer's tenant, and nothing on this page is the one thing to do.
     /// </summary>
     [Fact]
-    public async Task Someone_who_manages_the_solution_is_offered_a_copy_from_the_head()
+    public async Task Someone_who_manages_the_solution_is_offered_a_copy_beside_the_tabs()
     {
         var (projectId, envId) = await SeedAsync();
         _panels.Set(projectId, envId, Panel());
 
         var cut = Render(envId);
 
-        var copy = cut.FindAll(".page-head__actions button")
-            .Should().ContainSingle(b => b.TextContent.Contains("Copy this environment...")).Subject;
+        var copy = cut.FindAll(".env-detail__actions button")
+            .Should().ContainSingle(b => b.TextContent.Contains("Copy environment...")).Subject;
         copy.ClassList.Should().NotContain("btn--primary");
     }
 
@@ -427,7 +433,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId);
 
-        cut.Markup.Should().NotContain("Copy this environment...");
+        cut.Markup.Should().NotContain("Copy environment...");
     }
 
     /// <summary>A deleted environment has nothing to copy; the alert offers the one thing left to do.</summary>
@@ -440,7 +446,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId);
 
-        cut.Markup.Should().NotContain("Copy this environment...");
+        cut.Markup.Should().NotContain("Copy environment...");
         cut.Find(".alert--danger button").TextContent.Should().Contain("Recover this environment");
     }
 
@@ -453,8 +459,8 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId);
 
         cut.WaitForAssertion(() =>
-            cut.FindAll(".page-head__actions button")
-                .Single(b => b.TextContent.Contains("Copy this environment...")).Click());
+            cut.FindAll(".env-detail__actions button")
+                .Single(b => b.TextContent.Contains("Copy environment...")).Click());
 
         cut.WaitForAssertion(() =>
         {
@@ -772,7 +778,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             scheduled.QuerySelector("time")!.TextContent.Should().Be("12 Oct 2026, 11:00");
             scheduled.QuerySelector("time")!.GetAttribute("title").Should().Be("2026-10-12 02:00:00 UTC");
             scheduled.QuerySelector(".env-detail__utc")!.TextContent.Should().Be("Copenhagen time · 12 Oct, 04:00");
-            cut.FindAll(".meta-row .meta-item__value")[3].TextContent.Trim().Should()
+            cut.FindAll(".env-detail__facts .meta-item__value")[5].TextContent.Trim().Should()
                 .Be("22:00-04:00 (Copenhagen)", "a delivery window is a time of day on the customer's clock, never converted");
         });
 
