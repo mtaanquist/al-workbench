@@ -75,8 +75,19 @@ internal sealed class GatewayCommandFileConfiguration : IEntityTypeConfiguration
         entity.Property(e => e.Sha256).HasColumnName("sha256").HasMaxLength(64).IsRequired();
         entity.Property(e => e.Size).HasColumnName("size").IsRequired();
         entity.Property(e => e.Content).HasColumnName("content");
+        entity.Property(e => e.ProjectBuildArtifactId).HasColumnName("project_build_artifact_id");
 
         entity.HasIndex(e => e.CommandId);
+        // Plain, not filtered: it covers the SET NULL below, which has to find every row.
+        entity.HasIndex(e => e.ProjectBuildArtifactId);
+
+        // A deployment's files point at the build's artifacts rather than copying them
+        // (#1367). Deleting a build's artifacts leaves the command's record of what was
+        // sent (name, hash, size) and only loses the bytes.
+        entity.HasOne(e => e.ProjectBuildArtifact)
+            .WithMany()
+            .HasForeignKey(e => e.ProjectBuildArtifactId)
+            .OnDelete(DeleteBehavior.SetNull);
 
         entity.HasOne<Organization>()
             .WithMany()

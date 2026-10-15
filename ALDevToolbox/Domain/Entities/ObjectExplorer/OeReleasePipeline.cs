@@ -137,6 +137,15 @@ public class OeReleasePipeline
     /// </summary>
     public string? AllowedBranch { get; set; }
 
+    /// <summary>
+    /// On-premises only: once an app is upgraded, remove its previous version from the
+    /// service tier (<c>Unpublish-NAVApp</c>), so old versions do not pile up on the
+    /// server. On by default. Business Central online removes old versions itself, so the
+    /// setting is not offered for an online environment and is ignored there. See
+    /// <c>.design/on-prem-gateway.md</c>, "Deploying to on-premises".
+    /// </summary>
+    public bool UnpublishPrevious { get; set; } = true;
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

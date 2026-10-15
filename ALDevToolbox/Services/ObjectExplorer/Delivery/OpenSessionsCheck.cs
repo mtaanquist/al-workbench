@@ -20,13 +20,28 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// <param name="EndUsers">Distinct people signed in who are not delegated users.</param>
 /// <param name="DelegatedUsers">Distinct delegated users signed in.</param>
 /// <param name="Failure">Why Business Central could not be asked, when it could not; the counts are then zero and mean nothing.</param>
-public sealed record OpenSessionsCheck(string EnvironmentName, int EndUsers, int DelegatedUsers, string? Failure = null)
+/// <param name="Sessions">
+/// On-premises: the sessions open across every service tier on the environment's
+/// database, as the gateway last counted them. The gateway's inventory counts sessions,
+/// not people, so an on-premises check carries this instead of the two people counts
+/// (#1367). Null for Business Central online.
+/// </param>
+/// <param name="Tiers">On-premises: how many service tiers <paramref name="Sessions"/> was counted on.</param>
+public sealed record OpenSessionsCheck(
+    string EnvironmentName, int EndUsers, int DelegatedUsers, string? Failure = null, int? Sessions = null, int Tiers = 0)
 {
     /// <summary>The prefix Business Central gives a delegated admin's user name.</summary>
     public const string DelegatedUserPrefix = "USER_";
 
     /// <summary>True when the person should be asked before the deployment goes ahead: somebody is signed in, or we could not tell.</summary>
-    public bool NeedsConfirmation => Failure is not null || EndUsers + DelegatedUsers > 0;
+    public bool NeedsConfirmation => Failure is not null || EndUsers + DelegatedUsers > 0 || Sessions > 0;
+
+    /// <summary>
+    /// An on-premises count: <paramref name="sessions"/> open on <paramref name="tiers"/>
+    /// service tiers that share the environment's database.
+    /// </summary>
+    public static OpenSessionsCheck OnPremises(string environmentName, int sessions, int tiers) =>
+        new(environmentName, 0, 0, Sessions: sessions, Tiers: tiers);
 
     /// <summary>
     /// Counts the people in <paramref name="sessions"/>. One person with three tabs open is
@@ -84,6 +99,15 @@ public sealed record OpenSessionsCheck(string EnvironmentName, int EndUsers, int
             {
                 var reason = failure.EndsWith('.') || failure.EndsWith('!') || failure.EndsWith('?') ? failure : failure + ".";
                 return $"Couldn't check who is signed in to {EnvironmentName}. {reason} {ask}";
+            }
+            if (Sessions is { } sessions)
+            {
+                // Counted from the gateway's last reading, which is at most a quarter of an
+                // hour old, across every tier on the database: a session on any of them sees
+                // the new version once it is installed.
+                var where = Tiers > 1 ? $"the {Tiers} service tiers of {EnvironmentName}" : EnvironmentName;
+                return $"There {(sessions == 1 ? "is" : "are")} {Count(sessions, "session", "sessions")} open on {where}, "
+                    + $"as the gateway last counted them. {ask}";
             }
             return $"There {(EndUsers == 1 ? "is" : "are")} {Count(EndUsers, "end-user", "end-users")} online and "
                 + $"{Count(DelegatedUsers, "delegated user", "delegated users")} online in {EnvironmentName}. {ask}";

@@ -114,7 +114,7 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ReleaseBuildNowAsync_refuses_an_on_premises_service_tier_until_the_gateway_can_deploy()
+    public async Task ReleaseBuildNowAsync_refuses_an_on_premises_environment_with_no_service_tier_linked()
     {
         await using var ctx = _db.NewContext();
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
@@ -126,8 +126,8 @@ public sealed class DeliveryServiceTests : IDisposable
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
         var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironment"];
-        error.Should().Contain("on-premises service tier").And.Contain("nothing was sent");
-        _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued for a tier the gateway cannot deploy to yet");
+        error.Should().Contain("no longer linked");
+        _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued for a tier there is no way to reach");
     }
 
     [Fact]
@@ -1712,6 +1712,29 @@ public sealed class DeliveryServiceTests : IDisposable
         await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
         DrainQueue();
         return (seed, deliveryId);
+    }
+
+    [Fact]
+    public async Task Moving_a_held_deployment_on_an_on_premises_environment_is_refused_before_anything_is_claimed()
+    {
+        // #1374 review: the capability is checked before the move claims anything, so the
+        // refusal is a validation error in words, not an exception after a half move.
+        var (seed, heldId) = await HandedOffAsync();
+        await using (var flip = _db.NewContext())
+        {
+            await flip.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises));
+        }
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Delivery"];
+        error.Should().Be(DeliveryService.WaitsForUpdateRefusal("Production"));
+        _apps.Removed.Should().BeEmpty("nothing was cancelled");
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.CountAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId))
+            .Should().Be(1, "no replacement was written");
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == heldId)).Status.Should().Be(ProjectDeliveryStatus.HandedOff);
     }
 
     [Fact]

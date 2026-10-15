@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol;
 
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.Gateways;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
@@ -305,6 +306,30 @@ public sealed class ReleasePipelineService
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// What the pipeline editor needs to know about a linked on-premises target before it
+    /// offers anything: whether the customer's gateway settings let a deployment use Force
+    /// sync, which tier publishes, and anything that would refuse a deployment now. Null
+    /// when the environment is not an on-premises one of <paramref name="projectId"/>.
+    /// </summary>
+    public async Task<OnPremisesTargetInfo?> GetOnPremisesTargetAsync(int projectId, int environmentId, CancellationToken ct = default)
+    {
+        await _access.EnsureCanViewAsync(projectId, ct);
+        var belongs = await _db.OeProjectEnvironments.AsNoTracking()
+            .AnyAsync(e => e.Id == environmentId && e.ProjectId == projectId, ct);
+        if (!belongs) return null;
+        if (await OnPremisesDeployFacts.LoadAsync(_db, environmentId, ct) is not { } facts) return null;
+        var (machine, instance) = facts.PublishingTier;
+        return new OnPremisesTargetInfo(
+            facts.TierName,
+            $"{machine} / {instance}",
+            facts.GatewayName,
+            facts.GatewayStatusAt(DateTime.UtcNow),
+            facts.EnvironmentUnlinked,
+            facts.AllowForceSync,
+            facts.PolicyRefusal);
+    }
+
     /// <summary>A single active deployment pipeline, or null when not found in this org.</summary>
     public async Task<OeReleasePipeline?> GetReleasePipelineAsync(int id, CancellationToken ct = default)
     {
@@ -346,6 +371,7 @@ public sealed class ReleasePipelineService
             DeployWithoutApprovalByUserId = v.DeployWithoutApproval ? _orgContext.CurrentUserId : null,
             RestrictBranch = v.RestrictBranch,
             AllowedBranch = v.AllowedBranch,
+            UnpublishPrevious = v.UnpublishPrevious,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -385,6 +411,7 @@ public sealed class ReleasePipelineService
         pipeline.DeployWithoutApprovalByUserId = v.DeployWithoutApproval ? _orgContext.CurrentUserId : null;
         pipeline.RestrictBranch = v.RestrictBranch;
         pipeline.AllowedBranch = v.AllowedBranch;
+        pipeline.UnpublishPrevious = v.UnpublishPrevious;
         pipeline.UpdatedAt = DateTime.UtcNow;
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated deployment pipeline {ReleasePipelineId} ({Name}).", pipeline.Id, v.Name);
@@ -678,19 +705,22 @@ public sealed class ReleasePipelineService
         // the user would hit later, just earlier and while they can still change it.
         var environment = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == input.ProjectEnvironmentId && e.ProjectId == input.ProjectId)
-            .Select(e => new { e.Name, e.Type, e.Status, Missing = e.MissingSince != null, e.UpdateWindowStart, e.UpdateWindowEnd, OnPremises = e.Kind == OeEnvironmentKind.OnPremises })
+            .Select(e => new
+            {
+                e.Name, e.Type, e.Status, e.UpdateWindowStart, e.UpdateWindowEnd,
+                OnPremises = e.Kind == OeEnvironmentKind.OnPremises,
+                // An on-premises environment with no tier behind it has nowhere to deploy.
+                Missing = e.MissingSince != null || (e.Kind == OeEnvironmentKind.OnPremises && e.GatewayInstanceId == null),
+            })
             .FirstOrDefaultAsync(ct);
         if (environment is null)
         {
             errors["ProjectEnvironmentId"] = "Choose a target environment.";
         }
-        else if (environment.OnPremises)
+        else if (environment.Missing && environment.OnPremises)
         {
-            // Deploying to on-premises goes through the gateway, which is not built yet
-            // (#1374, #1367); the editor does not offer such a target, and this is the
-            // rule behind it. See .design/on-prem-gateway.md, "Deploying to on-premises".
             errors["ProjectEnvironmentId"] =
-                $"{environment.Name} is an on-premises service tier. Deploying to on-premises through the gateway isn't available yet, so a deployment pipeline can't target it.";
+                $"'{environment.Name}' is no longer linked to a service tier. An administrator can link it again on the solution's Environments tab, then come back.";
         }
         else if (environment.Missing)
         {
@@ -722,10 +752,28 @@ public sealed class ReleasePipelineService
                 $"'{environment.Name}' has no delivery window yet. Set one on the environment's page, or choose another time for installs.";
         }
 
+        // An on-premises service tier installs now or in its delivery window: nothing on
+        // it holds an install for a later Business Central update (#1367). The editor only
+        // offers those two; this is the rule behind it.
+        if (environment is { OnPremises: true }
+            && !errors.ContainsKey("DeploymentSchedule")
+            && BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(deploymentSchedule) ?? deploymentSchedule))
+        {
+            errors["DeploymentSchedule"] = DeliveryService.WaitsForUpdateRefusal(environment.Name);
+        }
+
         var schemaSyncMode = string.IsNullOrWhiteSpace(input.SchemaSyncMode) ? BcSyncMode.Add : input.SchemaSyncMode;
         if (!BcSyncMode.IsValid(schemaSyncMode))
         {
             errors["SchemaSyncMode"] = "Choose a schema sync setting.";
+        }
+        else if (environment is { OnPremises: true }
+                 && BcSyncMode.Normalize(schemaSyncMode) == BcSyncMode.ForceSync
+                 && !await OnPremisesDeployFacts.AllowsForceSyncAsync(_db, input.ProjectEnvironmentId, ct))
+        {
+            // On-premises, Force sync is the customer's to allow in the gateway's settings
+            // (allow_force_sync). Offered only where it is; refused here whatever was sent.
+            errors["SchemaSyncMode"] = OnPremisesDeployFacts.ForceSyncRefusal(environment.Name);
         }
 
         // The branch rule only means something for a build pipeline's builds; blank is
@@ -798,7 +846,7 @@ public sealed class ReleasePipelineService
         // GitHub releases has no build to follow, so the setting means nothing there.
         return new ValidatedReleasePipeline(
             name!, custom is not null, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
-            prepare, deployWithoutApproval, restrictBranch, allowedBranch);
+            prepare, deployWithoutApproval, restrictBranch, allowedBranch, input.UnpublishPrevious);
     }
 
     /// <summary>
@@ -824,7 +872,8 @@ public sealed class ReleasePipelineService
         bool PrepareReleaseOnNewBuild,
         bool DeployWithoutApproval,
         bool RestrictBranch,
-        string? AllowedBranch);
+        string? AllowedBranch,
+        bool UnpublishPrevious);
 
     /// <summary>
     /// Gates a deployment-pipeline-keyed read on its project's visibility. One that
@@ -884,6 +933,23 @@ public sealed class ReleasePipelineService
 
 }
 
+/// <summary>A linked on-premises target as the deployment pipeline editor shows it (#1367).</summary>
+/// <param name="TierName">The linked tier, <c>SERVER / INSTANCE</c>.</param>
+/// <param name="PublishingTier">The tier that publishes for its database, which may be another one.</param>
+/// <param name="GatewayName">The gateway's name.</param>
+/// <param name="GatewayStatus">The gateway's state as the Gateways page shows it.</param>
+/// <param name="Unlinked">The tier is gone from the gateway's inventory, or was never linked.</param>
+/// <param name="AllowForceSync">The customer's gateway settings let a deployment sync with Force sync.</param>
+/// <param name="PolicyRefusal">Why the gateway would refuse a deployment now, as it last reported its settings; null when it would not.</param>
+public sealed record OnPremisesTargetInfo(
+    string TierName,
+    string PublishingTier,
+    string? GatewayName,
+    GatewayStatus GatewayStatus,
+    bool Unlinked,
+    bool AllowForceSync,
+    string? PolicyRefusal);
+
 /// <summary>Form-post shape for a deployment pipeline: project, source build pipeline, target environment, and modes.</summary>
 public sealed record ReleasePipelineInput(
     int ProjectId,
@@ -922,7 +988,12 @@ public sealed record ReleasePipelineInput(
     /// (#1096). Needs <see cref="PrepareReleaseOnNewBuild"/>, and refused unless the
     /// target environment is a sandbox.
     /// </summary>
-    bool DeployWithoutApproval = false);
+    bool DeployWithoutApproval = false,
+    /// <summary>
+    /// On-premises: remove each app's previous version from the service tier once it is
+    /// upgraded (#1367). On by default; ignored (and kept as sent) for an online target.
+    /// </summary>
+    bool UnpublishPrevious = true);
 
 /// <summary>List-row projection of a deployment pipeline with its source and target resolved for display.</summary>
 public sealed record ReleasePipelineRow(

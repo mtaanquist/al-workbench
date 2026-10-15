@@ -48,12 +48,12 @@ public sealed class DeliveryTargetTests
     }
 
     [Fact]
-    public void Factory_refuses_an_on_premises_service_tier_until_the_gateway_can_deploy()
+    public void Factory_refuses_an_on_premises_service_tier_when_the_gateway_services_are_not_registered()
     {
         var factory = Factory();
 
         var why = factory.Unavailable(OeEnvironmentKind.OnPremises, "CRONUS-BC02");
-        why.Should().Be("CRONUS-BC02 is an on-premises service tier. Deploying to on-premises through the gateway isn't available yet, so nothing was sent.");
+        why.Should().Be("CRONUS-BC02 is an on-premises service tier, and deploying through its gateway isn't set up here, so nothing was sent.");
 
         var act = () => factory.Create(new DeliveryTargetEnvironment(ProjectId, "CRONUS-BC02", OeEnvironmentKind.OnPremises));
         act.Should().Throw<InvalidOperationException>().WithMessage(why);
@@ -109,8 +109,10 @@ public sealed class DeliveryTargetTests
         await target.ConnectAsync(CancellationToken.None);
         await target.ListInstalledAppsAsync(CancellationToken.None);
         await target.ListHeldInstallsAsync(CancellationToken.None);
-        await target.ListSessionsAsync(CancellationToken.None);
-        await target.StartInstallAsync([1, 2, 3], "CRONUS_Core_1.0.0.0.app", "Current version", "Add", CancellationToken.None);
+        await target.CheckOpenSessionsAsync(CancellationToken.None);
+        var package = new DeliveryPackage(1, "CRONUS_Core_1.0.0.0.app", null, "CRONUS Core", "1.0.0.0", 3, _ => Task.FromResult<byte[]>([1, 2, 3]));
+        await target.PrepareInstallsAsync(new DeliveryInstallBatch([package], "Add", true, null, false), CancellationToken.None);
+        await target.StartInstallAsync(package, "Current version", "Add", CancellationToken.None);
         await target.CancelHeldInstallAsync(Guid.NewGuid(), "1.0.0.0", "Next minor update", CancellationToken.None);
 
         foreach (var call in _calls.Calls.Where(c => c.Name != "AcquireDeliveryContextAsync"))
@@ -193,7 +195,7 @@ public sealed class DeliveryTargetTests
         var target = Factory().Create(Online());
         await target.ConnectAsync(CancellationToken.None);
 
-        var outcome = await target.WaitForInstallAsync(started, TimeSpan.Zero, TimeSpan.FromSeconds(5), CancellationToken.None);
+        var outcome = await target.WaitForInstallAsync(started, TimeSpan.Zero, TimeSpan.FromSeconds(5), null, CancellationToken.None);
 
         outcome.Completed.Should().BeTrue();
     }
@@ -204,7 +206,7 @@ public sealed class DeliveryTargetTests
         var target = Factory().Create(Online());
         await target.ConnectAsync(CancellationToken.None);
 
-        var outcome = await target.WaitForInstallAsync(Operation(appId: null), TimeSpan.Zero, TimeSpan.FromSeconds(5), CancellationToken.None);
+        var outcome = await target.WaitForInstallAsync(Operation(appId: null), TimeSpan.Zero, TimeSpan.FromSeconds(5), null, CancellationToken.None);
 
         outcome.Completed.Should().BeTrue();
         outcome.Message.Should().Contain("wasn't confirmed");
@@ -223,7 +225,7 @@ public sealed class DeliveryTargetTests
         var target = Factory().Create(Online());
         await target.ConnectAsync(CancellationToken.None);
 
-        var outcome = await target.WaitForInstallAsync(started, TimeSpan.Zero, TimeSpan.FromSeconds(5), CancellationToken.None);
+        var outcome = await target.WaitForInstallAsync(started, TimeSpan.Zero, TimeSpan.FromSeconds(5), null, CancellationToken.None);
 
         outcome.Completed.Should().BeFalse();
         outcome.Message.Should().NotBeNullOrEmpty();

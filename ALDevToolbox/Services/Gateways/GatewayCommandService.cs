@@ -11,8 +11,20 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Gateways;
 
-/// <summary>A file to send with a command: its name as the gateway will see it, and its content.</summary>
-public sealed record GatewayCommandFileInput(string FileName, byte[] Content);
+/// <summary>
+/// A file to send with a command: its name as the gateway will see it, and either its
+/// content or the build artifact it is (<see cref="FromArtifact"/>).
+/// </summary>
+public sealed record GatewayCommandFileInput(string FileName, byte[]? Content, int? ProjectBuildArtifactId = null)
+{
+    /// <summary>
+    /// A build artifact sent by reference: the command keeps the artifact's id rather than
+    /// a copy of its bytes, and the download reads the artifact (#1367). The hash the
+    /// gateway checks is worked out from the artifact when the command is queued.
+    /// </summary>
+    public static GatewayCommandFileInput FromArtifact(string fileName, int projectBuildArtifactId) =>
+        new(fileName, null, projectBuildArtifactId);
+}
 
 /// <summary>
 /// What a caller asks a gateway to do. <paramref name="DueAt"/> defaults to now; the
@@ -56,6 +68,18 @@ public enum GatewayFileOutcome
 
 /// <summary>A file the gateway may download; its content is streamed by <see cref="GatewayCommandService.CopyFileContentAsync"/>.</summary>
 public sealed record GatewayCommandFileDownload(long Id, string FileName, string Sha256, long Size);
+
+/// <summary>
+/// Where one command stands, as <see cref="GatewayCommandService.ReadProgressAsync"/> reads it.
+/// </summary>
+/// <param name="NewLog">The log written since the offset asked for, each line stamped with the workbench's clock.</param>
+/// <param name="LogOffset">The offset to ask from next time.</param>
+public sealed record GatewayCommandProgress(
+    GatewayCommandStatus Status, string? FailureMessage, JsonObject? Result, string NewLog, int LogOffset)
+{
+    /// <summary>The command will not change again.</summary>
+    public bool IsFinal => Status is GatewayCommandStatus.Succeeded or GatewayCommandStatus.Failed or GatewayCommandStatus.Expired;
+}
 
 /// <summary>What one sweep of one organisation did.</summary>
 public sealed record GatewayCommandSweepResult(int Expired, int FailedRekeyed, int FailedSilent, int TokensRemoved);
@@ -204,6 +228,11 @@ public sealed class GatewayCommandService
         }
 
         var files = request.Files ?? [];
+        // What each file is as it will be sent: its hash and size, worked out here for a
+        // referenced artifact as for a carried file, so the gateway always checks against
+        // a hash the workbench computed from exactly the bytes it will serve.
+        var sent = new List<(string Name, string Sha256, long Size, byte[]? Content, int? ArtifactId)>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
             var name = file.FileName?.Trim() ?? string.Empty;
@@ -212,16 +241,43 @@ public sealed class GatewayCommandService
                 errors["files"] = $"The file name '{name}' cannot be sent to a gateway.";
                 break;
             }
-            if (file.Content is null || file.Content.Length == 0)
+            if (!names.Add(name))
+            {
+                errors["files"] = $"Two files of one command are called {name}.";
+                break;
+            }
+            string sha;
+            long size;
+            if (file.ProjectBuildArtifactId is { } artifactId)
+            {
+                if (await ArtifactHashAsync(orgId, artifactId, ct).ConfigureAwait(false) is not { } artifact)
+                {
+                    errors["files"] = $"The build file {name} no longer exists.";
+                    break;
+                }
+                (sha, size) = artifact;
+            }
+            else
+            {
+                if (file.Content is null || file.Content.Length == 0)
+                {
+                    errors["files"] = $"The file {name} is empty.";
+                    break;
+                }
+                sha = Convert.ToHexStringLower(SHA256.HashData(file.Content));
+                size = file.Content.Length;
+            }
+            if (size == 0)
             {
                 errors["files"] = $"The file {name} is empty.";
                 break;
             }
-            if (file.Content.Length > MaxFileBytes)
+            if (size > MaxFileBytes)
             {
                 errors["files"] = $"The file {name} is larger than {MaxFileBytes / (1024 * 1024)} MB, the most a gateway is sent.";
                 break;
             }
+            sent.Add((name, sha, size, file.ProjectBuildArtifactId is null ? file.Content : null, file.ProjectBuildArtifactId));
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
@@ -238,15 +294,16 @@ public sealed class GatewayCommandService
             DueAt = due,
             ExpiresAt = expires,
         };
-        foreach (var file in files)
+        foreach (var file in sent)
         {
             command.Files.Add(new GatewayCommandFile
             {
                 OrganizationId = orgId,
-                FileName = file.FileName.Trim(),
-                Sha256 = Convert.ToHexStringLower(SHA256.HashData(file.Content)),
-                Size = file.Content.Length,
+                FileName = file.Name,
+                Sha256 = file.Sha256,
+                Size = file.Size,
                 Content = file.Content,
+                ProjectBuildArtifactId = file.ArtifactId,
             });
         }
         _db.GatewayCommands.Add(command);
@@ -257,6 +314,33 @@ public sealed class GatewayCommandService
             "Queued gateway command {CommandId} ({Verb}) for gateway {GatewayId} with {FileCount} file(s), due {DueAt}, expires {ExpiresAt}.",
             command.Id, GatewayVerbs.ToWire(request.Verb), request.GatewayId, files.Count, due, expires);
         return command.Id;
+    }
+
+    /// <summary>
+    /// Where a command stands, for the feature that queued it and is waiting on it (a
+    /// deployment, #1367): its status, how it ended, and the log written since
+    /// <paramref name="logOffset"/> characters, so a caller that polls only ever reads
+    /// what is new. Null when the command is not there (another organisation's reads as
+    /// absent, under the query filter).
+    /// </summary>
+    public async Task<GatewayCommandProgress?> ReadProgressAsync(long commandId, int logOffset, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var offset = Math.Max(0, logOffset);
+        var row = await _db.GatewayCommands.AsNoTracking()
+            .Where(c => c.Id == commandId)
+            .Select(c => new
+            {
+                c.Status,
+                c.FailureMessage,
+                c.ResultJson,
+                Length = c.Log.Length,
+                Tail = c.Log.Length > offset ? c.Log.Substring(offset) : string.Empty,
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (row is null) return null;
+        var result = string.IsNullOrWhiteSpace(row.ResultJson) ? null : JsonNode.Parse(row.ResultJson) as JsonObject;
+        return new GatewayCommandProgress(row.Status, row.FailureMessage, result, row.Tail, Math.Max(offset, row.Length));
     }
 
     /// <summary>
@@ -579,7 +663,12 @@ public sealed class GatewayCommandService
         try
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT content FROM gateway_command_files WHERE id = @id AND organization_id = @org";
+            // A file sent by reference (#1367) is read from its build artifact, in the same
+            // organisation; one carried with the command, from its own content.
+            command.CommandText =
+                "SELECT COALESCE(f.content, a.content) FROM gateway_command_files f "
+                + "LEFT JOIN oe_project_build_artifacts a ON a.id = f.project_build_artifact_id AND a.organization_id = f.organization_id "
+                + "WHERE f.id = @id AND f.organization_id = @org";
             var id = command.CreateParameter();
             id.ParameterName = "id";
             id.Value = fileId;
@@ -596,6 +685,42 @@ public sealed class GatewayCommandService
             await using var content = reader.GetStream(0);
             await content.CopyToAsync(destination, ct).ConfigureAwait(false);
             return true;
+        }
+        finally
+        {
+            await _db.Database.CloseConnectionAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The SHA-256 (lower-case hex) and size of a build artifact's content, worked out by
+    /// the database so a large <c>.app</c> is not pulled into memory to be hashed. Null
+    /// when the organisation has no such artifact. The SQL bypasses the query filter, so
+    /// it names the organisation itself.
+    /// </summary>
+    private async Task<(string Sha256, long Size)?> ArtifactHashAsync(int orgId, int artifactId, CancellationToken ct)
+    {
+        var connection = _db.Database.GetDbConnection();
+        await _db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT encode(sha256(content), 'hex'), octet_length(content) FROM oe_project_build_artifacts WHERE id = @id AND organization_id = @org";
+            var id = command.CreateParameter();
+            id.ParameterName = "id";
+            id.Value = artifactId;
+            command.Parameters.Add(id);
+            var org = command.CreateParameter();
+            org.ParameterName = "org";
+            org.Value = orgId;
+            command.Parameters.Add(org);
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false) || await reader.IsDBNullAsync(0, ct).ConfigureAwait(false))
+            {
+                return null;
+            }
+            return (reader.GetString(0), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
         }
         finally
         {

@@ -27,6 +27,9 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.DeployWithoutApprovalByUserId).HasColumnName("deploy_without_approval_by_user_id");
         entity.Property(e => e.RestrictBranch).HasColumnName("restrict_branch").IsRequired();
         entity.Property(e => e.AllowedBranch).HasColumnName("allowed_branch").HasMaxLength(255);
+        // No HasDefaultValue: a bool defaulting to true in the model would never write false.
+        // The migration gives existing rows true, the entity's own default does the rest.
+        entity.Property(e => e.UnpublishPrevious).HasColumnName("unpublish_previous").IsRequired();
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DisabledAt).HasColumnName("disabled_at");
