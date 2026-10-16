@@ -5,6 +5,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.Gateways;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 
@@ -1065,6 +1066,45 @@ public sealed class ProjectBuildService
         build.BcVersion = bcVersion ?? build.BcVersion;
         build.FinishedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Compares the objects the build behind <paramref name="releaseId"/> produced with the
+    /// licence of each linked on-premises environment of its Solution that is Production or
+    /// that a deployment pipeline of the build's pipeline targets, and keeps the answer on
+    /// the build (#1370). Called once the build is ready and its objects are
+    /// indexed. Best-effort: an object outside the licence is a warning on the build, and a
+    /// check that cannot run must never fail a build that compiled, so anything thrown is
+    /// logged and the build stays as it is. See <c>.design/on-prem-gateway.md</c>, "Licensed
+    /// object ranges, as built".
+    /// </summary>
+    public async Task RecordLicenceCheckAsync(int releaseId, CancellationToken ct = default)
+    {
+        try
+        {
+            var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+            if (build is null || build.Status != ProjectBuildStatus.Ready) return;
+            var checks = await LicenceRangeCheck.ForBuildAsync(_db, build.Id, _clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
+            build.LicenceCheckJson = LicenceRangeCheck.Serialize(checks);
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            foreach (var check in checks)
+            {
+                if (check.IsOutside)
+                    _logger.LogInformation("Build {BuildId}: {Count} object(s) are outside the licence on {Environment}.",
+                        build.Id, check.OutsideCount, check.EnvironmentName);
+                else if (check.IsNotChecked)
+                    _logger.LogInformation("Build {BuildId}: licence not checked for {Environment}: {Reason}",
+                        build.Id, check.EnvironmentName, check.Reason);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't compare the build of release {ReleaseId} with the customer's licence.", releaseId);
+        }
     }
 
     private const string PipelineDeletedRefusal = "The pipeline was deleted before this build started.";

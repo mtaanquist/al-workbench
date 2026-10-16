@@ -199,6 +199,25 @@ public sealed class DeliveryService
     }
 
     /// <summary>
+    /// The build's objects against the licence of the deployment pipeline's target (#1370),
+    /// for the Deploy dialog to refuse with before the person commits. Null for Business
+    /// Central online, which never checks. Deploying checks again whatever this said.
+    /// </summary>
+    public async Task<LicenceCheck?> CheckLicenceAsync(int releasePipelineId, int buildId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var rp = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == releasePipelineId && r.DeletedAt == null
+                        && r.ProjectEnvironment!.Kind == OeEnvironmentKind.OnPremises)
+            .Select(r => new { r.ProjectId, r.ProjectEnvironmentId })
+            .FirstOrDefaultAsync(ct);
+        if (rp is null) return null;
+        await _access.EnsureCanViewAsync(rp.ProjectId, ct);
+        if (!await _db.OeProjectBuilds.AsNoTracking().AnyAsync(b => b.Id == buildId && b.ProjectId == rp.ProjectId, ct)) return null;
+        return await LicenceRangeCheck.ForDeploymentAsync(_db, rp.ProjectEnvironmentId, buildId, _clock.GetUtcNow().UtcDateTime, ct);
+    }
+
+    /// <summary>
     /// <see cref="CheckOpenSessionsAsync"/> for a deployment already made, asked about the
     /// environment that deployment installs to (its own snapshot), not whatever its
     /// pipeline has been pointed at since. Used when a waiting deployment is moved to now.
@@ -591,6 +610,15 @@ public sealed class DeliveryService
         if (onPremises && await RestartGroupPlan.LoadAsync(_db, rp.ProjectEnvironmentId, ct) is { Refusal: { } sharedRefusal })
         {
             throw Validation("ProjectEnvironment", sharedRefusal);
+        }
+        // Every on-premises Business Central refuses an extension whose objects its licence
+        // does not cover (#1370). Refused here, before anything is made or sent, naming each
+        // object; checked again when the run claims it. A licence that could not be read is
+        // not a refusal: the run's log says it was not checked.
+        if (onPremises && await LicenceRangeCheck.ForDeploymentAsync(_db, rp.ProjectEnvironmentId, build.Id, _clock.GetUtcNow().UtcDateTime, ct)
+                is { IsOutside: true } outsideLicence)
+        {
+            throw Validation("Build", outsideLicence.RefusalFor(build.Id));
         }
         // Only an environment that can hold an install for a later update takes those
         // timings; on-premises has only now and the delivery window.
@@ -2111,6 +2139,20 @@ public sealed class DeliveryService
             Append(log, blocked);
             await FailAsync(delivery, log, blocked, ct);
             return;
+        }
+
+        // The claim-time half of the licence check in ResolveReleaseAsync (#1370): the
+        // customer's licence may have changed since the deployment was made. Before any
+        // command is queued, so a refusal sends nothing.
+        if (kind == OeEnvironmentKind.OnPremises && env is not null
+            && await LicenceRangeCheck.ForDeploymentAsync(_db, env.Id, delivery.ProjectBuildId, _clock.GetUtcNow().UtcDateTime, ct) is { } licence)
+        {
+            if (licence.IsOutside)
+            {
+                await FailAsync(delivery, log, licence.RefusalFor(delivery.ProjectBuildId), ct);
+                return;
+            }
+            Append(log, licence.Summary);
         }
 
         var now = DateTime.UtcNow;

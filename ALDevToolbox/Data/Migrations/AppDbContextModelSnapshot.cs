@@ -3510,6 +3510,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("head_sha");
 
+                    b.Property<string>("LicenceCheckJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("licence_check");
+
                     b.Property<int>("OrganizationId")
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");

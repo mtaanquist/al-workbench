@@ -13,7 +13,17 @@ public sealed record ParsedLicence(
     string? SerialNumber,
     DateOnly? ExpiresOn,
     IReadOnlyList<LicenceRange> Ranges,
-    IReadOnlyList<string> Problems);
+    IReadOnlyList<string> Problems)
+{
+    /// <summary>
+    /// False when a line was skipped (too long, or too slow to match) or ranges past
+    /// <see cref="GatewayLicenceParser.MaxRanges"/> were dropped: a range may be missing,
+    /// so an object outside <see cref="Ranges"/> is not known to be outside the licence
+    /// (#1370). The stored licence keeps only the problem sentences, so the range check
+    /// reads the stored text again to learn this.
+    /// </summary>
+    public bool RangesComplete { get; init; } = true;
+}
 
 /// <summary>
 /// Reads the text <c>Export-NAVServerLicenseInformation</c> prints: who the licence is
@@ -147,7 +157,7 @@ public static partial class GatewayLicenceParser
         if (ranges.Count == 0) problems.Add("No licensed object ranges were found in the licence information.");
         if (skipped > 0) problems.Add($"{skipped} line(s) of the licence information were too long or too slow to read and were skipped.");
         if (tooMany) problems.Add($"The licence lists more than {MaxRanges} object ranges; only the first {MaxRanges} were kept.");
-        return new ParsedLicence(licensee, serial, expires, ranges, problems);
+        return new ParsedLicence(licensee, serial, expires, ranges, problems) { RangesComplete = skipped == 0 && !tooMany };
     }
 
     /// <summary>

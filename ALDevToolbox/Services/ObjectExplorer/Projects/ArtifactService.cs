@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services.Gateways;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Projects;
@@ -517,7 +518,7 @@ public sealed class ArtifactService
                 b.Id, b.ProjectId, b.ReleaseId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.Trigger,
                 b.StartedAt, b.BuildingStartedAt, b.FinishedAt, b.FailureMessage,
                 b.GithubReleaseTag, b.GithubReleaseUrl, b.GithubReleaseError,
-                b.BcTarget, b.BcArtifactVersion,
+                b.BcTarget, b.BcArtifactVersion, b.LicenceCheckJson,
                 StartedByName = b.StartedByUser != null ? b.StartedByUser.DisplayName : null,
                 ArtifactCount = b.Artifacts.Count,
             })
@@ -588,9 +589,14 @@ public sealed class ArtifactService
                     ? null
                     : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId),
                 FromPush: b.Trigger == ProjectBuildTrigger.Push,
-                BuildingStartedAt: b.BuildingStartedAt);
+                BuildingStartedAt: b.BuildingStartedAt,
+                LicenceChecks: LicenceChecksOrNull(b.LicenceCheckJson));
         }).ToList();
     }
+
+    /// <summary>The licence checks stored on a build (#1370), or null when it has none.</summary>
+    private static IReadOnlyList<LicenceCheck>? LicenceChecksOrNull(string? json) =>
+        LicenceRangeCheck.Parse(json) is { Count: > 0 } checks ? checks : null;
 
     /// <summary>
     /// The newest successful build's id per <paramref name="key"/> (a pipeline or a
@@ -663,7 +669,7 @@ public sealed class ArtifactService
             .Select(b => new
             {
                 b.Id, b.ProjectId, b.PipelineId, b.ReleaseId, b.Status, b.BcVersion, b.Branch,
-                b.StartedAt, b.FinishedAt, b.FailureMessage, b.BcTarget, b.BcArtifactVersion,
+                b.StartedAt, b.FinishedAt, b.FailureMessage, b.BcTarget, b.BcArtifactVersion, b.LicenceCheckJson,
                 HasObjects = _db.OeProjectBuilds.Where(OeProjectBuild.HasIndexedObjects).Any(x => x.Id == b.Id),
                 StartedBy = b.StartedByUser != null ? b.StartedByUser.DisplayName : null,
                 ProjectName = b.Project != null ? b.Project.Name : string.Empty,
@@ -750,7 +756,8 @@ public sealed class ArtifactService
             build.ReleaseId, build.Status,
             build.BcVersion, build.Branch, build.StartedAt, build.FinishedAt, build.FailureMessage,
             build.StartedBy, repoCommits, changelogGroups, artifacts, logSections,
-            errorCount, warningCount, failedApps, build.BcTarget, build.BcArtifactVersion, build.HasObjects);
+            errorCount, warningCount, failedApps, build.BcTarget, build.BcArtifactVersion, build.HasObjects,
+            LicenceChecksOrNull(build.LicenceCheckJson));
     }
 
     /// <summary>The deliverables of a build (metadata only), ordered by file name.</summary>
@@ -1032,11 +1039,28 @@ public sealed record BuildRow(
     /// <summary>True when a push to the pipeline's branch started the build rather than a person.</summary>
     bool FromPush = false,
     /// <summary>When a worker picked the build up; <see cref="StartedAt"/> is when it was queued. Null for older builds.</summary>
-    DateTime? BuildingStartedAt = null)
+    DateTime? BuildingStartedAt = null,
+    /// <summary>
+    /// The build's objects against the licence of each linked on-premises environment it
+    /// was checked for (#1370), as the build recorded them once it was ready, objects and
+    /// all, for the pages. Null for an online Solution, one with no such tier, and builds
+    /// made before the check. Not serialised: a list of builds carries
+    /// <see cref="LicenceCheckRows"/> instead.
+    /// </summary>
+    [property: JsonIgnore]
+    IReadOnlyList<LicenceCheck>? LicenceChecks = null)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]
     public string ShownBranch => Branch ?? DefaultBranch ?? "(default branch)";
+
+    /// <summary>
+    /// <see cref="LicenceChecks"/> as a list of builds carries them: the outcome, how many
+    /// objects are outside and the summary per environment, without the objects, which
+    /// one build's detail (<c>get_solution_build</c>) carries.
+    /// </summary>
+    [JsonPropertyName("licenceChecks")]
+    public IReadOnlyList<LicenceCheckRow>? LicenceCheckRows => LicenceChecks?.Select(LicenceCheckRow.From).ToList();
 
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
@@ -1066,7 +1090,9 @@ public sealed record BuildDetail(
     IReadOnlyList<FailedAppRow>? FailedApps = null,
     string BcTarget = ProjectBuildTarget.Current,
     string? BcArtifactVersion = null,
-    bool HasObjects = true)
+    bool HasObjects = true,
+    /// <summary>The build's licence checks (#1370); null when it has none. See <see cref="BuildRow.LicenceChecks"/>.</summary>
+    IReadOnlyList<LicenceCheck>? LicenceChecks = null)
 {
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);

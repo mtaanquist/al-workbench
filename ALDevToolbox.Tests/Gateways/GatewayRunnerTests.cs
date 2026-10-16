@@ -887,10 +887,31 @@ public sealed class GatewayRunnerTests : IDisposable
         _log.Messages(GatewayLog.InventorySentId).Should().ContainSingle();
     }
 
-    [Fact]
-    public async Task A_refresh_inventory_command_reads_the_named_tier_itself_without_the_executor()
+    /// <remarks>
+    /// The fake clock moves a minute on every wait, and the loop waits on each heartbeat
+    /// while a command runs, so a command that is slow in real time is a long one in fake
+    /// time. A refresh of one tier does not put off the round of every tier, so once the
+    /// command has taken 15 fake minutes the scheduled round is due and runs before the
+    /// next poll stops the loop. That is right, and it is what made this test count seven
+    /// posts on a slow CI machine; <paramref name="slowCommand"/> makes it happen every time.
+    /// The command's own post is therefore found by its shape, not by the total.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_refresh_inventory_command_reads_the_named_tier_itself_without_the_executor(bool slowCommand)
     {
         _policy.InForce = GatewayInventoryParsingTests.Policy;
+        if (slowCommand)
+        {
+            var answer = _reader.Answer;
+            _reader.Answer = tier =>
+            {
+                // The fourth read is the command's; the first three are the round at start.
+                if (_reader.Read.Count == 4) Thread.Sleep(TimeSpan.FromSeconds(1));
+                return answer(tier);
+            };
+        }
         var command = Command(21) with
         {
             Parameters = new JsonObject
@@ -908,9 +929,22 @@ public sealed class GatewayRunnerTests : IDisposable
         result.Succeeded.Should().BeTrue();
         result.Result!["read"]!.GetValue<int>().Should().Be(1);
         var posts = InventoryPosts();
-        posts.Should().HaveCount(4, "three from the round at start, one for the command");
-        posts[^1].Roster.Should().BeNull();
-        posts[^1].Instances.Should().ContainSingle().Which.Name.Should().Be("BC250");
+        posts.Take(3).Should().HaveCount(3).And.OnlyContain(p => p.Roster!.Count == 3, "three from the round at start, each with the roster");
+        var commanded = posts[3];
+        commanded.Roster.Should().BeNull("the command reads one tier, not the roster");
+        commanded.Instances.Should().ContainSingle().Which.Name.Should().Be("BC250");
+        _reader.Read.Skip(3).First().Should().Be("CRONUS-BC01 / BC250");
+        // Anything after the command's post is a whole scheduled round, never another
+        // read of one tier.
+        posts.Skip(4).Should().OnlyContain(p => p.Roster!.Count == 3);
+        if (slowCommand)
+        {
+            (posts.Count - 4).Should().Be(3, "a command that took 15 fake minutes leaves the scheduled round due, once");
+        }
+        else
+        {
+            (posts.Count - 4).Should().BeOneOf([0, 3], "how much fake time a quick command takes depends on the machine");
+        }
     }
 
     [Fact]
