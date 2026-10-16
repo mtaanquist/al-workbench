@@ -5,10 +5,12 @@
 @attribute [Authorize]
 @rendermode InteractiveServer
 @implements IAsyncDisposable
+@using ALDevToolbox.Services.Gateways
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService UpgradeActions
 @inject ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService OnPremisesLinks
+@inject ALDevToolbox.Services.Gateways.OnPremisesLicenceService Licences
 @inject DeliveryService Deliveries
 @inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
 @inject ILogger<EnvironmentDetail> Log
@@ -133,7 +135,9 @@
         @if (Row.IsOnPremises)
         {
             <OnPremisesEnvironmentSections Row="Row" Head="true" Apps="_onPremisesApps"
-                                           DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway" />
+                                           DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway"
+                                           CanManage="_canManage" Licence="_licence"
+                                           UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync" />
         }
         else
         {
@@ -287,7 +291,9 @@
         @if (Row.IsOnPremises && _tab != Section.History)
         {
             <OnPremisesEnvironmentSections Row="Row" ShowApps="@(_tab == Section.Apps)" Apps="_onPremisesApps"
-                                           DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway" />
+                                           DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway"
+                                           CanManage="_canManage" Licence="_licence" LicenceError="@_licenceError"
+                                           UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync" />
         }
         else if (_tab == Section.Overview)
         {
@@ -1027,6 +1033,8 @@
 
 <ConfirmDialog @ref="_confirm" />
 
+<UploadLicenceDialog @ref="_licenceDialog" />
+
 @* Its own dialog because it asks a question the others do not: when. It asks it the
    way the upload dialog does, because both are bookings the workbench sends at the
    slot. The gentle answer is the default - an app update can interrupt whoever is
@@ -1300,6 +1308,9 @@
             _operations = null;
             _operationsError = null;
             LeaveSessionsTab();
+            StopLicenceWatch();
+            _licence = null;
+            _licenceError = null;
             await Zone.EnsureLoadedAsync();
             await LoadEnvironmentAsync();
             _loaded = true;
@@ -1315,6 +1326,7 @@
                 // the gateway is never asked from here.
                 _onPremisesApps = await Read(ct => Fleet.ListInstalledAppsAsync(Id, ct)) ?? [];
                 _canSeeGateway = await Read(ct => OnPremisesLinks.CanLinkAsync(ct));
+                await LoadLicenceAsync();
             }
             else
             {
@@ -2064,6 +2076,145 @@
     }
 
     private static string AppCount(int count) => count == 1 ? "1 other app" : $"{count} other apps";
+
+    // ── An on-premises licence (#1369) ──────────────────────────────────
+
+    private UploadLicenceDialog? _licenceDialog;
+    private OnPremisesLicenceView? _licence;
+    private string? _licenceError;
+    /// <summary>The running watch of a licence import, and the environment it watches; null when none runs.</summary>
+    private CancellationTokenSource? _licenceWatch;
+
+    private async Task LoadLicenceAsync()
+    {
+        try
+        {
+            _licence = await Read(ct => Licences.GetViewAsync(Id, ct));
+            _licenceError = _licence is null ? "This environment is not an on-premises one." : null;
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _licenceError = ex.Message;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogError(ex, "Reading the licence for environment {EnvId} failed.", Id);
+            _licenceError = "Couldn't read the licence. Reload the page to try again.";
+        }
+        if (_licence?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running }) WatchLicenceImport();
+    }
+
+    /// <summary>
+    /// Re-reads the licence every few seconds while its last upload is being imported, so
+    /// the card says how it went without a reload. Stops when the import ends, when the
+    /// page is left, when the page moves on to another environment (which starts its own
+    /// watch if it needs one), or after 30 minutes - a restart group of slow tiers is the
+    /// long case.
+    /// </summary>
+    private void WatchLicenceImport()
+    {
+        if (_licenceWatch is not null || !RendererInfo.IsInteractive) return;
+        var environmentId = Id;
+        var watch = CancellationTokenSource.CreateLinkedTokenSource(_gone.Token);
+        _licenceWatch = watch;
+        _ = Task.Run(async () =>
+        {
+            var until = DateTime.UtcNow.AddMinutes(30);
+            try
+            {
+                while (!watch.IsCancellationRequested && DateTime.UtcNow < until)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), watch.Token);
+                    var pending = true;
+                    await InvokeAsync(async () =>
+                    {
+                        // The page may have moved to another environment meanwhile.
+                        if (watch.IsCancellationRequested || _loadedId != environmentId) return;
+                        var view = await Read(ct => Licences.GetViewAsync(environmentId, ct));
+                        if (watch.IsCancellationRequested || _loadedId != environmentId) return;
+                        _licence = view;
+                        pending = view?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running };
+                        if (!pending)
+                        {
+                            // Imported or not, the tier's own reading moved too.
+                            await LoadEnvironmentAsync();
+                        }
+                        StateHasChanged();
+                    });
+                    if (!pending || _loadedId != environmentId) break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The page was left, or moved to another environment.
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning(ex, "Following the licence import for environment {EnvId} stopped.", environmentId);
+            }
+            finally
+            {
+                Interlocked.CompareExchange(ref _licenceWatch, null, watch);
+                watch.Dispose();
+            }
+        });
+    }
+
+    /// <summary>Stops the licence import watch, if one runs.</summary>
+    private void StopLicenceWatch()
+    {
+        var watch = Interlocked.Exchange(ref _licenceWatch, null);
+        try
+        {
+            watch?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // It had just finished by itself.
+        }
+    }
+
+    private async Task UploadLicenceAsync()
+    {
+        if (_licenceDialog is null) return;
+        var chosen = await _licenceDialog.OpenAsync(Id, Row.EnvironmentName);
+        if (chosen is null) return;
+
+        _settingSaving = true;
+        _settingBusy = "licence";
+        _settingError = null;
+        _settingDone = null;
+        _settingDoneLink = null;
+        StateHasChanged();
+        try
+        {
+            await Write(() => Licences.UploadAndImportAsync(Id, chosen.FileName, chosen.Bytes));
+            _settingDone = $"{chosen.FileName} was sent to the gateway. It imports the licence, then restarts the service tiers; the Licence card shows how it went.";
+        }
+        catch (PlanValidationException ex)
+        {
+            _settingError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't send the licence.";
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _settingError = ex.Message;
+        }
+        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Uploading a licence to environment {EnvId} failed.", Id);
+            _settingError = "Couldn't send the licence. Try again; if it keeps failing, check the gateway under Administration → Gateways.";
+        }
+        finally
+        {
+            _settingSaving = false;
+            _settingBusy = null;
+        }
+        await LoadLicenceAsync();
+    }
 
     // ── Uploading an app ────────────────────────────────────────────────
 

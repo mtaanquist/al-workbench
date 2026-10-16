@@ -58,6 +58,7 @@ public static class AppCoreRegistration
         services.AddScoped<UpgradeCheckNotifier>();
         services.AddScoped<GatewayNotifier>();
         services.AddScoped<EnvironmentUpdateNotifier>();
+        services.AddScoped<LicenceExpiryNotifier>();
         services.AddScoped<NotificationDigestService>();
         return services;
     }

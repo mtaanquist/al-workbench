@@ -608,8 +608,8 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         {
             var refusal = cut.Find(".rb-restart");
             refusal.ClassList.Should().Contain("alert--danger");
-            refusal.TextContent.Should().Contain("another solution's environment")
-                .And.EndWith("Ask the customer's IT to allow a shared restart of CRONUS-BC01 / BC140, CRONUS-BC02 / BC140, or to link each solution to its own service tiers, then try again.");
+            refusal.TextContent.Should().Contain("This deployment would restart service tiers (CRONUS-BC01 / BC140, CRONUS-BC02 / BC140) that another Solution also uses, and sign out its users.")
+                .And.EndWith("Ask the customer's IT to allow shared restarts for this database in the gateway's settings file (shared_restart), or to give each Solution its own service tiers, then try again.");
             cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue();
             cut.FindAll(".check--ack").Should().BeEmpty("there is nothing to acknowledge in a deployment that cannot run");
         });

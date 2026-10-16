@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using System.Security.Principal;
 using ALWorkbench.Gateway.Core;
 using ALWorkbench.Gateway.Core.Inventory;
+using ALWorkbench.Gateway.Core.Licence;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using ALWorkbench.Gateway.Core.PublishInstall;
@@ -76,6 +77,7 @@ internal sealed class GatewayWorker : BackgroundService
         {
             [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName, restarts, scripts),
             [ALWorkbench.Gateway.Contracts.GatewayVerb.RestartGroup] = new RestartGroupVerb(policy, restarts),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.ImportLicence] = new ImportLicenceVerb(policy, powerShell, locator, Environment.MachineName, restarts),
         });
         var runner = new GatewayRunner(
             http,

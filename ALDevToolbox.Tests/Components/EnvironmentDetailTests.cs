@@ -53,6 +53,9 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<UpgradeFleetService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService>();
+        _ctx.Services.AddSingleton(new ALDevToolbox.Services.Gateways.GatewayCommandSignal());
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.GatewayCommandService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesLicenceService>();
         _ctx.Services.AddScoped<UpgradeActionService>();
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddSingleton<IBcAdminClient>(_admin);

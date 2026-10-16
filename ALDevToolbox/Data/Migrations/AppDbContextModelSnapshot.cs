@@ -4392,6 +4392,14 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDefaultValue("Online")
                         .HasColumnName("kind");
 
+                    b.Property<int?>("LicenseExpiryNoticeDays")
+                        .HasColumnType("integer")
+                        .HasColumnName("license_expiry_notice_days");
+
+                    b.Property<DateOnly?>("LicenseExpiryNoticeFor")
+                        .HasColumnType("date")
+                        .HasColumnName("license_expiry_notice_for");
+
                     b.Property<string>("LocationName")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
@@ -4566,6 +4574,87 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId");
 
                     b.ToTable("oe_project_integrations", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectLicense", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<byte[]>("Content")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("content");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("file_name");
+
+                    b.Property<long?>("GatewayCommandId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("gateway_command_id");
+
+                    b.Property<string>("LicenceTarget")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("licence_target");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int?>("ProjectEnvironmentId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_environment_id");
+
+                    b.Property<int>("ProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_id");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("sha256");
+
+                    b.Property<int>("Size")
+                        .HasColumnType("integer")
+                        .HasColumnName("size");
+
+                    b.Property<string>("Tenant")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("tenant");
+
+                    b.Property<DateTime>("UploadedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("uploaded_at");
+
+                    b.Property<int?>("UploadedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("uploaded_by_user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_oe_project_licenses_project_id");
+
+                    b.HasIndex("UploadedByUserId")
+                        .HasDatabaseName("ix_oe_project_licenses_uploaded_by_user_id");
+
+                    b.HasIndex("ProjectEnvironmentId", "UploadedAt")
+                        .HasDatabaseName("ix_oe_project_licenses_environment_uploaded");
+
+                    b.ToTable("oe_project_licenses", (string)null);
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectModule", b =>
@@ -9213,6 +9302,39 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Organization");
 
                     b.Navigation("Project");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectLicense", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment", "ProjectEnvironment")
+                        .WithMany()
+                        .HasForeignKey("ProjectEnvironmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "UploadedByUser")
+                        .WithMany()
+                        .HasForeignKey("UploadedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Organization");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("ProjectEnvironment");
+
+                    b.Navigation("UploadedByUser");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectModule", b =>

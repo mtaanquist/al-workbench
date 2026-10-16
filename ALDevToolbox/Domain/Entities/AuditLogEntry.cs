@@ -99,6 +99,12 @@ public enum AuditEntityType
     /// handed it out and when it was used. The code itself is never stored.
     /// </summary>
     GatewayRegistrationCode,
+
+    /// <summary>
+    /// A licence file uploaded to a Solution to import on one of its on-premises
+    /// environments (#1369). Written once per upload; the file is recorded by its hash.
+    /// </summary>
+    ProjectLicense,
 }
 
 /// <summary>The kind of change captured by an audit row.</summary>

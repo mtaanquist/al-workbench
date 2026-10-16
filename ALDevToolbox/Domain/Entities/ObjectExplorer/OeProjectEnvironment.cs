@@ -234,4 +234,19 @@ public class OeProjectEnvironment
     /// counts against is the tenant's - <see cref="OeProject.BcStorageQuotaKb"/>.
     /// </summary>
     public long? BcDatabaseKb { get; set; }
+
+    // ── Licence expiry notices (#1369), on-premises only ─────────────────────────
+
+    /// <summary>
+    /// The licence expiry date the last expiry notice was sent for. A different expiry
+    /// (a new licence) starts the thresholds again; null until a notice has gone out.
+    /// </summary>
+    public DateOnly? LicenseExpiryNoticeFor { get; set; }
+
+    /// <summary>
+    /// The smallest threshold, in days before <see cref="LicenseExpiryNoticeFor"/>, a notice
+    /// has gone out for (30, 7, or 0 for "expired"). Claimed with a compare-and-set, so each
+    /// threshold sends once however many workers sweep. Null with <see cref="LicenseExpiryNoticeFor"/>.
+    /// </summary>
+    public int? LicenseExpiryNoticeDays { get; set; }
 }

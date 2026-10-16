@@ -454,7 +454,9 @@ public sealed class GatewayRunner
             try
             {
                 var (files, refusal) = await DownloadFilesAsync(client, command, folder, held, verbStop.Token, ct).ConfigureAwait(false);
-                outcome = refusal ?? await ExecuteAsync(client, new GatewayCommandContext(command, files, batcher.Add), verbStop.Token, ct).ConfigureAwait(false);
+                var context = new GatewayCommandContext(command, files, batcher.Add,
+                    _inventory is null ? null : (tier, token) => RefreshTierAsync(client, tier, batcher.Add, token));
+                outcome = refusal ?? await ExecuteAsync(client, context, verbStop.Token, ct).ConfigureAwait(false);
             }
             finally
             {
@@ -630,6 +632,39 @@ public sealed class GatewayRunner
             return GatewayCommandOutcome.Failure($"{target} is not a service tier the gateway may read.", result);
         }
         return GatewayCommandOutcome.Success(result);
+    }
+
+    /// <summary>
+    /// Reads one tier again and sends it, for a verb that changed what the tier reports
+    /// (a licence import, #1369) and wants that shown before its result arrives. Null when
+    /// it went through; otherwise why not, in a sentence. A refusal or an unreachable
+    /// AL Workbench is answered, never thrown: the loop reads every tier again after the
+    /// command anyway, so the verb only says so.
+    /// </summary>
+    private async Task<string?> RefreshTierAsync(WorkbenchClient client, TierRef tier, Action<string> progress, CancellationToken ct)
+    {
+        var inForce = _policy.InForce;
+        if (!IsInForce(_policy.Refresh(), inForce))
+        {
+            return "The gateway has no settings in force, so it read nothing.";
+        }
+        InventoryRunSummary summary;
+        try
+        {
+            summary = await _inventory!.RunAsync(inForce, tier, client.PostInventoryAsync, progress, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
+                                   or GatewayCredentialRefusedException or GatewayOutdatedException or CommandClosedException)
+        {
+            return $"The gateway read {tier} but could not send it to AL Workbench: {ex.Message}";
+        }
+        foreach (var refused in summary.Refused) _logger.InventoryRefused(refused);
+        if (summary.Refused.Count > 0) return $"AL Workbench did not take what was read from {tier}.";
+        if (summary.Read == 0)
+        {
+            return summary.Failed > 0 ? $"The gateway could not read {tier}." : $"{tier} is not a service tier the gateway may read.";
+        }
+        return null;
     }
 
     /// <summary>

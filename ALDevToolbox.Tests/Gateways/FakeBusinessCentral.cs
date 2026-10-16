@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core;
+using ALWorkbench.Gateway.Core.Licence;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using ALWorkbench.Gateway.Core.PublishInstall;
@@ -119,6 +120,27 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             Runs.Add(("script", parameters));
             Programs.Add(spec.FileName);
             return Task.FromResult(RunScript(spec, parameters, marker));
+        }
+        else if (script == ImportLicenceScript.Import.Script)
+        {
+            Runs.Add(("import-licence", parameters));
+            Programs.Add(spec.FileName);
+            var database = parameters["database"]!.GetValue<string>();
+            var tenant = parameters["tenant"]!.GetValue<string>();
+            var file = Path.GetFileName(parameters["path"]!.GetValue<string>());
+            if (LicenceImportCrashes) return Task.FromResult(new ProcessOutcome(1, string.Empty, "PowerShell could not load the module.", false));
+            if (LicenceImportTimesOut) return Task.FromResult(new ProcessOutcome(-1, "Importing the licence.\n", string.Empty, true));
+            if (LicenceImportStopped is { } stop)
+            {
+                stop.Cancel();
+                throw new OperationCanceledException(stop.Token);
+            }
+            if (LicenceImportError is null)
+            {
+                Timeline.Add($"import-licence {database} {tenant} {file}");
+                AfterLicenceImport?.Invoke();
+            }
+            output = [new JsonObject { ["ok"] = LicenceImportError is null, ["error"] = LicenceImportError }];
         }
         else
         {
@@ -378,6 +400,21 @@ internal sealed class FakeBusinessCentral : IProcessRunner
         }
         return ran;
     }
+
+    /// <summary>Makes <c>Import-NAVServerLicense</c> fail with this error (#1369).</summary>
+    public string? LicenceImportError { get; set; }
+
+    /// <summary>The licence import's PowerShell fails before the script reports anything.</summary>
+    public bool LicenceImportCrashes { get; set; }
+
+    /// <summary>The licence import's PowerShell runs past its timeout and is killed.</summary>
+    public bool LicenceImportTimesOut { get; set; }
+
+    /// <summary>Cancelled while the licence import runs, as stopping the command or the gateway does.</summary>
+    public CancellationTokenSource? LicenceImportStopped { get; set; }
+
+    /// <summary>Called after a licence import went through, e.g. to change the settings before the restart.</summary>
+    public Action? AfterLicenceImport { get; set; }
 
     /// <summary>App ids by name, for apps not published yet.</summary>
     public Dictionary<string, Guid> AppIds { get; } = [];

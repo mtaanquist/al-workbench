@@ -41,6 +41,9 @@ public static class BackgroundWorkerRegistration
         // command: copies its progress into the deployment and finishes it when the
         // command ends. See .design/on-prem-gateway.md.
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Delivery.GatewayDeliveryFollower>();
+        // Tells a solution's followers 30 and 7 days before an on-premises licence
+        // expires, and when it has (#1369). See .design/on-prem-gateway.md, "Licences".
+        services.AddHostedService<ALDevToolbox.Services.Notifications.LicenceExpiryScheduler>();
         // Nightly preview check: builds each opted-in pipeline against the next minor
         // and next major Business Central previews, as the person who turned it on.
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Projects.PreviewCheckScheduler>();

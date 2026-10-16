@@ -41,6 +41,8 @@ internal sealed class ProjectEnvironmentConfiguration : IEntityTypeConfiguration
         // list ("nothing on offer").
         entity.Property(e => e.BcOfferedVersions).HasColumnName("bc_offered_versions").HasColumnType("text[]");
         entity.Property(e => e.BcDatabaseKb).HasColumnName("bc_database_kb");
+        entity.Property(e => e.LicenseExpiryNoticeFor).HasColumnName("license_expiry_notice_for");
+        entity.Property(e => e.LicenseExpiryNoticeDays).HasColumnName("license_expiry_notice_days");
 
         // Fetched detail from the Admin Center API — all nullable, all refreshed by a
         // Refresh, none of them user config. Lengths are generous because the values
