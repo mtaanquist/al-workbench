@@ -1,0 +1,880 @@
+@page "/docs/gateway-setup"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using ALDevToolbox.Components.Pages.Admin.Administration
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services.Gateways
+@inject GatewayBuild Build
+
+@*
+    The setup guide for the on-premises gateway (#1376): what customer IT reads
+    before agreeing to install it, and uses while installing it.
+    .design/on-prem-gateway.md is the source of truth; every setting, default,
+    command and event id here is the gateway's own, and DocsSetupGuide tests in
+    GatewaySetupDocsTests hold the settings tables to the parser and the two
+    examples to "the parser accepts them".
+
+    Named user: an IT administrator at a Business Central customer who knows
+    Windows Server and their own service tiers, and nothing about AL Workbench.
+    So: no class names, no AL Workbench internals, and where the design doc lists
+    something as not yet tried on real servers, the guide says so or leaves it
+    out rather than promising it.
+
+    Page archetype 12 (docs / long-form), static SSR like the other docs pages.
+    The download block is the Gateways page's own GatewayDownloadLink, so the
+    hash and the "not code-signed yet" wording are the same in both places.
+*@
+
+<PageTitle>Gateway setup guide · AL Workbench</PageTitle>
+
+<DocsPage Title="Setting up the on-premises gateway"
+          Subtitle="For the IT team that installs it: what it does, what it needs, and how to set it up."
+          Toc="@Toc"
+          Prose="false">
+    <article class="prose gs-article">
+    <p class="prose__lead">
+        The AL Workbench Gateway is a small Windows service that lets AL Workbench look after
+        Business Central servers in your own network: see which versions run, install the apps
+        your partner builds, import a licence and restart a service tier. It connects out to
+        AL Workbench; nothing connects in. A settings file on your server, which AL Workbench
+        cannot change, decides exactly what it may do.
+    </p>
+
+    <h2 id="gs-what">What the gateway does, and what it does not</h2>
+    <p>
+        The gateway can only carry out a fixed list of operations, and only on the service tiers
+        you list in its settings file:
+    </p>
+    <table>
+        <thead><tr><th scope="col">Operation</th><th scope="col">What it runs</th></tr></thead>
+        <tbody>
+            <tr>
+                <td>Read the service tiers</td>
+                <td>
+                    State, version, tenants, installed apps, the number of open sessions and the
+                    licence, every 15 minutes and after every change. Read-only.
+                </td>
+            </tr>
+            <tr>
+                <td>Deploy apps</td>
+                <td>
+                    Publish, synchronise, install or upgrade an app, and optionally remove its
+                    previous version (<code>Publish-NAVApp</code>, <code>Sync-NAVApp</code>,
+                    <code>Install-NAVApp</code>, <code>Start-NAVAppDataUpgrade</code>,
+                    <code>Unpublish-NAVApp</code>), then restart the tiers of that database.
+                </td>
+            </tr>
+            <tr>
+                <td>Import a licence</td>
+                <td><code>Import-NAVServerLicense</code>, then restart the tiers of that database.</td>
+            </tr>
+            <tr>
+                <td>Restart, stop or start</td>
+                <td>One service tier, or every tier of one database, when someone asks from AL Workbench.</td>
+            </tr>
+        </tbody>
+    </table>
+    <p>What it never does:</p>
+    <ul>
+        <li>
+            <strong>It never runs a script or a command line sent from AL Workbench.</strong>
+            Every operation is a fixed script inside the program; what AL Workbench sends is
+            data, such as which tier and which app. The only scripts it runs are your own
+            before and after scripts, named in your settings file.
+        </li>
+        <li>
+            <strong>It opens no port.</strong> It only makes outbound HTTPS calls to
+            AL Workbench. No VPN and no firewall opening are needed.
+        </li>
+        <li>
+            It does not change server configuration, companies, users or permissions, does not
+            install cumulative updates or convert databases, and does not update itself.
+        </li>
+        <li>
+            It refuses anything your settings file does not allow, whatever AL Workbench asks.
+            AL Workbench can read what the file allows, but cannot change it.
+        </li>
+    </ul>
+    <p>
+        Files it downloads for a deployment or a licence import are checked against the SHA-256
+        AL Workbench sent with the command before they are used, and an app file is opened to
+        check that its name, publisher and version are the ones AL Workbench said it was sending.
+    </p>
+    <div class="note note--warn">
+        <span class="note__icon"><Icon Name="triangle-alert" Width="17" Height="17" /></span>
+        <span class="note__title">What the settings file is protecting you from</span>
+        <span class="note__body">
+            If AL Workbench itself were ever compromised, it could still install any app on any
+            tier your settings file allows deployments to, within the hours you allow. The file is
+            the real limit: which tiers, what each may do, and when. If that is not enough, require
+            signed apps on your production tiers (<code>allow_unsigned = false</code>) and list the
+            certificates you trust in <code>signers</code>. A valid signature from anyone else is
+            then refused.
+        </span>
+    </div>
+
+    <h3 id="gs-what-log">What it records on your server</h3>
+    <p>
+        Every operation is logged locally when it starts and when it ends, with who asked for it
+        in AL Workbench and how it went, in the Windows event log (Application, source
+        <strong>AL Workbench Gateway</strong>) and in a file per day in
+        <code>%ProgramData%\AL Workbench Gateway\logs</code>, kept for 30 days.
+        <a href="#gs-logs">Logs and event ids</a> lists what to filter on.
+    </p>
+
+    <h2 id="gs-requirements">What you need</h2>
+    <ul>
+        <li>
+            <strong>A Windows server in the network</strong> where it can reach the service tiers
+            it will manage: one of the Business Central servers itself, or another server next to
+            them. 64-bit Windows Server 2016 or later. The program is built on .NET 10 and carries
+            its own copy of it, so nothing else needs installing; a Windows version that .NET 10
+            does not support will not run it.
+        </li>
+        <li>
+            <strong>Windows PowerShell 5.1</strong>, which comes with Windows Server 2016 and later.
+            Stopping and starting service tiers, and your own before and after scripts, always run
+            in it.
+        </li>
+        <li>
+            <strong>PowerShell 7</strong> as well, if you have newer Business Central versions. The
+            gateway runs each tier's Business Central administration module in the PowerShell it
+            expects that version to need: Windows PowerShell 5.1 for older versions, PowerShell 7
+            from Business Central 24, and 5.1 when it cannot tell. It looks for PowerShell 7 in
+            <code>C:\Program Files\PowerShell\7\pwsh.exe</code>, where its installer puts it.
+            Where the version it picks does not suit a tier, set <code>powershell</code> for that
+            tier in the settings file; <code>check</code> (below) shows whether the module loads.
+        </li>
+        <li>
+            <strong>Business Central 14 or later</strong> for deployments; they are for AL apps.
+            Older servers can at most be read.
+        </li>
+        <li>
+            <strong>Outbound HTTPS</strong> (port 443) from the gateway's server to the AL Workbench
+            address, the one in the register command your AL Workbench Admin gives you. The gateway
+            uses the computer's proxy settings (WinHTTP or Internet Options, or the
+            <code>HTTPS_PROXY</code> environment variable), signs in to a proxy that asks with the
+            service account's own credentials, and checks certificates with Windows' certificate
+            store, so a proxy that inspects TLS works once your company's root certificate is
+            trusted there.
+        </li>
+        <li>
+            <strong>A correct clock.</strong> Every request the gateway makes is signed and valid
+            for 60 seconds, so a server clock that is far off is refused. Keep the server in time
+            with your domain or an internet time source.
+        </li>
+        <li>
+            <strong>For tiers on other computers:</strong> remote service control (remote
+            procedure call and file sharing reachable inside your network), or PowerShell
+            remoting (WinRM) if you choose that method. See <a href="#gs-account">the service
+            account</a>.
+        </li>
+    </ul>
+
+    <h2 id="gs-account">The service account</h2>
+    <p>
+        By default the service runs as its own <strong>virtual account</strong>,
+        <code>NT SERVICE\ALWorkbenchGateway</code>: no password to manage, not an administrator,
+        and on the network it acts as the computer's own account (<code>DOMAIN\SERVERNAME$</code>).
+        You can name a <strong>group managed service account</strong> instead, for example when
+        the gateway must stop and start tiers on other computers as a domain identity. The account
+        must be installed on the server and hold "Log on as a service". An ordinary user account
+        is refused, because the gateway never stores a password.
+    </p>
+    <p>Whichever account you use, it needs:</p>
+    <ul>
+        <li>
+            <strong>To run the Business Central administration cmdlets</strong> against each tier
+            it manages - the same cmdlets your team runs in the Business Central Administration
+            Shell. Exactly which rights that takes depends on your servers and version, and has not
+            yet been confirmed on every Business Central version. After the gateway is approved,
+            the gateway's page in AL Workbench shows whether each tier could be read, which is the
+            first proof that the account has what it needs.
+        </li>
+        <li>
+            <strong>The right to stop and start the Business Central service</strong>
+            (<code>MicrosoftDynamicsNavServer$&lt;instance&gt;</code>) of every tier you allow it
+            to restart, on this computer and on each other computer in a restart group. On another
+            computer that is remote service control, or, with the
+            <code>powershell-remoting</code> method, permission to connect with PowerShell
+            remoting there.
+        </li>
+        <li>
+            <strong>Read access</strong> to the gateway's program folder, its settings file and
+            your scripts - and <strong>no write access</strong> to them (see
+            <a href="#gs-rights">who may change the files</a>).
+        </li>
+    </ul>
+    <div class="note note--info">
+        <span class="note__icon"><Icon Name="info" Width="17" Height="17" /></span>
+        <span class="note__title">If you make the account an administrator</span>
+        <span class="note__body">
+            Adding the account to the local Administrators group is the quickest way to give it
+            those rights, and it works. It also lets the gateway's own process change its settings
+            file, which the file rules are there to prevent. If you can, grant the narrower rights
+            instead.
+        </span>
+    </div>
+
+    <h2 id="gs-install">Install and register it</h2>
+    <p>
+        You need an AL Workbench Admin for steps 4 and 5: they create the one-time registration
+        code and approve the gateway once it has registered. Run every command on the gateway's
+        server from a command prompt or PowerShell window opened with
+        <strong>Run as administrator</strong>.
+    </p>
+
+    <h3 id="gs-download">1. Download it and check the file</h3>
+    <p>
+        The gateway is one file, <code>ALWorkbench.Gateway.exe</code>, for 64-bit Windows, with the
+        same version as the AL Workbench it connects to.
+    </p>
+    @if (Build.Download is not null)
+    {
+        <p>Download it here, or have your AL Workbench Admin download it from Administration → Gateways:</p>
+        <div class="gs-download">
+            <GatewayDownloadLink IdPrefix="gs" />
+        </div>
+        <p>
+            If the hash is different, do not run the file. The same value, in lower case, is in
+            <code>ALWorkbench.Gateway.exe.sha256</code>, published beside the program.
+        </p>
+    }
+    else
+    {
+        <p>
+            Your AL Workbench Admin downloads it from Administration → Gateways, where its SHA-256 is
+            shown with it.
+        </p>
+        <div class="gs-download">
+            <GatewayDownloadLink IdPrefix="gs" />
+        </div>
+        <p>Check the SHA-256 before you run it. In PowerShell, in the folder you saved it to:</p>
+        <div class="code-block">
+            <div class="code-block__bar">
+                <span class="code-block__lang">powershell</span>
+                <span class="code-block__spacer"></span>
+                <CopyButton Target="#gs-hash-command" />
+            </div>
+            <pre id="gs-hash-command">Get-FileHash .\ALWorkbench.Gateway.exe -Algorithm SHA256</pre>
+        </div>
+        <p>
+            The <code>Hash</code> it prints must be exactly the SHA-256 shown with the download. If it
+            is different, do not run the file.
+        </p>
+        <div class="note note--warn">
+            <span class="note__icon"><Icon Name="triangle-alert" Width="17" Height="17" /></span>
+            <span class="note__title">Not code-signed yet</span>
+            <span class="note__body">
+                The gateway is not code-signed yet, so Windows may say its publisher is unknown.
+                Checking the SHA-256 is how you know it is the file AL Workbench published.
+            </span>
+        </div>
+    }
+    @if (Build.Download is { Signed: true })
+    {
+        <p>
+            This release is code-signed. Check the signature too; <code>Status</code> must be
+            <code>Valid</code>:
+        </p>
+        <div class="code-block">
+            <div class="code-block__bar">
+                <span class="code-block__lang">powershell</span>
+                <span class="code-block__spacer"></span>
+                <CopyButton Target="#gs-signature-command" />
+            </div>
+            <pre id="gs-signature-command">Get-AuthenticodeSignature .\ALWorkbench.Gateway.exe</pre>
+        </div>
+    }
+
+    <h3 id="gs-folder">2. Put it in a folder only administrators can change</h3>
+    <p>
+        Create <code>C:\Program Files\AL Workbench Gateway</code> and copy
+        <code>ALWorkbench.Gateway.exe</code> into it. The default rights on
+        <code>C:\Program Files</code> are what the gateway needs. A folder you create elsewhere,
+        such as <code>C:\ALWorkbench</code>, usually lets ordinary users add files there, and the
+        gateway refuses to run from it until that is removed (see
+        <a href="#gs-rights">who may change the files</a>).
+    </p>
+
+    <h3 id="gs-service">3. Install the service</h3>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__lang">cmd</span>
+            <span class="code-block__spacer"></span>
+            <CopyButton Target="#gs-install-command" />
+        </div>
+        <pre id="gs-install-command">cd "C:\Program Files\AL Workbench Gateway"
+ALWorkbench.Gateway install</pre>
+    </div>
+    <p>
+        This creates the Windows service <strong>AL Workbench Gateway</strong>
+        (<code>ALWorkbenchGateway</code>), set to start automatically (delayed) with the computer,
+        and restarted by Windows if it stops on an error. It runs as the virtual account. To use a
+        group managed service account instead, name it; its name ends in <code>$</code>:
+    </p>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__lang">cmd</span>
+            <span class="code-block__spacer"></span>
+            <CopyButton Target="#gs-install-account-command" />
+        </div>
+        <pre id="gs-install-account-command">ALWorkbench.Gateway install --account CRONUS\svc-bcgateway$</pre>
+    </div>
+    <p class="prose__cap">
+        The install uses Windows' own <code>sc.exe</code>, so <code>sc qc ALWorkbenchGateway</code>
+        shows exactly what it set up. It also creates the event log source and the data folder
+        <code>%ProgramData%\AL Workbench Gateway</code>, with rights only administrators can change.
+    </p>
+
+    <h3 id="gs-register">4. Register it with AL Workbench</h3>
+    <p>
+        The AL Workbench Admin opens <strong>Administration → Gateways</strong> and presses
+        <strong>Add gateway</strong>. AL Workbench shows a command with a one-time registration
+        code, valid for one hour. Run it on the server exactly as shown; it looks like this:
+    </p>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__lang">example</span>
+        </div>
+        <pre>ALWorkbench.Gateway register --url https://workbench.cronus.example --code &lt;registration code&gt;</pre>
+    </div>
+    <p>
+        The gateway creates its own key in the Windows key store (in the TPM when the server has
+        one), which cannot be exported. Only administrators, SYSTEM and the service account can
+        use it. It sends AL Workbench the public half, prints a <strong>key fingerprint</strong>,
+        and starts the service. No password or shared secret is stored anywhere, and the
+        registration code is useless once it has been used.
+    </p>
+
+    <h3 id="gs-approve">5. Have the Admin approve it</h3>
+    <p>
+        Read the key fingerprint the register command printed to the AL Workbench Admin. They see
+        the same value as the gateway's <strong>check code</strong> under Administration →
+        Gateways, and approve it only when the two match. Until then the gateway reports that it is
+        alive but receives no work, so a code that leaked cannot connect a stranger's server.
+    </p>
+
+    <h3 id="gs-settings-step">6. Write the settings file and check it</h3>
+    <p>
+        Create <code>gateway.toml</code> in the program folder (<a href="#gs-policy">the settings
+        file</a> below has every setting and two examples). Then run:
+    </p>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__lang">cmd</span>
+            <span class="code-block__spacer"></span>
+            <CopyButton Target="#gs-check-command" />
+        </div>
+        <pre id="gs-check-command">ALWorkbench.Gateway check</pre>
+    </div>
+    <p>
+        It lists any mistakes in the file with their line numbers, anyone other than administrators
+        who can change the gateway's files, what each tier is allowed, and asks each tier on this
+        computer for its state, which proves the right PowerShell and administration module load.
+        It changes nothing. The service picks up the file by itself within a minute; it does not
+        need restarting. Until there is a <code>gateway.toml</code>, the gateway is registered but
+        refuses everything.
+    </p>
+    <p class="prose__cap">
+        <code>check</code> runs as you, not as the service account. If AL Workbench later says a
+        tier could not be read, the service account's rights are the first thing to look at. With
+        <code>check --inventory &lt;folder&gt;</code> it also saves what the gateway would report for
+        each tier on this computer, one file per tier, without sending anything. The files hold the
+        tiers' app lists and licence information: share them only with whoever looks after
+        AL Workbench, if they ask for them.
+    </p>
+
+    <h2 id="gs-policy">The settings file</h2>
+    <p>
+        <code>gateway.toml</code> sits next to <code>ALWorkbench.Gateway.exe</code>. You own it:
+        the gateway does only what it allows, and AL Workbench shows what it allows but cannot
+        change it. It is a TOML file: text in <code>"double quotes"</code>, Windows paths in
+        <code>'single quotes'</code> so the backslashes are kept, and lines starting with
+        <code>#</code> are comments.
+    </p>
+    <ul>
+        <li>
+            <strong>Strict.</strong> A setting, section or value the gateway does not know is a
+            mistake reported with its line number, never ignored, so a typo cannot quietly widen or
+            narrow what the gateway may do. Values are written exactly as listed below
+            (<code>production</code>, not <code>Production</code>); computer and instance names
+            are compared without regard to case, as Windows does.
+        </li>
+        <li>
+            <strong>Read again every minute and before every operation.</strong> No restart needed
+            after an edit.
+        </li>
+        <li>
+            <strong>A file with mistakes</strong> leaves the gateway reading the tiers the last
+            correct version listed, and refusing every change, until it is fixed. The mistakes are
+            written to the event log (event 3001) and shown in AL Workbench.
+        </li>
+        <li>
+            <strong>No file</strong> means nothing is allowed; the gateway can still be registered
+            and approved first.
+        </li>
+    </ul>
+
+    <h3 id="gs-permissions">Permissions</h3>
+    <p>
+        Each tier has a list of permissions, <code>allow</code>. Anything not in it is refused.
+    </p>
+    <table>
+        <thead><tr><th scope="col">Permission</th><th scope="col">Lets the gateway</th></tr></thead>
+        <tbody>
+            <tr><td><code>inventory</code></td><td>Read the tier's state, version, tenants, apps, number of open sessions and licence.</td></tr>
+            <tr><td><code>session_users</code></td><td>Also report <em>who</em> is signed in, not only how many. That is personal data, so leave it out unless you need it.</td></tr>
+            <tr><td><code>publish</code></td><td>Publish, synchronise, install and upgrade apps.</td></tr>
+            <tr><td><code>unpublish</code></td><td>Remove an app's previous version after an upgrade.</td></tr>
+            <tr><td><code>restart</code></td><td>Restart the tier as part of a deployment or a licence import.</td></tr>
+            <tr><td><code>service_control</code></td><td>Stop, start and restart the tier on request from AL Workbench, outside a deployment.</td></tr>
+            <tr><td><code>licence</code></td><td>Import a licence file.</td></tr>
+            <tr><td><code>scripts</code></td><td>Run the before and after scripts named for its database.</td></tr>
+        </tbody>
+    </table>
+    <p>
+        A deployment needs <code>publish</code> on the tier that publishes, <code>restart</code> on
+        every tier of its database's restart group, <code>unpublish</code> when previous versions
+        are removed, and <code>scripts</code> when the database names a script. A licence import
+        needs <code>licence</code> on the publishing tier and <code>restart</code> on every tier of
+        the group. A restart, stop or start from AL Workbench needs <code>service_control</code> on
+        every tier it touches.
+    </p>
+
+    <h3 id="gs-defaults">Defaults per kind of environment</h3>
+    <p>
+        <code>[defaults.production]</code>, <code>[defaults.test]</code> and
+        <code>[defaults.development]</code> each hold the two settings a tier of that kind gets when
+        it does not set its own:
+    </p>
+    <table>
+        <thead><tr><th scope="col">Setting</th><th scope="col">Means</th></tr></thead>
+        <tbody>
+            <tr>
+                <td><code>allow</code></td>
+                <td>
+                    The permissions, for example <code>["inventory", "publish", "restart"]</code>.
+                    A tier with no <code>allow</code> of its own and none for its kind may only be
+                    read (<code>["inventory"]</code>). <code>allow = []</code> means nothing at all,
+                    not even reading.
+                </td>
+            </tr>
+            <tr>
+                <td><code>change_hours</code></td>
+                <td>
+                    A local time window for every permission except <code>inventory</code>, in
+                    24-hour time: <code>"20:00-06:00"</code> allows changes from 20:00 until just
+                    before 06:00. A start later than the end runs overnight. It is judged on this
+                    server's clock, so daylight saving moves with it. Left out: changes at any
+                    time. A change outside it is refused with "Outside the hours set on the
+                    customer's gateway", on top of the deployment window set in AL Workbench.
+                </td>
+            </tr>
+        </tbody>
+    </table>
+    <p>
+        A tier's own value replaces the default completely; the two lists are never combined. Each
+        of the two settings is taken separately: a tier can set its own <code>allow</code> and still
+        use its kind's <code>change_hours</code>.
+    </p>
+
+    <h3 id="gs-instance">[[instance]] - one per service tier</h3>
+    <p>
+        One <code>[[instance]]</code> section for each service tier the gateway may touch, at most
+        200. A tier that is not listed is refused, even for reading.
+    </p>
+    <table>
+        <thead><tr><th scope="col">Setting</th><th scope="col">Means</th></tr></thead>
+        <tbody>
+            <tr><td><code>machine</code></td><td>Required. The computer the tier runs on. A computer other than this one also needs a <a href="#gs-machine">[[machine]]</a> section.</td></tr>
+            <tr><td><code>name</code></td><td>Required. The server instance name, as <code>Get-NAVServerInstance</code> shows it, for example <code>BC250</code>.</td></tr>
+            <tr>
+                <td><code>environment</code></td>
+                <td>
+                    <code>production</code>, <code>test</code> or <code>development</code>. Left out:
+                    <code>production</code>, the most careful choice. AL Workbench shows this and
+                    cannot change it. On production it asks people to confirm again before a
+                    deployment or a restart, and AI assistants may never change a production tier.
+                </td>
+            </tr>
+            <tr><td><code>allow</code></td><td>This tier's own permissions, replacing its kind's default.</td></tr>
+            <tr><td><code>change_hours</code></td><td>This tier's own time window, replacing its kind's default.</td></tr>
+            <tr><td><code>tenants</code></td><td>On a multitenant server, the tenants the gateway may act on. Left out: <code>["default"]</code>, which is right for a single-tenant server.</td></tr>
+            <tr><td><code>publishers</code></td><td>Only publish apps from these publishers, compared without regard to case. Left out: any publisher.</td></tr>
+            <tr><td><code>allow_unsigned</code></td><td><code>true</code> to accept apps that are not signed. Left out: <code>false</code>. Apps your partner builds in AL Workbench are not signed today, so deploying them needs this.</td></tr>
+            <tr><td><code>signers</code></td><td>Only accept signatures from these certificates, each a thumbprint or a subject such as <code>"CN=CRONUS Partner"</code>. Left out: any signature Windows calls valid. When set, a signed app from anyone else is refused, even with <code>allow_unsigned = true</code>.</td></tr>
+            <tr><td><code>allow_force_sync</code></td><td><code>true</code> lets a deployment synchronise with ForceSync, which can delete tables and fields with their data. Left out: <code>false</code>, and only the normal synchronisation is allowed.</td></tr>
+            <tr><td><code>scope</code></td><td><code>tenant</code> publishes an app for one tenant only; <code>global</code> publishes it for the whole server. Left out: <code>tenant</code>.</td></tr>
+            <tr><td><code>powershell</code></td><td><code>5.1</code> or <code>7</code> to choose the PowerShell for this tier's administration module. Left out: the gateway chooses from the tier's version.</td></tr>
+        </tbody>
+    </table>
+    <p class="prose__cap">
+        <code>tenants</code>, <code>publishers</code> and <code>signers</code> may not be empty lists:
+        leave the line out instead. Requiring signed apps relies on Windows checking an app's
+        signature through a component Business Central installs. That has not yet been tried on
+        every Business Central version; where Windows cannot check it, the app is refused, never
+        published unchecked.
+    </p>
+
+    <h3 id="gs-database">[[database]] - tiers that share a database</h3>
+    <p>
+        When several tiers use one database, apps are published on one of them and all of them are
+        restarted afterwards, so nobody keeps running the old code. A licence import works the same
+        way, because a tier reads a new licence only when it starts. A tier that no database names
+        is restarted on its own after a deployment, and cannot import a licence.
+    </p>
+    <table>
+        <thead><tr><th scope="col">Setting</th><th scope="col">Means</th></tr></thead>
+        <tbody>
+            <tr><td><code>name</code></td><td>Required. Your name for the database, shown in AL Workbench, for example <code>"CRONUS-SQL/BC250"</code>.</td></tr>
+            <tr><td><code>publish_on</code></td><td>Required. The tier that publishes apps and imports licences: <code>{ machine = "CRONUS-BC01", instance = "BC250" }</code>.</td></tr>
+            <tr>
+                <td><code>restart</code></td>
+                <td>
+                    The tiers restarted after an install or a licence import, in this order, each
+                    written like <code>publish_on</code>. Left out: only the publishing tier. Only
+                    these tiers are ever restarted, whatever AL Workbench asks, so list every tier
+                    that uses the database: one left out keeps running the old version for everyone
+                    signed in to it.
+                </td>
+            </tr>
+            <tr>
+                <td><code>restart_mode</code></td>
+                <td>
+                    <code>stop-all-then-start-all</code> (the default) stops every tier, then starts
+                    every tier, so old and new code never run side by side.
+                    <code>one-by-one</code> restarts each tier before the next, so one is always up,
+                    and stops at the first tier that does not come back. The gateway waits up to
+                    5 minutes for a tier to stop and 10 for it to start; every tier it stopped is
+                    sent a start, even when something failed.
+                </td>
+            </tr>
+            <tr>
+                <td><code>shared_restart</code></td>
+                <td>
+                    For tiers shared by several customers, such as a multitenant server.
+                    <code>true</code> allows restarting them for one customer although that signs
+                    out the others' users too. Left out: <code>false</code>, and AL Workbench
+                    refuses a restart, deployment or licence import whose restart would reach tiers
+                    it has linked to more than one customer.
+                </td>
+            </tr>
+            <tr>
+                <td><code>licence_target</code></td>
+                <td>
+                    Where licences go, as <code>Import-NAVServerLicense -Database</code>:
+                    <code>NavDatabase</code> (the application database), <code>Master</code> (the
+                    master database, for every tenant), <code>Default</code> (the server's default
+                    database) or <code>Tenant</code> (only the tenant AL Workbench is linked to; the
+                    tiers still restart for every tenant on them). Left out: licence imports are
+                    refused.
+                </td>
+            </tr>
+            <tr><td><code>before</code></td><td>Optional. The full path of your own PowerShell script, run before a deployment publishes anything. See <a href="#gs-scripts">scripts</a>.</td></tr>
+            <tr><td><code>after</code></td><td>Optional. The full path of your own PowerShell script, run after the tiers have restarted.</td></tr>
+        </tbody>
+    </table>
+    <p class="prose__cap">A tier belongs to one database only, and every tier a database names needs its own <code>[[instance]]</code>.</p>
+
+    <h3 id="gs-machine">[[machine]] - other computers</h3>
+    <p>
+        One <code>[[machine]]</code> section for every computer, other than the gateway's own, that
+        has a tier listed. The gateway's own computer must not have one.
+    </p>
+    <table>
+        <thead><tr><th scope="col">Setting</th><th scope="col">Means</th></tr></thead>
+        <tbody>
+            <tr><td><code>name</code></td><td>Required. The computer's name, as in the tiers' <code>machine</code>.</td></tr>
+            <tr>
+                <td><code>method</code></td>
+                <td>
+                    Required. <code>service-manager</code> stops and starts the tier's Windows
+                    service through Windows' remote service control; <code>powershell-remoting</code>
+                    does it with PowerShell remoting (WinRM), which must be enabled on that computer.
+                </td>
+            </tr>
+        </tbody>
+    </table>
+    <p class="prose__cap">
+        On another computer the gateway only stops and starts the Business Central service. It reads,
+        publishes and imports licences only on the tiers of its own computer, so AL Workbench lists a
+        tier on another computer that allows <code>inventory</code> as not read, saying why.
+    </p>
+
+    <h3 id="gs-example-single">Example: one server</h3>
+    <p>
+        The gateway runs on CRONUS-BC01, which has a production tier and a test tier. Production
+        takes deployments and licences overnight only; test also allows stopping and starting, at
+        any time. Each tier
+        has its own database, so each has a <code>[[database]]</code> section for its licence
+        target.
+    </p>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__name">gateway.toml</span>
+            <span class="code-block__spacer"></span>
+            <CopyButton Target="#gs-example-single-toml" />
+        </div>
+        <pre id="gs-example-single-toml"># Production: deployments, restarts and licences, overnight only.
+[defaults.production]
+allow = ["inventory", "publish", "unpublish", "restart", "licence"]
+change_hours = "20:00-06:00"
+
+# Test: the same, plus stopping and starting on request, at any time.
+[defaults.test]
+allow = ["inventory", "publish", "unpublish", "restart", "service_control", "licence"]
+
+[[instance]]
+machine = "CRONUS-BC01"
+name = "BC250"
+environment = "production"
+allow_unsigned = true
+
+[[instance]]
+machine = "CRONUS-BC01"
+name = "BC250TEST"
+environment = "test"
+allow_unsigned = true
+
+[[database]]
+name = "CRONUS-SQL/BC250"
+publish_on = { machine = "CRONUS-BC01", instance = "BC250" }
+licence_target = "NavDatabase"
+
+[[database]]
+name = "CRONUS-SQL/BC250TEST"
+publish_on = { machine = "CRONUS-BC01", instance = "BC250TEST" }
+licence_target = "NavDatabase"</pre>
+    </div>
+
+    <h3 id="gs-example-group">Example: several tiers on one database</h3>
+    <p>
+        Two production tiers, on CRONUS-BC01 and CRONUS-BC02, share one database. The gateway runs
+        on CRONUS-BC01 and publishes there; both tiers are stopped, then both started. Your own
+        script runs before each deployment (to take a backup, say) and after the restart.
+    </p>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__name">gateway.toml</span>
+            <span class="code-block__spacer"></span>
+            <CopyButton Target="#gs-example-group-toml" />
+        </div>
+        <pre id="gs-example-group-toml">[defaults.production]
+change_hours = "20:00-06:00"
+
+[[instance]]
+machine = "CRONUS-BC01"        # this computer
+name = "BC250"
+environment = "production"
+allow = ["inventory", "publish", "unpublish", "restart", "licence", "scripts"]
+publishers = ["CRONUS Partner"]
+allow_unsigned = true
+
+[[instance]]
+machine = "CRONUS-BC02"
+name = "BC250"
+environment = "production"
+allow = ["inventory", "restart"]   # restarted with the database, never published to
+
+[[database]]
+name = "CRONUS-SQL/BC250"
+publish_on = { machine = "CRONUS-BC01", instance = "BC250" }
+restart = [
+  { machine = "CRONUS-BC01", instance = "BC250" },
+  { machine = "CRONUS-BC02", instance = "BC250" },
+]
+restart_mode = "stop-all-then-start-all"
+licence_target = "NavDatabase"
+before = 'C:\Program Files\AL Workbench Gateway\scripts\before-deploy.ps1'
+after = 'C:\Program Files\AL Workbench Gateway\scripts\after-restart.ps1'
+
+[[machine]]
+name = "CRONUS-BC02"
+method = "service-manager"</pre>
+    </div>
+    <p class="prose__cap">
+        The program also comes with <code>gateway.example.toml</code>, the same settings with a
+        comment on each, published with every release beside the program.
+    </p>
+
+    <h3 id="gs-scripts">Before and after scripts</h3>
+    <ul>
+        <li>
+            Written as the full path of a <code>.ps1</code> file on a local drive
+            (<code>C:\...</code>), not a share, with no <code>[</code> or <code>]</code> in it.
+            The tier that publishes needs <code>scripts</code> in its <code>allow</code>.
+        </li>
+        <li>
+            They run in Windows PowerShell 5.1 (<code>powershell.exe -File</code>) as the service
+            account, for up to 30 minutes, on the gateway's computer. Every line they print goes to
+            the deployment's log in AL Workbench. AL Workbench cannot send, change or choose them.
+        </li>
+        <li>
+            <strong>A script fails only when it says so:</strong> <code>exit 1</code> (any code
+            other than 0), an error that stops it, or the time limit. A program's exit code does not
+            count on its own: in Windows PowerShell a script that ends normally exits with 0, so a
+            <code>robocopy</code> at the end that returns 1 ("files copied") does not fail it. To
+            fail on a program's result, end with <code>exit $LASTEXITCODE</code> or check it yourself.
+        </li>
+        <li>
+            A failing before script stops the deployment before anything is published. A failing
+            after script marks the deployment failed with the apps installed and the tiers
+            restarted. No scripts run for a licence import, or for a restart asked for on its own.
+        </li>
+        <li>
+            AL Workbench shows a script's failure message cut to 2,000 characters; the whole output
+            is in the deployment's log.
+        </li>
+    </ul>
+
+    <h3 id="gs-rights">Who may change the files</h3>
+    <p>
+        Whoever can change the gateway's program, its settings file or a script it runs can run
+        code as a Business Central administrator. So the gateway checks, when it starts and before
+        every operation, that these are owned by Administrators, SYSTEM or TrustedInstaller, and
+        that nobody else can change them - <strong>not even the gateway's own service
+        account</strong>:
+    </p>
+    <ul>
+        <li>The program folder and everything in it, including <code>gateway.toml</code>.</li>
+        <li>Each script and its folder, and nobody else may rename or delete anything in the folders above it, up to the root of the drive (creating new folders, which a drive's root allows everyone, is fine).</li>
+        <li>The install folder of each Business Central tier whose administration module it loads.</li>
+    </ul>
+    <p>
+        If the program folder, the settings file or a script can be changed by someone else, the
+        gateway refuses every operation and logs event 3003 naming who, and a gateway that is
+        starting stops; Windows starts it again after a minute, and it carries on by itself once
+        the rights are fixed. If a tier's install folder can be changed by someone else, the gateway
+        refuses to run anything against that tier. The default rights on
+        <code>C:\Program Files</code> pass; a folder you created yourself usually needs the
+        "Users" rights to create files removed. <code>check</code> shows exactly which entries are
+        the problem.
+    </p>
+
+    <h2 id="gs-update">Updating it</h2>
+    <p>
+        The gateway does not update itself. When AL Workbench is updated, its Gateways page marks an
+        older gateway <strong>Out of date</strong>; it keeps working, but update it when you can. A
+        gateway marked <strong>Unsupported</strong> is refused until it is updated. On the gateway's
+        server, as an administrator:
+    </p>
+    <ol>
+        <li><a href="#gs-download">Download the new <code>ALWorkbench.Gateway.exe</code> and check its SHA-256.</a></li>
+        <li>Stop the service: <code>sc stop ALWorkbenchGateway</code> (or Services, "AL Workbench Gateway").</li>
+        <li>Replace <code>ALWorkbench.Gateway.exe</code> in its folder with the new file.</li>
+        <li>Start it: <code>sc start ALWorkbenchGateway</code>.</li>
+    </ol>
+    <p>
+        The registration, its key, the settings file and the gateway's state are kept, so there is
+        nothing to approve again. An operation that was running when you stopped it is reported to
+        AL Workbench as interrupted and is not run again. Stopping waits for any service tier the
+        gateway had stopped to be started again, which can take several minutes.
+    </p>
+
+    <h2 id="gs-uninstall">Removing it</h2>
+    <div class="code-block">
+        <div class="code-block__bar">
+            <span class="code-block__lang">cmd</span>
+            <span class="code-block__spacer"></span>
+            <CopyButton Target="#gs-uninstall-command" />
+        </div>
+        <pre id="gs-uninstall-command">cd "C:\Program Files\AL Workbench Gateway"
+ALWorkbench.Gateway uninstall</pre>
+    </div>
+    <p>
+        This stops and removes the service, deletes the gateway's key from the Windows key store,
+        its registration and its state, and removes the event log source. It keeps the log files in
+        <code>%ProgramData%\AL Workbench Gateway\logs</code>; delete them when you no longer need
+        them, then delete the program folder with <code>gateway.toml</code>. Ask the AL Workbench
+        Admin to <strong>revoke</strong> the gateway under Administration → Gateways, so it is
+        shown as gone there too.
+    </p>
+
+    <h2 id="gs-offline">When it is offline or revoked</h2>
+    <ul>
+        <li>
+            <strong>Offline.</strong> The gateway tells AL Workbench it is alive every minute. After
+            three missed minutes it is shown as offline, and the Admins are notified, and again when
+            it is back. Nothing waits for it: an operation for an offline gateway fails with "The
+            gateway was offline" once its time is up (15 minutes after it was due, or the end of its
+            deployment window, whichever is earlier), so a deployment never starts after its window.
+            AL Workbench keeps showing what the gateway last reported.
+        </li>
+        <li>
+            <strong>Cannot reach AL Workbench.</strong> The gateway keeps trying, waiting a little
+            longer each time up to five minutes, and logs event 2003, then 2004 when it is through.
+        </li>
+        <li>
+            <strong>Stopped in the middle of an operation.</strong> When it starts again it tells
+            AL Workbench the operation was interrupted, and never runs it again: a person decides
+            whether to deploy again. Before it takes any new work it starts every service tier it had
+            stopped and not yet started again (events 1010, 1011, and 1012 if one would not start -
+            start that one by hand).
+        </li>
+        <li>
+            <strong>Revoked.</strong> An Admin can revoke a gateway in AL Workbench at any time. Its
+            unfinished operations fail at once, and everything it asks afterwards is refused. The
+            service keeps running and logs event 2005 about every five minutes, so you can see why.
+            To connect it again, the Admin chooses <strong>Re-register</strong> to get a new code;
+            run the register command again and have them approve the new fingerprint. Otherwise
+            remove it.
+        </li>
+        <li>
+            <strong>Clock far off.</strong> Refused the same way as revoked (event 2005, saying it is
+            the time). Correct the clock; the gateway carries on by itself.
+        </li>
+        <li>
+            <strong>Too old.</strong> A gateway AL Workbench no longer accepts logs event 2009 with
+            the version it needs. <a href="#gs-update">Update it</a>.
+        </li>
+    </ul>
+
+    <h2 id="gs-logs">Logs and event ids</h2>
+    <p>
+        The Windows event log (Application, source <strong>AL Workbench Gateway</strong>) and the
+        daily files in <code>%ProgramData%\AL Workbench Gateway\logs</code>, kept 30 days, hold the
+        same lines. Each operation gets a line when it starts and when it ends, with who asked for
+        it in AL Workbench and the outcome.
+    </p>
+    <table>
+        <thead><tr><th scope="col">Event</th><th scope="col">Means</th></tr></thead>
+        <tbody>
+            <tr><td>1000, 1001, 1002</td><td>An operation started, succeeded, failed.</td></tr>
+            <tr><td>1003</td><td>An operation was refused, usually by the settings file, with the reason. Nothing was changed.</td></tr>
+            <tr><td>1004</td><td>An operation was cut short when the gateway last stopped, and reported as interrupted.</td></tr>
+            <tr><td>1005</td><td>A result that had not reached AL Workbench before the gateway stopped was sent after it started.</td></tr>
+            <tr><td>1006 to 1009</td><td>Reading the tiers: sent, could not be sent, one tier not taken, nothing read because the settings file is missing or broken.</td></tr>
+            <tr><td>1010, 1011, 1012</td><td>Tiers left stopped when the gateway stopped: found, started again, could not be started again (start it by hand).</td></tr>
+            <tr><td>2000, 2001, 2002</td><td>Registered, waiting for approval, approved.</td></tr>
+            <tr><td>2003, 2004</td><td>Cannot reach AL Workbench, reached it again.</td></tr>
+            <tr><td>2005</td><td>AL Workbench refused the gateway: revoked, or this computer's clock is far off.</td></tr>
+            <tr><td>2006</td><td>Not registered yet.</td></tr>
+            <tr><td>2007</td><td>Stopped on an unexpected error; Windows restarts it.</td></tr>
+            <tr><td>2008</td><td>The rights on the data folder were changed, so it will not run. Run <code>install</code> again to put them back.</td></tr>
+            <tr><td>2009</td><td>This version is too old for AL Workbench.</td></tr>
+            <tr><td>3000 to 3003</td><td>The settings file: read, has mistakes, missing, can be changed by someone other than administrators.</td></tr>
+        </tbody>
+    </table>
+    <p class="prose__cap">
+        A deployment's full log, line by line, is also kept with the deployment in AL Workbench, where
+        the people who asked for it can read it.
+    </p>
+    </article>
+</DocsPage>
+
+@code {
+    private static readonly DocsTocEntry[] Toc =
+    {
+        new("What it does", "gs-what"),
+        new("What you need", "gs-requirements"),
+        new("The service account", "gs-account"),
+        new("Install and register", "gs-install"),
+        new("The settings file", "gs-policy"),
+        new("Examples", "gs-example-single", Sub: true),
+        new("Who may change the files", "gs-rights", Sub: true),
+        new("Updating it", "gs-update"),
+        new("Removing it", "gs-uninstall"),
+        new("Offline or revoked", "gs-offline"),
+        new("Logs and event ids", "gs-logs"),
+    };
+}

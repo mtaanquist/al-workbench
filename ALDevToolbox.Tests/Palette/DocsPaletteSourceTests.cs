@@ -3,6 +3,7 @@ using System.Security.Claims;
 using ALDevToolbox.Components.Pages.Docs;
 using ALDevToolbox.Data;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Gateways;
 using ALDevToolbox.Services.Palette;
 using ALDevToolbox.Services.Palette.Sources;
 using AwesomeAssertions;
@@ -46,6 +47,8 @@ public sealed class DocsPaletteSourceTests : IDisposable
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
+        // The gateway setup guide shows the gateway download; a local build has none.
+        _ctx.Services.AddSingleton(new GatewayBuild(null, null, false));
     }
 
     public void Dispose() => _ctx.Dispose();
@@ -129,6 +132,7 @@ public sealed class DocsPaletteSourceTests : IDisposable
     [InlineData("/docs/mcp", typeof(McpDocs))]
     [InlineData("/docs/search", typeof(SearchDocs))]
     [InlineData("/docs/extensions-whats-next", typeof(WhatsNextDocs))]
+    [InlineData("/docs/gateway-setup", typeof(GatewaySetupDocs))]
     public void The_catalogue_matches_the_rendered_page(string href, Type component)
     {
         var entry = DocsPaletteSource.Pages.Should().ContainSingle(p => p.Href == href).Subject;

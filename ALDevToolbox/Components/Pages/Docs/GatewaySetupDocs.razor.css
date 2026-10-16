@@ -1,0 +1,27 @@
+/* The article is the reading column's one grid item, and a grid item will not
+   shrink below its content's narrowest width by default. Here that width is a
+   code block's longest line (the register command), so without this the whole
+   article grew past its column, under the contents list on a desktop and off the
+   screen on a phone. With it, the article keeps the column's width and the long
+   line scrolls inside its own code block. The article is this page's own (Prose
+   is off) so this scoped rule can reach it. */
+.gs-article {
+    min-width: 0;
+}
+
+/* The download block is the Gateways page's own component; inside .prose it is
+   not a direct child, so it does not get the article's rhythm and needs its own. */
+.gs-download {
+    display: grid;
+    gap: var(--space-2);
+}
+
+/* The settings tables put a value in their second column now and then
+   ("stop-all-then-start-all", a tier written out in full). .prose keeps table
+   code on one line, which pushes a two-column table past a phone's width; in the
+   description column it may wrap instead. The setting names in the first column
+   stay whole. */
+.prose td + td code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}

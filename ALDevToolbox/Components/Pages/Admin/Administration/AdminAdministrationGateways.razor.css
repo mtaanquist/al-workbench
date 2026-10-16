@@ -110,3 +110,18 @@
 .card + .card {
     margin-top: var(--space-4);
 }
+
+/* The link to the setup guide for customer IT (#1376), in the add card, the
+   empty state and the download card. */
+.gw-guide {
+    margin: 0 0 var(--space-3);
+}
+
+.gw-guide--empty {
+    display: block;
+    margin: var(--space-3) 0 0;
+}
+
+#gateway-download .gw-guide {
+    margin: var(--space-3) 0 0;
+}

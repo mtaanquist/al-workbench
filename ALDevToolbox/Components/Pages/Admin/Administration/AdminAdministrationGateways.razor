@@ -68,6 +68,13 @@
                     </div>
                 </div>
                 <div class="card__body">
+                    @if (_issuedFor is null)
+                    {
+                        <p class="gw-guide">
+                            The <a href="/docs/gateway-setup">setup guide</a> walks the customer's IT through
+                            what the gateway does, what it needs and its settings file.
+                        </p>
+                    }
                     <ol class="gw-steps">
                         @if (_issuedFor is null)
                         {
@@ -123,6 +130,9 @@
                                 <li>On that server, run the command you get when you add the gateway.</li>
                                 <li>Approve it here.</li>
                             </ol>
+                            <span class="gw-guide gw-guide--empty">
+                                The <a href="/docs/gateway-setup">setup guide</a> has the details for the customer's IT.
+                            </span>
                         </Text>
                         <Action>
                             <button type="button" class="btn btn--primary" @onclick="AddGatewayAsync" disabled="@_busy">
@@ -257,6 +267,10 @@
                             <li>Start the service again. Its registration and settings are kept, so there is nothing to approve.</li>
                         </ol>
                     }
+                    <p class="gw-guide">
+                        Requirements, the settings file and how to remove a gateway are in the
+                        <a href="/docs/gateway-setup">setup guide</a>.
+                    </p>
                 </div>
             </section>
         }
