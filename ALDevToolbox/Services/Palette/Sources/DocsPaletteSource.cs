@@ -9,7 +9,7 @@ namespace ALDevToolbox.Services.Palette.Sources;
 /// access tokens. See <c>.design/command-palette.md</c>, "Sources".
 ///
 /// <para><b>A hand-kept catalogue, not a table and not reflection.</b> There are
-/// three docs pages and their headings live in Razor markup; reading them out of
+/// four docs pages and their headings live in Razor markup; reading them out of
 /// the compiled components at startup would be cleverer than the problem.
 /// Instead <see cref="Pages"/> lists them, and <c>DocsPaletteSourceTests</c>
 /// renders every page and fails when a catalogued heading is missing from it or
@@ -18,7 +18,7 @@ namespace ALDevToolbox.Services.Palette.Sources;
 ///
 /// <para><b>The fence.</b> Docs hang off nothing and are the same for every
 /// organisation, so there is no database read and nothing to scope. The gate is
-/// "signed in": two of the pages require it, the third is public, and the
+/// "signed in": two of the pages require it, the other two are public, and the
 /// palette itself is only ever drawn for a signed-in person.</para>
 /// </summary>
 public sealed class DocsPaletteSource : IPaletteSource
@@ -53,6 +53,25 @@ public sealed class DocsPaletteSource : IPaletteSource
                 new("Doing things from it", "search-commands"),
                 new("It never changes a customer's environment", "search-safe"),
                 new("When it comes back empty", "search-nothing"),
+            ]),
+        new("Setting up the on-premises gateway", "Setting up the gateway", "/docs/gateway-setup",
+            "Installing the on-premises gateway on a customer's Windows server, and its settings file",
+            [
+                new("What the gateway does, and what it does not", "gs-what"),
+                new("What leaves your server", "gs-what-leaves"),
+                new("What you need", "gs-requirements"),
+                new("The service account", "gs-account"),
+                new("Install and register it", "gs-install"),
+                new("Download it and check the file", "gs-download"),
+                new("The settings file", "gs-policy"),
+                new("Permissions", "gs-permissions"),
+                new("Before and after scripts", "gs-scripts"),
+                new("Who may change the files", "gs-rights"),
+                new("Cutting it off from your side", "gs-cut-off"),
+                new("Updating it", "gs-update"),
+                new("Removing it", "gs-uninstall"),
+                new("When it is offline or revoked", "gs-offline"),
+                new("Logs and event ids", "gs-logs"),
             ]),
         new("You're all set - here's what's next", "After you generate", "/docs/extensions-whats-next",
             "After Generate - opening the download and putting it in git",

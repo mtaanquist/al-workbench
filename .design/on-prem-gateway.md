@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367), the restart group with the customer's before and after scripts (#1368), uploading and importing a licence, with its expiry notices (#1369), checking a build's objects against the customer's licence on builds and deployments (#1370), and restarting, stopping and starting service tiers from the environment page (#1371), exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367), the restart group with the customer's before and after scripts (#1368), uploading and importing a licence, with its expiry notices (#1369), checking a build's objects against the customer's licence on builds and deployments (#1370), restarting, stopping and starting service tiers from the environment page (#1371), and the setup guide for customer IT at `/docs/gateway-setup` (#1376), exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -2135,6 +2135,46 @@ reported as interrupted, as after any restart. The setup guide (#1376) repeats t
 `azure/login` in a job bound to the `gateway-signing` environment; the repository variables and
 the federated credential it needs are listed in `PROJECT.md`, "Releases and image publishing".
 Staging builds are never signed and are kept as a workflow artifact on the run, not a release.
+
+### The setup guide, as built (#1376)
+
+`/docs/gateway-setup` (`Components/Pages/Docs/GatewaySetupDocs.razor`, the docs archetype) is what
+customer IT reads before agreeing to install a gateway and while installing it: what it does and
+never does, what the server needs, the service account, install / register / approve / check,
+the settings file setting by setting with two examples (one server; two tiers on one database with
+a restart group and before and after scripts), who may change the files, updating, removing, what
+happens offline or revoked, and the event ids. The download block is the Gateways page's own
+`GatewayDownloadLink`, so the hash and "not code-signed yet" read the same in both places, and the
+signature check is shown only for a signed release. Linked from Administration → Gateways in the
+add card, the empty state and the download card, and found by the search box (`DocsPaletteSource`).
+
+**Public (decision).** It carries `[AllowAnonymous]`, like `/docs/mcp`, so a consultant can send
+customer IT the link before anyone there has an account. It reads no organisation's data: the only
+thing it injects is `GatewayBuild`, a singleton stamped from the build, so the download link and
+hash are the same for everyone. It is listed in `RouteAuthorizationTests.IntentionallyAnonymous`,
+and `GatewaySetupDocsAnonymousTests` fetches it signed out through the real pipeline.
+
+**Held to the gateway.** `GatewaySetupDocsTests` checks that each settings table lists exactly the
+settings the parser knows (read from the parser's own "The settings are: ..." answer to an unknown
+key), the permissions table exactly `PolicyWords.Permissions`, that every accepted value word is on
+the page, and that both examples parse without a mistake.
+
+**One name for the fingerprint.** The gateway prints "Key fingerprint", so the Gateways page,
+its approve dialog and the stale-approval message say "key fingerprint" too (they said "check
+code"), and the guide asks customer IT to read it out to the Admin over a channel they trust.
+
+**Precise about who enforces what.** The guide says the gateway enforces the settings file itself
+except `shared_restart` and the AI-assistant-on-production rule, which rely on AL Workbench; lists
+what a compromised AL Workbench could still do inside the file; says what leaves the server; and
+says a revoke is permanent (reconnecting is a new gateway, since `CreateRotationCodeAsync` refuses
+a revoked one).
+
+**What it does not promise.** Where this document lists something under "To verify on real servers",
+the guide says it has not been confirmed or leaves it out: the Business Central rights the service
+account needs (it says so, and points at the gateway page's tier read as the first proof), PowerShell 7
+from Business Central 24 (stated as what the gateway expects, with `powershell` to override), and
+Windows checking an `.app`'s signature (stated as fails-closed). The minimum Windows version is
+stated conservatively as Windows Server 2016, the first with Windows PowerShell 5.1 built in.
 
 ## Phasing
 

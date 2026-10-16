@@ -92,7 +92,7 @@ allow = ["inventory", "publish", "unpublish", "restart", "service_control", "lic
 #   allow_force_sync
 #                   true to allow ForceSync, which can delete tables and fields
 #                   with their data. Leave it out (false) to allow only Add.
-#   scope          "tenant" (the default) publishes an app for one tenant only;
+#   scope           "tenant" (the default) publishes an app for one tenant only;
 #                   "global" publishes it for the whole server.
 #   powershell      "5.1" or "7" to choose the PowerShell for this tier. Leave it
 #                   out and the gateway picks one from the tier's version.
@@ -195,6 +195,10 @@ licence_target = "NavDatabase"
 #           inside your network); "powershell-remoting" uses PowerShell remoting
 #           (WinRM). Either way the gateway's service account needs the right to
 #           stop and start the Business Central service on that computer.
+#
+# On another computer the gateway only stops and starts the service tier. It
+# reads, publishes and imports licences only on the tiers of this computer, so a
+# tier elsewhere that allows "inventory" shows in AL Workbench as not read.
 
 [[machine]]
 name = "CRONUS-BC02"

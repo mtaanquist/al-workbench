@@ -68,6 +68,13 @@
                     </div>
                 </div>
                 <div class="card__body">
+                    @if (_issuedFor is null)
+                    {
+                        <p class="gw-guide">
+                            The <a href="/docs/gateway-setup">setup guide</a> walks the customer's IT through
+                            what the gateway does, what it needs and its settings file.
+                        </p>
+                    }
                     <ol class="gw-steps">
                         @if (_issuedFor is null)
                         {
@@ -84,7 +91,7 @@
                                 <CopyButton Target="#gateway-register-command" />
                             </div>
                         </li>
-                        <li>Approve it here, once the check code the server prints matches the check code that will appear below.</li>
+                        <li>Approve it here, once the key fingerprint the server prints matches the one that will appear below.</li>
                     </ol>
                     @if (_registered is null)
                     {
@@ -123,6 +130,9 @@
                                 <li>On that server, run the command you get when you add the gateway.</li>
                                 <li>Approve it here.</li>
                             </ol>
+                            <span class="gw-guide gw-guide--empty">
+                                The <a href="/docs/gateway-setup">setup guide</a> has the details for the customer's IT.
+                            </span>
                         </Text>
                         <Action>
                             <button type="button" class="btn btn--primary" @onclick="AddGatewayAsync" disabled="@_busy">
@@ -170,7 +180,7 @@
                                 <StatusPill Tone="@ToneOf(gateway.Status)">@LabelOf(gateway.Status)</StatusPill>
                                 @if (gateway.Status == GatewayStatus.WaitingForApproval)
                                 {
-                                    <div class="u-muted">Check code <span class="code u-nowrap">@gateway.KeyFingerprint</span></div>
+                                    <div class="u-muted">Key fingerprint <span class="code u-nowrap">@gateway.KeyFingerprint</span></div>
                                 }
                                 else if (gateway.Status == GatewayStatus.NotConnectedYet)
                                 {
@@ -257,6 +267,10 @@
                             <li>Start the service again. Its registration and settings are kept, so there is nothing to approve.</li>
                         </ol>
                     }
+                    <p class="gw-guide">
+                        Requirements, the settings file and how to remove a gateway are in the
+                        <a href="/docs/gateway-setup">setup guide</a>.
+                    </p>
                 </div>
             </section>
         }
@@ -268,12 +282,12 @@
     @if (_target is not null)
     {
         <p>
-            When <strong>@_target.MachineName</strong> registered, the gateway printed a check code on
+            When <strong>@_target.MachineName</strong> registered, the gateway printed a key fingerprint on
             that server. Approve only if it is exactly this one:
         </p>
         <p class="gw-check"><span class="code">@_target.KeyFingerprint</span></p>
         <p class="u-muted">
-            If the codes differ, or nobody you know installed this gateway, revoke it instead.
+            If the fingerprints differ, or nobody you know installed this gateway, revoke it instead.
         </p>
     }
 </ConfirmDialog>

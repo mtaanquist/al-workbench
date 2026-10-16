@@ -34,6 +34,8 @@ public sealed class ContentPageTests : IDisposable
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
+        // The gateway setup guide shows the gateway download; a local build has none.
+        _ctx.Services.AddSingleton(new ALDevToolbox.Services.Gateways.GatewayBuild(null, null, false));
     }
 
     public void Dispose() => _ctx.Dispose();
@@ -227,6 +229,7 @@ public sealed class ContentPageTests : IDisposable
     [InlineData(typeof(WhatsNextDocs))]
     [InlineData(typeof(McpDocs))]
     [InlineData(typeof(SearchDocs))]
+    [InlineData(typeof(GatewaySetupDocs))]
     public void Every_contents_link_points_at_a_heading_on_the_page(Type page)
     {
         // McpDocs reads ?client= off the URL and renders a different block per

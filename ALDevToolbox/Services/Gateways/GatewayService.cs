@@ -381,8 +381,8 @@ public sealed class GatewayService
 
     private static PlanValidationException KeyChanged() => new(new Dictionary<string, string>
     {
-        ["gateway"] = "This gateway has registered again since the list was loaded, so its check code has changed. "
-            + "Nothing was approved. Compare the new check code in the list with the one the server printed, then approve again.",
+        ["gateway"] = "This gateway has registered again since the list was loaded, so its key fingerprint has changed. "
+            + "Nothing was approved. Compare the new key fingerprint in the list with the one the server printed, then approve again.",
     });
 
     /// <summary>Revokes the gateway: its next request is refused. There is no undo.</summary>
