@@ -787,6 +787,43 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         licence.LastUpload.ImportState.Should().Be("Failed", "an upload with no command was never sent");
     }
 
+    [Fact]
+    public async Task The_mcp_history_shows_a_service_tier_action_with_its_tier_and_how_it_went()
+    {
+        await ReportAsync(Tier("BC250", "test", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var id = await LinkAsync(solution, "BC250", "Test");
+        await using (var seed = _db.NewContext())
+        {
+            var now = Start.UtcDateTime;
+            var command = new GatewayCommand
+            {
+                OrganizationId = TestDb.DefaultOrgId, GatewayId = _gateway, Verb = GatewayVerb.RestartInstance,
+                ParametersJson = new GatewayServiceTierParameters { Machine = "CRONUS-BC01", Instance = "BC250" }.ToParameters().ToJsonString(),
+                Status = GatewayCommandStatus.Succeeded, CreatedAt = now, DueAt = now, ExpiresAt = now.AddMinutes(15), FinishedAt = now,
+                ResultJson = new GatewayServiceTierResult { Action = "restart", Machine = "CRONUS-BC01", Instance = "BC250", Done = true, State = "Running" }.ToJson().ToJsonString(),
+            };
+            seed.GatewayCommands.Add(command);
+            await seed.SaveChangesAsync();
+            seed.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = solution, EnvironmentId = id, Kind = UpgradeActionKind.RestartServiceTier,
+                Status = UpgradeActionStatus.Sent, RequestedByUserId = _admin.Id, RequestedBy = _admin.Email, RequestedAt = now, ExecuteAfter = now, SentAt = now,
+                GatewayCommandId = command.Id,
+            });
+            await seed.SaveChangesAsync();
+        }
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var entry = (await Tools(ctx).ListEnvironmentHistoryAsync(id)).Should().ContainSingle().Subject;
+
+        entry.Action.Should().Be("RestartServiceTier");
+        entry.ServiceTier.Should().Be("CRONUS-BC01 / BC250");
+        entry.Status.Should().Be("Sent");
+        entry.Outcome.Should().Be("CRONUS-BC01 / BC250 restarted and is running.");
+    }
+
     private DeliverTools Tools(AppDbContext ctx)
     {
         var access = new ProjectAccess(ctx, _db.OrgContext);

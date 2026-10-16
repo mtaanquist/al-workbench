@@ -124,13 +124,27 @@ else if (!ShowApps)
         <div class="card__head">
             <div>
                 <h2 class="card__title">Service tier</h2>
-                <p class="card__sub">The Business Central server this environment is, as the on-premises gateway in the customer's network reports it.</p>
+                <p class="card__sub">The Business Central server behind this environment, as reported by the AL Workbench gateway on the customer's network.</p>
             </div>
+            @* The one thing a consultant whose customer says Business Central is stuck came
+               for. Outline, like every button on this page. *@
+            @if (tier is not null && TierActions is { CanManage: true } actions && Lead(actions) is { } lead)
+            {
+                @TierButton(lead, actions)
+            }
         </div>
+        @* Why restart and stop are held back, said once and before the buttons rather than
+           under one of them: it is the first thing someone with a stuck customer needs. *@
+        @if (tier is not null && TierActions is { CanManage: true, SharedRefusal: { } sharedRefusal })
+        {
+            <div class="card__body onprem__shared">
+                <Alert Tone="AlertTone.Warn"><span>@sharedRefusal</span></Alert>
+            </div>
+        }
         <div class="card__body">
             @if (tier is null)
             {
-                <p class="u-muted">Nothing is known about the service tier any more.</p>
+                <p class="u-muted">The gateway no longer reports this service tier, so it can't be restarted from here. Ask the customer's IT to check the gateway.</p>
             }
             else
             {
@@ -138,7 +152,7 @@ else if (!ShowApps)
                     <span class="meta-item"><span class="meta-item__label">Server</span><span class="meta-item__value">@tier.Machine</span></span>
                     <span class="meta-item"><span class="meta-item__label">Instance</span><span class="meta-item__value">@tier.InstanceName</span></span>
                     <span class="meta-item"><span class="meta-item__label">Tenant</span><span class="meta-item__value">@TenantText(tier)</span></span>
-                    <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@FleetRowState.StatusWord(Row, now)</span></span>
+                    <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@StateText(now)</span></span>
                     <span class="meta-item"><span class="meta-item__label">Database</span><span class="meta-item__value">@(tier.Database ?? "Not read yet")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Open sessions</span><span class="meta-item__value">@(tier.SessionCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "Not read")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Gateway</span><span class="meta-item__value">@tier.GatewayName</span></span>
@@ -155,6 +169,80 @@ else if (!ShowApps)
                 </p>
             }
         </div>
+        @if (tier is not null && TierActions is { } view)
+        {
+            <div class="card__body onprem__actions">
+                @if (view.Latest is { } last)
+                {
+                    <div class="onprem__upload-line">
+                        <StatusPill Tone="@LastTone(last)">@LastWord(last)</StatusPill>
+                        <span>
+                            @ALDevToolbox.Components.Shared.EnvironmentActivityFeed.Headline(last)
+                            <span class="u-muted">by @last.RequestedByName <Timestamp Value="@last.RequestedAt" Relative="true" /></span>
+                        </span>
+                    </div>
+                    @if (last.TierProgress == ServiceTierProgress.Waiting)
+                    {
+                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. If this does not change within a minute or two, the gateway may be offline: ask the customer's IT to check it.</p>
+                    }
+                    else if (last.TierProgress == ServiceTierProgress.Running)
+                    {
+                        <p class="u-muted onprem__upload-detail">AL Workbench has sent this to the gateway. It usually takes a minute or two; this page shows the result when it is done.</p>
+                    }
+                    else if (last.Outcome is { } outcome && last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed)
+                    {
+                        <FieldError Class="onprem__upload-detail" Message="@outcome" />
+                    }
+                    else if (last.Outcome is { } done)
+                    {
+                        <p class="onprem__upload-detail onprem__upload-note">@done</p>
+                    }
+                }
+                @if (view.CanManage)
+                {
+                    var others = view.Choices.Where(c => c.Action != Lead(view)?.Action).ToList();
+                    var stop = others.FirstOrDefault(c => c.Action == ServiceTierAction.Stop);
+                    var rest = others.Where(c => c.Action != ServiceTierAction.Stop).ToList();
+                    @if (others.Count > 0)
+                    {
+                        <div class="onprem__action-row">
+                            @foreach (var choice in rest)
+                            {
+                                @TierButton(choice, view)
+                            }
+                            @* Stop last and set apart: it is the one that leaves people unable
+                               to work until someone acts again. *@
+                            @if (stop is not null)
+                            {
+                                @if (rest.Count > 0)
+                                {
+                                    <span class="onprem__action-sep" aria-hidden="true"></span>
+                                }
+                                @TierButton(stop, view)
+                            }
+                        </div>
+                    }
+                    @* Why a button is greyed out, once per reason rather than once per button:
+                       when the gateway is offline every one of them says the same thing. The
+                       shared-tier reason is said above the facts instead (an empty reason). *@
+                    @if (!view.InFlight)
+                    {
+                        @foreach (var reason in view.Choices.Select(c => c.Unavailable).Where(r => !string.IsNullOrEmpty(r)).Distinct())
+                        {
+                            <p class="u-muted onprem__upload-detail">@reason</p>
+                        }
+                    }
+                }
+                else
+                {
+                    <p class="u-muted onprem__upload-detail">Only people who manage this Solution can restart, stop or start the service tier. Ask someone who manages this Solution, or an Admin.</p>
+                }
+                @if (view.Latest is not null && !string.IsNullOrEmpty(HistoryHref))
+                {
+                    <p class="onprem__upload-detail"><a href="@HistoryHref">See every action in the Workbench history</a></p>
+                }
+            </div>
+        }
     </div>
 
     @* The licence: what the tier runs, the last upload, and the one action. An outline
@@ -346,6 +434,73 @@ else
 
     /// <summary>Opens the upload dialog.</summary>
     [Parameter] public EventCallback OnUploadLicence { get; set; }
+
+    /// <summary>The service tier actions (#1371); null while they are read, or when there are none to offer.</summary>
+    [Parameter] public ServiceTierActionsView? TierActions { get; set; }
+
+    /// <summary>The action being sent, while it is; null otherwise.</summary>
+    [Parameter] public ServiceTierAction? TierActionBusy { get; set; }
+
+    /// <summary>Opens the confirmation for an action.</summary>
+    [Parameter] public EventCallback<ServiceTierAction> OnTierAction { get; set; }
+
+    /// <summary>The Workbench history tab's address.</summary>
+    [Parameter] public string? HistoryHref { get; set; }
+
+    /// <summary>
+    /// The action the card's head offers: restart a tier that runs, start one that is
+    /// stopped. The rest sit in the row under the facts.
+    /// </summary>
+    /// <summary>
+    /// The tier's state: the inventory's word, unless an action finished since the inventory
+    /// last read the tier, which then says what it left the tier in.
+    /// </summary>
+    private string StateText(DateTime now) => TierActions is { StateFromAction: true, State: { } state }
+        ? state
+        : FleetRowState.StatusWord(Row, now);
+
+    private static ServiceTierActionChoice? Lead(ServiceTierActionsView view) =>
+        view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Restart)
+        ?? view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Start);
+
+    private RenderFragment TierButton(ServiceTierActionChoice choice, ServiceTierActionsView view) =>
+        @<button type="button" class="btn btn--sm @(TierActionBusy == choice.Action ? "btn--loading" : "")"
+                 disabled="@(choice.Unavailable is not null || view.InFlight || TierActionBusy is not null)"
+                 @onclick="() => OnTierAction.InvokeAsync(choice.Action)">
+            <Icon Name="@ActionIcon(choice.Action)" Width="14" Height="14" />
+            <span class="btn__label">@ActionLabel(choice.Action, view)</span>
+        </button>;
+
+    private static string ActionIcon(ServiceTierAction action) => action switch
+    {
+        ServiceTierAction.Start => "circle-play",
+        ServiceTierAction.Stop => "circle-stop",
+        _ => "rotate-cw",
+    };
+
+    private string ActionLabel(ServiceTierAction action, ServiceTierActionsView view) => TierActionBusy == action
+        ? "Sending"
+        : action switch
+        {
+            ServiceTierAction.RestartAll => $"{ServiceTierActionDialog.RestartAllLabel(view.GroupTierCount)}...",
+            ServiceTierAction.Stop => "Stop service tier (stays stopped)...",
+            ServiceTierAction.Start => "Start service tier...",
+            _ => "Restart service tier...",
+        };
+
+    private static string LastTone(ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionRow last) => last.TierProgress switch
+    {
+        ServiceTierProgress.Running => "running",
+        ServiceTierProgress.Waiting => "queued",
+        _ => last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed ? "danger" : "success",
+    };
+
+    private static string LastWord(ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionRow last) => last.TierProgress switch
+    {
+        ServiceTierProgress.Running => "Running",
+        ServiceTierProgress.Waiting => "Waiting",
+        _ => last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed ? "Didn't work" : "Done",
+    };
 
     /// <summary>Today on the customer's calendar, which is when a licence runs out.</summary>
     private DateOnly Today => OnPremisesLicenceService.TodayFor(Clock.GetUtcNow(), Row.TimeZone);

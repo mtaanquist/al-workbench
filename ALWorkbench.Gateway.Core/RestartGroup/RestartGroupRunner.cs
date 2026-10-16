@@ -80,11 +80,71 @@ public sealed class RestartGroupRunner
     /// whatever it says. <paramref name="commandId"/> names the command the tiers waiting
     /// for a start are recorded under.
     /// </summary>
-    public async Task<GatewayRestartGroupResult> RunAsync(GatewayPolicy policy, TierRef target, Action<string> progress,
+    public Task<GatewayRestartGroupResult> RunAsync(GatewayPolicy policy, TierRef target, Action<string> progress,
         CancellationToken ct, long? commandId = null)
     {
-        ArgumentNullException.ThrowIfNull(progress);
         var (tiers, mode) = GroupOf(policy, target);
+        return RunTiersAsync(policy, tiers, mode, progress, ct, commandId);
+    }
+
+    /// <summary>
+    /// What one service tier action from the environment page (#1371) does to one tier:
+    /// <c>restart-instance</c> restarts it as a group of one, with the same guarantee that a
+    /// tier sent a stop is sent a start and the same record kept for
+    /// <see cref="StoppedTierRecovery"/>; <c>stop-instance</c> and <c>start-instance</c> send
+    /// the one step asked for. <b>A stop asked for is never recorded</b> as waiting for a
+    /// start: the person meant the tier to stay down, so neither a failure here nor the
+    /// gateway's next start may start it again. The permission check is the caller's.
+    /// </summary>
+    public async Task<GatewayServiceTierResult> RunTierActionAsync(GatewayPolicy policy, TierRef tier, string action,
+        Action<string> progress, CancellationToken ct, long? commandId = null)
+    {
+        ArgumentNullException.ThrowIfNull(tier);
+        ArgumentNullException.ThrowIfNull(progress);
+        if (action == GatewayServiceTierActions.Restart)
+        {
+            var group = await RunTiersAsync(policy, [tier], RestartMode.StopAllThenStartAll, progress, ct, commandId).ConfigureAwait(false);
+            var only = group.Tiers[0];
+            return new GatewayServiceTierResult
+            {
+                Action = action,
+                Machine = tier.Machine,
+                Instance = tier.Instance,
+                Done = group.Restarted,
+                Before = only.Before,
+                State = only.State,
+                Message = group.Restarted ? null : only.Message ?? group.Message,
+            };
+        }
+        if (action is not (GatewayServiceTierActions.Stop or GatewayServiceTierActions.Start))
+        {
+            throw new ArgumentOutOfRangeException(nameof(action), action, "Not a service tier action.");
+        }
+
+        var stop = action == GatewayServiceTierActions.Stop;
+        var report = new TierReport(tier);
+        progress(stop ? $"Stopping {tier}, as asked. It stays stopped until someone starts it." : $"Starting {tier}.");
+        // No ledger entry either way: a stop that was asked for is not a restart cut short.
+        var reached = await StepAsync(policy, report, stop ? ServiceControlScript.Stop : ServiceControlScript.Start,
+            stop ? _timeouts.Stop : _timeouts.Start, progress, ct).ConfigureAwait(false);
+        if (reached) progress(stop ? $"Stopped {tier}." : $"Started {tier}.");
+        return new GatewayServiceTierResult
+        {
+            Action = action,
+            Machine = tier.Machine,
+            Instance = tier.Instance,
+            Done = reached,
+            Before = report.Before,
+            State = report.State,
+            Message = reached ? null : report.Message,
+        };
+    }
+
+    /// <summary>Restarts <paramref name="tiers"/> in <paramref name="mode"/>; <see cref="RunAsync"/> without the lookup.</summary>
+    private async Task<GatewayRestartGroupResult> RunTiersAsync(GatewayPolicy policy, IReadOnlyList<TierRef> tiers, RestartMode mode,
+        Action<string> progress, CancellationToken ct, long? commandId)
+    {
+        ArgumentNullException.ThrowIfNull(progress);
         var modeWord = PolicyWords.RestartModes[mode];
         var reports = tiers.Select(t => new TierReport(t)).ToList();
         var waiting = new List<TierReport>();
@@ -280,6 +340,7 @@ public sealed class RestartGroupRunner
             return false;
         }
         report.State = answer.State;
+        report.Before ??= answer.Before;
         if (answer.TimedOut)
         {
             report.Fail(action == ServiceControlScript.Stop
@@ -308,6 +369,9 @@ public sealed class RestartGroupRunner
         public string? Message { get; private set; }
 
         public string? State { get; set; }
+
+        /// <summary>The Windows service's state before the first step sent to it.</summary>
+        public string? Before { get; set; }
 
         /// <summary>A stop or start was sent to it (it could be reached).</summary>
         public bool Sent { get; set; }
@@ -355,6 +419,7 @@ public sealed class RestartGroupRunner
             Outcome = Outcome,
             Message = Message,
             State = State,
+            Before = Before,
         };
     }
 }

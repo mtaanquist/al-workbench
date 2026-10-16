@@ -68,7 +68,56 @@ public sealed record RestartGroupPlan(
             + (forDialog ? ", then try again." : ". Nothing was sent.");
     }
 
-    private bool Refused => Known && !SharedRestart && OtherSolutions > 0;
+    /// <summary>
+    /// The <c>shared_restart</c> rule itself: these tiers serve another Solution's environment
+    /// and the customer's settings do not say restarting them is allowed. Every caller that
+    /// signs people out of these tiers refuses on it, whatever words it then uses.
+    /// </summary>
+    public bool Refused => Known && !SharedRestart && OtherSolutions > 0;
+
+    /// <summary>
+    /// The plan for acting on the environment's own service tier alone (#1371): a restart or
+    /// stop of one tier signs out everyone on it, every tenant included, so the
+    /// <c>shared_restart</c> rule applies to it as to the whole group. The other Solutions
+    /// counted are the ones linked to this tier only, since the database's other tiers keep
+    /// running; <c>shared_restart</c> is the setting of the database the tier is listed
+    /// under. Null when the environment is not linked.
+    /// </summary>
+    public static async Task<RestartGroupPlan?> LoadForTierAsync(AppDbContext db, OnPremisesDeployFacts facts, CancellationToken ct)
+    {
+        if (facts.EnvironmentUnlinked || facts.InstanceId is not { } instanceId) return null;
+        var machine = facts.Machine ?? string.Empty;
+        var instance = facts.InstanceName ?? string.Empty;
+        var known = facts.Policy is { State: GatewayPolicyStates.Valid };
+        var database = known
+            ? facts.Policy!.Databases.FirstOrDefault(d =>
+                (Same(d.PublishOn.Machine, machine) && Same(d.PublishOn.Instance, instance))
+                || d.Restart.Any(t => Same(t.Machine, machine) && Same(t.Instance, instance)))
+            : null;
+
+        var projectId = await db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == facts.EnvironmentId)
+            .Select(e => e.ProjectId)
+            .FirstOrDefaultAsync(ct);
+        var otherSolutions = await db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Kind == OeEnvironmentKind.OnPremises
+                        && e.MissingSince == null
+                        && e.ProjectId != projectId
+                        && e.GatewayInstanceId == instanceId)
+            .Select(e => e.ProjectId)
+            .Distinct()
+            .CountAsync(ct);
+
+        return new RestartGroupPlan(
+            [facts.TierName],
+            OneByOne: false,
+            Before: null,
+            After: null,
+            SharedRestart: database?.SharedRestart == true,
+            otherSolutions,
+            [],
+            known);
+    }
 
     /// <summary>The plan for <paramref name="environmentId"/>, or null when it is not a linked on-premises environment.</summary>
     public static async Task<RestartGroupPlan?> LoadAsync(AppDbContext db, int environmentId, CancellationToken ct)

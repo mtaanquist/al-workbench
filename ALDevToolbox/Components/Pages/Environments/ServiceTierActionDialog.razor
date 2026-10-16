@@ -1,0 +1,209 @@
+@*
+    Confirm a restart, stop or start of an on-premises service tier, or a restart of every
+    tier on its database (#1371). Named user: a consultant whose customer has rung to say
+    Business Central is stuck, who wants it working again without remoting into the
+    customer's server, and who knows Business Central but nothing about the gateway.
+
+    What the person is about to cost other people is the point of the dialog, so it leads
+    with how many are signed in and that they will be signed out; on Production they tick
+    that they understand, as they do before deploying to Production. Anything that would
+    refuse the action is said here and holds the button.
+
+    The dialog only confirms. The caller sends it (OnPremisesTierActionService.RequestAsync),
+    which checks everything again. See .design/on-prem-gateway.md, "Service tier actions".
+*@
+@using ALDevToolbox.Services.Gateways
+@inject OnPremisesTierActionService TierActions
+@inject ILogger<ServiceTierActionDialog> Log
+@inject TimeProvider Clock
+
+<ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="@HeadIcon"
+               ConfirmDisabled="@(_plan is null || _plan.Refusal is not null || (NeedsAck && !_ack))">
+    <div class="tier-dialog">
+    @if (_planError is { } planError)
+    {
+        <Alert Tone="AlertTone.Danger"><span>@planError</span></Alert>
+    }
+    else if (_plan is null)
+    {
+        <LoadingBlock Text="Reading the service tier..." />
+    }
+    else if (_plan.Refusal is { } refusal)
+    {
+        <Alert Tone="AlertTone.Danger"><span>@refusal</span></Alert>
+    }
+    else
+    {
+        <p class="tier-dialog__lead">@Lead(_plan)</p>
+        <ul class="tier-dialog__tiers">
+            @foreach (var tier in _plan.Tiers)
+            {
+                <li>@tier</li>
+            }
+            @foreach (var left in _plan.LeftAlone)
+            {
+                <li class="tier-dialog__left-out">@left — keeps running</li>
+            }
+        </ul>
+
+        @if (_plan.SignsPeopleOut)
+        {
+            <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="tier-dialog__alert">
+                <div class="tier-dialog__warn">
+                    <p><b>@SessionsHeadline(_plan)</b> @SessionsDetail(_plan)</p>
+                    <p>@AfterSentence(_plan)</p>
+                </div>
+            </Alert>
+        }
+
+        @if (NeedsAck)
+        {
+            <label class="check check--ack @(_ack ? "is-checked" : "")">
+                <input type="checkbox" checked="@_ack" @onchange="e => _ack = (bool)(e.Value ?? false)" />
+                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                <span>@AckSentence(_plan)</span>
+            </label>
+        }
+    }
+    </div>
+</ConfirmDialog>
+
+@code {
+    private ConfirmDialog? _confirm;
+    private ServiceTierActionPlan? _plan;
+    private string? _planError;
+    private bool _ack;
+    private ServiceTierAction _action;
+
+    /// <summary>Production asks again before anyone is signed out, as a Production deployment does.</summary>
+    private bool NeedsAck => _plan is { IsProduction: true, SignsPeopleOut: true, Refusal: null };
+
+    private string HeadIcon => _action == ServiceTierAction.Start ? "circle-play" : _action == ServiceTierAction.Stop ? "circle-stop" : "rotate-cw";
+
+    /// <summary>
+    /// Asks the person to confirm <paramref name="action"/> on <paramref name="environmentId"/>,
+    /// after saying what it will do. True when they confirmed.
+    /// </summary>
+    public async Task<bool> OpenAsync(int environmentId, string environmentName, string tierName, int groupTierCount, ServiceTierAction action)
+    {
+        if (_confirm is null) return false;
+        _action = action;
+        _plan = null;
+        _planError = null;
+        _ack = false;
+        StateHasChanged();
+
+        var (title, message, label, css) = action switch
+        {
+            ServiceTierAction.RestartAll => (
+                $"{RestartAllLabel(groupTierCount)}?",
+                "Every service tier on this database stops and starts again. Use this when restarting one service tier did not help.",
+                RestartAllLabel(groupTierCount), "btn--danger"),
+            ServiceTierAction.Stop => (
+                $"Stop {tierName}?",
+                "The service tier stops and stays stopped until someone starts it again, here or on the server.",
+                "Stop service tier", "btn--danger"),
+            ServiceTierAction.Start => (
+                $"Start {tierName}?",
+                "The service tier starts, and people can sign in through it again once it is running.",
+                "Start service tier", ""),
+            _ => (
+                $"Restart {tierName}?",
+                "Use it when people cannot sign in or Business Central has stopped answering. A restart clears stuck sessions and reads the service tier's settings again.",
+                "Restart service tier", "btn--danger"),
+        };
+        var opening = _confirm.OpenAsync(title, message, label, css);
+        try
+        {
+            _plan = await TierActions.GetPlanAsync(environmentId, action);
+            if (_plan is null) _planError = "This environment is no longer linked to a service tier.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogWarning(ex, "Reading the {Action} plan for environment {EnvironmentId} failed.", action, environmentId);
+            _planError = "Couldn't read the service tier. Close this and try again.";
+        }
+        StateHasChanged();
+        return await opening;
+    }
+
+    private static string Lead(ServiceTierActionPlan plan) => plan.Action switch
+    {
+        ServiceTierAction.RestartAll => plan.OneByOne
+            ? "These service tiers restart one at a time, so one of them is always running:"
+            : "These service tiers all stop, then all start again:",
+        ServiceTierAction.Stop => "This service tier stops:",
+        ServiceTierAction.Start => "This service tier starts:",
+        _ => "This service tier stops and starts again:",
+    };
+
+    /// <summary>The label, title and confirm button for restarting the whole group, the same everywhere.</summary>
+    public static string RestartAllLabel(int tiers) =>
+        tiers == 2 ? "Restart both service tiers" : $"Restart all {tiers} service tiers";
+
+    /// <summary>
+    /// "14 sessions are open on this service tier (23 across both service tiers on this
+    /// database)." A tier without a count makes the number a floor, and it says so.
+    /// </summary>
+    private static string SessionsHeadline(ServiceTierActionPlan plan)
+    {
+        var s = plan.Sessions;
+        var where = plan.Tiers.Count == 1 ? "this service tier" : "these service tiers";
+        if (s.OnTiers is not { } open) return "How many sessions are open is not known yet.";
+        var count = open == 1 ? "1 session is" : $"{open} sessions are";
+        var sentence = s.Uncounted > 0 ? $"At least {open} {(open == 1 ? "session is" : "sessions are")} open on {where}"
+            : open == 0 ? $"No sessions were open on {where} when the gateway last counted"
+            : $"{count} open on {where}";
+        if (s.DatabaseTiers > plan.Tiers.Count && s.OnDatabase is { } onDatabase)
+        {
+            var all = s.DatabaseTiers == 2 ? "both service tiers" : $"all {s.DatabaseTiers} service tiers";
+            sentence += $" ({onDatabase} across {all} on this database)";
+        }
+        if (s.Uncounted > 0)
+        {
+            sentence += s.Uncounted == 1 ? "; one service tier did not report a count" : $"; {s.Uncounted} service tiers did not report a count";
+        }
+        return sentence + ".";
+    }
+
+    private string SessionsDetail(ServiceTierActionPlan plan) => plan.Sessions.CountedAt is { } counted
+        ? $"The gateway counted them {Ago(counted)}, so the number may have changed."
+        : "The gateway counts them every 15 minutes.";
+
+    private static string AfterSentence(ServiceTierActionPlan plan) => plan.Action switch
+    {
+        ServiceTierAction.Stop => "Everyone signed in to it is signed out and loses unsaved work. Nobody can sign in through it until someone starts it again.",
+        ServiceTierAction.RestartAll when plan.OneByOne => "Everyone signed in to a tier is signed out and loses unsaved work when that tier restarts.",
+        ServiceTierAction.RestartAll => "Everyone signed in is signed out and loses unsaved work. Business Central is unavailable for the few minutes the restart takes.",
+        _ => "Everyone signed in to it is signed out and loses unsaved work. It is unavailable for the minute or two the restart takes.",
+    };
+
+    private static string AckSentence(ServiceTierActionPlan plan)
+    {
+        var verb = plan.Action == ServiceTierAction.Stop ? "stops" : "restarts";
+        var them = plan.Tiers.Count == 1 ? "it" : "them";
+        var tiers = plan.Tiers.Count == 1 ? plan.Tiers[0] : $"the {plan.Tiers.Count} service tiers listed";
+        // Production because of where the people are, said the way that is true: this
+        // environment, another environment on the same tiers, or the customer's own word.
+        if (plan.OtherProduction is { Count: > 0 } others)
+        {
+            return $"I understand this {verb} {tiers}, which also {(plan.Tiers.Count == 1 ? "serves" : "serve")} live Production ({string.Join(", ", others)}), and signs everyone out of {them}.";
+        }
+        if (!plan.IsOwnProduction)
+        {
+            return $"I understand this {verb} {tiers}, which the customer's IT runs as production, and signs everyone out of {them}.";
+        }
+        var where = string.Equals(plan.EnvironmentName, "Production", StringComparison.OrdinalIgnoreCase)
+            ? $"{plan.SolutionName}'s live Production environment"
+            : $"{plan.EnvironmentName}, {plan.SolutionName}'s live Production environment";
+        return $"I understand this {verb} {where} on {tiers} and signs everyone out of {them}.";
+    }
+
+    private string Ago(DateTime utc)
+    {
+        var span = Clock.GetUtcNow().UtcDateTime - utc;
+        if (span < TimeSpan.FromMinutes(1)) return "less than a minute ago";
+        if (span < TimeSpan.FromHours(1)) return span.TotalMinutes < 2 ? "1 minute ago" : $"{(int)span.TotalMinutes} minutes ago";
+        return span.TotalHours < 2 ? "1 hour ago" : $"{(int)span.TotalHours} hours ago";
+    }
+}

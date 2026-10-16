@@ -91,6 +91,10 @@ public sealed record GatewayRestartTierResult
     /// <summary>The Windows service's state as last read, e.g. <c>Running</c> or <c>Stopped</c>, when it was read.</summary>
     [JsonPropertyName("state")]
     public string? State { get; init; }
+
+    /// <summary>The Windows service's state before the gateway sent it anything, when it was read (#1371). Additive.</summary>
+    [JsonPropertyName("before")]
+    public string? Before { get; init; }
 }
 
 /// <summary>How one tier of a restart group ended. Words on the wire.</summary>

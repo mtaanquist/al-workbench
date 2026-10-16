@@ -54,6 +54,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);
         entity.Property(e => e.PrerequisiteAppIds).HasColumnName("update_prerequisite_app_ids").HasColumnType("uuid[]");
 
+        // A service tier action on an on-premises environment (#1371) is a gateway command;
+        // its outcome is read from there. A plain column, as oe_project_licenses has.
+        entity.Property(e => e.GatewayCommandId).HasColumnName("gateway_command_id");
+
         // No concurrency-token column: see the entity's remarks. The one race on this
         // table — the worker claiming a row while somebody cancels it — is decided by a
         // conditional ExecuteUpdate, the pattern the rest of the codebase already uses.

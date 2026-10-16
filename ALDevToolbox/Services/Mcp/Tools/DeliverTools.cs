@@ -171,7 +171,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "get_environment", ReadOnly = true)]
-    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. For an on-premises service tier it also gives the Business Central licence the tier runs (licensee, serial number, expiry date and licensed object ranges, as the gateway last read it) and the last licence file uploaded to it in this workbench (who, when, and how its import went); licences are uploaded on the environment page, not here. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
+    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history (on premises, its service tier restarts, stops and starts included). For an on-premises service tier it also gives the Business Central licence the tier runs (licensee, serial number, expiry date and licensed object ranges, as the gateway last read it) and the last licence file uploaded to it in this workbench (who, when, and how its import went); licences are uploaded on the environment page, not here. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
     public async Task<EnvironmentDetail> GetEnvironmentAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         CancellationToken ct = default)
@@ -214,7 +214,7 @@ public sealed class DeliverTools
             : null);
 
     [McpServerTool(Name = "list_environment_history", ReadOnly = true)]
-    [Description("Lists an environment's Workbench history, newest first: what was done to it from this workbench and by whom - update dates moved, updates started or booked for a later slot (and cancelled), apps updated or uploaded, sessions ended, copies made, deleted environments recovered - with each line's status ('Pending', 'Sent', 'Failed', 'Cancelled') and outcome. Work done in Business Central's admin centre, or by Microsoft, is not in it. At most the latest 50 lines.")]
+    [Description("Lists an environment's Workbench history, newest first: what was done to it from this workbench and by whom - update dates moved, updates started or booked for a later slot (and cancelled), apps updated or uploaded, sessions ended, copies made, deleted environments recovered, and on an on-premises environment its service tier restarted, stopped or started (or every tier on its database restarted), naming the tier in serviceTier - with each line's status ('Pending', 'Sent', 'Failed', 'Cancelled') and outcome. A service tier action reads 'Pending' while the customer's gateway has not finished it, 'Sent' once it did what was asked, and 'Failed' with the reason when it did not; these are done on the environment page in the web UI, not here. Work done in Business Central's admin centre, or by Microsoft, is not in it. At most the latest 50 lines.")]
     public async Task<IReadOnlyList<EnvironmentHistoryEntry>> ListEnvironmentHistoryAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         CancellationToken ct = default)
@@ -570,7 +570,7 @@ public sealed class DeliverTools
 
     private static EnvironmentHistoryEntry ToHistory(UpgradeActionRow a) => new(
         a.Id, a.Kind.ToString(), a.Status.ToString(), a.IsBooking, a.RequestedByName, a.RequestedAt,
-        a.ExecuteAfter, a.SentAt, a.Outcome, a.CancelledByName, a.CancelledAt);
+        a.ExecuteAfter, a.SentAt, a.Outcome, a.CancelledByName, a.CancelledAt, a.TierName);
 
     private static CustomerModuleRow ToModuleRow(SolutionModule m, int projectId, string projectName, SolutionModules held) => new(
         m.ModuleId, m.Name, m.Publisher, null, projectId, projectName, m.Version,
@@ -775,8 +775,9 @@ public sealed record LicenceUploadSummary(
 public sealed record InstalledApp(Guid AppId, string Name, string Publisher, string Version, bool DeliveredFromWorkbench);
 
 /// <summary>One line of an environment's Workbench history.</summary>
-/// <param name="Action">'PushDateToLatest', 'RunNow', 'UpdateApp', 'UploadApp', 'RecoverEnvironment', 'CopyEnvironment' or 'CancelSession'.</param>
+/// <param name="Action">'PushDateToLatest', 'RunNow', 'SelectVersion', 'UpdateApp', 'UploadApp', 'RecoverEnvironment', 'CopyEnvironment' or 'CancelSession'; on an on-premises environment also 'RestartServiceTier', 'RestartServiceTiers' (every tier on the database), 'StopServiceTier' or 'StartServiceTier' (#1371).</param>
 /// <param name="IsBooking">True when it was booked for a later slot (ExecuteAfter) rather than done there and then.</param>
+/// <param name="ServiceTier">The on-premises service tier a service tier action named, SERVER / INSTANCE; null for every other action.</param>
 public sealed record EnvironmentHistoryEntry(
     int Id,
     string Action,
@@ -788,7 +789,8 @@ public sealed record EnvironmentHistoryEntry(
     DateTime? SentAt,
     string? Outcome,
     string? CancelledBy,
-    DateTime? CancelledAt);
+    DateTime? CancelledAt,
+    string? ServiceTier = null);
 
 /// <summary>One solution's environments on the Upgrades list.</summary>
 public sealed record UpgradeSolutionGroup(

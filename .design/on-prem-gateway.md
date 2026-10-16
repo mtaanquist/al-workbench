@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367), the restart group with the customer's before and after scripts (#1368), uploading and importing a licence, with its expiry notices (#1369), and checking a build's objects against the customer's licence on builds and deployments (#1370), exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367), the restart group with the customer's before and after scripts (#1368), uploading and importing a licence, with its expiry notices (#1369), checking a build's objects against the customer's licence on builds and deployments (#1370), and restarting, stopping and starting service tiers from the environment page (#1371), exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -781,7 +781,7 @@ Every reader decides whether on-premises rows belong:
 | --- | --- |
 | `EnvironmentRefreshScheduler` / `ProjectConnectionService` refresh | **Excluded** - filters `Kind = Online` before upserting and before stamping `MissingSince`, so a refresh never marks a linked tier missing |
 | `BcUpdateScheduleChange`, `EnvironmentQueries` (the panel and update reads) | **Excluded** |
-| `UpgradeFleetService`, `EnvironmentUpgradeService`, `UpgradeActionService`, `UpgradeActionWorker` (Upgrades page) | **Excluded** - Microsoft's platform updates only |
+| `UpgradeFleetService`, `EnvironmentUpgradeService`, `UpgradeActionService`, `UpgradeActionWorker` (Upgrades page) | **Excluded** - Microsoft's platform updates only. One exception from #1371: an on-premises row's service tier actions are `oe_environment_upgrade_actions` rows, so `UpgradeActionService.ListEnvironmentActivityAsync` (the Workbench history) includes them; `UpgradeActionWorker` only picks rows of `Online` environments and never fires them |
 | `EnvironmentUpdateNotifier` | **Excluded** - Microsoft's update notices only |
 | `HeldInstalls` | **Excluded** - Microsoft's deferred schedules only |
 | `DeliveryService`, `ReleasePipelineService` | Included, through the delivery seam: `GatewayDeliveryTarget` (#1367). A row with no tier linked reads as missing |
@@ -1335,8 +1335,9 @@ restarts the group itself ("Licences, as built"). Its parameters are the machine
 and instance of any tier of the group; the check needs `service_control` on every group tier. It
 runs no scripts. **It does not check `shared_restart`**: only AL Workbench knows which Solutions a
 tier serves, so whatever sends this verb (#1371) must refuse a shared
-group in AL Workbench first, with `RestartGroupPlan.Refusal`, exactly as deployments do. Nothing
-sends it yet; #1371 is not done until that check is in place. It succeeds when every tier came back and otherwise fails with the first failed
+group in AL Workbench first, with `RestartGroupPlan.Refusal`, exactly as deployments do. The
+environment page's "Restart all tiers" is what sends it, and refuses first ("Service tier actions,
+as built"). It succeeds when every tier came back and otherwise fails with the first failed
 tier's message, the result attached.
 
 **The result.** `GatewayPublishInstallResult` gained `restart` (`GatewayRestartGroupResult`: the
@@ -1720,6 +1721,120 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope. **Before it
 `restart-group` command, AL Workbench must refuse a group that `RestartGroupPlan.Refusal` refuses
 (`shared_restart`)**: the gateway does not check it ("The restart group, as built").
 
+### Service tier actions, as built (#1371)
+
+**Who and where.** The named user is a consultant whose customer rings to say Business Central is
+stuck. On an on-premises environment's Overview, the Service tier card offers **Restart service
+tier...** in its head (or **Start service tier...** when the tier is stopped), and under the facts
+**Restart both service tiers...** / **Restart all N service tiers...** (when the database's restart
+group has more than one tier; the dialog's title and button use the same words) and, last and set
+apart by a separator, **Stop service tier (stays stopped)...**. Only people who can manage the
+Solution see the buttons; everyone else reads a line saying who can and whom to ask. Nothing here is
+a primary button. A greyed-out button says why under the row, once per reason, except the shared
+rule below, which is said once directly under the card head, above the facts and the buttons.
+
+**The tier's state after an action.** The inventory reads a tier every 15 minutes, so straight after
+a stop it still says Running. Until the inventory reads the tier again, the card takes the state from
+the last finished action on it (`GatewayServiceTierResult.state`, or a restart group's tier
+outcome), so a tier just stopped offers Start at once and its State reads Stopped.
+
+**The confirmation** (`ServiceTierActionDialog`, over `ConfirmDialog`) lists the tiers it touches,
+then the sessions ("14 sessions are open on this service tier (23 across both service tiers on this
+database)."): open on the tiers it touches, and in all across every tier on the same database
+(`DatabaseKey`), as the last inventory counted them (whole-tier counts, every tenant included), with
+when that was. A touched tier without a count makes it "at least N", and it says a tier did not
+report a count. It says those people are signed out and lose unsaved work. When the action reaches
+Production, every action that signs people out (restart, restart all, stop) also needs the box
+ticked, as `ReleaseBuildDialog` asks for online Production; Start does not, since it signs nobody
+out. **Production is decided by the tiers, not the page** (decision, from review): the action reaches
+Production when this environment is Production, when another live environment linked to a touched
+tier is (a Test environment's tier can carry the same Solution's Production tenant), or when the
+customer's settings call a touched tier `environment = "production"` (a restart of every tier from
+Test can reach a production tier); the tick box names which. **The tick box is UI-only** (decision):
+`RequestAsync` does not ask for it, exactly as online Production deliveries do not; it guards a
+person's slip, and every caller is a person on this page, since there is no MCP write tool. The
+confirm button stays disabled until the plan has loaded without a refusal.
+
+**What is sent** (`OnPremisesTierActionService.RequestAsync`): `restart-instance`, `restart-group`,
+`stop-instance` or `start-instance`, with the linked tier's machine and instance only; the group's
+other tiers come from the customer's settings file. In one transaction it queues the command,
+writes an `oe_environment_upgrade_actions` row (`RestartServiceTier`, `RestartServiceTiers`,
+`StopServiceTier`, `StartServiceTier`) linked by the new nullable `gateway_command_id` (migration
+`20270212000000_LinkServiceTierActionsToCommands`, no foreign key, as `oe_project_licenses`), and an
+audit row on the environment (who, when, the action, the tiers, the command id). That table is not
+audited by the interceptor, so the audit row is written by hand, as `ProjectConnectionService`
+does for its environment actions. The gateway is woken after the commit. If the save fails after the
+command was queued, the change tracker is cleared, so the rolled-back command and rows do not ride
+along on the next save of the same scoped context; the licence upload does the same.
+
+**One thing at a time on a tier.** Before queuing, inside the transaction and under
+`pg_advisory_xact_lock` keyed by the gateway, the service reads the gateway's unfinished commands
+that stop, start or restart tiers (the four tier verbs, `publish-install` and `import-licence`).
+A deployment, a licence import or a restart of every tier reaches the whole restart group when the
+tier it names is in it; the single-tier verbs reach their own tier. If any reaches a tier this
+action touches, it is refused with what is running ("A deployment to this server is still running;
+try again when it has finished."). The same check greys the buttons out. Deployments and licence
+imports do not take this lock themselves, so one of those queued in the same instant as a tier
+action can still get past this check (to verify, below).
+
+**The outcome is read, not stored.** As for licences, the history row stays as written and
+`ServiceTierActionOutcome` reads the command each time: queued or claimed reads *Waiting*, running
+reads *Running* (both `Pending`), succeeded reads `Sent` with a sentence ("CRONUS-BC01 / BC250
+restarted and is running."), failed or expired reads `Failed` with the gateway's reason, and a
+refusal by the customer's settings reads the same sentence licence imports use, without their file.
+The page polls while an action is in flight and refreshes the history when it ends. In the history a
+running action shows the Running pill and a spinner, and a restart of every tier names its database
+("Restarted every service tier on database CRONUS-SQL / CRONUS").
+
+**Refusals, all before anything is queued**, in this order: no tier linked, the tier no longer
+reported, the gateway not approved or offline, no valid settings file reported, a touched tier
+whose settings do not allow `service_control` (the gateway would refuse it too), something already
+working on a touched tier (above), and the shared rule below. Each is a `PlanValidationException`
+keyed `environment`; the same sentence shows on the card and in the dialog.
+
+**The shared rule (decision).** Restart all uses `RestartGroupPlan.Refused` exactly as deployments
+do: refused when another Solution has a live environment on any tier of the group and the database
+does not set `shared_restart`. A **single-tier restart or stop is refused the same way**, but
+counting only Solutions linked to *that* tier (`RestartGroupPlan.LoadForTierAsync`): stopping a
+tier signs out every tenant on it, which is the harm `shared_restart` exists to prevent, while
+other tiers of the database keep running. Start is never refused for this reason; it signs nobody
+out. `shared_restart` on the database allows all three. The refusal reads "Restarting CRONUS-BC11 /
+BC140 would also sign out people using another Solution on the same service tier. Ask the
+customer's IT to allow shared restarts for this database in the AL Workbench gateway's settings (the
+shared_restart setting), or to give each Solution its own service tier."
+
+**The gateway side.** `ServiceTierVerb` handles the three single-tier verbs: it checks the
+settings file first (`service_control` on the tier, through `PolicyEnforcer`; a refusal ends
+"Nothing was changed." before any process runs), then hands the tier to
+`RestartGroupRunner.RunTierActionAsync`, which reuses the restart group's stop and start steps,
+remote methods and timeouts (5 minutes to stop, 10 to start). Restart is a one-tier restart group
+and keeps its run-once ledger entry, so a restart cut short by the gateway stopping is started on
+its next start. **A deliberate stop is never written to the ledger** (decision), so
+`StoppedTierRecovery` leaves it stopped; a stop that does not finish is reported and not started
+again. The result (`GatewayServiceTierResult`) carries the action, the tier, whether it was done,
+the state before and after, and a message; `GatewayRestartTierResult` gained `before`. Both are
+additive; the schema stays 1.
+
+**Known edge.** A restart group (a deployment, a licence import or Restart all) still starts a tier
+that someone stopped on purpose, since every tier in the group is stopped and then started. That is
+the existing group behaviour and is left as it is; the person who stopped it sees it running again
+on the card.
+
+**MCP.** No write tool. `list_environment_history` and `get_environment` show the actions with their
+tier and outcome ("MCP parity").
+
+**To verify on real servers:**
+
+- How long `Stop-NAVServerInstance` takes on a tier with many open sessions, against the 5-minute
+  stop timeout, and what the session count reads straight after a restart.
+- That stopping a tier through the service manager on another computer leaves it stopped after the
+  next inventory, and that the inventory reads it `Stopped`, so the card offers Start.
+- That the dialog's session count, taken from the last inventory, is close enough to what the
+  consultant sees in the Business Central admin tool to be trusted.
+- What the gateway does when a deployment and a tier action on the same tiers reach it together
+  (deployments and licence imports do not take the per-gateway lock); whether it runs them one
+  after the other or both at once.
+
 ## MCP parity
 
 - **Reads:** `list_environments`, `get_environment`, `get_solution` and the deployment reads include
@@ -1737,7 +1852,10 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope. **Before it
   `list_deployments` reports `refused` app statuses and `tiersRestarted`, and from #1368
   `gatewaySteps` (each script and tier restart, in order).
 - **No write tools** for licences or tier actions in this milestone, as environment actions are
-  web-only today. As built (#1369): `get_environment` carries an on-premises environment's
+  web-only today. As built (#1371): `list_environment_history` and `get_environment`'s recent
+  history carry the service tier actions (`RestartServiceTier`, `RestartServiceTiers`,
+  `StopServiceTier`, `StartServiceTier`) with the tier in `serviceTier`, `Pending` until the gateway
+  has finished, then `Sent` or `Failed` with the outcome. As built (#1369): `get_environment` carries an on-premises environment's
   `licence` (licensee, serial number, expiry, object ranges and the last upload with its import
   state), and `onPremisesTier` its licensee. As built (#1370): `get_solution_build` carries the build's
   `licenceChecks` with the objects outside the licence, `list_pipeline_builds` and

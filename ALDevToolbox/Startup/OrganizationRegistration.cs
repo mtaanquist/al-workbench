@@ -30,6 +30,8 @@ public static class OrganizationRegistration
         services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService>();
         // Licence uploads and imports on on-premises environments (#1369).
         services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesLicenceService>();
+        // Restart, stop and start a service tier from its environment page (#1371).
+        services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesTierActionService>();
         // Build-time stamps only: the gateway download and the version gateways are compared with (#1363).
         services.AddSingleton(ALDevToolbox.Services.Gateways.GatewayBuild.FromAssembly(typeof(ALDevToolbox.Services.Gateways.GatewayBuild).Assembly));
         return services;
