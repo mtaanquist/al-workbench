@@ -120,7 +120,8 @@ external dependency, CLAUDE.md), inbound access or a VPN (customers will not ope
    gateway's ("Gateway CRONUS-BC01"), which is what the audit interceptor records as the actor, with
    no user id.
 
-**Revoke, rotate, retire.** Revoking stamps `revoked_at` and refuses the next request. Rotating is a
+**Revoke, rotate, retire.** Revoking stamps `revoked_at`, refuses the next request and fails the
+gateway's unfinished commands. Rotating is a
 new registration code bound to that gateway's id; on exchange the new key replaces the old one, which
 is refused from then on, and the gateway goes back to pending until an Admin approves the new
 fingerprint. Only the newest rotation code for a gateway works: issuing or using one makes the older
@@ -135,6 +136,11 @@ when it comes back, under a new notification category **Gateways** (`Notificatio
 labelled "Gateways", `notifications.md`). Commands for an offline gateway expire with "The gateway
 was offline" rather than waiting.
 
+Each change is told once: the sweep claims `gateways.notified_online` with a compare-and-set before
+it sends, as `UpgradeCheckNotifier` does. A gateway's first connection is recorded without a notice,
+and one that was never heard from is not "offline" (it is still being set up). The category goes to
+Admins only, so the account page offers its row to Admins only.
+
 ## Commands
 
 A command is a row in `gateway_commands`: gateway, typed verb, parameters (JSON), status
@@ -142,6 +148,36 @@ A command is a row in `gateway_commands`: gateway, typed verb, parameters (JSON)
 `started_by_agent` as for deliveries), times, expiry, result (JSON) and log lines. The verb is an
 enum shared by both sides through `ALWorkbench.Gateway.Contracts`; an unknown verb is refused by both.
 **No verb runs a script or a command line the server sends.**
+
+As built (#1361), in `Services/Gateways/GatewayCommandService.cs`:
+
+- The verb travels, and is stored, as its kebab-case word (`publish-install`). The contracts' own
+  JSON converter refuses any other string, a number or a different case, so an unknown verb fails
+  deserialisation of the whole message on either side.
+- `GET /gateway/commands/next` answers 403 to a gateway that is not approved, 204 when nothing came
+  within 30 seconds, and otherwise the claimed command. Claiming is a compare-and-set update on a
+  `queued` row (the loser of a race moves on to the next row), all under the query filter.
+- `POST /gateway/commands/{id}/progress` appends lines to one `log` text column, each stamped with
+  the workbench's clock; the first post moves `claimed` to `running`. `POST
+  /gateway/commands/{id}/result` records `succeeded` or `failed` with the result object and a reason.
+  Both answer 409 once the command is no longer the caller's to report on (finished, expired, or
+  failed by the sweep), so a late report never overwrites the first outcome, and 403 to a gateway
+  that is not approved. The log stops at 1,000,000 characters with one "[Log truncated...]" line.
+- A heartbeat's running and interrupted lists are applied only for an approved gateway.
+- Files are stored with the command (`gateway_command_files.content`), not referenced from the
+  artifact row. #1375 decides whether command files reference the build's artifacts instead. A file
+  is at most 128 MB (an .app the BC admin API accepts is at most 50 MB), the download is streamed
+  rather than buffered, and the sweep drops the content once the command is final, keeping its
+  name, hash and size.
+- Revoking a gateway fails its queued, claimed and running commands at once with "The gateway was
+  revoked.", rather than leaving them to wait out a claim deadline that may be days away. Rotating
+  one does the same with its own message, but from the next sweep (within 30 seconds) rather than
+  in the exchange: the exchange runs before anyone is signed in and cannot reach the organisation's
+  commands.
+- Every route but `/register` shares the per-address limit on the `/gateway` group (600 burst,
+  300 a minute). One gateway's steady traffic is a heartbeat a minute and a long-poll every 30
+  seconds; the gateway batches progress lines (a post every few seconds at most, up to 200 lines
+  each), so even a deployment stays far below it, with room for several gateways behind one address.
 
 | Verb | Cmdlets (each instance's own module) | Used by |
 | --- | --- | --- |
@@ -166,15 +202,25 @@ Once claimed, a command is not timed out while the gateway keeps heartbeating it
 a data upgrade can legitimately take a long time. A claimed command whose gateway stops heartbeating
 is failed after 10 minutes of silence.
 
+Silence is measured per command (`last_reported_at`, moved by the claim, each progress post and each
+heartbeat that lists it), not only per gateway. That also catches a command whose claim answer never
+reached the gateway: the gateway keeps heartbeating but never lists it. The two cases fail with
+different messages: "The gateway stopped responding while this was running" when the gateway itself
+went quiet, "The gateway stopped reporting on this while it was running" when only the command did.
+Neither is ever sent again.
+
 **Run once, across restarts.** The gateway keeps the ids it has started in a local file, so it never
 runs one twice, including after it restarts. If it restarts in the middle of a command, its first
 heartbeat reports that id as interrupted; the server marks the command failed with "The gateway
 restarted while this was running; check the environment", asks for a fresh inventory, and never
-sends it again. A person decides whether to deploy again.
+sends it again. A person decides whether to deploy again. (The fresh inventory is queued once the
+`refresh-inventory` verb exists, #1365; #1361 only fails the command.)
 
 **The sweep** that expires and fails commands is a `PolledScheduler` that loops organisations with
 `AmbientOrganizationScope`, as `DeliveryScheduler` does, so it adds no `IgnoreQueryFilters()` call.
-It registers with `/healthz/workers`.
+It registers with `/healthz/workers`. As built it is `GatewayCommandSweep`, every 30 seconds; it
+also clears spent `gateway_seen_tokens` and sends the online/offline notices.
+`DISABLE_GATEWAY_COMMAND_SWEEP=1` turns it off, and then nothing expires and nobody is told.
 
 ## Running the cmdlets
 
@@ -306,7 +352,7 @@ New tables, all org-scoped with the usual query filter:
 
 | Table | Holds |
 | --- | --- |
-| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON), revoked at |
+| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON), revoked at, the online state last announced to Admins |
 | `gateway_registration_codes` | Code hash, created by, expires at, used at, gateway id (set for a rotation code) |
 | `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |

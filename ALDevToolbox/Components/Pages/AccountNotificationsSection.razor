@@ -19,7 +19,7 @@
         <div>
             <h2 class="card__title">Notifications</h2>
             <p class="card__sub">
-                About builds, deployments and environment changes you started or set up, and updates to solutions you follow.
+                About builds, deployments and environment changes you started or set up, and updates to solutions you follow@(IsAdmin ? "; as an administrator, also about on-premises gateways" : "").
                 Choose whether each kind shows on your <a href="/notifications">Notifications page</a> and when it is emailed;
                 changes save as you make them. Digests arrive at @DigestTime UTC, the weekly one on Mondays.
             </p>
@@ -44,7 +44,7 @@
             </div>
         }
         <div class="setting-list">
-            @foreach (var category in Enum.GetValues<NotificationCategory>())
+            @foreach (var category in Enum.GetValues<NotificationCategory>().Where(Applies))
             {
                 var id = $"notify-{category.ToString().ToLowerInvariant()}";
                 <SettingRow Name="@Name(category)" Hint="@Hint(category)">
@@ -92,6 +92,12 @@
 </section>
 
 @code {
+    /// <summary>
+    /// Whether the person is an organisation Admin. Gateway notifications go to
+    /// Admins only, so nobody else is offered a choice about them.
+    /// </summary>
+    [Parameter] public bool IsAdmin { get; set; }
+
     private Dictionary<NotificationCategory, NotificationChoice>? _choices;
     private bool _canSend;
     private bool _saving;
@@ -152,6 +158,8 @@
         }
     }
 
+    private bool Applies(NotificationCategory category) => category != NotificationCategory.Gateways || IsAdmin;
+
     private static string Name(NotificationCategory category) => NotificationCategories.Label(category);
 
     /// <summary>"06:00": when the digest runs, as the scheduler has it.</summary>
@@ -167,6 +175,8 @@
             "A change you scheduled on an environment (an app install, a new update date) has run, failed or needs checking. Also when an environment you are assigned to check during a planned upgrade has been updated; if nobody is assigned, the person who planned the upgrade hears instead.",
         NotificationCategory.Solutions =>
             "Business Central schedules or moves an update for a solution you follow, or its last possible date is a week away. Solutions you own or are listed on under Who knows this customer are followed for you; follow or stop following any solution from its page.",
+        NotificationCategory.Gateways =>
+            "An on-premises gateway stops checking in, or starts checking in again. Sent to administrators only.",
         _ => string.Empty,
     };
 

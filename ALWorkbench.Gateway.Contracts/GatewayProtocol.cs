@@ -27,6 +27,25 @@ public static class GatewayProtocol
     /// <summary>Where a registered gateway says it is alive, every <see cref="HeartbeatInterval"/>.</summary>
     public const string HeartbeatPath = PathPrefix + "/heartbeat";
 
+    /// <summary>
+    /// Where a gateway long-polls for its next command: held open for up to
+    /// <see cref="LongPollTimeout"/>, answered with a <c>GatewayCommandMessage</c> as
+    /// soon as one is queued for it, or 204 No Content when none was.
+    /// </summary>
+    public const string NextCommandPath = PathPrefix + "/commands/next";
+
+    /// <summary>The longest the workbench holds <see cref="NextCommandPath"/> open before answering 204.</summary>
+    public static readonly TimeSpan LongPollTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>Where a gateway posts progress lines for command <paramref name="commandId"/>.</summary>
+    public static string CommandProgressPath(long commandId) => $"{PathPrefix}/commands/{commandId}/progress";
+
+    /// <summary>Where a gateway posts how command <paramref name="commandId"/> ended.</summary>
+    public static string CommandResultPath(long commandId) => $"{PathPrefix}/commands/{commandId}/result";
+
+    /// <summary>Where a gateway downloads file <paramref name="fileId"/> of command <paramref name="commandId"/>.</summary>
+    public static string CommandFilePath(long commandId, long fileId) => $"{PathPrefix}/commands/{commandId}/files/{fileId}";
+
     /// <summary>How often a gateway calls <see cref="HeartbeatPath"/>.</summary>
     public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(60);
 

@@ -162,6 +162,12 @@ internal static class TenantTableCatalog
         // since. See .design/on-prem-gateway.md.
         "gateways",
         "gateway_registration_codes",
+        // The gateway command queue is the record of what was asked of a customer's
+        // servers and what came back, so it is history, not content; restoring it
+        // would hand out old commands again. Its files (.app bodies, licences) are
+        // counted because they are the bulk of it.
+        "gateway_commands",
+        "gateway_command_files",
         "audit_log",
     ];
 

@@ -33,6 +33,10 @@ public static class BackgroundWorkerRegistration
         // Enqueues scheduled SaaS deliveries when due, and fails restart-orphaned ones on its
         // first sweep.
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryScheduler>();
+        // Expires gateway commands nobody collected, fails ones a gateway went quiet on,
+        // clears spent gateway request tokens and tells Admins when a gateway goes
+        // offline or comes back. See .design/on-prem-gateway.md.
+        services.AddHostedService<ALDevToolbox.Services.Gateways.GatewayCommandSweep>();
         // Nightly preview check: builds each opted-in pipeline against the next minor
         // and next major Business Central previews, as the person who turned it on.
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Projects.PreviewCheckScheduler>();

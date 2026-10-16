@@ -151,6 +151,10 @@ public class AppDbContext : DbContext
     public DbSet<Gateway> Gateways => Set<Gateway>();
     public DbSet<GatewayRegistrationCode> GatewayRegistrationCodes => Set<GatewayRegistrationCode>();
     public DbSet<GatewaySeenToken> GatewaySeenTokens => Set<GatewaySeenToken>();
+    // The command queue (#1361): org-scoped like the rest, and nothing on it crosses
+    // the filter - the sweep visits one organisation at a time.
+    public DbSet<GatewayCommand> GatewayCommands => Set<GatewayCommand>();
+    public DbSet<GatewayCommandFile> GatewayCommandFiles => Set<GatewayCommandFile>();
     public DbSet<UserRepositoryToken> UserRepositoryTokens => Set<UserRepositoryToken>();
     public DbSet<UserNotificationSetting> UserNotificationSettings => Set<UserNotificationSetting>();
     public DbSet<NotificationDigestItem> NotificationDigestItems => Set<NotificationDigestItem>();
@@ -409,6 +413,8 @@ public class AppDbContext : DbContext
         ScopeToOrganization<Gateway>(modelBuilder);
         ScopeToOrganization<GatewayRegistrationCode>(modelBuilder);
         ScopeToOrganization<GatewaySeenToken>(modelBuilder);
+        ScopeToOrganization<GatewayCommand>(modelBuilder);
+        ScopeToOrganization<GatewayCommandFile>(modelBuilder);
         ScopeToOrganization<UserRepositoryToken>(modelBuilder);
         ScopeToOrganization<UserNotificationSetting>(modelBuilder);
         ScopeToOrganization<NotificationDigestItem>(modelBuilder);

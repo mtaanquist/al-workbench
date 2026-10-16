@@ -67,6 +67,22 @@ public sealed record GatewayHeartbeatRequest
     /// <summary>The Windows computer name, in case the gateway has moved.</summary>
     [JsonPropertyName("machineName")]
     public string MachineName { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The commands the gateway is working on now. Each one listed is kept alive: a
+    /// command is only failed for silence when no heartbeat has listed it, and no
+    /// progress arrived for it, for ten minutes.
+    /// </summary>
+    [JsonPropertyName("runningCommandIds")]
+    public IReadOnlyList<long> RunningCommandIds { get; init; } = [];
+
+    /// <summary>
+    /// Commands the gateway had started when it stopped (a restart, a crash) and
+    /// will not finish. The workbench marks them failed and never sends them again;
+    /// a person decides whether to try again.
+    /// </summary>
+    [JsonPropertyName("interruptedCommandIds")]
+    public IReadOnlyList<long> InterruptedCommandIds { get; init; } = [];
 }
 
 /// <summary>Answer to a heartbeat.</summary>

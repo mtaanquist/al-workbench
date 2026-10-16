@@ -71,6 +71,15 @@ public class Gateway
     /// <summary>The Windows computer name the gateway runs on, as it last reported it.</summary>
     public string MachineName { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Whether the gateway was online the last time the command sweep looked, so each
+    /// change is announced to the organisation's Admins once: true once it has been
+    /// heard from, false after it went quiet for three heartbeats. Null until it first
+    /// connects - a gateway still being set up is not "offline". Written by the sweep
+    /// with a compare-and-set, never by a person, so it is not audited.
+    /// </summary>
+    public bool? NotifiedOnline { get; set; }
+
     /// <summary>Stamped on revoke. A revoked gateway's next request is refused; there is no un-revoke.</summary>
     public DateTime? RevokedAt { get; set; }
 }

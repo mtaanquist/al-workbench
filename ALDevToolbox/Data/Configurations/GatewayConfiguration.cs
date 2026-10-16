@@ -28,6 +28,7 @@ internal sealed class GatewayConfiguration : IEntityTypeConfiguration<Gateway>
         entity.Property(e => e.ReportedVersion).HasColumnName("reported_version");
         entity.Property(e => e.MachineName).HasColumnName("machine_name").IsRequired();
         entity.Property(e => e.RevokedAt).HasColumnName("revoked_at");
+        entity.Property(e => e.NotifiedOnline).HasColumnName("notified_online");
 
         entity.HasIndex(e => new { e.OrganizationId, e.RevokedAt });
 

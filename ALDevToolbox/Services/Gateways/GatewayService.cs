@@ -399,7 +399,12 @@ public sealed class GatewayService
             gateway.RevokedAt = Now;
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
-        _logger.LogInformation("Gateway {GatewayId} revoked by user {UserId}.", gatewayId, _orgContext.CurrentUserId);
+        // Its unfinished work fails now rather than waiting out a claim deadline that
+        // may be days away; a revoked gateway can neither collect nor report it.
+        var failed = await GatewayCommandService.FailOpenCommandsAsync(
+            _db, gatewayId, GatewayCommandService.RevokedMessage, Now, ct).ConfigureAwait(false);
+        _logger.LogInformation("Gateway {GatewayId} revoked by user {UserId}; {Failed} unfinished command(s) failed.",
+            gatewayId, _orgContext.CurrentUserId, failed);
     }
 
     /// <summary>Renames the gateway on the Gateways page. The machine name is the gateway's to report.</summary>
@@ -512,8 +517,8 @@ public sealed class GatewayService
         if (state is null) return null;
 
         // The replay table only needs a row until its token could no longer be
-        // accepted; each heartbeat clears this gateway's spent ones. The command
-        // sweep (#1361) will take this over for gateways that stop calling.
+        // accepted; each heartbeat clears this gateway's spent ones, and
+        // GatewayCommandSweep clears those of gateways that stopped calling.
         await _db.GatewaySeenTokens
             .Where(t => t.GatewayId == gatewayId && t.ExpiresAt < now)
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);

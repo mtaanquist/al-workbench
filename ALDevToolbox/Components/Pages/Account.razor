@@ -193,7 +193,7 @@ else
             }
             else if (_section == Section.Notifications)
             {
-                <AccountNotificationsSection />
+                <AccountNotificationsSection IsAdmin="@(_user.Role == UserRole.Admin)" />
             }
             else if (_section == Section.Security)
             {

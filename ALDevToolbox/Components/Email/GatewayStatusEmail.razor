@@ -1,0 +1,65 @@
+@*
+    An on-premises gateway went offline, or came back (issue #1361). Sent once per
+    change to the organisation's Admins: see .design/on-prem-gateway.md, "Online and
+    offline", and .design/notifications.md.
+*@
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="@Reason" SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    @if (Offline)
+    {
+        <EmailParagraph>The on-premises gateway <strong>@GatewayName</strong> on <strong>@MachineName</strong> has stopped checking in. It was last heard from @LastSeen.</EmailParagraph>
+        <EmailParagraph>Until it is back, deployments and other work for the service tiers it manages fail rather than wait. Ask the customer's IT to check that the AL Workbench Gateway service is running on that server and can reach AL Workbench.</EmailParagraph>
+    }
+    else
+    {
+        <EmailParagraph>The on-premises gateway <strong>@GatewayName</strong> on <strong>@MachineName</strong> is checking in again, after being offline.</EmailParagraph>
+        <EmailParagraph>Work that failed while it was offline is not tried again by itself. Check the deployments for its service tiers and start again any that are still needed.</EmailParagraph>
+    }
+    <EmailButton Href="@GatewaysUrl">Open Gateways</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string GatewayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string MachineName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public bool Offline { get; set; }
+    /// <summary>When it was last heard from, already formatted ("14 Oct 2026, 09:12 UTC").</summary>
+    [Parameter] public string LastSeen { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string GatewaysUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Preheader => Offline
+        ? $"{GatewayName} has stopped checking in."
+        : $"{GatewayName} is checking in again.";
+
+    private const string Reason = "You received this because you are an administrator of this organisation.";
+
+    public static string SubjectFor(bool offline, string gatewayName) =>
+        offline ? $"Gateway offline: {gatewayName}" : $"Gateway back online: {gatewayName}";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        string gatewayName,
+        string machineName,
+        bool offline,
+        string lastSeen,
+        string gatewaysUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<GatewayStatusEmail>(
+            SubjectFor(offline, gatewayName),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(GatewayName)] = gatewayName,
+                [nameof(MachineName)] = machineName,
+                [nameof(Offline)] = offline,
+                [nameof(LastSeen)] = lastSeen,
+                [nameof(GatewaysUrl)] = gatewaysUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}
