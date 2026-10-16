@@ -2145,10 +2145,11 @@ happens offline or revoked, and the event ids. The download block is the Gateway
 signature check is shown only for a signed release. Linked from Administration → Gateways in the
 add card, the empty state and the download card, and found by the search box (`DocsPaletteSource`).
 
-**Signed in to read.** It carries `[Authorize]` like `/docs/search`, so someone without an account
-cannot open it; `/docs/mcp` is the one anonymous docs page. Whether to make it anonymous, so a
-consultant can send customer IT the link before they have an account, is open: the page reads no
-data and would need an entry in `RouteAuthorizationTests`.
+**Public (decision).** It carries `[AllowAnonymous]`, like `/docs/mcp`, so a consultant can send
+customer IT the link before anyone there has an account. It reads no organisation's data: the only
+thing it injects is `GatewayBuild`, a singleton stamped from the build, so the download link and
+hash are the same for everyone. It is listed in `RouteAuthorizationTests.IntentionallyAnonymous`,
+and `GatewaySetupDocsAnonymousTests` fetches it signed out through the real pipeline.
 
 **Held to the gateway.** `GatewaySetupDocsTests` checks that each settings table lists exactly the
 settings the parser knows (read from the parser's own "The settings are: ..." answer to an unknown

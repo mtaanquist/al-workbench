@@ -50,6 +50,7 @@ public sealed class RouteAuthorizationTests
             ["/accept-invite"] = "invited user sets a password before they have an account",
             // Public, data-free pages.
             ["/docs/mcp"] = "public connect-an-assistant docs; carries an explicit [AllowAnonymous]",
+            ["/docs/gateway-setup"] = "gateway setup guide customer IT reads before they have an account; no org data, explicit [AllowAnonymous]",
             ["/not-found"] = "404 landing page",
             ["/Error"] = "unhandled-error page",
             // Standalone client-side utilities: they inject no services and read no data.

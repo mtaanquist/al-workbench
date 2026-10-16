@@ -18,7 +18,7 @@ namespace ALDevToolbox.Services.Palette.Sources;
 ///
 /// <para><b>The fence.</b> Docs hang off nothing and are the same for every
 /// organisation, so there is no database read and nothing to scope. The gate is
-/// "signed in": three of the pages require it, the fourth is public, and the
+/// "signed in": two of the pages require it, the other two are public, and the
 /// palette itself is only ever drawn for a signed-in person.</para>
 /// </summary>
 public sealed class DocsPaletteSource : IPaletteSource

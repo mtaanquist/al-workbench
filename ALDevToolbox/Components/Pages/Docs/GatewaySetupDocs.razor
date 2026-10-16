@@ -1,5 +1,5 @@
 @page "/docs/gateway-setup"
-@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
 @using ALDevToolbox.Components.Pages.Admin.Administration
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Services.Gateways
@@ -18,6 +18,11 @@
     So: no class names, no AL Workbench internals, and where the design doc lists
     something as not yet tried on real servers, the guide says so or leaves it
     out rather than promising it.
+
+    Public, like /docs/mcp: customer IT reads it before they have an account (decision
+    on #1376). It reads no data from any organisation; the only thing it injects is
+    GatewayBuild, a singleton stamped at build time, so a signed-out reader sees the
+    same download and hash as an Admin.
 
     Page archetype 12 (docs / long-form), static SSR like the other docs pages.
     The download block is the Gateways page's own GatewayDownloadLink, so the
