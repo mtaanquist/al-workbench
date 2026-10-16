@@ -747,7 +747,8 @@ multitenant server. Where it differs from, or adds to, the decision above:
   release is resolved and when a scheduled one is claimed, with "... Deploying to on-premises through
   the gateway isn't available yet, so nothing was sent."; the pipeline editor does not offer an
   on-premises target, and `ReleasePipelineService` refuses one sent past the editor with a
-  `ProjectEnvironmentId` error. All three lift with #1374 and #1367.
+  `ProjectEnvironmentId` error. All three lift with #1367; since #1374 the delivery refusal
+  comes from `DeliveryTargetFactory.Unavailable`.
 - **What the environment page shows:** Overview (the service tier, its database, tenant, sessions,
   licence expiry and the gateway), Apps (from the mirror) and Workbench history. Operations and
   Sessions are Business Central online's live reads and are not offered; an address naming them lands
@@ -807,6 +808,22 @@ downgrade refusal that reads it, and the install of each app. That clears CLAUDE
 `IOffsiteStorageProvider` did. Shared, unchanged: claiming, per-app result rows, dependency order,
 skip-if-already-installed (#931), failure short-circuit, the delivery window, prepared deployments
 and approvals, one deployment per environment at a time.
+
+As built (#1374): the seam is `IDeliveryTarget`, one instance per environment per run, picked
+from `OeProjectEnvironment.Kind` by `DeliveryTargetFactory` (the `OffsiteStorageProviderFactory`
+shape). `AdminCenterDeliveryTarget` is today's code moved, not rewritten: the token source
+(`ConnectAsync`, and `RenewAsync` before each app after the first, #1113), the application
+family, the live status re-read and its refusal (`ReadStatusAsync`), the installed-apps read,
+the upload (`StartInstallAsync`), operation polling through `BcAppOperationPoller`
+(`WaitForInstallAsync`), the open-sessions read, and the held-install list and cancel. What a
+target can do is a reported capability, `DeliveryTargetCapabilities.DeferredSchedules`, not a
+null the shared code guesses at: true online, false on-premises. The shared code asks it when a
+deployment is resolved and again when it is claimed, and only a target that has it is asked for
+held installs. Still in `DeliveryService`: the downgrade refusal (it compares the build with the
+installed list the target returns), writing the live status back to the environment row, the
+not-a-sandbox rule for unapproved and agent deployments, and the rest of the shared list above.
+Until #1367 the factory has no on-premises target: `DeliveryTargetFactory.Unavailable` gives the
+refusal below, which the run now checks before signing in rather than after.
 
 On-premises differences:
 

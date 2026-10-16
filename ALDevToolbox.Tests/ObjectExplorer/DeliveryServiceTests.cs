@@ -3689,7 +3689,7 @@ public sealed class DeliveryServiceTests : IDisposable
     private DeliveryService NewService(AppDbContext ctx, ALDevToolbox.Services.Tools.ToolEnablement? tools = null, TimeProvider? clock = null)
     {
         var svc = new DeliveryService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-            _tokens, _apps, _admin, _queue,
+            new DeliveryTargetFactory(_tokens, _apps, _admin), _queue,
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
             tools ?? _db.NewToolEnablement(ctx),
             clock ?? TimeProvider.System,

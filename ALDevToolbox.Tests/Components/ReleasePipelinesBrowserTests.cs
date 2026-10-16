@@ -63,6 +63,7 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         // The Reschedule dialog the list hosts deploys through the delivery service.
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.IDeliveryTokenSource>(
             sp => sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService>());
+        _ctx.Services.AddScoped<DeliveryTargetFactory>();
         _ctx.Services.AddScoped<DeliveryService>();
         _ctx.Services.AddSingleton(new DeliveryQueue());
         TestDb.AddToolServices(_ctx.Services);

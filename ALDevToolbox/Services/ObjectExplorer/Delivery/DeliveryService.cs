@@ -19,26 +19,21 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// here (access-gated, target snapshotted) and enqueued to <see cref="DeliveryQueue"/>;
 /// <see cref="DeliveryWorker"/> then calls <see cref="RunDeliveryAsync"/>, which claims
 /// the row and drives the per-app upload → install → poll flow through the
-/// <see cref="IBcAppManagementClient"/> seam. Every failure is captured onto the row
-/// (never thrown out of the worker). The BC secret never passes through here — only a
-/// bearer token from <see cref="ProjectConnectionService"/>. See
-/// <c>.design/saas-delivery.md</c> ("Publish flow", "Services &amp; seams").
+/// <see cref="IDeliveryTarget"/> seam, which <see cref="DeliveryTargetFactory"/> picks per
+/// environment (#1374). Every failure is captured onto the row (never thrown out of the
+/// worker). The BC secret never passes through here. See
+/// <c>.design/saas-delivery.md</c> ("Publish flow", "Services &amp; seams") and
+/// <c>.design/on-prem-gateway.md</c> ("Deploying to on-premises").
 /// </summary>
 public sealed class DeliveryService
 {
     /// <summary>Why a deployment through a disabled deployment pipeline is refused (#1131).</summary>
     public const string DisabledRefusal = "This deployment pipeline is disabled. Enable it to deploy.";
 
-    /// <summary>Why a deployment to a linked on-premises service tier is refused until the gateway can deploy (#1367).</summary>
-    internal static string OnPremisesNotYet(string environmentName) =>
-        $"{environmentName} is an on-premises service tier. Deploying to on-premises through the gateway isn't available yet, so nothing was sent.";
-
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
-    private readonly IDeliveryTokenSource _tokens;
-    private readonly IBcAppManagementClient _apps;
-    private readonly IBcAdminClient _admin;
+    private readonly DeliveryTargetFactory _targets;
     private readonly DeliveryQueue _queue;
     private readonly Bc.BcPanelCache _panelCache;
     private readonly ILogger<DeliveryService> _logger;
@@ -49,9 +44,7 @@ public sealed class DeliveryService
         AppDbContext db,
         IOrganizationContext orgContext,
         ProjectAccess access,
-        IDeliveryTokenSource tokens,
-        IBcAppManagementClient apps,
-        IBcAdminClient admin,
+        DeliveryTargetFactory targets,
         DeliveryQueue queue,
         Bc.BcPanelCache panelCache,
         ALDevToolbox.Services.Tools.ToolEnablement tools,
@@ -63,9 +56,7 @@ public sealed class DeliveryService
         _db = db;
         _orgContext = orgContext;
         _access = access;
-        _tokens = tokens;
-        _apps = apps;
-        _admin = admin;
+        _targets = targets;
         _queue = queue;
         _panelCache = panelCache;
         _logger = logger;
@@ -170,11 +161,15 @@ public sealed class DeliveryService
                 r.ProjectId,
                 OwnerId = r.Project!.CreatedByUserId,
                 EnvName = r.ProjectEnvironment!.Name,
+                r.ProjectEnvironmentId,
+                r.ProjectEnvironment.Kind,
                 r.ProjectEnvironment.ApplicationFamily,
             })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
-        return await CheckOpenSessionsOnAsync(rp.ProjectId, rp.OwnerId, rp.EnvName, rp.ApplicationFamily, releasePipelineId, ct);
+        return await CheckOpenSessionsOnAsync(rp.OwnerId,
+            new DeliveryTargetEnvironment(rp.ProjectId, rp.EnvName, rp.Kind, rp.ProjectEnvironmentId, rp.ApplicationFamily),
+            releasePipelineId, ct);
     }
 
     /// <summary>
@@ -199,28 +194,35 @@ public sealed class DeliveryService
             ?? throw Validation("Delivery", "That deployment no longer exists.");
         // The same environment the run resolves: the snapshot name, preferring the
         // pipeline's own environment when two share it.
-        var family = await _db.OeProjectEnvironments.AsNoTracking()
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == d.ProjectId && e.Name == d.EnvironmentName)
             .OrderBy(e => e.Id == d.PipelineEnvironmentId ? 0 : 1)
-            .Select(e => e.ApplicationFamily)
+            .Select(e => new { e.Id, e.Kind, e.ApplicationFamily })
             .FirstOrDefaultAsync(ct);
-        return await CheckOpenSessionsOnAsync(d.ProjectId, d.OwnerId, d.EnvironmentName, family, d.ReleasePipelineId, ct);
+        return await CheckOpenSessionsOnAsync(d.OwnerId,
+            new DeliveryTargetEnvironment(d.ProjectId, d.EnvironmentName, env?.Kind ?? OeEnvironmentKind.Online, env?.Id, env?.ApplicationFamily),
+            d.ReleasePipelineId, ct);
     }
 
     private async Task<OpenSessionsCheck> CheckOpenSessionsOnAsync(
-        int projectId, int? ownerId, string envName, string? applicationFamily, int releasePipelineId, CancellationToken ct)
+        int? ownerId, DeliveryTargetEnvironment environment, int releasePipelineId, CancellationToken ct)
     {
-        await _access.EnsureCanManageAsync(projectId, ownerId, ct);
+        var envName = environment.Name;
+        await _access.EnsureCanManageAsync(environment.ProjectId, ownerId, ct);
+        if (_targets.Unavailable(environment.Kind, envName) is { } unavailable)
+        {
+            return OpenSessionsCheck.Unknown(envName, unavailable);
+        }
+        var target = _targets.Create(environment);
 
         // The person is waiting in a dialog for this answer, so it gets a short leash rather
         // than the HTTP client's own timeout.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(OpenSessionsTimeout);
 
-        BcDeliveryContext bc;
         try
         {
-            bc = await _tokens.AcquireDeliveryContextAsync(projectId, timeout.Token);
+            await target.ConnectAsync(timeout.Token);
         }
         catch (BcApiException ex)
         {
@@ -236,7 +238,7 @@ public sealed class DeliveryService
 
         try
         {
-            var sessions = await _admin.ListSessionsAsync(bc.AccessToken, applicationFamily, envName, timeout.Token);
+            var sessions = await target.ListSessionsAsync(timeout.Token);
             return OpenSessionsCheck.From(envName, sessions);
         }
         catch (BcApiException ex)
@@ -388,7 +390,7 @@ public sealed class DeliveryService
                 TimeZone = r.Project.BcTimeZone,
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvMissing = r.ProjectEnvironment.MissingSince != null,
-                EnvOnPremises = r.ProjectEnvironment.Kind == OeEnvironmentKind.OnPremises,
+                EnvKind = r.ProjectEnvironment.Kind,
                 EnvStatus = r.ProjectEnvironment.Status,
                 EnvType = r.ProjectEnvironment.Type,
                 WindowStart = r.ProjectEnvironment.UpdateWindowStart,
@@ -410,16 +412,16 @@ public sealed class DeliveryService
 
         if (rp.EnvMissing)
         {
-            throw Validation("ProjectEnvironment", rp.EnvOnPremises
+            throw Validation("ProjectEnvironment", rp.EnvKind == OeEnvironmentKind.OnPremises
                 ? "This deployment pipeline's target service tier is no longer linked to the solution. An administrator can link it again on the solution's Environments tab."
                 : "This deployment pipeline's target environment is no longer present in Business Central. Refresh the environments and try again.");
         }
         // Deploying to a linked on-premises service tier goes through the gateway, which
-        // is not built yet (#1374, #1367). Until then the service refuses it, whatever
-        // the page offers. See .design/on-prem-gateway.md, "Deploying to on-premises".
-        if (rp.EnvOnPremises)
+        // is not built yet (#1367). Until then the service refuses it, whatever the page
+        // offers. See .design/on-prem-gateway.md, "Deploying to on-premises".
+        if (_targets.Unavailable(rp.EnvKind, rp.EnvName) is { } unavailable)
         {
-            throw Validation("ProjectEnvironment", OnPremisesNotYet(rp.EnvName));
+            throw Validation("ProjectEnvironment", unavailable);
         }
         // The cached status catches the obvious cases at the point the user is looking
         // at the screen. The live re-read before the upload (see PublishAsync) is the
@@ -530,6 +532,12 @@ public sealed class DeliveryService
             throw Validation("SchemaSyncMode",
                 "This deployment pipeline's schema sync setting is no longer a valid option. Open the deployment pipeline, choose a schema sync setting, and save it.");
         }
+        // Only an environment that can hold an install for a later update takes those
+        // timings; on-premises has only now and the delivery window.
+        if (BcDeploymentSchedule.IsDeferred(wireSchedule) && !_targets.CapabilitiesFor(rp.EnvKind).DeferredSchedules)
+        {
+            throw Validation("DeploymentSchedule", WaitsForUpdateRefusal(rp.EnvName));
+        }
         // Business Central decides the order it installs a window's queue in; our order
         // only decides the order things were uploaded. With one app that's harmless, with
         // several it can install a dependent before its dependency.
@@ -545,6 +553,10 @@ public sealed class DeliveryService
             BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule), rp.SchemaSyncMode,
             UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, build.Id, artifacts);
     }
+
+    /// <summary>Why a deployment can't wait for a later update on an environment that can't hold one.</summary>
+    internal static string WaitsForUpdateRefusal(string environmentName) =>
+        $"{environmentName} can't hold an install for a later update. Set this deployment pipeline to install right away or in the delivery window.";
 
     /// <summary>What to do about an app older than the installed one, for both refusals.</summary>
     private const string RaiseVersionAdvice =
@@ -1379,24 +1391,27 @@ public sealed class DeliveryService
         }
 
         var schedule = BcDeploymentSchedule.Normalize(info.DeploymentSchedule) ?? info.DeploymentSchedule;
-        var family = await _db.OeProjectEnvironments.AsNoTracking()
+        // Only a target that holds installs hands a deployment off, so this is one.
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == info.EnvironmentId)
-            .Select(e => e.ApplicationFamily)
-            .FirstOrDefaultAsync(CancellationToken.None)
-            ?? BcConstants.DefaultApplicationFamily;
-        string? token = null;
+            .Select(e => new { e.Kind, e.ApplicationFamily })
+            .FirstOrDefaultAsync(CancellationToken.None);
+        IDeliveryTarget? connected = null;
         try
         {
-            token = (await _tokens.AcquireDeliveryContextAsync(info.ProjectId, ct)).AccessToken;
-            await _apps.RemoveScheduledPteVersionAsync(token, family, info.EnvironmentName, held.AppId, held.Version, schedule, ct);
+            var target = _targets.Create(new DeliveryTargetEnvironment(
+                info.ProjectId, info.EnvironmentName, env?.Kind ?? OeEnvironmentKind.Online, info.EnvironmentId, env?.ApplicationFamily));
+            await target.ConnectAsync(ct);
+            connected = target;
+            await target.CancelHeldInstallAsync(held.AppId, held.Version, schedule, ct);
         }
         catch (Exception ex)
         {
             // A refusal means Business Central still has its copy. Anything else (a timeout,
             // the page closing) may have reached it or not, so ask it before deciding: with
             // its copy gone the move has to finish, or nothing would install at all.
-            var stillHeld = ex is BcApiException || token is null
-                || await StillHeldAsync(token, family, info.EnvironmentName, held) != false;
+            var stillHeld = ex is BcApiException || connected is null
+                || await StillHeldAsync(connected, info.EnvironmentName, held) != false;
             if (stillHeld)
             {
                 await _db.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == replacementId).ExecuteDeleteAsync(CancellationToken.None);
@@ -1478,11 +1493,11 @@ public sealed class DeliveryService
     /// Whether Business Central still lists the held version, after a cancel whose answer
     /// was lost. Null when it can't be asked either.
     /// </summary>
-    private async Task<bool?> StillHeldAsync(string token, string family, string environmentName, HeldApp held)
+    private async Task<bool?> StillHeldAsync(IDeliveryTarget target, string environmentName, HeldApp held)
     {
         try
         {
-            var waiting = await _apps.ListScheduledPteOperationsAsync(token, family, environmentName, CancellationToken.None);
+            var waiting = await target.ListHeldInstallsAsync(CancellationToken.None);
             return waiting.Any(w => w.AppId == held.AppId
                 && string.Equals(w.TargetAppVersion, held.Version, StringComparison.OrdinalIgnoreCase));
         }
@@ -1932,10 +1947,27 @@ public sealed class DeliveryService
     /// </summary>
     private async Task PublishAsync(OeProjectDelivery delivery, StringBuilder log, CancellationToken ct)
     {
-        BcDeliveryContext bc;
+        // The environment this delivery installs to, by its snapshot name: it picks the
+        // target (#1374), and its type as last read stands in when the live read fails.
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
+            .Where(EnvironmentQueries.HoldsName)
+            .Select(e => new CachedEnvironment(e.Id, e.ApplicationFamily, e.Type, e.Kind))
+            .FirstOrDefaultAsync(ct);
+        var kind = env?.Kind ?? OeEnvironmentKind.Online;
+        // The claim-time half of the refusal in ResolveReleaseAsync.
+        if (_targets.Unavailable(kind, delivery.EnvironmentName) is { } unavailable)
+        {
+            Append(log, unavailable);
+            await FailAsync(delivery, log, unavailable, ct);
+            return;
+        }
+
+        var target = _targets.Create(new DeliveryTargetEnvironment(
+            delivery.ProjectId, delivery.EnvironmentName, kind, env?.Id, env?.ApplicationFamily));
         try
         {
-            bc = await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, ct);
+            await target.ConnectAsync(ct);
         }
         catch (BcApiException ex)
         {
@@ -1943,19 +1975,19 @@ public sealed class DeliveryService
             return;
         }
 
-        // Whatever the API called this environment's family, verbatim. Every App
-        // Management URL is built from it.
-        var family = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
-            .Where(EnvironmentQueries.HoldsName)
-            .Select(e => e.ApplicationFamily)
-            .FirstOrDefaultAsync(ct)
-            ?? BcConstants.DefaultApplicationFamily;
+        // The claim-time half of the timing check in ResolveReleaseAsync.
+        if (BcDeploymentSchedule.IsDeferred(delivery.DeploymentSchedule) && !target.Capabilities.DeferredSchedules)
+        {
+            var cannotWait = WaitsForUpdateRefusal(delivery.EnvironmentName);
+            Append(log, cannotWait);
+            await FailAsync(delivery, log, cannotWait, ct);
+            return;
+        }
 
         // The environment was fine when this delivery was scheduled; hours may have
         // passed. Re-read it live before the first byte goes up — a platform update that
         // landed in between is exactly what this catches.
-        if (await EnvironmentBlockedAsync(delivery, bc.AccessToken, ct) is { } blocked)
+        if (await EnvironmentBlockedAsync(delivery, target, env, ct) is { } blocked)
         {
             Append(log, blocked);
             await FailAsync(delivery, log, blocked, ct);
@@ -2002,7 +2034,7 @@ public sealed class DeliveryService
         IReadOnlyList<BcInstalledApp> installed;
         try
         {
-            installed = await _apps.ListInstalledAppsAsync(bc.AccessToken, family, delivery.EnvironmentName, ct);
+            installed = await target.ListInstalledAppsAsync(ct);
         }
         catch (BcApiException ex)
         {
@@ -2080,7 +2112,7 @@ public sealed class DeliveryService
         {
             try
             {
-                waiting = await _apps.ListScheduledPteOperationsAsync(bc.AccessToken, family, delivery.EnvironmentName, ct);
+                waiting = await target.ListHeldInstallsAsync(ct);
             }
             catch (BcApiException ex)
             {
@@ -2175,7 +2207,7 @@ public sealed class DeliveryService
                 // The token source hands back its cached one while that still has time left.
                 if (i > 0)
                 {
-                    bc = await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, ct);
+                    await target.RenewAsync(ct);
                 }
 
                 var artifact = artifacts[i];
@@ -2190,17 +2222,8 @@ public sealed class DeliveryService
                 Append(log, $"Uploading {label} ({bytes.Length} bytes)...");
                 await SaveResultAsync(delivery, log, ct);
 
-                var operation = await _apps.InstallPteAsync(
-                    bc.AccessToken, family, delivery.EnvironmentName,
-                    bytes, artifact.FileName,
-                    delivery.DeploymentSchedule, delivery.SchemaSyncMode,
-                    // No language is sent. The workbench has no concept of one, and
-                    // guessing "en-US" would set the install locale wrong for (say) a
-                    // Danish customer; BC applies its own default until a deployment
-                    // pipeline can say what the language should be.
-                    languageId: string.Empty,
-                    installOrUpdateNeededDependencies: true,
-                    ct);
+                var operation = await target.StartInstallAsync(
+                    bytes, artifact.FileName, delivery.DeploymentSchedule, delivery.SchemaSyncMode, ct);
 
                 uploadedAny = true;
                 result.OperationId = operation.Id;
@@ -2241,7 +2264,7 @@ public sealed class DeliveryService
                 Append(log, $"Installing {label} (operation {operation.Id})...");
                 await SaveResultAsync(delivery, log, ct);
 
-                var outcome = await PollUntilTerminalAsync(bc, family, delivery, operation, ct);
+                var outcome = await target.WaitForInstallAsync(operation, PollDelay, PollTimeoutPerApp, ct);
                 if (outcome.Completed)
                 {
                     result.Status = ProjectDeliveryResultStatus.Completed;
@@ -2364,30 +2387,25 @@ public sealed class DeliveryService
         return $"{result.AppName} {result.AppVersion} is already waiting for {when} on {delivery.EnvironmentName}; cancel it there first.";
     }
 
+    /// <summary>The environment row a run resolved, as last read.</summary>
+    private sealed record CachedEnvironment(int Id, string? ApplicationFamily, string? Type, OeEnvironmentKind Kind);
+
     /// <summary>
-    /// Re-reads the target environment from the Admin Center API and returns a refusal
-    /// message when it can't take an install right now — the claim-time half of the
-    /// status gate (the other half runs in <see cref="ScheduleDeliveryAsync"/>). Returns
-    /// null when the delivery may proceed, including when the API can't be read: a
+    /// Re-reads the target environment through <paramref name="target"/> and returns a
+    /// refusal message when it can't take an install right now — the claim-time half of
+    /// the status gate (the other half runs in <see cref="ScheduleDeliveryAsync"/>). Returns
+    /// null when the delivery may proceed, including when the environment can't be read: a
     /// transport failure here isn't evidence the environment is unhealthy, and the
     /// upload that follows will surface a real problem with a better message. The fresh
     /// status is written back to the environment row so the project page doesn't keep
     /// showing the stale one the delivery just contradicted.
     /// </summary>
-    private async Task<string?> EnvironmentBlockedAsync(OeProjectDelivery delivery, string token, CancellationToken ct)
+    private async Task<string?> EnvironmentBlockedAsync(OeProjectDelivery delivery, IDeliveryTarget target, CachedEnvironment? env, CancellationToken ct)
     {
-        var env = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
-            .Where(EnvironmentQueries.HoldsName)
-            .Select(e => new { e.Id, e.ApplicationFamily, e.Type, e.Kind })
-            .FirstOrDefaultAsync(ct);
-        // The claim-time half of the on-premises refusal in ResolveReleaseAsync.
-        if (env?.Kind == OeEnvironmentKind.OnPremises) return OnPremisesNotYet(delivery.EnvironmentName);
-
-        BcEnvironment? live;
+        DeliveryTargetStatus live;
         try
         {
-            live = await _admin.GetEnvironmentAsync(token, env?.ApplicationFamily, delivery.EnvironmentName, ct);
+            live = await target.ReadStatusAsync(ct);
         }
         catch (BcApiException ex)
         {
@@ -2398,9 +2416,9 @@ public sealed class DeliveryService
             return await NotASandboxRefusalAsync(delivery, env?.Type, ct);
         }
 
-        if (live is null)
+        if (!live.Exists)
         {
-            return $"Business Central no longer has an environment called '{delivery.EnvironmentName}'. Refresh the environments on the solution's Business Central page.";
+            return live.Refusal;
         }
 
         if (env is not null)
@@ -2419,7 +2437,7 @@ public sealed class DeliveryService
             return notSandbox;
         }
 
-        var refusal = BcEnvironmentStatus.RefusalMessage(delivery.EnvironmentName, live.Status);
+        var refusal = live.Refusal;
         if (refusal is not null)
         {
             _logger.LogWarning("Delivery {DeliveryId} refused: environment {Env} is {Status}.",
@@ -2451,30 +2469,6 @@ public sealed class DeliveryService
         }
         return null;
     }
-
-    /// <summary>
-    /// Polls one install operation until it reports a terminal state or the per-app
-    /// timeout elapses - the shared <see cref="BcAppOperationPoller"/>, which booked
-    /// uploads use too, mapped onto this delivery's outcome shape.
-    /// </summary>
-    private async Task<DeploymentOutcome> PollUntilTerminalAsync(
-        BcDeliveryContext bc, string family, OeProjectDelivery delivery, BcAppOperation started, CancellationToken ct)
-    {
-        var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, bc.AccessToken,
-            // Business Central refused the token in hand, so a cached one is no use.
-            async token => (await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, forceRefresh: true, token)).AccessToken,
-            family, delivery.EnvironmentName, started, PollDelay, PollTimeoutPerApp, ct);
-        // A delivery needs a clean yes: an install it could not see finish (no id, a run
-        // of failed polls, the wait ran out) is not one it reports as done. A missing app
-        // id is the one caveat it has always carried as a success.
-        var completed = result.Completed || (result.IsUnconfirmed && started.AppId is null);
-        return new DeploymentOutcome(completed, result.Message, result.Failure, result.Raw);
-    }
-
-    /// <param name="Failure">Set when Business Central reported the install as failed, so the delivery's line is built from its code.</param>
-    /// <param name="Raw">Business Central's text as it came, for the log.</param>
-    private sealed record DeploymentOutcome(bool Completed, string? Message, BcFailureDetail? Failure = null, string? Raw = null);
 
     /// <summary>A multi-line response folded onto one log line, so the page reads the log a line at a time.</summary>
     private static string OneLine(string text) =>

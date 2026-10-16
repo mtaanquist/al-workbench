@@ -67,6 +67,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _ctx.Services.AddSingleton(new EnvironmentRefreshQueue());
         // Scheduled installs lists the deployment pipelines' bookings too (#1097).
         _ctx.Services.AddScoped<IDeliveryTokenSource>(sp => sp.GetRequiredService<ProjectConnectionService>());
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryTargetFactory>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryService>();
         _ctx.Services.AddSingleton(new ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryQueue());
         TestDb.AddToolServices(_ctx.Services);

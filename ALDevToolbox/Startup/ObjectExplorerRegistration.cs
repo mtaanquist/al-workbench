@@ -98,6 +98,9 @@ public static class ObjectExplorerRegistration
         // a singleton hand-off to the hosted worker, mirroring ProjectDiscoveryQueue/Worker. The
         // worker runs the upload→install→poll publish off the request thread. No external queue.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryService>();
+        // Picks the install surface per environment (Admin Center for online; the gateway's
+        // arrives with #1367). Scoped because the clients it hands its targets are (#1374).
+        services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryTargetFactory>();
         // The cross-solution delivery feed behind list_recent_deployments; read-only.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryFeedService>();
         // The Pipelines dashboard at /pipelines (#955): the two lists' numbers on one page; read-only.

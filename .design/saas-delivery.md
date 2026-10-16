@@ -845,7 +845,11 @@ whole. The page reads the log line back through the same parser, so a deployment
   upload → install → poll); it takes the access token through a narrow **`IDeliveryTokenSource`**
   seam (implemented by `ProjectConnectionService`) so the orchestration is unit-testable without the
   OAuth round-trip or the key ring — mirroring the BC client seams. The future-time
-  scheduler and cancel surface land in the scheduling slice.
+  scheduler and cancel surface land in the scheduling slice. **Since #1374** everything the run
+  asks of the environment goes through **`IDeliveryTarget`**, built per environment by
+  `DeliveryTargetFactory`; `AdminCenterDeliveryTarget` holds the token source, the application
+  family and the calls above, and reports whether deferred schedules exist. See
+  `on-prem-gateway.md`, "Deploying to on-premises".
 - **`DeliveryScheduler`** (`BackgroundService`) — polls for due `scheduled` rows, enqueues to
   **`DeliveryQueue`** (bounded `Channel`); **`DeliveryWorker`** drains and runs the publish under the
   triggering user's captured `AmbientOrganizationScope` identity. Persisted rows = restart-resume.

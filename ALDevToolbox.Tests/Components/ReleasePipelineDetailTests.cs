@@ -51,6 +51,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddScoped<IDeliveryTokenSource>(sp => sp.GetRequiredService<ProjectConnectionService>());
+        _ctx.Services.AddScoped<DeliveryTargetFactory>();
         _ctx.Services.AddScoped<DeliveryService>();
         TestDb.AddToolServices(_ctx.Services);
         _ctx.Services.AddSingleton(new DeliveryQueue());
