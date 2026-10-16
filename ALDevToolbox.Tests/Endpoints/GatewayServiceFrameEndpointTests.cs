@@ -8,6 +8,7 @@ using ALDevToolbox.Tests.Gateways;
 using ALDevToolbox.Tests.Infrastructure;
 using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core;
+using ALWorkbench.Gateway.Core.Policy;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,8 +19,9 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// <summary>
 /// The gateway's own code (<c>ALWorkbench.Gateway.Core</c>) against the real
 /// <c>/gateway</c> routes: register with a code, wait for approval, take a command,
-/// download and check its file, report progress and the result. Only the Windows key
-/// store is replaced, by an in-memory key.
+/// download and check its file, report progress and the result, with the local
+/// policy file read and checked and its effective content stored by AL Workbench.
+/// Only the Windows key store and the file-permission check are replaced.
 /// </summary>
 [Collection(EndpointFactoryCollection.Name)]
 public sealed class GatewayServiceFrameEndpointTests : IDisposable
@@ -69,6 +71,16 @@ public sealed class GatewayServiceFrameEndpointTests : IDisposable
         {
             commandId = await new GatewayCommandService(ctx, _db.OrgContext, _signal, TimeProvider.System, NullLogger<GatewayCommandService>.Instance)
                 .EnqueueAsync(new GatewayCommandRequest(registered.GatewayId, GatewayVerb.PublishInstall,
+                    Parameters: new JsonObject
+                    {
+                        [GatewayCommandParameters.Machine] = "CRONUS-BC01",
+                        [GatewayCommandParameters.Instance] = "BC140",
+                        [GatewayCommandParameters.Apps] = new JsonArray(new JsonObject
+                        {
+                            [GatewayCommandParameters.AppFile] = "CRONUS_Coffee_1.4.0.0.app",
+                            [GatewayCommandParameters.AppPublisher] = "CRONUS Partner",
+                        }),
+                    },
                     RequestedByUserId: admin.Id, Files: [new GatewayCommandFileInput("CRONUS_Coffee_1.4.0.0.app", app)]));
         }
 
@@ -81,8 +93,20 @@ public sealed class GatewayServiceFrameEndpointTests : IDisposable
             },
         };
         var folder = new GatewayDataFolder(_scratch.Path);
+        var policyFile = Path.Combine(_scratch.Path, GatewayPolicyParser.FileName);
+        await File.WriteAllTextAsync(policyFile, """
+            [[instance]]
+            machine = "CRONUS-BC01"
+            name = "BC140"
+            environment = "test"
+            allow = ["inventory", "publish", "restart"]
+            publishers = ["CRONUS Partner"]
+            allow_unsigned = true
+            """);
+        var policy = new GatewayPolicySource(new GatewayPolicyOptions(policyFile, _scratch.Path, "CRONUS-BC01"), new FakeFileAccess(),
+            SystemGatewayClock.Instance, TimeZoneInfo.Utc, log);
         var runner = new GatewayRunner(http, settings, keys, new FileRunOnceStore(folder.RunOnceFile, SystemGatewayClock.Instance),
-            executor, SystemGatewayClock.Instance, log, new GatewayRunnerOptions(folder.WorkFolder, "CRONUS-BC01", "1.0.0"));
+            executor, policy, SystemGatewayClock.Instance, log, new GatewayRunnerOptions(folder.WorkFolder, "CRONUS-BC01", "1.0.0"));
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var run = runner.RunAsync(stop.Token);
 
@@ -103,5 +127,17 @@ public sealed class GatewayServiceFrameEndpointTests : IDisposable
         row.Log.Should().Contain("Published CRONUS Coffee 1.4.0.0");
         executor.FileContents.Values.Single().Should().Equal(app);
         log.Messages(GatewayLog.CommandStartedId).Should().ContainSingle().Which.Should().Contain("ida@cronus.example");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var gateway = await ctx.Gateways.AsNoTracking().SingleAsync(g => g.Id == registered.GatewayId);
+            var stored = System.Text.Json.JsonSerializer.Deserialize<GatewayPolicyReport>(gateway.EffectivePolicyJson!)!;
+            stored.State.Should().Be(GatewayPolicyStates.Valid);
+            var tier = stored.Instances.Should().ContainSingle().Subject;
+            tier.Name.Should().Be("BC140");
+            tier.Environment.Should().Be("test");
+            tier.Allow.Should().Equal("inventory", "publish", "restart");
+            gateway.PolicyReportedAt.Should().NotBeNull();
+        }
     }
 }

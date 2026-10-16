@@ -26,6 +26,7 @@ public sealed class GatewayRunnerTests : IDisposable
     private readonly InMemorySettingsStore _settings = new();
     private readonly ScratchFolder _scratch = new();
     private readonly RecordingExecutor _executor = new();
+    private readonly AllowEveryCommandPolicy _policy = new();
     private readonly ListLogger _log = new();
     private readonly CancellationTokenSource _stop = new();
     private readonly GatewayDataFolder _folder;
@@ -53,7 +54,7 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     private GatewayRunner Runner(TimeSpan? resultGrace = null, IGatewaySettingsStore? settings = null) =>
-        new(_workbench.Client(), settings ?? _settings, _keys, _runOnce, _executor, _clock, _log,
+        new(_workbench.Client(), settings ?? _settings, _keys, _runOnce, _executor, _policy, _clock, _log,
             new GatewayRunnerOptions(_folder.WorkFolder, "CRONUS-BC01", "1.0.0")
             {
                 ResultGrace = resultGrace ?? GatewayRunnerOptions.DefaultResultGrace,
@@ -387,7 +388,7 @@ public sealed class GatewayRunnerTests : IDisposable
     [Fact]
     public async Task The_default_executor_fails_every_command_as_not_supported_yet()
     {
-        var runner = new GatewayRunner(_workbench.Client(), _settings, _keys, _runOnce, new NotSupportedCommandExecutor(), _clock, _log,
+        var runner = new GatewayRunner(_workbench.Client(), _settings, _keys, _runOnce, new NotSupportedCommandExecutor(), _policy, _clock, _log,
             new GatewayRunnerOptions(_folder.WorkFolder, "CRONUS-BC01", "1.0.0"), new Random(1));
         Serve([Command(12)]);
 
@@ -584,6 +585,65 @@ public sealed class GatewayRunnerTests : IDisposable
 
         resultAttempts.Should().Be(3);
         _runOnce.Unfinished().Should().BeEmpty();
+    }
+
+    // ---------------------------------------------------------------- the local policy
+
+    [Fact]
+    public async Task A_command_the_policy_refuses_is_reported_failed_with_the_reason_and_nothing_is_downloaded_or_run()
+    {
+        var app = "CRONUS Coffee 1.4"u8.ToArray();
+        var file = new GatewayCommandFileMessage { Id = 5, Name = "CRONUS_Coffee.app", Sha256 = Convert.ToHexStringLower(SHA256.HashData(app)), Size = app.Length };
+        _policy.Decide = _ => ALWorkbench.Gateway.Core.Policy.PolicyDecision.Refuse(
+            "CRONUS-BC09 / BC140 is not listed in the customer's gateway settings (gateway.toml), so the gateway does not touch it.");
+        Serve([Command(61, files: file)], new Dictionary<long, byte[]> { [5] = app });
+
+        await RunAsync();
+
+        _policy.Checked.Should().ContainSingle().Which.Id.Should().Be(61);
+        _executor.Calls.Should().BeEmpty();
+        _workbench.Requests.Should().NotContain(r => r.Path.Contains("/files/", StringComparison.Ordinal));
+        var result = Results().Single().Result;
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Be("CRONUS-BC09 / BC140 is not listed in the customer's gateway settings (gateway.toml), so the gateway does not touch it. Nothing was changed.");
+        _log.Messages(GatewayLog.CommandRefusedId).Should().ContainSingle().Which.Should().Contain("not listed");
+        _runOnce.HasStarted(61).Should().BeTrue();
+        _runOnce.Unfinished().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Loose_permissions_at_start_stop_the_gateway_before_it_sends_anything()
+    {
+        _policy.StartProblems = ["BUILTIN\\Users can change C:\\Program Files\\AL Workbench Gateway\\gateway.toml."];
+
+        var outcome = await RunAsync();
+
+        outcome.Should().Be(GatewayRunOutcome.PolicyUnsafe);
+        _workbench.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_policy_goes_with_the_first_heartbeat_again_when_it_changes_and_every_fifteen_minutes()
+    {
+        var heartbeats = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path != GatewayProtocol.HeartbeatPath) return FakeWorkbench.NoContent();
+            heartbeats++;
+            if (heartbeats == 3) _policy.Snapshot = new(new GatewayPolicyReport { State = GatewayPolicyStates.Invalid, Problems = ["Line 4: oops"] }, 2);
+            if (heartbeats == 20) _stop.Cancel();
+            return FakeWorkbench.Heartbeat(approved: false);
+        };
+
+        await RunAsync();
+
+        var sent = _workbench.To(GatewayProtocol.HeartbeatPath)
+            .Select((r, i) => (Beat: i + 1, Policy: r.Json<GatewayHeartbeatRequest>().Policy))
+            .Where(b => b.Policy is not null)
+            .ToList();
+        sent.Select(b => b.Beat).Should().Equal(1, 4, 19);
+        sent[1].Policy!.State.Should().Be(GatewayPolicyStates.Invalid);
+        sent[1].Policy!.Problems.Should().Equal("Line 4: oops");
     }
 
     // ---------------------------------------------------------------- review fixes

@@ -80,6 +80,25 @@ public class Gateway
     /// </summary>
     public bool? NotifiedOnline { get; set; }
 
+    /// <summary>
+    /// What the gateway's local policy file allows, as the gateway last reported it
+    /// (<c>GatewayPolicyReport</c> from the contracts, as JSON). Customer IT owns that
+    /// file; this copy is for display only, and the gateway enforces the file whatever
+    /// this says. Null until a gateway that reports it has sent a heartbeat. Written
+    /// with the heartbeat's <c>ExecuteUpdateAsync</c>, so not audited.
+    /// </summary>
+    public string? EffectivePolicyJson { get; set; }
+
+    /// <summary>When <see cref="EffectivePolicyJson"/> was last received.</summary>
+    public DateTime? PolicyReportedAt { get; set; }
+
+    /// <summary>
+    /// True when the gateway's latest report was too large to store or to send, so
+    /// <see cref="EffectivePolicyJson"/> is an older one and must not be shown as what
+    /// the gateway enforces now. Cleared by the next full report.
+    /// </summary>
+    public bool PolicyStale { get; set; }
+
     /// <summary>Stamped on revoke. A revoked gateway's next request is refused; there is no un-revoke.</summary>
     public DateTime? RevokedAt { get; set; }
 }

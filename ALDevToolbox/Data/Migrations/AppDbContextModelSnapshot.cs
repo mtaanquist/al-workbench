@@ -504,6 +504,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("approved_by_user_id");
 
+                    b.Property<string>("EffectivePolicyJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("effective_policy");
+
                     b.Property<string>("KeyFingerprint")
                         .IsConcurrencyToken()
                         .IsRequired()
@@ -535,6 +539,14 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<int>("OrganizationId")
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
+
+                    b.Property<DateTime?>("PolicyReportedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("policy_reported_at");
+
+                    b.Property<bool>("PolicyStale")
+                        .HasColumnType("boolean")
+                        .HasColumnName("policy_stale");
 
                     b.Property<byte[]>("PublicKey")
                         .IsRequired()

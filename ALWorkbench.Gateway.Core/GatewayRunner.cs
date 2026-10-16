@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using ALWorkbench.Gateway.Contracts;
+using ALWorkbench.Gateway.Core.Policy;
 using Microsoft.Extensions.Logging;
 
 namespace ALWorkbench.Gateway.Core;
@@ -12,6 +13,10 @@ public enum GatewayRunOutcome
     /// <summary>There are no registration settings; nothing to run.</summary>
     NotRegistered,
     /// <summary>
+    /// Someone other than administrators can change the program folder, the policy
+    /// file or a script it names; the gateway does not start (see <see cref="IGatewayPolicy.Start"/>).
+    /// </summary>
+    PolicyUnsafe,
     /// An unexpected error ended the loop (a damaged settings file, a key that cannot be
     /// opened, a state file that cannot be written). Logged; the service should exit
     /// with a failure code so Windows' recovery options restart it.
@@ -64,6 +69,7 @@ public sealed class GatewayRunner
     private readonly ISigningKeyStore _keys;
     private readonly IRunOnceStore _runOnce;
     private readonly ICommandExecutor _executor;
+    private readonly IGatewayPolicy _policy;
     private readonly IGatewayClock _clock;
     private readonly ILogger _logger;
     private readonly GatewayRunnerOptions _options;
@@ -74,6 +80,8 @@ public sealed class GatewayRunner
     private readonly List<long> _interrupted = [];
     private bool? _approved;
     private string _fingerprint = string.Empty;
+    private long _policySentVersion = -1;
+    private long? _policySentAt;
 
     public GatewayRunner(
         HttpClient http,
@@ -81,6 +89,7 @@ public sealed class GatewayRunner
         ISigningKeyStore keys,
         IRunOnceStore runOnce,
         ICommandExecutor executor,
+        IGatewayPolicy policy,
         IGatewayClock clock,
         ILogger logger,
         GatewayRunnerOptions options,
@@ -91,6 +100,7 @@ public sealed class GatewayRunner
         _keys = keys;
         _runOnce = runOnce;
         _executor = executor;
+        _policy = policy;
         _clock = clock;
         _logger = logger;
         _options = options;
@@ -129,6 +139,8 @@ public sealed class GatewayRunner
             return GatewayRunOutcome.NotRegistered;
         }
         _fingerprint = settings.KeyFingerprint;
+        // The policy source logs what is wrong, in words for customer IT.
+        if (_policy.Start().Count > 0) return GatewayRunOutcome.PolicyUnsafe;
         // Results that finished before the last stop but never arrived: listed as
         // running until they are posted, not reported as interrupted.
         var savedResults = _runOnce.PendingResults();
@@ -284,13 +296,25 @@ public sealed class GatewayRunner
             running = _running.Order().ToList();
             interrupted = _interrupted.ToList();
         }
+        // The policy goes with the first heartbeat, after it changed, and every
+        // fifteen minutes; the other heartbeats stay a few hundred bytes.
+        var policy = _policy.Refresh();
+        var sendPolicy = policy.Version != _policySentVersion
+            || _policySentAt is null
+            || _clock.Elapsed(_policySentAt.Value) >= GatewayPolicyReport.ResendInterval;
         var answer = await client.HeartbeatAsync(new GatewayHeartbeatRequest
         {
             Version = _options.Version,
             MachineName = _options.MachineName,
             RunningCommandIds = running,
             InterruptedCommandIds = interrupted,
+            Policy = sendPolicy ? policy.Report : null,
         }, ct).ConfigureAwait(false);
+        if (sendPolicy)
+        {
+            _policySentVersion = policy.Version;
+            _policySentAt = _clock.Timestamp();
+        }
 
         // AL Workbench only applies the lists for an approved gateway, so a pending one
         // keeps reporting them until a heartbeat is answered as approved. Then AL
@@ -359,6 +383,19 @@ public sealed class GatewayRunner
             _runOnce.MarkStarted(command.Id);
             _logger.CommandRefused(command.Id, verb, who, expired);
             await SaveAndReportAsync(client, command.Id, GatewayCommandOutcome.Failure(expired), ct).ConfigureAwait(false);
+            _runOnce.MarkFinished(command.Id);
+            return;
+        }
+
+        // The customer's own policy file, whatever AL Workbench sent: checked before a
+        // file is downloaded or the verb sees the command.
+        var decision = _policy.Check(command);
+        if (!decision.Allowed)
+        {
+            var reason = decision.Reason ?? "Not allowed by the customer's gateway settings.";
+            _runOnce.MarkStarted(command.Id);
+            _logger.CommandRefused(command.Id, verb, who, reason);
+            await SaveAndReportAsync(client, command.Id, GatewayCommandOutcome.Failure(reason + " Nothing was changed."), ct).ConfigureAwait(false);
             _runOnce.MarkFinished(command.Id);
             return;
         }

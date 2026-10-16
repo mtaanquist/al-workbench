@@ -306,6 +306,11 @@
           "System.Diagnostics.EventLog": "10.0.12"
         }
       },
+      "Tomlyn": {
+        "type": "Transitive",
+        "resolved": "2.10.1",
+        "contentHash": "ykjOY3IpYmC4SpPcAZRTl/w2jTmhPMDydHq8xcV7tTBAQ22nKBsOkPqauIrZlMjHm03cmKfV23UOPscKp+J4Og=="
+      },
       "alworkbench.gateway.contracts": {
         "type": "Project"
       },
@@ -313,7 +318,8 @@
         "type": "Project",
         "dependencies": {
           "ALWorkbench.Gateway.Contracts": "[1.0.0, )",
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )"
+          "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )",
+          "Tomlyn": "[2.10.1, )"
         }
       }
     }

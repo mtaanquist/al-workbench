@@ -1,6 +1,7 @@
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using ALWorkbench.Gateway.Core;
+using ALWorkbench.Gateway.Core.Policy;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -10,9 +11,11 @@ namespace ALWorkbench.Gateway;
 /// The service itself: runs <see cref="GatewayRunner"/> until Windows stops the
 /// service. When the runner ends on its own because the gateway is not registered,
 /// the service stops cleanly, which Windows does not treat as a crash and so does not
-/// restart it every minute. When it ends on an unexpected error, or the data folder's
-/// access rights are not the ones the gateway set, the process exits with code 1, so
-/// the service's recovery options (set by <c>install</c>) apply.
+/// restart it every minute. When it ends on an unexpected error, when the data folder's
+/// access rights are not the ones the gateway set (event 2008), or when someone other
+/// than administrators can change the program folder, gateway.toml or a script it
+/// names (event 3003), the process exits with code 1, so the service's recovery
+/// options (set by <c>install</c>) restart it and it starts once the rights are fixed.
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class GatewayWorker : BackgroundService
@@ -41,7 +44,7 @@ internal sealed class GatewayWorker : BackgroundService
             outcome = GatewayRunOutcome.Failed;
         }
 
-        if (outcome == GatewayRunOutcome.Failed) Environment.ExitCode = 1;
+        if (outcome is GatewayRunOutcome.Failed or GatewayRunOutcome.PolicyUnsafe) Environment.ExitCode = 1;
         if (outcome != GatewayRunOutcome.Stopped) _lifetime.StopApplication();
     }
 
@@ -56,12 +59,14 @@ internal sealed class GatewayWorker : BackgroundService
 
         var clock = SystemGatewayClock.Instance;
         using var http = GatewayHttp.Create();
+        var policy = new GatewayPolicySource(PolicyOptions(), new WindowsFileAccessCheck(), clock, TimeZoneInfo.Local, _logger);
         var runner = new GatewayRunner(
             http,
             new JsonFileGatewaySettingsStore(_folder.SettingsFile),
             new CngSigningKeyStore(),
             new FileRunOnceStore(_folder.RunOnceFile, clock),
             new NotSupportedCommandExecutor(),
+            policy,
             clock,
             _logger,
             new GatewayRunnerOptions(_folder.WorkFolder, Environment.MachineName, GatewayHttp.ProgramVersion));
@@ -87,5 +92,12 @@ internal sealed class GatewayWorker : BackgroundService
             _logger.LogWarning("The service account {Account} in the gateway's settings is not known to Windows: {Reason}", recorded, ex.Message);
         }
         return accounts;
+    }
+
+    /// <summary><c>gateway.toml</c> beside the program, which customer IT owns.</summary>
+    internal static GatewayPolicyOptions PolicyOptions()
+    {
+        var programFolder = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return new GatewayPolicyOptions(Path.Combine(programFolder, GatewayPolicyParser.FileName), programFolder, Environment.MachineName);
     }
 }

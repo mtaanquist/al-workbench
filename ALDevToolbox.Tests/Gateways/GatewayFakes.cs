@@ -231,3 +231,52 @@ internal sealed class ListLogger : Microsoft.Extensions.Logging.ILogger
 
     public IEnumerable<string> Messages(int eventId) => Lines.Where(l => l.EventId == eventId).Select(l => l.Message);
 }
+
+/// <summary>
+/// A policy that allows every command and reports one valid tier, for the loop's
+/// tests that are about something else. Records what it was asked.
+/// </summary>
+internal sealed class AllowEveryCommandPolicy : ALWorkbench.Gateway.Core.Policy.IGatewayPolicy
+{
+    public List<GatewayCommandMessage> Checked { get; } = [];
+
+    public IReadOnlyList<string> StartProblems { get; set; } = [];
+
+    public Func<GatewayCommandMessage, ALWorkbench.Gateway.Core.Policy.PolicyDecision> Decide { get; set; } =
+        _ => ALWorkbench.Gateway.Core.Policy.PolicyDecision.Allow;
+
+    public ALWorkbench.Gateway.Core.Policy.PolicySnapshot Snapshot { get; set; } = new(new GatewayPolicyReport { State = GatewayPolicyStates.Valid }, 1);
+
+    public IReadOnlyList<string> Start() => StartProblems;
+
+    public ALWorkbench.Gateway.Core.Policy.PolicySnapshot Refresh() => Snapshot;
+
+    public ALWorkbench.Gateway.Core.Policy.PolicyDecision Check(GatewayCommandMessage command)
+    {
+        lock (Checked) Checked.Add(command);
+        return Decide(command);
+    }
+}
+
+/// <summary>An <see cref="ALWorkbench.Gateway.Core.Policy.IFileAccessCheck"/> told which paths are unsafe and which exist.</summary>
+internal sealed class FakeFileAccess : ALWorkbench.Gateway.Core.Policy.IFileAccessCheck
+{
+    public Dictionary<string, string> Problems { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public HashSet<string> Existing { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public List<string> Asked { get; } = [];
+
+    public string? Problem(string path)
+    {
+        Asked.Add(path);
+        return Problems.GetValueOrDefault(path);
+    }
+
+    public bool Exists(string path) => Existing.Contains(path) || File.Exists(path);
+
+    /// <summary>What <see cref="Contents"/> lists for a folder; a folder not given lists nothing.</summary>
+    public Dictionary<string, List<string>> FolderContents { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyList<string> Contents(string folder) => FolderContents.GetValueOrDefault(folder) ?? [];
+}

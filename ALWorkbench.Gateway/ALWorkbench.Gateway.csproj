@@ -31,4 +31,9 @@
     <ProjectReference Include="..\ALWorkbench.Gateway.Core\ALWorkbench.Gateway.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Ships beside the program; customer IT copies it to gateway.toml (#1373). -->
+    <None Include="gateway.example.toml" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

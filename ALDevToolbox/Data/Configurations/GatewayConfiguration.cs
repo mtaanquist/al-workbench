@@ -29,6 +29,11 @@ internal sealed class GatewayConfiguration : IEntityTypeConfiguration<Gateway>
         entity.Property(e => e.MachineName).HasColumnName("machine_name").IsRequired();
         entity.Property(e => e.RevokedAt).HasColumnName("revoked_at");
         entity.Property(e => e.NotifiedOnline).HasColumnName("notified_online");
+        // jsonb so Postgres refuses a malformed report at write time; the gateway
+        // sends a typed GatewayPolicyReport, serialised by GatewayService.
+        entity.Property(e => e.EffectivePolicyJson).HasColumnName("effective_policy").HasColumnType("jsonb");
+        entity.Property(e => e.PolicyReportedAt).HasColumnName("policy_reported_at");
+        entity.Property(e => e.PolicyStale).HasColumnName("policy_stale");
 
         entity.HasIndex(e => new { e.OrganizationId, e.RevokedAt });
 

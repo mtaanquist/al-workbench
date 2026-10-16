@@ -83,6 +83,15 @@ public sealed record GatewayHeartbeatRequest
     /// </summary>
     [JsonPropertyName("interruptedCommandIds")]
     public IReadOnlyList<long> InterruptedCommandIds { get; init; } = [];
+
+    /// <summary>
+    /// What the local policy file allows, when it is sent with this heartbeat: after
+    /// the gateway starts, after the file changed, and every
+    /// <see cref="GatewayPolicyReport.ResendInterval"/>. Null on the other heartbeats,
+    /// which keep the last one AL Workbench stored. An older gateway never sends it.
+    /// </summary>
+    [JsonPropertyName("policy")]
+    public GatewayPolicyReport? Policy { get; init; }
 }
 
 /// <summary>Answer to a heartbeat.</summary>

@@ -2,18 +2,24 @@ using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Text;
+using System.Text.Json.Nodes;
 using ALWorkbench.Gateway;
+using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core;
+using ALWorkbench.Gateway.Core.Policy;
+using ALWorkbench.Gateway.Core.PowerShell;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging.EventLog;
 
-// The program customer IT runs. Four commands:
+// The program customer IT runs. Five commands:
 //   register --url <address> --code <code>   make a key, exchange the code, print the fingerprint
 //   install [--account DOMAIN\name$]           create the Windows service (see ServiceInstaller)
 //   uninstall                                  remove the service, the key and the stored settings
+//   check                                      read gateway.toml and try each local tier, changing nothing
 //   run                                        the service itself; Windows starts it with this
 // See .design/on-prem-gateway.md.
 
@@ -44,6 +50,7 @@ internal static class GatewayProgram
                 "register" => await RegisterAsync(Options(args)),
                 "install" => Install(Options(args)),
                 "uninstall" => Uninstall(),
+                "check" => await CheckAsync(),
                 "run" => await RunAsync(args),
                 _ => Usage(command),
             };
@@ -81,6 +88,11 @@ internal static class GatewayProgram
                   Connects this computer to AL Workbench. An Admin gets the code in
                   AL Workbench under Administration → Gateways → Add gateway, and then
                   approves the gateway there.
+
+              ALWorkbench.Gateway check
+                  Reads gateway.toml beside the program, shows what it allows for each
+                  service tier, checks that only administrators can change it, and asks
+                  each service tier on this computer for its state. Changes nothing.
 
               ALWorkbench.Gateway uninstall
                   Removes the service, the gateway's key and its settings. The log files stay.
@@ -237,6 +249,72 @@ internal static class GatewayProgram
             Console.WriteLine($"Ask an Admin to revoke gateway '{settings.Name}' in AL Workbench under Administration → Gateways.");
         }
         return 0;
+    }
+
+    /// <summary>
+    /// What customer IT runs after editing gateway.toml: the file's mistakes, who else
+    /// can change it, what each tier is allowed, and a harmless read from each tier on
+    /// this computer, which proves the right PowerShell and administration module load.
+    /// </summary>
+    private static async Task<int> CheckAsync()
+    {
+        RequireAdministrator();
+        var options = GatewayWorker.PolicyOptions();
+        var source = new GatewayPolicySource(options, new WindowsFileAccessCheck(), SystemGatewayClock.Instance, TimeZoneInfo.Local, NullLogger.Instance);
+        source.Refresh();
+        var report = source.FullReport;
+
+        Console.WriteLine($"Settings file: {options.PolicyFile}");
+        Console.WriteLine(report.State switch
+        {
+            GatewayPolicyStates.Valid => "The settings are correct.",
+            GatewayPolicyStates.Invalid => "The settings have mistakes. Until they are corrected, the gateway only reads from the tiers the last correct version listed:",
+            GatewayPolicyStates.Missing => "There is no gateway.toml yet. Copy gateway.example.toml to gateway.toml and list your service tiers in it.",
+            _ => "Someone other than administrators can change the gateway's files, so the gateway will not run:",
+        });
+        foreach (var problem in report.Problems) Console.WriteLine("  - " + problem);
+        Console.WriteLine();
+
+        foreach (var instance in report.Instances)
+        {
+            Console.WriteLine($"{instance.Machine} / {instance.Name} ({instance.Environment})");
+            Console.WriteLine($"  Allowed:       {(instance.Allow.Count == 0 ? "nothing" : string.Join(", ", instance.Allow))}");
+            Console.WriteLine($"  Change hours:  {instance.ChangeHours ?? "any time"}");
+            Console.WriteLine($"  Tenants:       {string.Join(", ", instance.Tenants)}");
+            Console.WriteLine($"  Publishers:    {(instance.Publishers is null ? "any" : string.Join(", ", instance.Publishers))}");
+            Console.WriteLine($"  Unsigned apps: {(instance.AllowUnsigned ? "allowed" : "refused")}");
+        }
+
+        var failed = report.State != GatewayPolicyStates.Valid;
+        var locator = new RegistryServiceTierLocator();
+        var runner = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck());
+        foreach (var instance in source.InForce.Instances.Where(i =>
+                     string.Equals(i.Tier.Machine, Environment.MachineName, StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.WriteLine();
+            Console.Write($"Asking {instance.Tier} for its state... ");
+            var install = locator.Find(instance.Tier.Instance);
+            if (install is null)
+            {
+                Console.WriteLine($"there is no Business Central service for {instance.Tier.Instance} on this computer.");
+                failed = true;
+                continue;
+            }
+            var target = new PowerShellTarget(PowerShellChoice.For(instance.PowerShell, install.Version), install.ServiceFolder);
+            var result = await runner.RunAsync(PowerShellOperations.SelfTest, target,
+                new JsonObject { [GatewayCommandParameters.Instance] = instance.Tier.Instance }, TimeSpan.FromMinutes(2), null, CancellationToken.None);
+            if (result.Succeeded)
+            {
+                Console.WriteLine($"{result.Output.FirstOrDefault()?["state"]}, version {result.Output.FirstOrDefault()?["version"]} (PowerShell {result.Output.FirstOrDefault()?["powerShell"]}).");
+            }
+            else
+            {
+                Console.WriteLine("failed.");
+                Console.WriteLine("  " + result.Error);
+                failed = true;
+            }
+        }
+        return failed ? 1 : 0;
     }
 
     /// <summary>How long stopping may take: the result grace plus room for the rest.</summary>

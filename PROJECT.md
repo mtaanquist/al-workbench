@@ -11,15 +11,17 @@ one of its sections.
 App folders are relative to `ALDevToolbox/`. Beside the app and its tests, the repo root
 holds `ALWorkbench.Gateway.Contracts/`: what the app and the on-premises gateway agree on
 (the request and response records, the closed `GatewayVerb` set and its strict JSON converter, `GatewayProtocol` with the protocol version and the
-routes, the signed request token and the key fingerprint). It is plain `net10.0` with no
+routes, the signed request token and the key fingerprint, `GatewayPolicyReport` (what the
+local policy file allows, sent with heartbeats) and `GatewayCommandParameters` (the parameter
+names the gateway's policy check reads)). It is plain `net10.0` with no
 package references, because everything in it ships inside the gateway too; the Dockerfile's
 restore layer copies its csproj beside the app's. Next to it are the gateway's own two, which
 the app never references and `.dockerignore` keeps out of the image:
 
 | Project | What goes there |
 |---|---|
-| `ALWorkbench.Gateway.Core/` | Everything the gateway does, behind seams so it is tested on Linux: the seams themselves (`ISigningKeyStore`, `IGatewaySettingsStore`, `IGatewayClock`, `IRunOnceStore`, `ICommandExecutor`), `GatewayRegistration`, `WorkbenchClient` (signed requests, answers mapped to the exceptions in `WorkbenchExceptions`), the loop `GatewayRunner`, `ProgressBatcher`, `Backoff`, `GatewayHttp` (system proxy and certificate store), `GatewayLog` (the event ids customer IT filters on) and `RollingFileLoggerProvider`. A verb is a new `ICommandExecutor`, not a change to the loop. |
-| `ALWorkbench.Gateway/` | The Windows host only: `Program` (the `register` / `install` / `uninstall` / `run` commands and their console text, which customer IT reads), `CngSigningKeyStore`, `ServiceInstaller` (`sc.exe`), `DataFolderAccess` (the data folder's access lists) and `GatewayWorker`. Anything testable belongs in Core instead. |
+| `ALWorkbench.Gateway.Core/` | Everything the gateway does, behind seams so it is tested on Linux: the seams themselves (`ISigningKeyStore`, `IGatewaySettingsStore`, `IGatewayClock`, `IRunOnceStore`, `ICommandExecutor`), `GatewayRegistration`, `WorkbenchClient` (signed requests, answers mapped to the exceptions in `WorkbenchExceptions`), the loop `GatewayRunner`, `ProgressBatcher`, `Backoff`, `GatewayHttp` (system proxy and certificate store), `GatewayLog` (the event ids customer IT filters on) and `RollingFileLoggerProvider`. `Policy/`: the local policy file `gateway.toml` - `GatewayPolicyParser` (strict, line-numbered mistakes), `GatewayPolicy` (effective permissions per tier), `PolicyEnforcer` (the check before every command), `GatewayPolicySource` (re-reading, the last-good fallback, the `IGatewayPolicy` seam the loop uses) and the `IFileAccessCheck` seam. `PowerShell/`: `PowerShellRunner` (one child process per operation, parameters on standard input, never in script), the `IProcessRunner` seam and `SystemProcessRunner`, `PowerShellChoice`, `ServiceTierInstall` and the `IServiceTierLocator` seam. A verb is a new `ICommandExecutor`, not a change to the loop. |
+| `ALWorkbench.Gateway/` | The Windows host only: `Program` (the `register` / `install` / `uninstall` / `check` / `run` commands and their console text, which customer IT reads), `CngSigningKeyStore`, `ServiceInstaller` (`sc.exe`), `DataFolderAccess` (the data folder's access lists), `WindowsFileAccessCheck` (who may change the policy file and scripts), `RegistryServiceTierLocator` (a tier's install folder from its service), `GatewayWorker`, and `gateway.example.toml`, the commented policy file customer IT starts from (shipped beside the program; a test keeps it valid). Anything testable belongs in Core instead. |
 
 Their tests are in `ALDevToolbox.Tests/Gateways/` (the core library, against fakes in
 `GatewayFakes.cs`) and `Endpoints/GatewayServiceFrameEndpointTests.cs` (the gateway's code

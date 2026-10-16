@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361) and the Windows service frame (#1362) exist; the policy file, the runner and the verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362) and the policy file and PowerShell runner (#1373) exist; the verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -349,13 +349,163 @@ that method is chosen; the setup guide (#1376) says this. In Windows PowerShell 
 `Get-Service`, so `service-manager` steps always run in 5.1. `powershell-remoting` uses
 `Invoke-Command -ComputerName` where WinRM is enabled.
 
+### The policy file and the runner, as built (#1373)
+
+In `ALWorkbench.Gateway.Core/Policy/` and `PowerShell/`, with the Windows-only pieces in the host.
+`gateway.example.toml` ships beside the program with comments for customer IT; they copy it to
+`gateway.toml`.
+
+**Reading the file** (`GatewayPolicyParser`, on Tomlyn's syntax tree because only the tree knows
+line numbers). Strict: a key, a section or a value it does not know is a mistake reported with its
+line number, never ignored, so a typo cannot silently widen or narrow what the gateway may do. All
+mistakes are reported at once. Beyond the example above:
+
+- Values are case-sensitive words (`"production"`, `"stop-all-then-start-all"`, `"NavDatabase"`);
+  machine and instance names compare without regard to case, as Windows does.
+- `tenants` left out means `["default"]`; `publishers` left out means any publisher. An empty list
+  for either is a mistake ("leave the line out instead"). `allow = []` is allowed and means nothing,
+  not even `inventory`.
+- `[defaults.<kind>]` holds only `allow` and `change_hours`. Each of the two is taken from the tier
+  if it sets it, else from its kind's default, independently; there is no `[gateway]` section.
+- `change_hours` is `HH:MM-HH:MM`, start inside and end outside, overnight when the start is later;
+  judged on the gateway computer's wall clock, so daylight saving moves with it (an hour that happens
+  twice is inside both times). A window that starts and ends at the same time is a mistake.
+- A database must name `publish_on`; `restart` left out restarts only that tier; every tier it names
+  needs its own `[[instance]]`, and a tier belongs to one database. `licence_target` left out
+  refuses licence imports.
+- `before` / `after` must be the full path of a `.ps1` on a local drive (`C:\...`), not a share.
+- A tier on another computer needs a `[[machine]]` section; one for this computer is a mistake.
+- An optional `powershell = "5.1"` or `"7"` per tier overrides the gateway's choice (below).
+- At most 200 tiers, so the report sent to AL Workbench stays small.
+
+**Keeping it current** (`GatewayPolicySource`). The file is read at every heartbeat and before every
+command, and parsed again when its SHA-256 changed: cheaper than a file watcher to get right, and a
+command never runs under an older version than the one on disk. States, reported to AL Workbench:
+
+| State | When | What is allowed |
+| --- | --- | --- |
+| `valid` | Read without mistakes | The file as written |
+| `invalid` | Mistakes, a named script is missing, or the file could not be read | The tiers of the last good version, `inventory` only, until fixed |
+| `missing` | No `gateway.toml` | Nothing; the gateway still starts, so it can be registered and approved first |
+| `unsafe` | Someone other than administrators can change the files | Nothing; at start the gateway stops with exit code 1 |
+
+A file with mistakes keeps the last good tiers readable rather than refusing everything: an edit
+that broke the file may have been meant to take a permission away, so the old permissions are not
+kept, but reads change nothing and AL Workbench keeps seeing the tiers. A file that is there but
+cannot be read (held open by an editor, or its rights changed) is treated the same way until a read
+succeeds, since what it now says is unknown. Each change of state is logged once (event ids 3000
+read, 3001 mistakes, 3002 missing, 3003 unsafe).
+
+**File permissions** (`IFileAccessCheck`; `WindowsFileAccessCheck` in the host reads the access
+list, `AccessRules` judges it). The program folder and every file and folder in it (the program, its
+DLLs, `gateway.toml`), and each named script and its folder must be owned by Administrators, SYSTEM
+or TrustedInstaller, and no one else may hold a right that changes them (write, append, attributes,
+delete, delete children, change permissions, take ownership, generic write or all). That includes
+the gateway's own service account. On a folder, an inherit-only entry that is passed on to files or
+folders created in it counts like one on the folder itself, since it decides who can write the next
+DLL; on a file it applies to nothing. Deny entries, and the CREATOR OWNER and CREATOR GROUP
+placeholders, add nobody. A folder where many files are open names five and counts the rest. The
+same rule covers the tier's install folder whose `NavAdminTool.ps1` or module the runner loads (see
+the runner, below). Checked on the same schedule as the file; at start a problem logs event 3003 and ends the service with exit code 1,
+the same way as loosened data-folder rights (event 2008), so the recovery options `install` sets
+restart it every minute and it starts by itself once the rights are fixed. Later, a problem refuses
+every command, reads included.
+
+**The check before every command** (`PolicyEnforcer`, called by `GatewayRunner` before any file is
+downloaded). A refusal is reported as the command's failure with the reason and "Nothing was
+changed.", and logged with event id 1003. The command names its tier with the parameters in
+`GatewayCommandParameters` (`machine`, `instance`, `tenant`, and for `publish-install` `apps`
+with each app's `file`, `publisher` and `signed`, and `unpublishPrevious`); a parameter of the wrong
+shape refuses the command. A `publish-install` must list its apps, never an empty list, with exactly
+one app for each of the command's files, named by the file's name; otherwise it is refused, because
+an empty list would pass every publisher and signing rule while the verb published whatever files
+came with it. What each verb needs:
+
+| Verb | Needs |
+| --- | --- |
+| `refresh-inventory` | `inventory` on the named tier; with no tier named, the verb reads only the tiers that allow it |
+| `publish-install` | Sent to the database's `publish_on` tier: `publish` there, the tenant and each publisher on its lists, `allow_unsigned` for an unsigned app, `unpublish` when previous versions go, `scripts` when the database names a script, and `restart` on every tier of the restart group |
+| `import-licence` | Sent to the `publish_on` tier of a database with a `licence_target`: `licence` there (and the tenant for `Tenant`), `restart` on every tier of the group |
+| `restart-group` | `service_control` on every tier of the group |
+| `restart-instance`, `stop-instance`, `start-instance` | `service_control` on the tier |
+
+Then, for every change: refused when any tier it touches is `production` and an AI assistant asked
+("AI assistants cannot change on-premises production"), and refused outside any touched tier's
+`change_hours`. Everything this check knows about an app is what the command declares: the
+publisher, the `signed` flag and which file is which. It refuses on the claim early; the
+`publish-install` verb (#1375) must verify it against the files (see the open items). The shared-tier rule
+(`shared_restart`) needs to know which Solutions each tier is linked to, which only AL Workbench
+knows; it is enforced with the restart group (#1368).
+
+**The report.** `GatewayPolicyReport` (contracts) goes with the first heartbeat after start, after
+any change, and every 15 minutes; other heartbeats stay small. AL Workbench stores it in
+`gateways.effective_policy` (jsonb) with `policy_reported_at`, whether or not the gateway is
+approved yet, and keeps the stored one when a heartbeat carries none. The gateway lists at most 50
+problems (and counts the rest), and a report over 128 KB of JSON is replaced by a short one with
+`tooLarge` set and the state, so a large file can never get the heartbeat refused and the gateway
+shown offline; `check` still shows all of it. When AL Workbench receives that short report, or one
+over its own 256 KB limit from a gateway that did not cut it down, it keeps the stored report and
+sets `policy_stale`, so it is never shown as what the gateway enforces now; the next full report
+clears it.
+
+**The runner** (`PowerShellRunner` over `IProcessRunner`). One child process per operation:
+`powershell.exe` or `pwsh.exe` with fixed switches (`-NoLogo -NoProfile -NonInteractive
+-ExecutionPolicy Bypass -EncodedCommand`) and a script made only of the fixed bootstrap and the
+operation's own constant script. The parameters, the module folder and a per-run random marker
+go on standard input as base64 of UTF-8 JSON, which the script reads with `ConvertFrom-Json`, so the
+command line is identical whatever the parameters hold. The bootstrap dot-sources `NavAdminTool.ps1`
+from the tier's install folder, or, without it, imports whichever of the
+`Microsoft.Dynamics.Nav.Management`, `Microsoft.Dynamics.Nav.Apps.Management`,
+`Microsoft.BusinessCentral.Management` and `Microsoft.BusinessCentral.Apps.Management` modules
+the folder holds (`.psd1`, `.psm1`, then `.dll`); the folder is the one in the tier's Windows service
+image path (`MicrosoftDynamicsNavServer$<instance>`, read by `RegistryServiceTierLocator`). The
+result comes back on standard output between two marker lines as base64 JSON; other lines are log,
+streamed as progress; a failure is a non-zero exit with PowerShell's error on standard error.
+A timeout or a cancellation kills the whole process tree. On Windows each child also goes into a
+job object set to kill everything in it when closed (`JobObjectContainment` behind
+`IProcessContainment`), closed when the operation ends, so a grandchild whose parent already exited,
+which a tree kill no longer finds, cannot outlive the command.
+
+Before it loads a tier's module, the runner checks the tier's install folder and everything in it
+with the same rule as the gateway's own files, and refuses to run anything against a tier where
+someone other than administrators can change them: whoever can replace `NavAdminTool.ps1` or a
+module DLL there gets code running in the gateway's PowerShell. `check` reports it for each tier.
+
+PowerShell per tier (`PowerShellChoice`): the file's `powershell` if set; else 7 from Business
+Central 24 (assumed to be the first whose module needs modern .NET; to be confirmed against real servers
+with #1365), else 5.1, and 5.1 when the version is unknown. Remote machines are #1368's.
+
+**`ALWorkbench.Gateway check`**, run by customer IT as administrator: shows the file's mistakes, who
+else can change the files, each tier's effective permissions, and runs a harmless
+`Get-NAVServerInstance` against each tier on this computer, which proves the right PowerShell and
+module load. It changes nothing.
+
+Tests: `ALDevToolbox.Tests/Gateways/GatewayPolicy*Tests` and `PowerShellRunnerTests`. The runner's
+real round trip (hostile values, loading `NavAdminTool.ps1` from a tier folder) runs when `pwsh` is
+on the PATH and is skipped otherwise; Windows PowerShell 5.1 and real Business Central modules are
+first exercised with #1365.
+
+**Open items**, each owned by a later step:
+
+- **PowerShell choice and standard input under 5.1** (#1365). The version from which a tier gets
+  PowerShell 7 (Business Central 24) is an assumption, and passing the parameters on standard input
+  is only tested under `pwsh`; the inventory spike confirms both against real servers running
+  Windows PowerShell 5.1.
+- **`shared_restart`** (#1368). The gateway cannot tell which Solutions share a tier, so the rule is
+  parsed and reported but not enforced; the restart group enforces it.
+- **Each `.app` against the declared list** (#1375). The policy check sees only what the command
+  declares. Before publishing anything, `publish-install` must check that the files are exactly the
+  apps declared (as many, one each), read each `.app`'s publisher from its own manifest and refuse
+  a mismatch with the declared one, and verify each signature itself: with `allow_unsigned = false`,
+  an app whose Authenticode or NAVX signature does not verify is refused whatever `signed` claimed.
+
 ## Data model
 
 New tables, all org-scoped with the usual query filter:
 
 | Table | Holds |
 | --- | --- |
-| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON), revoked at, the online state last announced to Admins |
+| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON), when it was reported and whether it is out of date, revoked at, the online state last announced to Admins |
 | `gateway_registration_codes` | Code hash, created by, expires at, used at, gateway id (set for a rotation code) |
 | `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |
@@ -629,6 +779,8 @@ commands yet" until #1365 onward plug executors in behind `ICommandExecutor`.
   the new key is made beside the old one, which is deleted only once AL Workbench has accepted the
   new one. The address must be `https://` (plain `http` only for the computer itself) and is the
   workbench's `PUBLIC_BASE_URL`, path included, because the token audience is built from it.
+- `check` reads `gateway.toml` and tries each local tier, changing nothing (#1373, below "The
+  policy file and the runner, as built").
 - `uninstall` stops and removes the service, deletes the key, the settings and the state, removes
   the event log source, keeps the log files, and reminds them to have an Admin revoke the gateway.
 
@@ -676,19 +828,21 @@ what it found (event 2008) and exits with a failure code instead of running.
 1. Refused if the run-once file already has it ("already started this command once").
 2. Refused if its seconds left are 0, or have run out by the gateway's monotonic clock since the
    answer arrived. It is recorded as started-and-finished, so it is never considered again.
-3. Recorded as started, on disk, before anything else happens.
-4. Files downloaded into its work folder, each stopped as soon as it exceeds its announced size,
+3. Refused if the local policy file does not allow it (#1373), with the reason; recorded as
+   started-and-finished like 2.
+4. Recorded as started, on disk, before anything else happens.
+5. Files downloaded into its work folder, each stopped as soon as it exceeds its announced size,
    then checked by size and SHA-256. Any mismatch fails the command; the verb never sees the file.
    A download has 30 minutes in all, body included, and gives up if nothing arrives for 2 minutes
    (a connection dropped without a word), then is retried like any unreachable answer. Each file
    is opened read-only, sharing read only, before it is hashed, and stays open until the verb
    ends, so on Windows nothing can change or delete it between the check and its use.
-5. The executor runs. Its progress lines are batched: at most one post every 3 seconds, at most 200
+6. The executor runs. Its progress lines are batched: at most one post every 3 seconds, at most 200
    lines a post, lines over 2,000 characters cut, at most 10,000 lines held (more are counted and
    reported as left out). Each batch is numbered, and one whose post failed is sent again
    unchanged before anything newer, so a lost answer never doubles lines. A 409 on progress stops
    the verb.
-6. The result is saved in the run-once file, then posted, retried with back-off until it arrives,
+7. The result is saved in the run-once file, then posted, retried with back-off until it arrives,
    including through a 401 or a 403 while a new key waits for approval (a 409 means AL Workbench
    already closed it, and is accepted), then the command is marked finished.
 
@@ -702,7 +856,8 @@ it did (event 1005); it is not reported as interrupted.
 `install`) and a file per day in `logs\`, kept 30 days. Each command gets a line when it starts and
 when it ends, naming the verb, who asked for it, and the outcome, with fixed event ids (1000
 started, 1001 succeeded, 1002 failed, 1003 refused, 1004 interrupted, 1005 result sent after a
-restart; 2007 stopped on an unexpected error, 2008 data folder rights loosened) so customer IT can
+restart; 2007 stopped on an unexpected error, 2008 data folder rights loosened; 3000 to 3003 the
+policy file, above) so customer IT can
 filter on them. "Who asked" travels with the command: `GatewayCommandMessage.requestedBy` (the requester's
 display name) and `startedByAgent`, added for this; an older gateway ignores them.
 
