@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Everything the on-premises gateway does, behind seams, so it builds and is
+       tested on the Linux CI: registration, request signing, the heartbeat and
+       long-poll loop, run-once bookkeeping, file downloads and their hash check,
+       batched progress, the rolling log file. The Windows-only parts (the service
+       host, the Windows key store, the event log) live in ALWorkbench.Gateway.
+       See .design/on-prem-gateway.md, "Projects, packaging and naming". -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ALWorkbench.Gateway.Core</RootNamespace>
+    <!-- Same discipline as the app (#394, #396). -->
+    <WarningsAsErrors>$(WarningsAsErrors);nullable</WarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ILogger only. Microsoft first-party, and already a dependency of the
+         Microsoft.Extensions.Hosting the Windows host references. Kept in step
+         with the app's 10.0.x packages. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ALWorkbench.Gateway.Contracts\ALWorkbench.Gateway.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -77,6 +77,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ALDevToolbox\ALDevToolbox.csproj" />
+    <!-- The gateway's logic library is tested here rather than in a project of its
+         own: one test project is what CI runs and what PROJECT.md maps, and the
+         end-to-end test drives the gateway against the real /gateway routes booted
+         by EndpointFactory. Tests live under Gateways/. -->
+    <ProjectReference Include="..\ALWorkbench.Gateway.Core\ALWorkbench.Gateway.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

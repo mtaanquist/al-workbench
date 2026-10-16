@@ -355,6 +355,8 @@ public sealed class GatewayCommandService
                 c.Verb,
                 c.ParametersJson,
                 c.ExpiresAt,
+                RequestedBy = c.RequestedByUser != null ? c.RequestedByUser.DisplayName : null,
+                c.StartedByAgent,
                 Files = c.Files.OrderBy(f => f.Id)
                     .Select(f => new GatewayCommandFileMessage { Id = f.Id, Name = f.FileName, Sha256 = f.Sha256, Size = f.Size })
                     .ToList(),
@@ -366,6 +368,8 @@ public sealed class GatewayCommandService
             Verb = row.Verb,
             Parameters = JsonNode.Parse(row.ParametersJson) as JsonObject ?? new JsonObject(),
             SecondsLeft = (int)Math.Max(0, Math.Floor((row.ExpiresAt - now).TotalSeconds)),
+            RequestedBy = string.IsNullOrWhiteSpace(row.RequestedBy) ? null : row.RequestedBy,
+            StartedByAgent = row.StartedByAgent,
             Files = row.Files,
         };
     }

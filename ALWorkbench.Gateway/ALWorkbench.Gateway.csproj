@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The program customer IT installs: a thin Windows service host over
+       ALWorkbench.Gateway.Core, plus the Windows-only pieces (the Windows key store,
+       the event log, installing the service). EnableWindowsTargeting lets the
+       solution restore and build on the Linux CI; it only runs on Windows.
+       Publishing it self-contained for win-x64 and signing it is the release
+       job's work (#1363). See .design/on-prem-gateway.md. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ALWorkbench.Gateway</RootNamespace>
+    <AssemblyName>ALWorkbench.Gateway</AssemblyName>
+    <Product>AL Workbench Gateway</Product>
+    <!-- Same discipline as the app (#394, #396). -->
+    <WarningsAsErrors>$(WarningsAsErrors);nullable</WarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft first-party, approved in #1362. Kept in step with the app's
+         10.0.x packages. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ALWorkbench.Gateway.Core\ALWorkbench.Gateway.Core.csproj" />
+  </ItemGroup>
+
+</Project>

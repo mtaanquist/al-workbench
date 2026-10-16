@@ -13,7 +13,17 @@ holds `ALWorkbench.Gateway.Contracts/`: what the app and the on-premises gateway
 (the request and response records, the closed `GatewayVerb` set and its strict JSON converter, `GatewayProtocol` with the protocol version and the
 routes, the signed request token and the key fingerprint). It is plain `net10.0` with no
 package references, because everything in it ships inside the gateway too; the Dockerfile's
-restore layer copies its csproj beside the app's. See `.design/on-prem-gateway.md`.
+restore layer copies its csproj beside the app's. Next to it are the gateway's own two, which
+the app never references and `.dockerignore` keeps out of the image:
+
+| Project | What goes there |
+|---|---|
+| `ALWorkbench.Gateway.Core/` | Everything the gateway does, behind seams so it is tested on Linux: the seams themselves (`ISigningKeyStore`, `IGatewaySettingsStore`, `IGatewayClock`, `IRunOnceStore`, `ICommandExecutor`), `GatewayRegistration`, `WorkbenchClient` (signed requests, answers mapped to the exceptions in `WorkbenchExceptions`), the loop `GatewayRunner`, `ProgressBatcher`, `Backoff`, `GatewayHttp` (system proxy and certificate store), `GatewayLog` (the event ids customer IT filters on) and `RollingFileLoggerProvider`. A verb is a new `ICommandExecutor`, not a change to the loop. |
+| `ALWorkbench.Gateway/` | The Windows host only: `Program` (the `register` / `install` / `uninstall` / `run` commands and their console text, which customer IT reads), `CngSigningKeyStore`, `ServiceInstaller` (`sc.exe`), `DataFolderAccess` (the data folder's access lists) and `GatewayWorker`. Anything testable belongs in Core instead. |
+
+Their tests are in `ALDevToolbox.Tests/Gateways/` (the core library, against fakes in
+`GatewayFakes.cs`) and `Endpoints/GatewayServiceFrameEndpointTests.cs` (the gateway's code
+against the real routes). See `.design/on-prem-gateway.md`.
 
 | Folder                       | What goes there                                                              |
 |------------------------------|------------------------------------------------------------------------------|

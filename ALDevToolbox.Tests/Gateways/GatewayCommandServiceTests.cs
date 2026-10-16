@@ -228,6 +228,31 @@ public sealed class GatewayCommandServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_claim_names_who_asked_for_the_command_so_the_gateway_can_log_it()
+    {
+        var gateway = await GatewayAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var admin = await ctx.Users.SingleAsync(u => u.Id == _admin.Id);
+            admin.DisplayName = "Ida Consultant";
+            await ctx.SaveChangesAsync();
+        }
+        await EnqueueAsync(gateway);
+        await using (var ctx = _db.NewContext())
+        {
+            await Service(ctx).EnqueueAsync(new GatewayCommandRequest(gateway, GatewayVerb.RefreshInventory, StartedByAgent: true));
+        }
+
+        var asked = await ClaimAsync(gateway);
+        var scheduled = await ClaimAsync(gateway);
+
+        asked.Command!.RequestedBy.Should().Be("Ida Consultant");
+        asked.Command.StartedByAgent.Should().BeFalse();
+        scheduled.Command!.RequestedBy.Should().BeNull();
+        scheduled.Command.StartedByAgent.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Concurrent_claims_never_hand_out_the_same_command_twice()
     {
         var gateway = await GatewayAsync();
