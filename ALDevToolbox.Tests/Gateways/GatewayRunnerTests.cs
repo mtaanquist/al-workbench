@@ -535,7 +535,7 @@ public sealed class GatewayRunnerTests : IDisposable
                 allow_unsigned = true
                 """),
             new ALWorkbench.Gateway.Core.PowerShell.PowerShellRunner(server, new("powershell.exe", "pwsh.exe"), new FakeFileAccess()),
-            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01");
+            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01", server.Restarts(), server.ScriptRunner());
         var sent = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0");
         var arrived = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.5.0.0");
         var file = new GatewayCommandFileMessage { Id = 9, Name = "CRONUS_Coffee.app", Sha256 = Convert.ToHexStringLower(SHA256.HashData(sent)), Size = arrived.Length };
@@ -580,7 +580,7 @@ public sealed class GatewayRunnerTests : IDisposable
                 allow_unsigned = true
                 """),
             new ALWorkbench.Gateway.Core.PowerShell.PowerShellRunner(server, new("powershell.exe", "pwsh.exe"), new FakeFileAccess()),
-            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01");
+            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01", server.Restarts(), server.ScriptRunner());
         var sent = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0");
         var swapped = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "Fabrikam", "1.4.0.0");
         var file = new GatewayCommandFileMessage { Id = 9, Name = "CRONUS_Coffee.app", Sha256 = Convert.ToHexStringLower(SHA256.HashData(sent)), Size = sent.Length };

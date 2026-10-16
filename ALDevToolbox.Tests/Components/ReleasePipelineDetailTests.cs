@@ -340,6 +340,296 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
             cut.Find(".rp-summary__sentence").TextContent.Should().EndWith("The service tiers were not restarted."));
     }
 
+    // ── The restart group (#1368) ──────────────────────────────────────────────
+
+    private static string Steps(params DeliveryGatewayStep[] steps) => DeliveryGatewaySteps.ToJson(steps)!;
+
+    private static DeliveryGatewayStep Tier(string name, string outcome, string? message = null) =>
+        new() { Kind = DeliveryGatewaySteps.Restart, Name = name, Outcome = outcome, Message = message };
+
+    private static DeliveryGatewayStep ScriptStep(string kind, string name, string outcome, string? message = null) =>
+        new() { Kind = kind, Name = name, Outcome = outcome, Message = message };
+
+    [Fact]
+    public async Task Each_restarted_tier_and_script_is_its_own_line_and_the_old_not_restarted_note_is_gone()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-1);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Deployed, start, d =>
+        {
+            d.StartedAt = start.AddSeconds(1);
+            d.FinishedAt = start.AddMinutes(6);
+            d.TiersRestarted = true;
+            d.GatewayStepsJson = Steps(
+                ScriptStep(DeliveryGatewaySteps.BeforeScript, @"C:\Scripts\before-deploy.ps1", DeliveryGatewaySteps.Done),
+                Tier("CRONUS-BC01 / BC140", DeliveryGatewaySteps.Done),
+                Tier("CRONUS-BC02 / BC140", DeliveryGatewaySteps.Done),
+                ScriptStep(DeliveryGatewaySteps.AfterScript, @"C:\Scripts\after-restart.ps1", DeliveryGatewaySteps.Done));
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Completed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(1)));
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.Find(".rp-rel__row").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".rp-summary__sentence").TextContent.Should().EndWith("The service tiers were restarted.");
+            cut.Find(".rp-tiers .section-label").TextContent.Should().Be("Service tiers and scripts");
+            cut.FindAll(".rp-tiers .rp-app__name").Select(e => e.TextContent).Should().Equal(
+                "before-deploy.ps1", "CRONUS-BC01 / BC140", "CRONUS-BC02 / BC140", "after-restart.ps1");
+            cut.FindAll(".rp-tiers .rp-app__end .rp-strong").Select(e => e.TextContent).Should().Equal(
+                "Ran", "Restarted", "Restarted", "Ran");
+            cut.Markup.Should().NotContain("Service tiers were not restarted.");
+        });
+    }
+
+    [Fact]
+    public async Task A_tier_that_did_not_restart_says_the_apps_are_in_and_offers_no_deploy_again()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-1);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Failed, start, d =>
+        {
+            d.StartedAt = start.AddSeconds(1);
+            d.FinishedAt = start.AddMinutes(14);
+            d.TiersRestarted = false;
+            d.FailureMessage = "The apps were installed, but CRONUS-BC02 / BC140 did not restart. It was not running again after 10 minutes.";
+            d.GatewayStepsJson = Steps(
+                Tier("CRONUS-BC01 / BC140", DeliveryGatewaySteps.Done),
+                Tier("CRONUS-BC02 / BC140", DeliveryGatewaySteps.Failed, "it was not running again after 10 minutes"));
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Completed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(1)));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".rp-what__text").TextContent.Should().StartWith("The apps were installed, but CRONUS-BC02 / BC140 did not restart.");
+            cut.Find(".rp-next__text").TextContent.Should().Be(
+                "The apps are installed. Ask the customer's IT to start CRONUS-BC02 / BC140. You don't need to deploy again.");
+            cut.FindAll(".rp-tiers .rp-app__end .rp-strong").Select(e => e.TextContent).Should().Equal("Restarted", "Did not restart");
+            cut.FindAll(".rp-step__label").Select(e => e.TextContent).Should().Contain("Installed, restart failed")
+                .And.NotContain("Installing failed", "the install went through");
+            cut.Markup.Should().Contain("Installed, but CRONUS-BC02 / BC140 did not restart");
+            cut.FindAll(".rp-tiers .rp-app__msg--failed").Single().TextContent.Should().Be("It was not running again after 10 minutes.");
+            cut.FindAll("button").Select(b => b.TextContent).Should().NotContain(t => t.Contains("Deploy again"),
+                "the apps are in, so the same build would change nothing and restart nothing");
+        });
+    }
+
+    [Fact]
+    public async Task A_restart_failure_that_skipped_the_after_script_asks_for_it_to_be_run_by_hand()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-1);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Failed, start, d =>
+        {
+            d.StartedAt = start.AddSeconds(1);
+            d.FinishedAt = start.AddMinutes(14);
+            d.TiersRestarted = false;
+            d.FailureMessage = "The apps were installed, but CRONUS-BC02 / BC140 did not restart.";
+            d.GatewayStepsJson = Steps(
+                Tier("CRONUS-BC01 / BC140", DeliveryGatewaySteps.Done),
+                Tier("CRONUS-BC02 / BC140", DeliveryGatewaySteps.Failed, "it was not running again after 10 minutes"),
+                ScriptStep(DeliveryGatewaySteps.AfterScript, @"C:\Scripts\after-restart.ps1", DeliveryGatewaySteps.NotDone, "Not run, because the service tiers were not all restarted."));
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Completed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(1)));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() => cut.Find(".rp-next__text").TextContent.Should().Be(
+            "The apps are installed. Ask the customer's IT to start CRONUS-BC02 / BC140 and run after-restart.ps1 by hand. You don't need to deploy again."));
+    }
+
+    [Fact]
+    public async Task On_premises_the_health_names_the_tier_it_is_read_from()
+    {
+        var seed = await SeedAsync();
+        await LinkRestartGroupAsync(seed);
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() => cut.FindAll(".rp-fact .meta-item__label").Select(e => e.TextContent).Should()
+            .Contain("Health of CRONUS-BC01 / BC140", "beside a restart failure on another tier, a bare 'Running' reads as all clear")
+            .And.NotContain("Health"));
+    }
+
+    [Fact]
+    public async Task On_premises_production_asks_to_acknowledge_signing_everyone_out_of_the_listed_tiers()
+    {
+        var seed = await SeedAsync(production: true);
+        await LinkRestartGroupAsync(seed);
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.Find(".empty-state .btn--primary").Click());
+
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog .check--ack").TextContent.Trim().Should().Be(
+            "I understand this installs into CRONUS Denmark's live Production environment and signs everyone out of the 2 service tiers listed."));
+    }
+
+        [Fact]
+    public async Task A_failed_after_script_says_the_apps_are_in_and_the_tiers_running()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-1);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Failed, start, d =>
+        {
+            d.StartedAt = start.AddSeconds(1);
+            d.FinishedAt = start.AddMinutes(8);
+            d.TiersRestarted = true;
+            d.FailureMessage = "The apps were installed and the service tiers restarted, but the customer's after script (after-restart.ps1) failed. It ended with exit code 1.";
+            d.GatewayStepsJson = Steps(
+                Tier("CRONUS-BC01 / BC140", DeliveryGatewaySteps.Done),
+                ScriptStep(DeliveryGatewaySteps.AfterScript, @"C:\Scripts\after-restart.ps1", DeliveryGatewaySteps.Failed, "it ended with exit code 1"));
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Completed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(1)));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".rp-next__text").TextContent.Should().StartWith("The apps are installed and the service tiers are running.");
+            cut.FindAll(".rp-tiers .rp-app__end .rp-strong").Select(e => e.TextContent).Should().Equal("Restarted", "Failed");
+            cut.FindAll("button").Select(b => b.TextContent).Should().NotContain(t => t.Contains("Deploy again"));
+        });
+    }
+
+    /// <summary>
+    /// Links the seeded environment to CRONUS-BC01 / BC140 behind an online gateway whose
+    /// settings restart BC01 and BC02 together, and adds BC02 (and BC03, on the same
+    /// database but left out of the group).
+    /// </summary>
+    private async Task<int> LinkRestartGroupAsync(Seed seed, bool shared = false)
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var gateway = new Gateway
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS hosting", MachineName = "CRONUS-BC01",
+            KeyFingerprint = Guid.NewGuid().ToString("N"), State = GatewayState.Approved,
+            RegisteredAt = now.AddDays(-30), KeyRegisteredAt = now.AddDays(-30), LastSeenAt = now,
+            EffectivePolicyJson = System.Text.Json.JsonSerializer.Serialize(new ALWorkbench.Gateway.Contracts.GatewayPolicyReport
+            {
+                State = ALWorkbench.Gateway.Contracts.GatewayPolicyStates.Valid,
+                Instances =
+                [
+                    new ALWorkbench.Gateway.Contracts.GatewayPolicyInstance { Machine = "CRONUS-BC01", Name = "BC140", Environment = "test", Allow = ["inventory", "publish", "restart", "scripts"] },
+                    new ALWorkbench.Gateway.Contracts.GatewayPolicyInstance { Machine = "CRONUS-BC02", Name = "BC140", Environment = "test", Allow = ["inventory", "restart"] },
+                ],
+                Databases =
+                [
+                    new ALWorkbench.Gateway.Contracts.GatewayPolicyDatabase
+                    {
+                        Name = "CRONUS-SQL/BC140",
+                        PublishOn = new ALWorkbench.Gateway.Contracts.GatewayPolicyTier { Machine = "CRONUS-BC01", Instance = "BC140" },
+                        Restart =
+                        [
+                            new ALWorkbench.Gateway.Contracts.GatewayPolicyTier { Machine = "CRONUS-BC01", Instance = "BC140" },
+                            new ALWorkbench.Gateway.Contracts.GatewayPolicyTier { Machine = "CRONUS-BC02", Instance = "BC140" },
+                        ],
+                        SharedRestart = shared,
+                        Before = @"C:\Program Files\AL Workbench Gateway\scripts\before-deploy.ps1",
+                    },
+                ],
+            }),
+        };
+        GatewayInstance Tier(string machine) => new()
+        {
+            OrganizationId = TestDb.DefaultOrgId, Gateway = gateway, Machine = machine, Name = "BC140", State = "Running",
+            DatabaseServer = "CRONUS-SQL", DatabaseName = "CRONUS", SessionCount = 0,
+            FirstReportedAt = now.AddDays(-30), ReportedAt = now, ReadAt = now,
+        };
+        var bc01 = Tier("CRONUS-BC01");
+        var bc02 = Tier("CRONUS-BC02");
+        ctx.GatewayInstances.AddRange(bc01, bc02, Tier("CRONUS-BC03"));
+        await ctx.SaveChangesAsync();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId).ExecuteUpdateAsync(s => s
+            .SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises)
+            .SetProperty(e => e.TenantId, "default")
+            .SetProperty(e => e.GatewayInstanceId, bc01.Id));
+        return bc02.Id;
+    }
+
+    [Fact]
+    public async Task The_deploy_dialog_warns_which_tiers_restart_and_that_everyone_is_signed_out()
+    {
+        var seed = await SeedAsync();
+        await LinkRestartGroupAsync(seed);
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.Find(".empty-state .btn--primary").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            var warning = cut.Find(".rb-restart");
+            warning.ClassList.Should().Contain("alert--warn");
+            warning.TextContent.Should().Contain("After the install, these 2 service tiers restart:")
+                .And.Contain("Everyone signed in is signed out and loses unsaved work.")
+                .And.Contain("They all stop, then all start again")
+                .And.Contain("The customer's script before-deploy.ps1 runs before anything is installed.")
+                .And.Contain("The tier marked not restarted uses the same database");
+            cut.FindAll(".rb-restart__tiers li").Select(e => e.TextContent).Should().Equal(
+                "CRONUS-BC01 / BC140", "CRONUS-BC02 / BC140", "CRONUS-BC03 / BC140 — not restarted");
+            cut.Find(".confirm-dialog__body p").TextContent.Should().Contain("then restarts its service tiers");
+            cut.FindAll(".confirm-dialog .btn--primary").Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task The_deploy_dialog_refuses_a_restart_that_would_reach_another_solution()
+    {
+        var seed = await SeedAsync(production: true);
+        var bc02 = await LinkRestartGroupAsync(seed);
+        await using (var ctx = _db.NewContext())
+        {
+            var now = DateTime.UtcNow;
+            var other = new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Retail", Visibility = ProjectVisibility.Public,
+                CreatedByUserId = OwnerUserId, CreatedAt = now, UpdatedAt = now,
+            };
+            ctx.OeProjects.Add(other);
+            ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, Project = other, Name = "Retail", Type = "Sandbox",
+                Kind = OeEnvironmentKind.OnPremises, GatewayInstanceId = bc02, TenantId = "default", Status = "Active", FetchedAt = now,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.Find(".empty-state .btn--primary").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            var refusal = cut.Find(".rb-restart");
+            refusal.ClassList.Should().Contain("alert--danger");
+            refusal.TextContent.Should().Contain("another solution's environment")
+                .And.EndWith("Ask the customer's IT to allow a shared restart of CRONUS-BC01 / BC140, CRONUS-BC02 / BC140, or to link each solution to its own service tiers, then try again.");
+            cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue();
+            cut.FindAll(".check--ack").Should().BeEmpty("there is nothing to acknowledge in a deployment that cannot run");
+        });
+    }
+
+    [Fact]
+    public async Task The_deploy_dialog_has_no_restart_warning_for_business_central_online()
+    {
+        var seed = await SeedAsync();
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.Find(".empty-state .btn--primary").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#rb-title").Should().NotBeNull();
+            cut.FindAll(".rb-restart").Should().BeEmpty();
+        });
+    }
+
     [Fact]
     public async Task A_failed_release_opens_with_the_whole_failure_its_apps_in_words_and_the_log()
     {

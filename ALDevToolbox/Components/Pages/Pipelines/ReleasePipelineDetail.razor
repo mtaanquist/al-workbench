@@ -357,7 +357,7 @@
                                 </span>
                             </span>
                             <span class="meta-item rp-fact">
-                                <span class="meta-item__label">Health</span>
+                                <span class="meta-item__label">@HealthLabel</span>
                                 @if (GatewayHealth is { } gatewayHealth)
                                 {
                                     <span class="meta-item__value rp-tone--failed">@gatewayHealth</span>
@@ -599,7 +599,7 @@
                                             </div>
                                         </div>
                                     }
-                                    @if (d.Status == ProjectDeliveryStatus.Deployed && d.TiersRestarted == false)
+                                    @if (d.Status == ProjectDeliveryStatus.Deployed && d.TiersRestarted == false && d.GatewaySteps.Count == 0)
                                     {
                                         <Alert Tone="AlertTone.Info" Role="status"><span>@NotRestartedSentence</span></Alert>
                                     }
@@ -650,6 +650,42 @@
                                                             {
                                                                 <span class="rp-app__took u-num">@appTook</span>
                                                             }
+                                                        </span>
+                                                    </div>
+                                                }
+                                            </div>
+                                        </div>
+                                    }
+
+                                    @if (d.GatewaySteps.Count > 0)
+                                    {
+                                        @* On-premises (#1368): what the gateway did around the apps,
+                                           a line each - the customer's before script, every service
+                                           tier it restarted, the after script - in the order it ran. *@
+                                        <div class="rp-apps rp-tiers">
+                                            <p class="section-label rp-summary__label">Service tiers and scripts</p>
+                                            <div class="rp-apps__list">
+                                                @foreach (var step in d.GatewaySteps)
+                                                {
+                                                    var status = StepLook(step);
+                                                    var row = $"rp-app rp-bar--{status.Tone}";
+                                                    var script = step.Kind != DeliveryGatewaySteps.Restart;
+                                                    <div class="@row">
+                                                        <span class="@GlyphClass(status)" role="img" aria-label="@status.Word">
+                                                            <Icon Name="@(script ? "file-code" : "rotate-cw")" Width="15" Height="15" />
+                                                        </span>
+                                                        <span class="rp-app__main">
+                                                            <span class="rp-app__line">
+                                                                <span class="rp-app__name" title="@(script ? step.Name : null)">@(script ? DeliveryGatewaySteps.ScriptName(step.Name) : step.Name)</span>
+                                                                <span class="rp-app__ver">@StepKindWord(step)</span>
+                                                            </span>
+                                                            @if (step.Message is { } stepMessage)
+                                                            {
+                                                                <span class="@(step.Outcome == DeliveryGatewaySteps.Failed ? "rp-app__msg rp-app__msg--failed" : "rp-app__msg")">@DeliveryGatewaySteps.Sentence(stepMessage)</span>
+                                                            }
+                                                        </span>
+                                                        <span class="rp-app__end">
+                                                            <span class="@($"rp-strong rp-tone--{status.Tone}")">@status.Word</span>
                                                         </span>
                                                     </div>
                                                 }
@@ -1084,7 +1120,8 @@
             _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,
             _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
             _secretExpiresAt,
-            selectedBuildId: buildId);
+            selectedBuildId: buildId,
+            onPremises: _isOnPremises);
     }
 
     private async Task OpenReleaseAsync()
@@ -1096,7 +1133,8 @@
             _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
             _secretExpiresAt,
             _fromReleases ? _releaseOptions : null,
-            _fromReleases ? SourceName : null);
+            _fromReleases ? SourceName : null,
+            onPremises: _isOnPremises);
     }
 
     private async Task OnReleasedAsync(int _)
@@ -1162,7 +1200,75 @@
 
     /// <summary>A failed deployment can be deployed again by someone who manages the pipeline.</summary>
     private bool CanReleaseAgain(DeliveryHistoryRow d) =>
-        _canManage && !Disabled && d.Status == ProjectDeliveryStatus.Failed && !RefusedBySettings(d);
+        _canManage && !Disabled && d.Status == ProjectDeliveryStatus.Failed && !RefusedBySettings(d)
+        && !DeliveryGatewaySteps.FailedAfterInstall(d.GatewaySteps);
+
+    /// <summary>One gateway step's look: the tone and word of how it ended, beside the restart or script icon.</summary>
+    internal static Look StepLook(DeliveryGatewayStep step)
+    {
+        var restart = step.Kind == DeliveryGatewaySteps.Restart;
+        return step.Outcome switch
+        {
+            DeliveryGatewaySteps.Done => new("succeeded", "circle-check", false, restart ? "Restarted" : "Ran"),
+            DeliveryGatewaySteps.Failed => new("failed", "circle-x", false, restart ? "Did not restart" : "Failed"),
+            _ => new("skipped", "circle-minus", false, restart ? "Not restarted" : "Not run"),
+        };
+    }
+
+    private static string StepKindWord(DeliveryGatewayStep step) => step.Kind switch
+    {
+        DeliveryGatewaySteps.BeforeScript => "before script",
+        DeliveryGatewaySteps.AfterScript => "after script",
+        _ => step.Name.Contains(',') ? "service tiers" : "service tier",
+    };
+
+    /// <summary>
+    /// The closed row's short line for a deployment that failed around its apps (#1368);
+    /// the whole sentence is in the open row. Null when no such step failed.
+    /// </summary>
+    private static string? StepCollapsed(DeliveryHistoryRow d)
+    {
+        var steps = d.GatewaySteps;
+        if (steps.Any(s => s.Kind == DeliveryGatewaySteps.BeforeScript && s.Outcome == DeliveryGatewaySteps.Failed))
+        {
+            return "The customer's before script failed, so nothing was installed";
+        }
+        if (!DeliveryGatewaySteps.FailedAfterInstall(steps)) return null;
+        var failedTiers = steps.Where(s => s.Kind == DeliveryGatewaySteps.Restart && s.Outcome == DeliveryGatewaySteps.Failed).ToList();
+        if (failedTiers.Count > 0) return $"Installed, but {string.Join(" and ", failedTiers.Select(s => s.Name))} did not restart";
+        return steps.Any(s => s.Kind == DeliveryGatewaySteps.Restart && s.Outcome != DeliveryGatewaySteps.Done)
+            ? "Installed, but the service tiers were not restarted"
+            : "Installed, but the customer's after script failed";
+    }
+
+    /// <summary>
+    /// What to do after a deployment that failed around its apps rather than in one (#1368):
+    /// the customer's before script stopped it, a tier did not come back, or the after
+    /// script failed. Null when no such step failed.
+    /// </summary>
+    private static string? StepNextStep(DeliveryHistoryRow d)
+    {
+        var steps = d.GatewaySteps;
+        if (steps.FirstOrDefault(s => s.Kind == DeliveryGatewaySteps.BeforeScript && s.Outcome == DeliveryGatewaySteps.Failed) is { } before)
+        {
+            return $"Nothing was installed. Ask the customer's IT why their script {DeliveryGatewaySteps.ScriptName(before.Name)} failed, then deploy again.";
+        }
+        var notBack = steps.Where(s => s.Kind == DeliveryGatewaySteps.Restart && s.Outcome != DeliveryGatewaySteps.Done && s.Message is not null).ToList();
+        if (notBack.Count > 0)
+        {
+            // The after script is named only when it was skipped because of the restart.
+            var skipped = steps.FirstOrDefault(s => s.Kind == DeliveryGatewaySteps.AfterScript && s.Outcome == DeliveryGatewaySteps.NotDone);
+            var tiers = string.Join(", ", notBack.Select(s => s.Name));
+            return skipped is null
+                ? $"The apps are installed. Ask the customer's IT to start {tiers}. You don't need to deploy again."
+                : $"The apps are installed. Ask the customer's IT to start {tiers} and run {DeliveryGatewaySteps.ScriptName(skipped.Name)} by hand. You don't need to deploy again.";
+        }
+        if (steps.FirstOrDefault(s => s.Kind == DeliveryGatewaySteps.AfterScript && s.Outcome == DeliveryGatewaySteps.Failed) is { } after)
+        {
+            return $"The apps are installed and the service tiers are running. Ask the customer's IT what their script {DeliveryGatewaySteps.ScriptName(after.Name)} should have done, and whether to run it again by hand.";
+        }
+        return null;
+    }
 
     /// <summary>
     /// The customer's gateway settings refused an app (#1367): deploying the same build
@@ -1595,7 +1701,9 @@
         if (last is { Status: ProjectDeliveryStatus.Deployed })
         {
             var succeededAt = LastWhen(last);
-            var restartTail = last.TiersRestarted == false ? " The service tiers were not restarted." : "";
+            var restartTail = last.GatewaySteps.Any(s => s.Kind == DeliveryGatewaySteps.Restart && s.Outcome == DeliveryGatewaySteps.Done)
+                ? " The service tiers were restarted."
+                : last.TiersRestarted == false && last.GatewaySteps.Count == 0 ? " The service tiers were not restarted." : "";
             return new HealthView("succeeded", "circle-check", "Healthy",
                 @<text>The last deployment succeeded <Timestamp Value="@succeededAt" Relative="true" />. Nothing is scheduled.@restartTail</text>);
         }
@@ -1692,6 +1800,15 @@
             };
         }
     }
+
+    /// <summary>
+    /// On premises the health is the linked tier's, which is not every tier a deployment
+    /// restarts: the label names it, so "Running" beside a restart failure on another tier
+    /// is not read as all clear (#1368).
+    /// </summary>
+    private string HealthLabel => _isOnPremises && _onPrem is { Unlinked: false } linked
+        ? $"Health of {linked.TierName}"
+        : "Health";
 
     private string EnvHealth => _rp?.ProjectEnvironment?.MissingSince is not null
         ? (_isOnPremises ? "No longer linked" : "No longer in Business Central")
@@ -1804,8 +1921,8 @@
     }
 
     /// <summary>
-    /// Said after an on-premises deployment that went through, because the gateway does
-    /// not restart service tiers yet (#1368).
+    /// Said after an on-premises deployment that went through on a gateway older than
+    /// #1368, which installs but does not restart the service tiers.
     /// </summary>
     private const string NotRestartedSentence =
         "Service tiers were not restarted. People who stay signed in keep running the previous version until each service tier is restarted. "
@@ -1999,6 +2116,12 @@
                 ProjectDeliveryStatus.Deployed => "Installed",
                 ProjectDeliveryStatus.HandedOff => "Handed over",
                 _ when d.Apps.Any(a => a.Status == ProjectDeliveryResultStatus.Refused) => "Refused",
+                // On premises (#1368) the apps can go in and what comes after them fail.
+                _ when d.GatewaySteps.Any(s => s.Kind == DeliveryGatewaySteps.BeforeScript && s.Outcome == DeliveryGatewaySteps.Failed) => "Before script failed",
+                _ when DeliveryGatewaySteps.FailedAfterInstall(d.GatewaySteps) =>
+                    d.GatewaySteps.Any(s => s.Kind == DeliveryGatewaySteps.Restart && s.Outcome != DeliveryGatewaySteps.Done)
+                        ? "Installed, restart failed"
+                        : "Installed, after script failed",
                 _ => d.InstallStartedAt is not null ? "Installing failed" : null,
             };
             if (stepLabel is not null && from is { } began)
@@ -2124,8 +2247,10 @@
             // A refusal's sentence carries the customer's whole rule; the closed row only
             // needs to say which app it stopped at (#1367).
             var refused = failedApp is { Status: ProjectDeliveryResultStatus.Refused };
-            var collapsed = refused ? $"The gateway refused {label}" : ours;
-            var next = refused ? GatewayRefusalAdvice.NextStep(failedApp!.Message, _onPrem is { Unlinked: false } tier ? tier.TierName : EnvName) : null;
+            var collapsed = refused ? $"The gateway refused {label}" : (failedApp is null ? StepCollapsed(d) : null) ?? ours;
+            var next = refused
+                ? GatewayRefusalAdvice.NextStep(failedApp!.Message, _onPrem is { Unlinked: false } tier ? tier.TierName : EnvName)
+                : failedApp is null ? StepNextStep(d) : null;
             return new FailureView(collapsed, null, ours, null, next, null, failedApp, false);
         }
 

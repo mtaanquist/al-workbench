@@ -7,7 +7,11 @@ using Microsoft.Extensions.Logging;
 namespace ALWorkbench.Gateway.Core.Policy;
 
 /// <summary>The policy as reported to AL Workbench, and a number that moves each time the report changes.</summary>
-public sealed record PolicySnapshot(GatewayPolicyReport Report, long Version);
+public sealed record PolicySnapshot(GatewayPolicyReport Report, long Version)
+{
+    /// <summary>The policy in force as of this snapshot; what a verb reads after a refresh, never a later <see cref="IGatewayPolicy.InForce"/>.</summary>
+    public GatewayPolicy? Policy { get; init; }
+}
 
 /// <summary>
 /// The local policy as <see cref="GatewayRunner"/> sees it: read at start, kept up to
@@ -131,7 +135,7 @@ public sealed class GatewayPolicySource : IGatewayPolicy
                 _version++;
                 LogChange(state, problems, inForce);
             }
-            return new PolicySnapshot(_report, _version);
+            return new PolicySnapshot(_report, _version) { Policy = inForce };
         }
     }
 
@@ -202,9 +206,9 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         var decision = PolicyEnforcer.Check(policy, request, _clock.UtcNow, _zone);
         if (!decision.Allowed && state == GatewayPolicyStates.Invalid && request.Verb != GatewayVerb.RefreshInventory)
         {
-            return PolicyDecision.Refuse(decision.Reason + " The customer's gateway.toml has mistakes or could not be read, so only reading is allowed until that is fixed.");
+            return PolicyDecision.Refuse(decision.Reason + " The customer's gateway.toml has mistakes or could not be read, so only reading is allowed until that is fixed.") with { Policy = policy };
         }
-        return decision;
+        return decision with { Policy = policy };
     }
 
     /// <summary>Reads and parses the file when its content changed. Called under the lock.</summary>
@@ -301,17 +305,13 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         var problems = FileAccessChecks.FolderAndContents(_access, _options.ProgramFolder);
         var paths = new List<string>();
         if (File.Exists(_options.PolicyFile)) paths.Add(_options.PolicyFile);
+        problems.AddRange(paths.Select(_access.Problem).OfType<string>());
         foreach (var script in policy?.Scripts ?? [])
         {
             if (!_access.Exists(script)) continue;
-            paths.Add(script);
-            var folder = WindowsFolderOf(script);
-            if (folder is not null) paths.Add(folder);
+            // The script, its folder, and every folder above it (#1368).
+            problems.AddRange(FileAccessChecks.ScriptProblems(_access, script));
         }
-        problems.AddRange(paths
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(_access.Problem)
-            .OfType<string>());
         return problems.Distinct(StringComparer.Ordinal).ToList();
     }
 

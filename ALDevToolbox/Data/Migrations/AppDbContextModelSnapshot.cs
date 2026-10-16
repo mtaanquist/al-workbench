@@ -4078,6 +4078,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDefaultValue(0)
                         .HasColumnName("gateway_log_offset");
 
+                    b.Property<string>("GatewayStepsJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("gateway_steps");
+
                     b.Property<DateTime?>("InstallStartedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("install_started_at");

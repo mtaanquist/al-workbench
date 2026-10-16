@@ -36,6 +36,29 @@ public interface IRunOnceStore
     /// these are the ones a stop cut short.
     /// </summary>
     IReadOnlyList<long> Unfinished();
+
+    /// <summary>
+    /// Records the service tiers <paramref name="commandId"/> has sent a stop to and not
+    /// yet tried to start again (#1368), replacing what was recorded; an empty list clears
+    /// it. On disk when this returns, so a stop or crash in the middle of a restart group
+    /// leaves a list the next start can act on.
+    /// </summary>
+    void SetStoppedTiers(long commandId, IReadOnlyList<StoppedTier> tiers);
+
+    /// <summary>The tiers recorded by <see cref="SetStoppedTiers"/> and not cleared, by command id.</summary>
+    IReadOnlyDictionary<long, IReadOnlyList<StoppedTier>> StoppedTiers();
+}
+
+/// <summary>A service tier a restart group stopped and has not yet tried to start again.</summary>
+public sealed record StoppedTier
+{
+    [JsonPropertyName("machine")]
+    public string Machine { get; init; } = string.Empty;
+
+    [JsonPropertyName("instance")]
+    public string Instance { get; init; } = string.Empty;
+
+    public override string ToString() => $"{Machine} / {Instance}";
 }
 
 /// <summary>
@@ -80,7 +103,8 @@ public sealed class FileRunOnceStore : IRunOnceStore
         lock (_lock)
         {
             var entry = _entries.GetValueOrDefault(commandId) ?? new Entry { StartedAt = _clock.UtcNow };
-            _entries[commandId] = entry with { FinishedAt = _clock.UtcNow, Result = null };
+            // A finished verb has tried to start every tier it stopped; nothing is left to recover.
+            _entries[commandId] = entry with { FinishedAt = _clock.UtcNow, Result = null, StoppedTiers = null };
             Save();
         }
     }
@@ -108,6 +132,27 @@ public sealed class FileRunOnceStore : IRunOnceStore
     public IReadOnlyList<long> Unfinished()
     {
         lock (_lock) return _entries.Where(e => e.Value is { FinishedAt: null, Result: null }).Select(e => e.Key).Order().ToList();
+    }
+
+    public void SetStoppedTiers(long commandId, IReadOnlyList<StoppedTier> tiers)
+    {
+        ArgumentNullException.ThrowIfNull(tiers);
+        lock (_lock)
+        {
+            var entry = _entries.GetValueOrDefault(commandId) ?? new Entry { StartedAt = _clock.UtcNow };
+            _entries[commandId] = entry with { StoppedTiers = tiers.Count == 0 ? null : tiers.ToList() };
+            Save();
+        }
+    }
+
+    public IReadOnlyDictionary<long, IReadOnlyList<StoppedTier>> StoppedTiers()
+    {
+        lock (_lock)
+        {
+            return _entries.Where(e => e.Value.StoppedTiers is { Count: > 0 })
+                .OrderBy(e => e.Key)
+                .ToDictionary(e => e.Key, e => (IReadOnlyList<StoppedTier>)e.Value.StoppedTiers!.ToList());
+        }
     }
 
     private void Save()
@@ -155,5 +200,10 @@ public sealed class FileRunOnceStore : IRunOnceStore
         [JsonPropertyName("result")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public GatewayCommandResultRequest? Result { get; init; }
+
+        /// <summary>Tiers a restart group stopped and has not yet tried to start again (#1368).</summary>
+        [JsonPropertyName("stoppedTiers")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<StoppedTier>? StoppedTiers { get; init; }
     }
 }

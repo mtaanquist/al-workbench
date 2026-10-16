@@ -42,7 +42,9 @@ public static partial class GatewayPolicyParser
     private static readonly string[] DefaultsKeys = ["allow", "change_hours"];
     private static readonly string[] TierKeys = ["machine", "instance"];
 
-    [GeneratedRegex(@"^[A-Za-z]:\\[^""<>|?*]+\.ps1$")]
+    // No [ or ] (PowerShell reads them as a pattern, which could pick another file than
+    // the one checked) and no : after the drive (an alternate data stream).
+    [GeneratedRegex(@"^[A-Za-z]:\\[^""<>|?*\[\]:]+\.ps1$")]
     private static partial Regex LocalScriptPath();
 
     /// <summary>
@@ -450,6 +452,11 @@ public static partial class GatewayPolicyParser
             if (!values.TryGetValue(key, out var kv)) return null;
             var path = Text(kv.Value, key);
             if (path is null) return null;
+            if (path.IndexOfAny(['[', ']']) >= 0)
+            {
+                Error(kv, $"{key} must not contain [ or ], which PowerShell reads as a pattern rather than a name. Rename the script or its folder.");
+                return null;
+            }
             if (!LocalScriptPath().IsMatch(path) || path.Contains(@"\..\", StringComparison.Ordinal))
             {
                 Error(kv, $"{key} must be the full path of a .ps1 file on this computer, for example 'C:\\ALWorkbench\\before-deploy.ps1'. Use single quotes so the backslashes are kept.");

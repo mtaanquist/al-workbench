@@ -137,10 +137,19 @@ public class OeProjectDelivery
     /// Whether the service tiers were restarted after an on-premises deployment installed
     /// its apps, as the gateway reported it. Null for Business Central online, where there
     /// is nothing of ours to restart, and for an on-premises run that never got that far.
-    /// False is shown as it is ("Service tiers were not restarted"): until the gateway
-    /// restarts tiers (#1368) it always reports false. See <c>.design/on-prem-gateway.md</c>.
+    /// From #1368 the gateway restarts the database's restart group after the install,
+    /// and <see cref="GatewayStepsJson"/> says tier by tier what happened; false with no
+    /// steps is a gateway older than that. See <c>.design/on-prem-gateway.md</c>.
     /// </summary>
     public bool? TiersRestarted { get; set; }
+
+    /// <summary>
+    /// What the gateway did around an on-premises deployment's apps (#1368): the customer's
+    /// before script, each service tier's restart and the after script, as a JSON list of
+    /// <c>DeliveryGatewayStep</c>s in the order they ran. Null for Business Central online
+    /// and for a gateway that reports none. Read through <c>DeliveryGatewaySteps.Parse</c>.
+    /// </summary>
+    public string? GatewayStepsJson { get; set; }
 
     /// <summary>
     /// The gateway command an on-premises deployment was sent as (#1367). Set when the

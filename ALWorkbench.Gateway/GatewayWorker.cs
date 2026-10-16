@@ -5,6 +5,7 @@ using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using ALWorkbench.Gateway.Core.PublishInstall;
+using ALWorkbench.Gateway.Core.RestartGroup;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -63,23 +64,31 @@ internal sealed class GatewayWorker : BackgroundService
         var clock = SystemGatewayClock.Instance;
         using var http = GatewayHttp.Create();
         var policy = new GatewayPolicySource(PolicyOptions(), new WindowsFileAccessCheck(), clock, TimeZoneInfo.Local, _logger);
-        var powerShell = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck());
+        var fileAccess = new WindowsFileAccessCheck();
+        var powerShell = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), fileAccess);
         var locator = new RegistryServiceTierLocator();
+        var runOnce = new FileRunOnceStore(_folder.RunOnceFile, clock);
+        // The run-once store keeps the tiers a restart group has stopped until it has tried
+        // to start them, so a stop or crash in between is put right on the next start.
+        var restarts = new RestartGroupRunner(powerShell, Environment.MachineName, ledger: runOnce);
+        var scripts = new CustomerScripts(powerShell, fileAccess);
         var verbs = new VerbExecutors(new Dictionary<ALWorkbench.Gateway.Contracts.GatewayVerb, ICommandExecutor>
         {
-            [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName, restarts, scripts),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.RestartGroup] = new RestartGroupVerb(policy, restarts),
         });
         var runner = new GatewayRunner(
             http,
             new JsonFileGatewaySettingsStore(_folder.SettingsFile),
             new CngSigningKeyStore(),
-            new FileRunOnceStore(_folder.RunOnceFile, clock),
+            runOnce,
             verbs,
             policy,
             clock,
             _logger,
             new GatewayRunnerOptions(_folder.WorkFolder, Environment.MachineName, GatewayHttp.ProgramVersion),
-            inventory: new GatewayInventory(new PowerShellInventoryReader(powerShell, locator, Environment.MachineName)));
+            inventory: new GatewayInventory(new PowerShellInventoryReader(powerShell, locator, Environment.MachineName)),
+            recovery: new StoppedTierRecovery(restarts, runOnce, _logger));
         return await runner.RunAsync(stoppingToken).ConfigureAwait(false);
     }
 

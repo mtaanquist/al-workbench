@@ -125,6 +125,44 @@ public sealed class ReleaseBuildDialogTests : IDisposable
         return cut;
     }
 
+    // ── On premises: what restarts is read before Deploy can be pressed (#1368) ──
+    // The delivery service here has no organisation behind it, so the read fails.
+
+    [Fact]
+    public async Task On_premises_Deploy_stays_disabled_while_the_restart_is_read_and_after_the_read_fails()
+    {
+        var cut = _ctx.Render<ReleaseBuildDialog>();
+        var renders = new List<string>();
+        cut.OnMarkupUpdated += (_, _) => renders.Add(cut.Markup);
+
+        await cut.InvokeAsync(() => cut.Instance.OpenAsync(
+            releasePipelineId: 1, customerName: "CRONUS A/S", envName: "Production", envType: "Production",
+            deploymentSchedule: "Immediate", schemaSyncMode: "Add",
+            builds: [new ReleaseBuildDialog.ReleasableBuildOption(412, "#412", [])],
+            timeZone: "UTC", windowStart: null, windowEnd: null, onPremises: true));
+
+        var loading = renders.Should().Contain(m => m.Contains("loading-block"), "the dialog opens before the read is back").Which;
+        loading.Should().Contain("Checking what this deployment changes...");
+        loading.Should().NotContain("check--ack", "nothing can be acknowledged before the dialog says what restarts");
+        loading.Should().NotContain("Uploads the build's apps", "the online wording would say nothing restarts");
+        System.Text.RegularExpressions.Regex.IsMatch(loading, @"class=""btn btn--primary""[^>]*disabled").Should().BeTrue("Deploy waits for the read");
+
+        cut.Find(".confirm-dialog__body .alert--danger").TextContent.Trim().Should().Be(
+            "Couldn't check what this deployment restarts, so it can't be deployed right now. Close this and try again in a moment.");
+        cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue("a failed read is not a reason to deploy without the warning");
+        cut.FindAll(".check--ack").Should().BeEmpty();
+        cut.Markup.Should().NotContain("Uploads the build's apps");
+    }
+
+    [Fact]
+    public void Online_the_dialog_reads_no_restart_and_opens_ready()
+    {
+        var cut = OpenedDialog("Test", "Sandbox");
+
+        cut.FindAll(".loading-block").Should().BeEmpty();
+        cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeFalse();
+    }
+
     [Fact]
     public void An_environment_literally_named_Production_still_names_the_customer_in_the_title_and_the_acknowledgement()
     {

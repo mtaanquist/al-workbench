@@ -116,18 +116,18 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
     /// The tier as the gateway last read it, with what its settings allow. Read from the
     /// inventory the environment row is itself written from, so nothing is written back.
     /// </summary>
-    public Task<DeliveryTargetStatus> ReadStatusAsync(CancellationToken ct)
+    public async Task<DeliveryTargetStatus> ReadStatusAsync(CancellationToken ct)
     {
         var facts = Facts;
         if (facts.InstanceMissing)
         {
-            return Task.FromResult(DeliveryTargetStatus.Missing(
-                $"The gateway no longer reports {facts.TierName}, so nothing was sent. Check the service tier with the customer's IT."));
+            return DeliveryTargetStatus.Missing(
+                $"The gateway no longer reports {facts.TierName}, so nothing was sent. Check the service tier with the customer's IT.");
         }
         if (facts.TenantMissing)
         {
-            return Task.FromResult(DeliveryTargetStatus.Missing(
-                $"The gateway no longer reports the tenant {facts.TenantId} on {facts.TierName}, so nothing was sent. Check the tenant with the customer's IT."));
+            return DeliveryTargetStatus.Missing(
+                $"The gateway no longer reports the tenant {facts.TenantId} on {facts.TierName}, so nothing was sent. Check the tenant with the customer's IT.");
         }
         var refusal = facts.PolicyRefusal;
         if (refusal is null && facts.InstanceState is { Length: > 0 } state
@@ -135,7 +135,14 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         {
             refusal = $"The gateway last read {facts.TierName} as {BcEnvironmentStatus.StatusWord(state).ToLowerInvariant()}, so it can't take an install. Start the service tier, then deploy again.";
         }
-        return Task.FromResult(new DeliveryTargetStatus(true, facts.EnvironmentType, facts.EnvironmentStatus, refusal, ReadLive: false));
+        // The restart after the install would reach other solutions' environments, which
+        // the customer's settings must say is allowed (#1368, shared_restart). Only AL
+        // Workbench knows which solutions are linked where, so it is checked here.
+        if (refusal is null)
+        {
+            refusal = (await RestartGroupPlan.LoadAsync(_db, facts, ct))?.Refusal;
+        }
+        return new DeliveryTargetStatus(true, facts.EnvironmentType, facts.EnvironmentStatus, refusal, ReadLive: false);
     }
 
     /// <summary>
