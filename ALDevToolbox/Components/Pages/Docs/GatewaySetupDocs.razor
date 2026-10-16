@@ -427,7 +427,7 @@ ALWorkbench.Gateway install</pre>
             <tr><td><code>publish</code></td><td>Publish, synchronise, install and upgrade apps.</td></tr>
             <tr><td><code>unpublish</code></td><td>Remove an app's previous version after an upgrade.</td></tr>
             <tr><td><code>restart</code></td><td>Restart the tier as part of a deployment or a licence import.</td></tr>
-            <tr><td><code>service_control</code></td><td>Stop, start and restart the tier on request from AL Workbench, outside a deployment.</td></tr>
+            <tr><td><code>service_control</code></td><td>Stop, start and restart the tier on request from AL Workbench, outside a deployment. A tier stopped this way stays stopped until someone starts it, though a later deployment or licence import that restarts its database starts it again.</td></tr>
             <tr><td><code>licence</code></td><td>Import a licence file.</td></tr>
             <tr><td><code>scripts</code></td><td>Run the before and after scripts named for its database.</td></tr>
         </tbody>
