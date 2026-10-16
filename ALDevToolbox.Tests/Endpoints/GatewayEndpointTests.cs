@@ -217,4 +217,129 @@ public sealed class GatewayEndpointTests : IDisposable
         response.StatusCode.Should().Be(HttpStatusCode.Redirect);
         response.Headers.Location!.ToString().Should().Contain("/login");
     }
+
+    // ---------------------------------------------------------------- minimum version (#1363)
+
+    private const string TooOld = "11.18.0";
+
+    private static async Task ShouldBeOutdatedAsync(HttpResponseMessage response)
+    {
+        ((int)response.StatusCode).Should().Be(GatewayProtocol.OutdatedStatusCode, await response.Content.ReadAsStringAsync());
+        (await ErrorsOf(response)).Should().ContainKey("version").WhoseValue.Should()
+            .Contain($"version {TooOld}").And.Contain($"needs version {GatewayProtocol.MinimumGatewayVersion} or later")
+            .And.Contain("Administration → Gateways");
+    }
+
+    [Fact]
+    public async Task A_gateway_below_the_minimum_cannot_register_and_its_code_stays_unused()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var code = await NewCodeAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, GatewayProtocol.RegisterPath)
+        {
+            Content = JsonContent.Create(GatewayTestKit.Request(code, key)),
+        };
+        request.Headers.Add(GatewayProtocol.GatewayVersionHeader, TooOld);
+
+        using var response = await client.SendAsync(request);
+
+        await ShouldBeOutdatedAsync(response);
+        await using var ctx = _db.NewContext();
+        (await ctx.Gateways.AnyAsync()).Should().BeFalse();
+        (await ctx.GatewayRegistrationCodes.SingleAsync()).UsedAt.Should().BeNull("the Admin's code still works once the gateway is updated");
+    }
+
+    [Fact]
+    public async Task A_gateway_below_the_minimum_is_refused_its_heartbeat_and_is_not_marked_seen()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var registered = await RegisterAsync(client, key);
+        using var request = Heartbeat(key, registered.GatewayId);
+        request.Headers.Add(GatewayProtocol.GatewayVersionHeader, TooOld);
+
+        using var response = await client.SendAsync(request);
+
+        await ShouldBeOutdatedAsync(response);
+        await using var ctx = _db.NewContext();
+        (await ctx.Gateways.SingleAsync()).LastSeenAt.Should().BeNull();
+    }
+
+    /// <summary>
+    /// Every route the app maps under <see cref="GatewayProtocol.PathPrefix"/>, read from
+    /// the running app's endpoints rather than listed by hand, with each route
+    /// parameter filled in. A route added later is covered without touching this test.
+    /// </summary>
+    private List<(string Method, string Path)> GatewayRoutes()
+    {
+        var routes = _factory.Services.GetServices<EndpointDataSource>()
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Where(e => e.RoutePattern.RawText is { } raw
+                && raw.StartsWith(GatewayProtocol.PathPrefix + "/", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(e => (e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? ["GET"])
+                .Select(method => (method, System.Text.RegularExpressions.Regex.Replace(e.RoutePattern.RawText!, @"\{[^}]+\}", "1"))))
+            .Distinct()
+            .ToList();
+        return routes;
+    }
+
+    [Fact]
+    public async Task A_gateway_below_the_minimum_is_refused_every_gateway_route_before_its_token_is_read()
+    {
+        var routes = GatewayRoutes();
+        // The ones the protocol names, so an empty or partial enumeration cannot pass.
+        routes.Select(r => r.Path).Should().Contain([
+            GatewayProtocol.RegisterPath, GatewayProtocol.HeartbeatPath, GatewayProtocol.NextCommandPath,
+            GatewayProtocol.CommandProgressPath(1), GatewayProtocol.CommandResultPath(1), GatewayProtocol.CommandFilePath(1, 1),
+        ]);
+
+        using var client = _factory.CreateClient();
+        foreach (var (method, path) in routes)
+        {
+            // No token at all: a gateway too old for today's protocol is told to update,
+            // not given a 401 for a token it built the old way.
+            using var request = new HttpRequestMessage(new HttpMethod(method), path);
+            if (method == "POST") request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            request.Headers.Add(GatewayProtocol.GatewayVersionHeader, TooOld);
+
+            using var response = await client.SendAsync(request);
+
+            ((int)response.StatusCode).Should().Be(GatewayProtocol.OutdatedStatusCode, $"{method} {path} must refuse an old gateway");
+            await ShouldBeOutdatedAsync(response);
+        }
+    }
+
+    [Theory]
+    [InlineData(GatewayProtocol.MinimumGatewayVersion)]
+    [InlineData("99.0.0")]
+    [InlineData("0.0.0-dev")]
+    public async Task A_gateway_at_or_above_the_minimum_or_a_preview_build_registers_as_usual(string version)
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var code = await NewCodeAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, GatewayProtocol.RegisterPath)
+        {
+            Content = JsonContent.Create(GatewayTestKit.Request(code, key)),
+        };
+        request.Headers.Add(GatewayProtocol.GatewayVersionHeader, version);
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task The_version_check_leaves_other_routes_alone()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/healthz");
+        request.Headers.Add(GatewayProtocol.GatewayVersionHeader, TooOld);
+
+        using var response = await client.SendAsync(request);
+
+        ((int)response.StatusCode).Should().NotBe(GatewayProtocol.OutdatedStatusCode);
+    }
 }

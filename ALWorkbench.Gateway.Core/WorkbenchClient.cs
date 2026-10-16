@@ -194,6 +194,7 @@ public sealed class WorkbenchClient : IDisposable
                 HttpStatusCode.Unauthorized => new GatewayCredentialRefusedException(reason),
                 HttpStatusCode.Forbidden => new GatewayNotApprovedException(reason),
                 HttpStatusCode.Conflict => new CommandClosedException(reason),
+                (HttpStatusCode)GatewayProtocol.OutdatedStatusCode => new GatewayOutdatedException(reason),
                 HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout or HttpStatusCode.ProxyAuthenticationRequired
                     => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}"),
                 >= HttpStatusCode.InternalServerError

@@ -1,0 +1,58 @@
+@using ALDevToolbox.Services.Gateways
+@inject GatewayBuild Build
+
+@*
+    The gateway download that matches this AL Workbench, with its SHA-256 for
+    customer IT to check, used by the Gateways tab in its install steps (adding a
+    gateway, the empty state) and in its download card (updating one). A local or
+    staging AL Workbench has no release to link to and says so instead of offering
+    a link that would not work. See .design/on-prem-gateway.md, "Versions and updates".
+*@
+
+@if (Build.Download is { } download)
+{
+    <div class="gw-download">
+        <a class="btn btn--sm" href="@download.Url" download>
+            <Icon Name="download" Width="14" Height="14" />
+            <span>Download @GatewayBuild.ExecutableName</span>
+        </a>
+        <span class="u-muted">Version @download.Version, for 64-bit Windows</span>
+    </div>
+    @if (download.Sha256 is not null)
+    {
+        <p class="gw-download__hash-label">
+            Before running it, check that its SHA-256 is exactly this
+            (in PowerShell: <span class="code u-nowrap">Get-FileHash .\@GatewayBuild.ExecutableName</span>):
+        </p>
+        <div class="code-block code-block--inlinebar">
+            <pre id="@($"{IdPrefix}-sha256")" class="gw-download__hash">@download.Sha256</pre>
+            <CopyButton Target="@($"#{IdPrefix}-sha256")" />
+        </div>
+    }
+    else
+    {
+        <p class="gw-download__hash-label">
+            Before running it, check its SHA-256 against the one in
+            <a href="@download.ChecksumUrl">@(GatewayBuild.ExecutableName).sha256</a>, published with it.
+        </p>
+    }
+    @if (!download.Signed)
+    {
+        <p class="u-muted gw-download__note">
+            This build is not code-signed yet, so Windows may say the publisher is unknown.
+            Checking the SHA-256 above is how to know it is the file AL Workbench published.
+        </p>
+    }
+}
+else
+{
+    <p class="u-muted gw-download__note">
+        There is no gateway download for this AL Workbench, because it is not a released
+        version. Ask whoever runs AL Workbench for a gateway that matches it.
+    </p>
+}
+
+@code {
+    /// <summary>Prefix for the element ids the copy button targets, unique on the page.</summary>
+    [Parameter, EditorRequired] public string IdPrefix { get; set; } = string.Empty;
+}

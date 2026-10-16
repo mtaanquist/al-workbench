@@ -123,6 +123,28 @@ public sealed class GatewayRegistrationClientTests
     }
 
     [Fact]
+    public async Task A_gateway_too_old_for_the_workbench_prints_the_workbench_reason_and_keeps_no_key()
+    {
+        _workbench.Respond = _ => FakeWorkbench.Refused((HttpStatusCode)GatewayProtocol.OutdatedStatusCode,
+            "This gateway is version 1.2.3, and this AL Workbench needs version 11.19.0 or later.");
+
+        var act = () => RegisterAsync();
+
+        (await act.Should().ThrowAsync<GatewayRegistrationException>())
+            .Which.Message.Should().Contain("refused the registration").And.Contain("needs version 11.19.0 or later");
+        _keys.Names.Should().BeEmpty();
+        _settings.Value.Should().BeNull();
+    }
+
+    [Fact]
+    public void The_gateway_names_its_version_on_every_request()
+    {
+        using var http = GatewayHttp.Create();
+
+        http.DefaultRequestHeaders.GetValues(GatewayProtocol.GatewayVersionHeader).Should().Equal(GatewayHttp.ProgramVersion);
+    }
+
+    [Fact]
     public async Task An_unreachable_workbench_says_to_check_the_address_and_the_proxy()
     {
         _workbench.Respond = _ => throw new HttpRequestException("No such host is known.");

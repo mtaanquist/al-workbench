@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362) and the policy file and PowerShell runner (#1373) exist; the verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373) and the download with each release (#1363) exist; the verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -728,8 +728,10 @@ Nothing else on the gateway path crosses the fence: the expiry sweep uses `Ambie
 per organisation, and the gateway endpoints run under the organisation claim from the credential.
 
 **Signed binaries.** Releases are signed through Azure's managed code signing service (Trusted
-Signing, now Artifact Signing). Until it is set up, builds ship unsigned and marked preview only.
+Signing, now Artifact Signing). Until it is set up, builds ship unsigned and are marked "not code-signed
+yet" (the decision in #1359 said "preview only"; "preview" is now reserved for `0.0.0-*` builds).
 The gateway does not update itself; the workbench shows "Out of date" and customer IT updates it.
+"Versions and updates" below has how, as built (#1363).
 
 ## Projects, packaging and naming
 
@@ -748,10 +750,10 @@ exist (#1361, #1362).
 
 The Dockerfile's restore layer copies the contracts csproj alongside `ALDevToolbox.csproj`;
 `.dockerignore` leaves the other two gateway projects out of the image's build context. The
-release workflow gains a Windows job that publishes the gateway self-contained single-file for
+release workflow has a Windows job that publishes the gateway self-contained single-file for
 `win-x64`, signs it and attaches it to the release; the Gateways page links the build matching the
 running version with its SHA-256. The contracts carry a minimum supported gateway version; an older
-gateway is refused with a message saying to update.
+gateway is refused with a message saying to update. "Versions and updates" below has the detail.
 
 ### The Windows service, as built (#1362)
 
@@ -869,6 +871,95 @@ Tests: the core library's in `ALDevToolbox.Tests/Gateways/` against a fake workb
 whose waits return at once, and one end-to-end test in `Endpoints/GatewayServiceFrameEndpointTests`
 that drives the gateway's own code against the real `/gateway` routes. The Windows host has no
 automated tests: the key store, `sc.exe` and the event log need Windows.
+
+### Versions and updates, as built (#1363)
+
+**One version for both.** A gateway is published with every AL Workbench release, from the same
+tag, and reports that version: `release.yml` passes the tag (`v12.1.0` becomes `12.1.0`) to the
+image as `RELEASE_VERSION` and to the gateway's `dotnet publish` as `ReleaseVersion`. So "the
+gateway this AL Workbench expects" is simply its own version, and there is no compatibility table
+to keep. A staging preview reports `0.0.0-staging.g<commit>` and a local build `0.0.0-dev`.
+
+**Comparing.** `GatewayVersion` (contracts) orders versions the semantic-versioning way: numbers
+as numbers, a pre-release before its release (`12.1.0-rc.1` < `12.1.0`), numeric pre-release parts
+as numbers (`rc.2` < `rc.10`), build metadata after `+` ignored. **Major version 0 is a preview**
+(local or staging) and is never compared with a release: never refused for its version, never
+called out of date, so a developer can point a local gateway at any workbench.
+
+**What the Gateways page says**, in the Version column, from the version the last heartbeat
+reported (`GatewayBuild.StateOf`):
+
+| State | When | Shown |
+| --- | --- | --- |
+| Current | the workbench's version or newer, or the workbench is itself unstamped | the version |
+| Out of date | older than the workbench, at or above the minimum | "Out of date", a link "Update to x" to the download card |
+| Unsupported | below `GatewayProtocol.MinimumGatewayVersion` | "Unsupported", "AL Workbench refuses this version. Update it" (linked) |
+| Preview / unknown | major 0, or nothing parseable reported | the version as reported |
+
+The connection status (Online, Offline, ...) stays in its own column; an unsupported gateway is
+also Offline before long, because its heartbeats are refused.
+
+**The minimum, and the refusal.** `GatewayProtocol.MinimumGatewayVersion` (`11.19.0`, below which
+no gateway was ever released) is raised when a change makes older gateways unsafe or unable to
+work, never above the release that carries the change; `release.yml` refuses to cut a tag below
+it. The comparison ignores pre-release (`GatewayVersion.SatisfiesMinimum`): `11.19.0-rc.1` is
+built from the change that raised the minimum to `11.19.0`, so it satisfies it, where strict
+semver would order it below and refuse a release candidate of its own release. Every gateway request carries its version
+in the `ALWorkbench-Gateway-Version` header (set once on the `HttpClient`, beside the user agent).
+`GatewayVersionGate`, middleware on `/gateway/*` ahead of authentication, answers a release below
+the minimum with **426 Upgrade Required** and a `GatewayErrorResponse` keyed `version` naming the
+version needed and where to download it. 426 because it is exactly RFC 9110's meaning ("might be
+willing to do so after the client upgrades") and is distinct from 401 (revoked or clock), 403
+(waiting for approval) and 400, so the gateway can tell it apart. It runs before the token is
+read so a gateway too old to build today's token still hears why; that is also why it is a
+header and not a body field. The RFC's `Upgrade` response header is not sent: it names
+connection protocols, is hop-by-hop (Caddy drops it) and is forbidden in HTTP/2. A request with
+no version header is let through to the usual checks; no released gateway omits it, and the
+version is not a security property: a gateway that claims a wrong version only refuses itself
+work. A refused registration leaves the code unused, and a refused heartbeat does not mark the
+gateway seen.
+
+**The gateway's side.** A 426 becomes `GatewayOutdatedException`. The loop logs event **2009**
+(error) with the workbench's words and how to update, and backs off as for a 401 - it does not
+stop, so the service is still there, still saying why, when someone looks. A result refused this
+way stays saved and is retried; an updated gateway sends it on its first start. `register`
+prints the reason and keeps no key.
+
+**The download.** The release job publishes `ALWorkbench.Gateway.exe` (self-contained, single
+file, symbols embedded), signs it when signing is set up, verifies the signature with
+`Get-AuthenticodeSignature` (a configured but failed signing fails the release), then hashes the
+signed file. The image build receives the hash and whether it was signed (`GATEWAY_SHA256`,
+`GATEWAY_SIGNED`, stamped as assembly metadata like the release version), and the GitHub release
+gets three assets: the program, `ALWorkbench.Gateway.exe.sha256` (`sha256sum` format) and
+`gateway.example.toml`, plus a note above the generated release notes with the hash and, while
+unsigned, "Not code-signed yet". The asset name never changes, so the service's
+path keeps pointing at the right file after an update.
+
+The Gateways page (`GatewayDownloadLink`) links that asset on the release matching the running
+version, shows the SHA-256 in upper case with the `Get-FileHash` command to check it, and says
+plainly when the build is not code-signed yet. A local or staging AL Workbench has no release to
+link to and says "There is no gateway download for this AL Workbench, because it is not a
+released version" instead of a broken link, and an unsupported row there says which version to
+ask for instead of linking to a download that does not exist. The link is in the first install
+step when adding a gateway and in a "Download the gateway" card under the list, which also
+carries the update steps; the empty state stays short (three one-line steps and Add gateway). It is an outline button: Add gateway stays the page's one primary.
+
+**Updating is manual.** No self-update (supply-chain risk; an MSI and auto-update are out of
+scope). On the gateway's server, as an administrator:
+
+1. Download the new `ALWorkbench.Gateway.exe` from Administration → Gateways and check its SHA-256.
+2. Stop the service: `sc stop ALWorkbenchGateway` (or Services, "AL Workbench Gateway").
+3. Replace `ALWorkbench.Gateway.exe` in its folder with the new file.
+4. Start it: `sc start ALWorkbenchGateway`.
+
+The registration, key, settings, policy file and run-once state are in `%ProgramData%` or beside
+the program and are kept, so nothing needs approving again; a command interrupted by the stop is
+reported as interrupted, as after any restart. The setup guide (#1376) repeats this for customer IT.
+
+**Signing** uses Azure Artifact Signing through `azure/artifact-signing-action` after an OIDC
+`azure/login` in a job bound to the `gateway-signing` environment; the repository variables and
+the federated credential it needs are listed in `PROJECT.md`, "Releases and image publishing".
+Staging builds are never signed and are kept as a workflow artifact on the run, not a release.
 
 ## Phasing
 

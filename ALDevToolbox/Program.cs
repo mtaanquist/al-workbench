@@ -83,6 +83,11 @@ app.UseMcpKillSwitch();
 // See Endpoints/McpAcceptCompatibility.cs.
 app.UseMcpAcceptCompatibility();
 
+// Gateways older than the minimum get a 426 that says how to update, before their
+// token is read: one too old for today's protocol must not see only a 401. See
+// Endpoints/GatewayVersionGate.cs and .design/on-prem-gateway.md.
+app.UseGatewayVersionGate();
+
 app.UseAuthentication();
 
 // Tool visibility gate: 404 a disabled tool's end-user routes (site-wide or

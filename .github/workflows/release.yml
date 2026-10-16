@@ -1,11 +1,12 @@
 name: release
 
-# Cuts a versioned GHCR image whenever a vX.Y.Z tag is pushed. The build job in
-# build.yml already gates "compiles + tests + compose-smoke" on every push
-# (tags included), so this workflow stays focused on building and publishing the
-# image — tag a commit that's already green on main. Version scheme and the
-# how-to-cut-a-release steps live in CLAUDE.md under "Releases and image
-# publishing".
+# Cuts a versioned GHCR image whenever a vX.Y.Z tag is pushed, and the
+# on-premises gateway's Windows program that goes with it (#1363). The build job
+# in build.yml already gates "compiles + tests + compose-smoke" on every push
+# (tags included), so this workflow stays focused on building and publishing —
+# tag a commit that's already green on main. Version scheme, the
+# how-to-cut-a-release steps and the signing set-up live in PROJECT.md under
+# "Releases and image publishing".
 on:
   push:
     tags:
@@ -72,11 +73,153 @@ jobs:
           echo "Timed out waiting for build.yml to finish for ${sha}." >&2
           exit 1
 
-  image:
+  # The on-premises gateway (.design/on-prem-gateway.md, "Versions and updates"):
+  # self-contained, single file, win-x64, stamped with the tag's version so it
+  # reports the same version as the image it goes with. Waits for the gate, so a
+  # commit that is not green never gets as far as a signed program.
+  #
+  # Signed through Azure Artifact Signing (formerly Trusted Signing) when the
+  # repository variables for it exist; until they do, the build goes out
+  # unsigned and the release notes and the Gateways page say it is not code-signed yet.
+  # The variables, and the federated credential the sign-in needs, are listed
+  # in PROJECT.md. Whether it was signed is read back from the file itself,
+  # never assumed from the variables.
+  gateway:
     needs: require-green-build
+    runs-on: windows-latest
+    # The sign-in uses GitHub's OIDC token, whose subject for a job in an
+    # environment is `repo:<owner>/<repo>:environment:<name>` - one federated
+    # credential for every tag, where a tag push alone would need one per tag.
+    environment: gateway-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+      signed: ${{ steps.verify.outputs.signed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Check the release is not below the gateway minimum
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # The app refuses (426) any gateway below GatewayProtocol.MinimumGatewayVersion.
+          # A release below it would ship a program its own image refuses, so stop here.
+          # Pre-release is ignored, as GatewayVersion.SatisfiesMinimum does: v11.19.0-rc.1
+          # already carries the change that raised the minimum to 11.19.0.
+          $source = Get-Content -Raw ALWorkbench.Gateway.Contracts/GatewayProtocol.cs
+          if ($source -notmatch 'MinimumGatewayVersion\s*=\s*"(\d+)\.(\d+)\.(\d+)"') { throw 'MinimumGatewayVersion not found in GatewayProtocol.cs.' }
+          $minimum = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+          if ($env:REF_NAME -notmatch '^v(\d+)\.(\d+)\.(\d+)') { throw "'$env:REF_NAME' is not a release tag." }
+          $tag = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+          if ($tag -lt $minimum) { throw "Tag $env:REF_NAME is below MinimumGatewayVersion $minimum; this release's own gateway would be refused. Raise the tag or lower the minimum." }
+          Write-Host "Tag $env:REF_NAME satisfies MinimumGatewayVersion $minimum."
+
+      - name: Publish the gateway
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # The same bare semver metadata-action gives the image (v12.1.0 -> 12.1.0).
+          $version = $env:REF_NAME -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "'$env:REF_NAME' is not a release tag." }
+          # DebugType=embedded keeps the symbols inside the one file, so a stack
+          # trace in customer IT's log still has line numbers.
+          dotnet publish ALWorkbench.Gateway/ALWorkbench.Gateway.csproj -c Release -r win-x64 --self-contained `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=embedded `
+            -p:ReleaseVersion=$version -o out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Refuse to sign outside a release tag
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && !startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        # Defence in depth only: the real control is the gateway-signing
+        # environment's deployment rule (tags matching v*), see PROJECT.md.
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          Write-Error "Signing runs only for a release tag (refs/tags/v*); this run is for $env:REF."
+          exit 1
+
+      - name: Sign in to Azure for signing
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && startsWith(github.ref, 'refs/tags/v')
+        # Third-party actions pinned to full commit SHAs, as everywhere in this
+        # repository (#393).
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign the gateway
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && startsWith(github.ref, 'refs/tags/v')
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\out\ALWorkbench.Gateway.exe
+          file-digest: SHA256
+          timestamp-digest: SHA256
+          description: AL Workbench Gateway
+          description-url: https://github.com/${{ github.repository }}
+
+      - name: Check the signature
+        id: verify
+        shell: pwsh
+        env:
+          SIGNING_CONFIGURED: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+        run: |
+          $signature = Get-AuthenticodeSignature out\ALWorkbench.Gateway.exe
+          $signed = $signature.Status -eq 'Valid'
+          if ($env:SIGNING_CONFIGURED -eq 'true' -and -not $signed) {
+            throw "Signing is set up, but the program is not validly signed: $($signature.StatusMessage)"
+          }
+          Write-Output "Signature: $($signature.Status) $($signature.SignerCertificate.Subject)"
+          "signed=$($signed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      # After signing: the signature is part of the file, so this is the hash of
+      # what customer IT downloads.
+      - name: Compute the SHA-256
+        id: hash
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash out\ALWorkbench.Gateway.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          # sha256sum's format, so `sha256sum -c` works as well as Get-FileHash.
+          [IO.File]::WriteAllText("out\ALWorkbench.Gateway.exe.sha256", "$hash  ALWorkbench.Gateway.exe`n")
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Keep the gateway for the release
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gateway
+          path: |
+            out/ALWorkbench.Gateway.exe
+            out/ALWorkbench.Gateway.exe.sha256
+            out/gateway.example.toml
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    # The gateway first: its hash goes into the image (the Gateways page shows
+    # it beside the download link) and the program goes onto the release.
+    needs: [require-green-build, gateway]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Outside the workspace, so it is not part of the image's build context.
+      - name: Fetch the gateway
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gateway
+          path: ${{ runner.temp }}/gateway
 
       - name: Log in to GHCR
         # Third-party actions pinned to full commit SHAs (mutable tags can be
@@ -123,9 +266,15 @@ jobs:
           # it back to render the sidebar version link (issue #604).
           # metadata-action's `version` output is the bare semver (v6.1.0 ->
           # 6.1.0), which is also what the release-notes URL wants.
+          #
+          # GATEWAY_SHA256 / GATEWAY_SIGNED: the gateway published above, so the
+          # Gateways page can show the hash customer IT checks the download
+          # against, and say when the build is not code-signed yet (#1363).
           build-args: |
             RELEASE_VERSION=${{ steps.meta.outputs.version }}
             RELEASE_DATE=${{ steps.stamp.outputs.date }}
+            GATEWAY_SHA256=${{ needs.gateway.outputs.sha256 }}
+            GATEWAY_SIGNED=${{ needs.gateway.outputs.signed }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -138,7 +287,37 @@ jobs:
       # so there's no loop. Before this step releases were image-only and the
       # GitHub Release had to be cut by hand — see CLAUDE.md "Releases and image
       # publishing".
+      #
+      # The gateway goes on as three assets: the program, its SHA-256 and the
+      # example policy file customer IT copies to gateway.toml. The notes above
+      # the generated ones say what it is, its hash, and - while signing is not
+      # set up - that it is not code-signed yet.
+      - name: Write the gateway's release notes
+        env:
+          GATEWAY_SHA256: ${{ needs.gateway.outputs.sha256 }}
+          GATEWAY_SIGNED: ${{ needs.gateway.outputs.signed }}
+        run: |
+          {
+            echo "### On-premises gateway"
+            echo
+            echo "\`ALWorkbench.Gateway.exe\` is the on-premises gateway for this release, for 64-bit Windows."
+            echo "Its SHA-256 is \`${GATEWAY_SHA256}\` (also in \`ALWorkbench.Gateway.exe.sha256\`)."
+            echo
+            if [ "$GATEWAY_SIGNED" != "true" ]; then
+              echo "> **Not code-signed yet.** Windows may say the publisher is unknown. Check the SHA-256 before running it."
+              echo
+            fi
+            echo "To update an installed gateway: stop the AL Workbench Gateway service, replace \`ALWorkbench.Gateway.exe\` with this one, and start the service again."
+            echo
+          } > "$RUNNER_TEMP/gateway-notes.md"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
+          body_path: ${{ runner.temp }}/gateway-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            ${{ runner.temp }}/gateway/ALWorkbench.Gateway.exe
+            ${{ runner.temp }}/gateway/ALWorkbench.Gateway.exe.sha256
+            ${{ runner.temp }}/gateway/gateway.example.toml

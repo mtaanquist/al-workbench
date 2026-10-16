@@ -20,6 +20,21 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
+  <!-- Version stamp (#1363). release.yml publishes with -p:ReleaseVersion=<tag without
+       the v>, the same value the app image is stamped with, so a gateway downloaded
+       from a release reports exactly that release's version. staging.yml passes
+       0.0.0-staging.g<commit>. Anything else is a local build and says 0.0.0-dev rather
+       than the SDK's 1.0.0, which would read as a real (and ancient) release.
+       GatewayVersion treats major 0 as a preview: never refused, never "out of date". -->
+  <PropertyGroup Condition="'$(ReleaseVersion)' != ''">
+    <Version>$(ReleaseVersion)</Version>
+    <InformationalVersion>$(ReleaseVersion)</InformationalVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ReleaseVersion)' == ''">
+    <Version>0.0.0-dev</Version>
+    <InformationalVersion>0.0.0-dev</InformationalVersion>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- Microsoft first-party, approved in #1362. Kept in step with the app's
          10.0.x packages. -->

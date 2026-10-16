@@ -24,6 +24,19 @@ public sealed class GatewayCredentialRefusedException : Exception
     public GatewayCredentialRefusedException(string message) : base(message) { }
 }
 
+/// <summary>
+/// 426: this gateway is older than the oldest version AL Workbench accepts
+/// (<see cref="Contracts.GatewayProtocol.MinimumGatewayVersion"/>). Every request will be
+/// refused until customer IT installs the current build. The loop logs it and keeps
+/// trying on its back-off rather than stopping, so the service is still running, and
+/// still saying why, when someone looks; <see cref="Exception.Message"/> carries the
+/// workbench's own words, which name the version it needs.
+/// </summary>
+public sealed class GatewayOutdatedException : Exception
+{
+    public GatewayOutdatedException(string message) : base(message) { }
+}
+
 /// <summary>403: the gateway is waiting for an Admin to approve it, and gets no commands or files until then.</summary>
 public sealed class GatewayNotApprovedException : Exception
 {
