@@ -25,3 +25,9 @@
     white-space: normal;
     overflow-wrap: anywhere;
 }
+
+/* The security note has three paragraphs and a list; .note__body is a span in the
+   design system, so its parts are spans set to block rather than <p> and <ul>. */
+.gs-block {
+    display: block;
+}

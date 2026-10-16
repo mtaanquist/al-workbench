@@ -250,7 +250,7 @@ public sealed class GatewayServiceTests : IDisposable
         {
             var approve = () => Service(ctx).ApproveAsync(seen.Id, seen.KeyFingerprint);
             (await approve.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("gateway")
-                .WhoseValue.Should().Contain("check code has changed");
+                .WhoseValue.Should().Contain("key fingerprint has changed");
         }
         await using (var ctx = _db.NewContext())
         {

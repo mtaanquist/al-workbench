@@ -2155,6 +2155,16 @@ settings the parser knows (read from the parser's own "The settings are: ..." an
 key), the permissions table exactly `PolicyWords.Permissions`, that every accepted value word is on
 the page, and that both examples parse without a mistake.
 
+**One name for the fingerprint.** The gateway prints "Key fingerprint", so the Gateways page,
+its approve dialog and the stale-approval message say "key fingerprint" too (they said "check
+code"), and the guide asks customer IT to read it out to the Admin over a channel they trust.
+
+**Precise about who enforces what.** The guide says the gateway enforces the settings file itself
+except `shared_restart` and the AI-assistant-on-production rule, which rely on AL Workbench; lists
+what a compromised AL Workbench could still do inside the file; says what leaves the server; and
+says a revoke is permanent (reconnecting is a new gateway, since `CreateRotationCodeAsync` refuses
+a revoked one).
+
 **What it does not promise.** Where this document lists something under "To verify on real servers",
 the guide says it has not been confirmed or leaves it out: the Business Central rights the service
 account needs (it says so, and points at the gateway page's tier read as the first proof), PowerShell 7

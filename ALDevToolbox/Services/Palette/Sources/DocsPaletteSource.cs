@@ -58,6 +58,7 @@ public sealed class DocsPaletteSource : IPaletteSource
             "Installing the on-premises gateway on a customer's Windows server, and its settings file",
             [
                 new("What the gateway does, and what it does not", "gs-what"),
+                new("What leaves your server", "gs-what-leaves"),
                 new("What you need", "gs-requirements"),
                 new("The service account", "gs-account"),
                 new("Install and register it", "gs-install"),
@@ -66,6 +67,7 @@ public sealed class DocsPaletteSource : IPaletteSource
                 new("Permissions", "gs-permissions"),
                 new("Before and after scripts", "gs-scripts"),
                 new("Who may change the files", "gs-rights"),
+                new("Cutting it off from your side", "gs-cut-off"),
                 new("Updating it", "gs-update"),
                 new("Removing it", "gs-uninstall"),
                 new("When it is offline or revoked", "gs-offline"),

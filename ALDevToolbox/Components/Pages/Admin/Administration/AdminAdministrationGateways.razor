@@ -91,7 +91,7 @@
                                 <CopyButton Target="#gateway-register-command" />
                             </div>
                         </li>
-                        <li>Approve it here, once the check code the server prints matches the check code that will appear below.</li>
+                        <li>Approve it here, once the key fingerprint the server prints matches the one that will appear below.</li>
                     </ol>
                     @if (_registered is null)
                     {
@@ -180,7 +180,7 @@
                                 <StatusPill Tone="@ToneOf(gateway.Status)">@LabelOf(gateway.Status)</StatusPill>
                                 @if (gateway.Status == GatewayStatus.WaitingForApproval)
                                 {
-                                    <div class="u-muted">Check code <span class="code u-nowrap">@gateway.KeyFingerprint</span></div>
+                                    <div class="u-muted">Key fingerprint <span class="code u-nowrap">@gateway.KeyFingerprint</span></div>
                                 }
                                 else if (gateway.Status == GatewayStatus.NotConnectedYet)
                                 {
@@ -282,12 +282,12 @@
     @if (_target is not null)
     {
         <p>
-            When <strong>@_target.MachineName</strong> registered, the gateway printed a check code on
+            When <strong>@_target.MachineName</strong> registered, the gateway printed a key fingerprint on
             that server. Approve only if it is exactly this one:
         </p>
         <p class="gw-check"><span class="code">@_target.KeyFingerprint</span></p>
         <p class="u-muted">
-            If the codes differ, or nobody you know installed this gateway, revoke it instead.
+            If the fingerprints differ, or nobody you know installed this gateway, revoke it instead.
         </p>
     }
 </ConfirmDialog>

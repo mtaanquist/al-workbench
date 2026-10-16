@@ -69,7 +69,8 @@ public sealed class GatewaySetupDocsTests : IDisposable
     public void Every_value_the_gateway_accepts_is_named_in_the_guide()
     {
         var page = Render();
-        var code = page.FindAll(".prose code").Select(c => c.TextContent.Trim()).ToHashSet(StringComparer.Ordinal);
+        // A value may be written as it goes in the file, in quotes ("5.1").
+        var code = page.FindAll(".prose code").Select(c => c.TextContent.Trim().Trim('"')).ToHashSet(StringComparer.Ordinal);
 
         var words = PolicyWords.Environments.Values
             .Concat(PolicyWords.Scopes.Values)
@@ -147,6 +148,29 @@ public sealed class GatewaySetupDocsTests : IDisposable
             "ALDevToolbox", "Components", "Pages", "Admin", "Administration", "AdminAdministrationGateways.razor"));
 
         Regex.Matches(source, "href=\"/docs/gateway-setup\"").Count.Should().Be(3);
+    }
+
+    [Fact]
+    public void The_guide_and_the_gateways_page_give_the_fingerprint_one_name()
+    {
+        // The gateway prints "Key fingerprint"; customer IT reads it out and the Admin
+        // compares it on the Gateways page, so both say the same words.
+        var source = File.ReadAllText(RepoRoot.Combine(
+            "ALDevToolbox", "Components", "Pages", "Admin", "Administration", "AdminAdministrationGateways.razor"));
+        var page = Render();
+
+        source.Should().NotContainEquivalentOf("check code").And.Contain("Key fingerprint");
+        page.Find(".docs__main").TextContent.Should().NotContainEquivalentOf("check code").And.Contain("key fingerprint");
+    }
+
+    [Fact]
+    public void The_guide_says_a_revoke_is_permanent()
+    {
+        var page = Render();
+
+        // GatewayService refuses a new key for a revoked gateway: reconnecting is a new gateway.
+        Regex.Replace(page.Find("#gs-offline").ParentElement!.TextContent, @"\s+", " ")
+            .Should().Contain("a revoke is permanent").And.Contain("the Admin adds a new gateway");
     }
 
     // ------------------------------------------------------------ helpers
