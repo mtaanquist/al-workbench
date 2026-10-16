@@ -68,11 +68,15 @@ public sealed class AdminCenterDeliveryTarget : IDeliveryTarget
     public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(CancellationToken ct) =>
         _apps.ListInstalledAppsAsync(Token, Family, _environment.Name, ct);
 
-    public Task<BcAppOperation> StartInstallAsync(
-        byte[] package, string fileName, string schedule, string schemaSyncMode, CancellationToken ct) =>
-        _apps.InstallPteAsync(
+    /// <summary>The Admin Center takes one app at a time; there is nothing to set up for a batch, and the run goes on.</summary>
+    public Task<DeliveryHandOff?> PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct) =>
+        Task.FromResult<DeliveryHandOff?>(null);
+
+    public async Task<BcAppOperation> StartInstallAsync(
+        DeliveryPackage package, string schedule, string schemaSyncMode, CancellationToken ct) =>
+        await _apps.InstallPteAsync(
             Token, Family, _environment.Name,
-            package, fileName,
+            await package.ReadContentAsync(ct), package.FileName,
             schedule, schemaSyncMode,
             // No language is sent. The workbench has no concept of one, and
             // guessing "en-US" would set the install locale wrong for (say) a
@@ -88,7 +92,8 @@ public sealed class AdminCenterDeliveryTarget : IDeliveryTarget
     /// uploads use too, mapped onto a delivery's outcome shape.
     /// </summary>
     public async Task<DeliveryInstallOutcome> WaitForInstallAsync(
-        BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout, CancellationToken ct)
+        BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout,
+        Func<IReadOnlyList<string>, CancellationToken, Task>? onProgress, CancellationToken ct)
     {
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
             _apps, Token,
@@ -102,9 +107,10 @@ public sealed class AdminCenterDeliveryTarget : IDeliveryTarget
         return new DeliveryInstallOutcome(completed, result.Message, result.Failure, result.Raw);
     }
 
-    public Task<IReadOnlyList<BcSession>> ListSessionsAsync(CancellationToken ct) =>
-        // The family as last read, null included.
-        _admin.ListSessionsAsync(Token, _environment.ApplicationFamily, _environment.Name, ct);
+    public async Task<OpenSessionsCheck> CheckOpenSessionsAsync(CancellationToken ct) =>
+        OpenSessionsCheck.From(_environment.Name,
+            // The family as last read, null included.
+            await _admin.ListSessionsAsync(Token, _environment.ApplicationFamily, _environment.Name, ct));
 
     public Task<IReadOnlyList<BcScheduledPteOperation>> ListHeldInstallsAsync(CancellationToken ct) =>
         _apps.ListScheduledPteOperationsAsync(Token, Family, _environment.Name, ct);

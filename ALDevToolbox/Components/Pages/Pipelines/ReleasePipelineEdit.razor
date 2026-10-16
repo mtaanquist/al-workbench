@@ -27,7 +27,9 @@
     .design/saas-delivery.md.
 
     Named user: a BC consultant who has connected a customer's environment and wants a
-    reusable "publish this build to Production" target.
+    reusable "publish this build to Production" target, or one setting up a pipeline to a
+    hosted customer's on-premises test tier (#1367), where only "now" and "in the delivery
+    window" are offered and Force sync only where the customer's gateway settings allow it.
 
     Query: ?solution= fixes the solution for a new pipeline, ?buildPipeline= fills in the build
     pipeline to deploy from, ?deploy= is a build to deploy once the pipeline exists (the
@@ -36,7 +38,7 @@
 
 <PageTitle>@HeadTitle · Pipelines · AL Workbench</PageTitle>
 
-<EditPage Title="@HeadTitle" Sticky="true"
+<EditPage Title="@HeadTitle" Sticky="true" PageClass="rpe-page"
           IsLoading="@_loadingPage" IsNotFound="@_notFound"
           Trail="@Trail">
     <SubtitleContent>
@@ -228,13 +230,17 @@
                             @if (_environments is { Count: 0 })
                             {
                                 <p class="form-sec__cap">
-                                    This solution has no Business Central environments yet. Connect Business Central
-                                    and refresh its environments to choose a target.
+                                    This solution has no environments to deploy to yet. Connect Business Central online
+                                    and refresh its environments, or link a customer's on-premises service tier, to choose a target.
                                 </p>
-                                <div>
+                                <div class="u-row">
                                     <a class="btn btn--sm" href="@($"/solutions/{_projectId}/bc")">
                                         <Icon Name="plug" Width="14" Height="14" />
                                         <span>Connect Business Central</span>
+                                    </a>
+                                    <a class="btn btn--sm" href="@($"/solutions/{_projectId}/environments")">
+                                        <Icon Name="server" Width="14" Height="14" />
+                                        <span>Link a service tier</span>
                                     </a>
                                 </div>
                             }
@@ -243,19 +249,33 @@
                                 <div class="field">
                                     <label class="field__label" for="rpe-env">Target environment</label>
                                     <SelectBox>
-                                        <select id="rpe-env" class="select" @bind="_environmentId" @bind:after="SuggestBranchRule" disabled="@_saving">
+                                        <select id="rpe-env" class="select" @bind="_environmentId" @bind:after="OnEnvironmentChangedAsync" disabled="@_saving">
                                             <option value="0">Choose an environment...</option>
                                             @foreach (var env in _environments!)
                                             {
-                                                var typeSuffix = env.Name.Equals(env.Type, StringComparison.OrdinalIgnoreCase) ? "" : $" ({env.Type})";
+                                                var typeSuffix = env.IsOnPremises
+                                                    ? $" (on-premises, {(BcEnvironmentTypes.IsProduction(env.Type) ? "production" : "test")})"
+                                                    : env.Name.Equals(env.Type, StringComparison.OrdinalIgnoreCase) ? "" : $" ({env.Type})";
                                                 var status = BcEnvironmentStatus.Humanise(env.Status);
                                                 var statusSuffix = $" — {(status.Length > 0 ? status : "not checked yet")}";
                                                 <option value="@env.Id">@env.Name@typeSuffix@statusSuffix</option>
                                             }
                                         </select>
                                     </SelectBox>
-                                    <small class="field__hint">Where the apps are installed — every app in the build goes to this one. Each environment's status is shown: you can pick one that's busy, but deployments to it are refused until Business Central reports it ready.</small>
+                                    <small class="field__hint">Where the apps are installed — every app in the build goes to this one. Each environment's status is shown: you can pick one that's busy, but deployments to it are refused until it reports ready.</small>
+                                    @if (ChosenEnvironment is { IsOnPremises: true } && _onPremises is { } tier)
+                                    {
+                                        <small class="field__hint" id="rpe-onprem-hint">
+                                            Sent through the "@(tier.GatewayName)" gateway to @(tier.TierName).@(tier.PublishingTier == tier.TierName ? "" : $" {tier.TierName} shares a database with {tier.PublishingTier}; apps are published on {tier.PublishingTier}.")
+                                        </small>
+                                    }
                                 </div>
+                                @if (ChosenEnvironment is { IsOnPremises: true } && OnPremisesWarning is { } warning)
+                                {
+                                    <Alert Tone="AlertTone.Warn" Role="status">
+                                        <span id="rpe-onprem-warning">@warning</span>
+                                    </Alert>
+                                }
 
                                 @if (_artifactSource == ReleaseArtifactSource.Build)
                                 {
@@ -292,18 +312,17 @@
                                     <label class="field__label" for="rpe-schedule">When a deployment installs</label>
                                     <SelectBox>
                                         <select id="rpe-schedule" class="select" @bind="_deploymentSchedule" disabled="@_saving">
-                                            @if (!BcDeploymentSchedule.Pickable.Contains(_deploymentSchedule))
+                                            @if (!ScheduleChoices.Contains(_deploymentSchedule))
                                             {
-                                                <option value="@_deploymentSchedule" disabled>No longer available - choose one</option>
+                                                <option value="@_deploymentSchedule" disabled>@(BcDeploymentSchedule.Pickable.Contains(_deploymentSchedule) ? "Not available for an on-premises service tier - choose one" : "No longer available - choose one")</option>
                                             }
-                                            @foreach (var mode in BcDeploymentSchedule.Pickable)
+                                            @foreach (var mode in ScheduleChoices)
                                             {
                                                 var unavailable = BcDeploymentSchedule.IsOurDeliveryWindow(mode) && !ChosenEnvironmentHasWindow;
                                                 <option value="@mode" disabled="@unavailable">@DeliveryModeDisplay.ScheduleChoice(mode, ChosenEnvironment?.Name)@(unavailable && ChosenEnvironment is not null ? " (none set yet)" : "")</option>
                                             }
                                         </select>
                                     </SelectBox>
-                                    <small class="field__hint">A deployment starts when you press Deploy or approve a prepared one. This is when it installs.</small>
                                     @if (ChosenEnvironment is { } chosenEnv && !ChosenEnvironmentHasWindow)
                                     {
                                         @if (BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule))
@@ -317,11 +336,6 @@
                                         else
                                         {
                                             <small class="field__hint">@ScheduleHint</small>
-                                            <small class="field__hint">
-                                                To install in @(chosenEnv.Name)'s delivery window, first
-                                                <a href="@($"/environments/{chosenEnv.Id}")" target="_blank" rel="noopener">set one on the environment's page</a>
-                                                (opens in a new tab).
-                                            </small>
                                         }
                                     }
                                     else
@@ -334,17 +348,24 @@
                                     <label class="field__label" for="rpe-sync">Schema sync</label>
                                     <SelectBox>
                                         <select id="rpe-sync" class="select" @bind="_schemaSyncMode" disabled="@_saving">
-                                            @if (!BcSyncMode.IsValid(_schemaSyncMode))
+                                            @if (!SyncChoices.Contains(_schemaSyncMode))
                                             {
-                                                <option value="@_schemaSyncMode" disabled>No longer available - choose one</option>
+                                                <option value="@_schemaSyncMode" disabled>@(BcSyncMode.IsValid(_schemaSyncMode) ? "Not allowed on this service tier - choose one" : "No longer available - choose one")</option>
                                             }
-                                            @foreach (var mode in BcSyncMode.All)
+                                            @foreach (var mode in SyncChoices)
                                             {
                                                 <option value="@mode">@DeliveryModeDisplay.SyncMode(mode)</option>
                                             }
                                         </select>
                                     </SelectBox>
-                                    <small class="field__hint"><b>Add</b> only ever adds — the safe default. <b>Force sync</b> can drop table columns and lose data.</small>
+                                    @if (ChosenIsOnPremises && !ForceSyncAllowed)
+                                    {
+                                        <small class="field__hint" id="rpe-sync-onprem"><b>Add</b>: new tables and fields only; a change that would remove data stops the deployment. Force sync isn't offered: the customer's gateway settings don't allow it on this service tier.</small>
+                                    }
+                                    else
+                                    {
+                                        <small class="field__hint"><b>Add</b>: new tables and fields only; a change that would remove data stops the deployment — the safe default. <b>Force sync</b> can drop table columns and lose data.</small>
+                                    }
                                 </div>
 
                                 @if (_schemaSyncMode == BcSyncMode.ForceSync)
@@ -355,6 +376,19 @@
                                         <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                                         <span>I understand Force sync can drop columns and permanently lose data in this environment.</span>
                                     </label>
+                                }
+
+                                @if (ChosenIsOnPremises)
+                                {
+                                    <div class="field">
+                                        <label class="@(_unpublishPrevious ? "check is-checked" : "check")">
+                                            <input id="rpe-unpublish" type="checkbox" checked="@_unpublishPrevious" disabled="@_saving"
+                                                   @onchange="e => _unpublishPrevious = (bool)(e.Value ?? false)" />
+                                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                            <span>Remove the previous version after upgrading</span>
+                                        </label>
+                                        <small class="field__hint">Once an app is upgraded, its old version is removed from the service tier. Turn this off to leave the old version there, for example when the customer's IT wants to remove it themselves.</small>
+                                    </div>
                                 }
                             </div>
                         </section>
@@ -477,6 +511,10 @@
     private string _deploymentSchedule = BcDeploymentSchedule.Immediate;
     private string _schemaSyncMode = BcSyncMode.Add;
     private bool _forceSyncAck;
+    // On-premises: remove each app's previous version once it is upgraded (#1367).
+    private bool _unpublishPrevious = true;
+    // The chosen on-premises target as the gateway last reported it; null for an online one.
+    private OnPremisesTargetInfo? _onPremises;
     private bool _prepareOnNewBuild;
     private bool _deployWithoutApproval;
     // Who deployments without approval run as, for an existing pipeline that has it on.
@@ -543,6 +581,10 @@
             if (_environmentId == 0) return "Choose a target environment to continue.";
             if (BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule) && !ChosenEnvironmentHasWindow)
                 return "Choose another time for installs, or set a delivery window on the environment, to continue.";
+            if (!ScheduleChoices.Contains(_deploymentSchedule))
+                return "Choose when installs run to continue.";
+            if (!SyncChoices.Contains(_schemaSyncMode))
+                return "Choose a schema sync setting to continue.";
             if (_schemaSyncMode == BcSyncMode.ForceSync && !_forceSyncAck)
                 return "Tick the Force sync acknowledgement to continue.";
             return null;
@@ -597,6 +639,75 @@
     /// window" choice is offered only when it does, and re-evaluated whenever the
     /// environment changes, because the window belongs to the environment.
     /// </summary>
+    /// <summary>The chosen target is a linked on-premises service tier.</summary>
+    private bool ChosenIsOnPremises => ChosenEnvironment is { IsOnPremises: true };
+
+    /// <summary>
+    /// When installs may run on the chosen target. An on-premises service tier holds no
+    /// install for a later Business Central update, so it has right away and the delivery
+    /// window only; the service refuses the rest whatever is sent.
+    /// </summary>
+    private IReadOnlyList<string> ScheduleChoices => ChosenIsOnPremises
+        ? BcDeploymentSchedule.Pickable.Where(m => !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(m) ?? m)).ToList()
+        : BcDeploymentSchedule.Pickable;
+
+    /// <summary>Whether Force sync may be chosen: always online, and on-premises only where the customer's gateway settings allow it.</summary>
+    private bool ForceSyncAllowed => !ChosenIsOnPremises || _onPremises is { AllowForceSync: true };
+
+    private IReadOnlyList<string> SyncChoices => ForceSyncAllowed
+        ? BcSyncMode.All
+        : BcSyncMode.All.Where(m => m != BcSyncMode.ForceSync).ToList();
+
+    /// <summary>
+    /// Why deployments to the chosen on-premises tier would not go through now, as the
+    /// gateway last reported: its settings refuse it, or the gateway can't be reached.
+    /// Saving is still allowed; the pipeline is for later as much as for now.
+    /// </summary>
+    private string? OnPremisesWarning
+    {
+        get
+        {
+            if (_onPremises is not { } tier) return null;
+            if (tier.Unlinked)
+                return $"{ChosenEnvironment?.Name} is no longer linked to a service tier. An administrator can link it again on the solution's Environments tab.";
+            if (tier.PolicyRefusal is { } refusal)
+                return refusal.Replace(" Nothing was sent.", "") + " Deployments to it are refused until then.";
+            return tier.GatewayStatus switch
+            {
+                ALDevToolbox.Services.Gateways.GatewayStatus.Online => null,
+                ALDevToolbox.Services.Gateways.GatewayStatus.Revoked =>
+                    $"The gateway {tier.GatewayName} has been revoked. Deployments to this service tier fail until it is set up again under Administration → Gateways.",
+                ALDevToolbox.Services.Gateways.GatewayStatus.WaitingForApproval =>
+                    $"The gateway {tier.GatewayName} is waiting for an administrator to approve it under Administration → Gateways. Deployments fail until then.",
+                _ => $"The gateway {tier.GatewayName} is offline. You can save this pipeline, but deployments fail until the gateway is back.",
+            };
+        }
+    }
+
+    /// <summary>
+    /// A new target: reads what the on-premises one allows, and drops a choice the new
+    /// target cannot take, so the form never shows a value Save would refuse.
+    /// </summary>
+    private async Task OnEnvironmentChangedAsync()
+    {
+        SuggestBranchRule();
+        await LoadOnPremisesAsync();
+    }
+
+    private async Task LoadOnPremisesAsync()
+    {
+        _onPremises = null;
+        if (ChosenEnvironment is not { IsOnPremises: true } env) return;
+        try
+        {
+            _onPremises = await Releases.GetOnPremisesTargetAsync(_projectId, env.Id);
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Reading the on-premises target {EnvironmentId} failed for solution {ProjectId}.", env.Id, _projectId);
+        }
+    }
+
     private bool ChosenEnvironmentHasWindow =>
         ChosenEnvironment is { } env && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd);
 
@@ -632,6 +743,8 @@
             : _buildPipelines is { Count: > 0 } && _buildPipelineId != 0)
         && _environmentId != 0
         && (!BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule) || ChosenEnvironmentHasWindow)
+        && ScheduleChoices.Contains(_deploymentSchedule)
+        && SyncChoices.Contains(_schemaSyncMode)
         && (_schemaSyncMode != BcSyncMode.ForceSync || _forceSyncAck);
 
     protected override async Task OnInitializedAsync()
@@ -685,6 +798,7 @@
             _deploymentSchedule = rp.DeploymentSchedule;
             _schemaSyncMode = rp.SchemaSyncMode;
             _forceSyncAck = rp.SchemaSyncMode == BcSyncMode.ForceSync; // already-saved choice is pre-acknowledged
+            _unpublishPrevious = rp.UnpublishPrevious;
             _prepareOnNewBuild = rp.PrepareReleaseOnNewBuild;
             _deployWithoutApproval = rp.DeployWithoutApproval;
             _withoutApprovalBy = rp.DeployWithoutApproval ? rp.DeployWithoutApprovalByUser?.DisplayName : null;
@@ -729,6 +843,7 @@
         _artifactSource = ReleaseArtifactSource.Build;
         _buildPipelineId = 0;
         _environmentId = 0;
+        _onPremises = null;
         _projectName = _projectOptions?.FirstOrDefault(p => p.Id == _projectId)?.Name;
         _solutionManageable = true;
         SuggestBranchRule();
@@ -833,11 +948,12 @@
             // into the environment, so there is nothing further to choose inside one.
             // Keep an environment that's the current edit's target even if it's since gone
             // missing, so editing doesn't silently drop the existing selection.
-            // An on-premises service tier cannot be deployed to yet (#1367), so it is not
-            // offered as a target; one a pipeline already points at is kept, as above.
+            // A linked on-premises service tier is a target too, deployed to through its
+            // gateway (#1367).
             _environments = envs
-                .Where(env => (env.MissingSince is null && !env.IsOnPremises) || env.Id == _environmentId)
+                .Where(env => env.MissingSince is null || env.Id == _environmentId)
                 .ToList();
+            await LoadOnPremisesAsync();
             // With nothing built here yet, GitHub releases are the only source there is:
             // show that picker rather than an empty one for build pipelines.
             if (!_editing && _buildPipelines.Count == 0 && _releaseRepositories is { Count: > 0 })
@@ -883,7 +999,8 @@
                 _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build,
                 _restrictBranch && _artifactSource == ReleaseArtifactSource.Build,
                 string.IsNullOrWhiteSpace(_allowedBranch) ? null : _allowedBranch.Trim(),
-                _deployWithoutApproval && _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build && ChosenEnvironmentIsSandbox);
+                _deployWithoutApproval && _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build && ChosenEnvironmentIsSandbox,
+                _unpublishPrevious);
 
             int id;
             if (_editing && Id is { } rid)

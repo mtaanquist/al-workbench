@@ -283,10 +283,9 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateReleasePipelineAsync_rejects_an_on_premises_service_tier()
+    public async Task CreateReleasePipelineAsync_rejects_an_on_premises_environment_with_no_service_tier_linked()
     {
-        // #1366: deploying through the gateway is not built yet, so the editor does not
-        // offer a linked service tier; the service refuses one sent past it.
+        // An on-premises environment with no tier behind it has nowhere to deploy (#1367).
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
         var buildId = await SeedBuildPipelineAsync(ctx, projectId);
@@ -298,8 +297,125 @@ public sealed class ReleasePipelineServiceTests : IDisposable
             new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
 
         var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironmentId"];
-        error.Should().Contain("on-premises service tier");
+        error.Should().Contain("no longer linked to a service tier");
         (await ctx.OeReleasePipelines.CountAsync()).Should().Be(0);
+    }
+
+    /// <summary>Links <paramref name="envId"/> to a service tier on an approved gateway whose settings allow publishing there.</summary>
+    private static async Task LinkOnPremisesAsync(AppDbContext ctx, int envId, bool allowForceSync = false, string policyState = "valid")
+    {
+        var now = DateTime.UtcNow;
+        var policy = new ALWorkbench.Gateway.Contracts.GatewayPolicyReport
+        {
+            State = policyState,
+            Instances =
+            [
+                new ALWorkbench.Gateway.Contracts.GatewayPolicyInstance
+                {
+                    Machine = "CRONUS-BC01", Name = "BC250", Allow = ["inventory", "publish"], AllowForceSync = allowForceSync,
+                },
+            ],
+        };
+        var gateway = new ALDevToolbox.Domain.Entities.Gateway
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS hosting", MachineName = "CRONUS-GW01",
+            KeyFingerprint = Guid.NewGuid().ToString("N"),
+            State = ALDevToolbox.Domain.Entities.GatewayState.Approved, RegisteredAt = now, KeyRegisteredAt = now, LastSeenAt = now,
+            EffectivePolicyJson = System.Text.Json.JsonSerializer.Serialize(policy),
+        };
+        var instance = new ALDevToolbox.Domain.Entities.GatewayInstance
+        {
+            OrganizationId = TestDb.DefaultOrgId, Gateway = gateway, Machine = "CRONUS-BC01", Name = "BC250", State = "Running",
+            FirstReportedAt = now, ReportedAt = now, ReadAt = now,
+        };
+        ctx.GatewayInstances.Add(instance);
+        await ctx.SaveChangesAsync();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == envId).ExecuteUpdateAsync(s => s
+            .SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises)
+            .SetProperty(e => e.TenantId, "default")
+            .SetProperty(e => e.GatewayInstanceId, instance.Id));
+    }
+
+    [Fact]
+    public async Task CreateReleasePipelineAsync_accepts_a_linked_on_premises_tier_and_keeps_remove_previous_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox");
+        await LinkOnPremisesAsync(ctx, envId);
+
+        var on = await NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "On", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        var off = await NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Off", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add, UnpublishPrevious: false));
+
+        await using var read = _db.NewContext();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == on)).UnpublishPrevious.Should().BeTrue("removing the previous version is the default");
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == off)).UnpublishPrevious.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(BcDeploymentSchedule.NextMinorUpdate)]
+    [InlineData(BcDeploymentSchedule.NextMajorUpdate)]
+    public async Task CreateReleasePipelineAsync_refuses_a_deferred_schedule_on_premises(string schedule)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox");
+        await LinkOnPremisesAsync(ctx, envId);
+
+        var act = () => NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Rel", buildId, envId, schedule, BcSyncMode.Add));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["DeploymentSchedule"]
+            .Should().Be(DeliveryService.WaitsForUpdateRefusal("CRONUS Test"));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task CreateReleasePipelineAsync_offers_force_sync_on_premises_only_where_the_gateway_settings_allow_it(bool allowed, bool refused)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox");
+        await LinkOnPremisesAsync(ctx, envId, allowForceSync: allowed);
+
+        var act = () => NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.ForceSync));
+
+        if (refused)
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["SchemaSyncMode"]
+                .Should().Be(ALDevToolbox.Services.Gateways.OnPremisesDeployFacts.ForceSyncRefusal("CRONUS Test"));
+        }
+        else
+        {
+            await act.Should().NotThrowAsync();
+        }
+        (await NewService(ctx).GetOnPremisesTargetAsync(projectId, envId))!.AllowForceSync.Should().Be(allowed);
+    }
+
+    [Fact]
+    public async Task GetOnPremisesTargetAsync_says_why_the_gateway_settings_would_refuse_a_deployment()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox");
+        var onlineId = await SeedEnvironmentAsync(ctx, projectId, name: "Online");
+        await LinkOnPremisesAsync(ctx, envId, policyState: "missing");
+
+        var target = await NewService(ctx).GetOnPremisesTargetAsync(projectId, envId);
+
+        target!.TierName.Should().Be("CRONUS-BC01 / BC250");
+        target.PublishingTier.Should().Be("CRONUS-BC01 / BC250");
+        target.GatewayName.Should().Be("CRONUS hosting");
+        target.AllowForceSync.Should().BeFalse();
+        target.PolicyRefusal.Should().StartWith("Not allowed by the customer's gateway settings: the gateway has no settings file");
+        (await NewService(ctx).GetOnPremisesTargetAsync(projectId, onlineId)).Should().BeNull("an online environment has no gateway");
     }
 
     [Fact]

@@ -98,8 +98,15 @@ public sealed record BcConnectionTestResult(BcConnectionResult Result, int Envir
 /// Raised by the BC HTTP clients when the API returns a non-success status, so the
 /// orchestrating service can classify it (e.g. 401/403 on the admin call → GDAP
 /// missing). Carries the status code and a short, secret-free detail.
+/// <para>
+/// It is also the Admin Center's kind of
+/// <see cref="ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryTargetException"/>,
+/// the exception the delivery seam promises: the deployment code catches that, so the
+/// on-premises gateway's target can refuse in the same way without pretending to be an
+/// HTTP client (#1367).
+/// </para>
 /// </summary>
-public sealed class BcApiException : Exception
+public sealed class BcApiException : ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryTargetException
 {
     public System.Net.HttpStatusCode? StatusCode { get; }
 

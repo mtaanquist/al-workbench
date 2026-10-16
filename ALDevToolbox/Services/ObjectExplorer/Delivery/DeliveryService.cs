@@ -6,6 +6,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.Gateways;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -111,6 +112,13 @@ public sealed class DeliveryService
 
     internal static string ProductionRefusedForAgents(string environmentName) =>
         $"{environmentName} is not a sandbox, and this organisation does not let AI assistants deploy to production. Deploy to it from the deployment pipeline's page, which asks you to confirm first.";
+
+    /// <summary>
+    /// Why an AI assistant may not deploy to an on-premises production tier, whatever the
+    /// organisation's setting for production says (#1367).
+    /// </summary>
+    internal static string OnPremisesProductionRefusedForAgents(string environmentName) =>
+        $"{environmentName} is an on-premises production service tier. AI assistants can't deploy to on-premises production, because a deployment there can restart the customer's service tiers. Deploy to it from the deployment pipeline's page, which asks you to confirm first.";
 
     /// <summary>
     /// Deploys a failed delivery's build again, now, through the same deployment pipeline
@@ -224,9 +232,10 @@ public sealed class DeliveryService
         {
             await target.ConnectAsync(timeout.Token);
         }
-        catch (BcApiException ex)
+        catch (DeliveryTargetException ex)
         {
-            // The connection's own sentence (not set up, secret expired) says what to fix.
+            // The connection's own sentence (not set up, secret expired, the gateway is
+            // offline) says what to fix.
             _logger.LogWarning("Couldn't sign in to check the sessions on {Env} before deploying through pipeline {ReleasePipelineId}: {Message}",
                 envName, releasePipelineId, ex.Message);
             return OpenSessionsCheck.Unknown(envName, ex.Message);
@@ -238,10 +247,9 @@ public sealed class DeliveryService
 
         try
         {
-            var sessions = await target.ListSessionsAsync(timeout.Token);
-            return OpenSessionsCheck.From(envName, sessions);
+            return await target.CheckOpenSessionsAsync(timeout.Token);
         }
-        catch (BcApiException ex)
+        catch (DeliveryTargetException ex)
         {
             _logger.LogWarning("Couldn't read the sessions on {Env} before deploying through pipeline {ReleasePipelineId}: {Message}",
                 envName, releasePipelineId, ex.Message);
@@ -276,6 +284,20 @@ public sealed class DeliveryService
 
         var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
         var sandbox = BcEnvironmentTypes.IsSandbox(plan.EnvType);
+        // The organisation's "let AI assistants deploy to production" covers Business
+        // Central online only. A deployment to an on-premises production tier also
+        // restarts the customer's service tiers, and that starts as a person's decision on
+        // the deployment pipeline's page. See .design/on-prem-gateway.md, "MCP parity".
+        if (forAgent && !sandbox && plan.OnPremises)
+        {
+            throw Validation("ProjectEnvironment", OnPremisesProductionRefusedForAgents(plan.EnvName));
+        }
+        // A one-time Force sync is checked here, beside the pipeline's own in
+        // ResolveReleaseAsync: on-premises, the customer's gateway settings decide.
+        if (forceSyncOnce && plan.OnPremises && !await OnPremisesDeployFacts.AllowsForceSyncAsync(_db, plan.EnvironmentId, ct))
+        {
+            throw Validation("SchemaSyncMode", OnPremisesDeployFacts.ForceSyncRefusal(plan.EnvName));
+        }
         if (forAgent && !sandbox
             && !await _db.OrganizationSettings.AsNoTracking()
                 .Where(s => s.OrganizationId == orgId)
@@ -389,7 +411,8 @@ public sealed class DeliveryService
                 OwnerId = r.Project!.CreatedByUserId,
                 TimeZone = r.Project.BcTimeZone,
                 EnvName = r.ProjectEnvironment!.Name,
-                EnvMissing = r.ProjectEnvironment.MissingSince != null,
+                EnvMissing = r.ProjectEnvironment.MissingSince != null
+                    || (r.ProjectEnvironment.Kind == OeEnvironmentKind.OnPremises && r.ProjectEnvironment.GatewayInstanceId == null),
                 EnvKind = r.ProjectEnvironment.Kind,
                 EnvStatus = r.ProjectEnvironment.Status,
                 EnvType = r.ProjectEnvironment.Type,
@@ -416,9 +439,9 @@ public sealed class DeliveryService
                 ? "This deployment pipeline's target service tier is no longer linked to the solution. An administrator can link it again on the solution's Environments tab."
                 : "This deployment pipeline's target environment is no longer present in Business Central. Refresh the environments and try again.");
         }
-        // Deploying to a linked on-premises service tier goes through the gateway, which
-        // is not built yet (#1367). Until then the service refuses it, whatever the page
-        // offers. See .design/on-prem-gateway.md, "Deploying to on-premises".
+        // Only a kind of environment with a target can be deployed to. Online and a linked
+        // on-premises tier both have one (#1367). See .design/on-prem-gateway.md,
+        // "Deploying to on-premises".
         if (_targets.Unavailable(rp.EnvKind, rp.EnvName) is { } unavailable)
         {
             throw Validation("ProjectEnvironment", unavailable);
@@ -512,7 +535,9 @@ public sealed class DeliveryService
             throw Validation("Build",
                 $"{older.App.AppName} {older.App.AppVersion} in build #{build.Id} is older than {older.Installed}, which is already installed in {rp.EnvName}. "
                 + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice
-                + $" If {rp.EnvName} has changed recently, refresh the environments on the solution's Business Central page and try again.");
+                + (rp.EnvKind == OeEnvironmentKind.OnPremises
+                    ? $" If {rp.EnvName} has changed recently, wait for the gateway to read it again (it does every 15 minutes) and try again."
+                    : $" If {rp.EnvName} has changed recently, refresh the environments on the solution's Business Central page and try again."));
         }
 
         // A deployment pipeline saved before the move to the App Management API stores the
@@ -531,6 +556,16 @@ public sealed class DeliveryService
         {
             throw Validation("SchemaSyncMode",
                 "This deployment pipeline's schema sync setting is no longer a valid option. Open the deployment pipeline, choose a schema sync setting, and save it.");
+        }
+        // On-premises, Force sync is the customer's to allow, in the gateway's settings, and
+        // they can take it back after the pipeline was saved. Refused here so it is said
+        // when the deployment is made; the gateway refuses it again whatever is sent.
+        var onPremises = rp.EnvKind == OeEnvironmentKind.OnPremises;
+        if (onPremises && BcSyncMode.Normalize(rp.SchemaSyncMode) == BcSyncMode.ForceSync
+            && !await OnPremisesDeployFacts.AllowsForceSyncAsync(_db, rp.ProjectEnvironmentId, ct))
+        {
+            throw Validation("SchemaSyncMode", OnPremisesDeployFacts.ForceSyncRefusal(rp.EnvName)
+                + " Open the deployment pipeline and choose Add.");
         }
         // Only an environment that can hold an install for a later update takes those
         // timings; on-premises has only now and the delivery window.
@@ -551,7 +586,37 @@ public sealed class DeliveryService
         return new ReleasePlan(
             rp.Id, rp.ProjectId, rp.EnvName, rp.EnvType, wireSchedule,
             BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule), rp.SchemaSyncMode,
-            UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, build.Id, artifacts);
+            UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, build.Id, artifacts)
+        {
+            EnvironmentId = rp.ProjectEnvironmentId,
+            OnPremises = onPremises,
+        };
+    }
+
+    /// <summary>The log line, and the page's note, for an on-premises deployment whose service tiers were not restarted.</summary>
+    public const string TiersNotRestartedLine =
+        "Service tiers were not restarted. People who stay signed in keep running the previous version until each service tier is restarted.";
+
+    /// <summary>
+    /// The end of the delivery window a deployment runs in, when the window chose its
+    /// time and it is running inside it: a gateway command queued now must not start
+    /// after it. Null otherwise.
+    /// </summary>
+    private async Task<DateTime?> DeliveryWindowEndAsync(OeProjectDelivery delivery, CancellationToken ct)
+    {
+        if (!delivery.ScheduledByDeliveryWindow || delivery.ScheduledOutsideWindow) return null;
+        var w = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == delivery.ReleasePipelineId)
+            .Select(r => new
+            {
+                TimeZone = r.Project!.BcTimeZone,
+                r.ProjectEnvironment!.UpdateWindowStart,
+                r.ProjectEnvironment.UpdateWindowEnd,
+            })
+            .FirstOrDefaultAsync(ct);
+        return w is null
+            ? null
+            : UpdateWindow.ClosingUtc(w.UpdateWindowStart, w.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(w.TimeZone), _clock.GetUtcNow().UtcDateTime);
     }
 
     /// <summary>Why a deployment can't wait for a later update on an environment that can't hold one.</summary>
@@ -617,6 +682,12 @@ public sealed class DeliveryService
         int Id, int ProjectId, string EnvName, string? EnvType, string WireSchedule, bool ByDeliveryWindow, string SchemaSyncMode,
         TimeZoneInfo Tz, TimeOnly? WindowStart, TimeOnly? WindowEnd, int BuildId, List<ReleaseApp> Artifacts)
     {
+        /// <summary>The target environment row.</summary>
+        public int EnvironmentId { get; init; }
+
+        /// <summary>The target is a linked on-premises service tier.</summary>
+        public bool OnPremises { get; init; }
+
         /// <summary>True when a window is set and <paramref name="utc"/> falls outside it: the audited override.</summary>
         public bool IsOutsideWindow(DateTime utc) =>
             UpdateWindow.IsConfigured(WindowStart, WindowEnd) && !UpdateWindow.IsWithin(WindowStart, WindowEnd, Tz, utc);
@@ -1351,6 +1422,19 @@ public sealed class DeliveryService
     private async Task<int> MoveHeldDeliveryAsync(RescheduleInfo info, RescheduleTiming timing, DateTime? atUtc, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
+        // Only a target that holds installs hands a deployment off. The environment's kind
+        // is read first, before anything is claimed or written, so a deployment on a kind
+        // that cannot hold one (on-premises) is refused in words rather than half moved.
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == info.EnvironmentId)
+            .Select(e => new { e.Kind, e.ApplicationFamily })
+            .FirstOrDefaultAsync(ct);
+        var kind = env?.Kind ?? OeEnvironmentKind.Online;
+        if (!_targets.CapabilitiesFor(kind).DeferredSchedules)
+        {
+            throw Validation("Delivery", WaitsForUpdateRefusal(info.EnvironmentName));
+        }
+
         var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
         if (t.Schedule == BcDeploymentSchedule.Normalize(info.DeploymentSchedule))
         {
@@ -1391,16 +1475,11 @@ public sealed class DeliveryService
         }
 
         var schedule = BcDeploymentSchedule.Normalize(info.DeploymentSchedule) ?? info.DeploymentSchedule;
-        // Only a target that holds installs hands a deployment off, so this is one.
-        var env = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(e => e.Id == info.EnvironmentId)
-            .Select(e => new { e.Kind, e.ApplicationFamily })
-            .FirstOrDefaultAsync(CancellationToken.None);
         IDeliveryTarget? connected = null;
         try
         {
             var target = _targets.Create(new DeliveryTargetEnvironment(
-                info.ProjectId, info.EnvironmentName, env?.Kind ?? OeEnvironmentKind.Online, info.EnvironmentId, env?.ApplicationFamily));
+                info.ProjectId, info.EnvironmentName, kind, info.EnvironmentId, env?.ApplicationFamily));
             await target.ConnectAsync(ct);
             connected = target;
             await target.CancelHeldInstallAsync(held.AppId, held.Version, schedule, ct);
@@ -1410,7 +1489,7 @@ public sealed class DeliveryService
             // A refusal means Business Central still has its copy. Anything else (a timeout,
             // the page closing) may have reached it or not, so ask it before deciding: with
             // its copy gone the move has to finish, or nothing would install at all.
-            var stillHeld = ex is BcApiException || connected is null
+            var stillHeld = ex is DeliveryTargetException || connected is null
                 || await StillHeldAsync(connected, info.EnvironmentName, held) != false;
             if (stillHeld)
             {
@@ -1418,7 +1497,7 @@ public sealed class DeliveryService
                 await _db.OeProjectDeliveries.Where(d => d.Id == replacementId).ExecuteDeleteAsync(CancellationToken.None);
                 await SetHeldStatusAsync(info.DeliveryId, ProjectDeliveryStatus.Cancelled, ProjectDeliveryStatus.HandedOff, null, null, CancellationToken.None);
                 _panelCache.Invalidate(info.ProjectId, info.EnvironmentId);
-                if (ex is not BcApiException bcEx) throw;
+                if (ex is not DeliveryTargetException bcEx) throw;
                 _logger.LogWarning(bcEx, "Business Central refused to cancel the install held for delivery {DeliveryId}; nothing was moved.", info.DeliveryId);
                 throw Validation("Delivery",
                     $"Business Central didn't cancel the copy it is holding, so nothing was changed. It may have installed it already: refresh {info.EnvironmentName} and check. ({bcEx.Message})");
@@ -1701,7 +1780,9 @@ public sealed class DeliveryService
     /// startup, when the worker may already be running a deployment claimed since; the
     /// cut-off keeps that one alone (#1114). The publish isn't safely resumable (partial
     /// uploads to BC), so these are failed, not retried. Returns the ids it failed, so the
-    /// people behind them can be told (#1036).
+    /// people behind them can be told (#1036). An on-premises deployment already handed to
+    /// its gateway command is not one of them: the command carries on whatever happens to
+    /// us, and <see cref="FollowGatewayDeliveriesAsync"/> goes on following it (#1367).
     /// </summary>
     public async Task<List<int>> FailInterruptedDeliveriesAsync(DateTime claimedBeforeUtc, CancellationToken ct = default)
     {
@@ -1709,7 +1790,9 @@ public sealed class DeliveryService
             .Where(d => (d.Status == ProjectDeliveryStatus.Claimed
                          || d.Status == ProjectDeliveryStatus.Uploading
                          || d.Status == ProjectDeliveryStatus.Installing)
-                        && (d.ClaimedAt == null || d.ClaimedAt < claimedBeforeUtc))
+                        && (d.ClaimedAt == null || d.ClaimedAt < claimedBeforeUtc)
+                        // Handed to a gateway command: not orphaned, followed (#1367).
+                        && !(d.Status == ProjectDeliveryStatus.Installing && d.GatewayCommandId != null))
             .Include(d => d.Results)
             .ToListAsync(ct);
         if (orphans.Count == 0) return [];
@@ -1776,6 +1859,15 @@ public sealed class DeliveryService
             _logger.LogDebug("Delivery {DeliveryId} waits for an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
             return false;
         }
+        // An on-premises deployment handed to its gateway command holds no worker, so the
+        // in-process gate below doesn't see it; the row does, across a restart too (#1367).
+        if (await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
+                d.Id != deliveryId && d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
+                && d.Status == ProjectDeliveryStatus.Installing && d.GatewayCommandId != null, ct))
+        {
+            _logger.LogDebug("Delivery {DeliveryId} waits: the gateway is still installing an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
+            return false;
+        }
         using var environment = _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, target.EnvironmentName);
         if (environment is null)
         {
@@ -1834,6 +1926,7 @@ public sealed class DeliveryService
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            await AbandonHandOffAsync();
             // Saved and reported as a finished run, so the worker still tells the person
             // behind it: after the restart the row is already failed, and the startup check
             // that reports interrupted deployments passes over it (#1179).
@@ -1842,6 +1935,7 @@ public sealed class DeliveryService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Delivery {DeliveryId} failed unexpectedly.", deliveryId);
+            await AbandonHandOffAsync();
             await FailAsync(delivery, log, "The delivery failed unexpectedly. " + Short(ex.Message), ct);
         }
         return true;
@@ -1969,7 +2063,7 @@ public sealed class DeliveryService
         {
             await target.ConnectAsync(ct);
         }
-        catch (BcApiException ex)
+        catch (DeliveryTargetException ex)
         {
             await FailAsync(delivery, log, ex.Message, ct);
             return;
@@ -1998,7 +2092,10 @@ public sealed class DeliveryService
         delivery.Status = ProjectDeliveryStatus.Uploading;
         delivery.StartedAt = now;
         delivery.UpdatedAt = now;
-        Append(log, $"Publishing {delivery.Results.Count} app(s) to {delivery.EnvironmentName}.");
+        var onPremises = kind == OeEnvironmentKind.OnPremises;
+        Append(log, onPremises
+            ? $"Publishing {delivery.Results.Count} app(s) to {delivery.EnvironmentName} through the gateway."
+            : $"Publishing {delivery.Results.Count} app(s) to {delivery.EnvironmentName}.");
         if (BcSyncMode.Normalize(delivery.SchemaSyncMode) == BcSyncMode.ForceSync)
         {
             // Said once, up front: a reader of the log after a dropped column needs to see
@@ -2021,7 +2118,7 @@ public sealed class DeliveryService
         var artifacts = await _db.OeProjectBuildArtifacts.AsNoTracking()
             .Where(a => a.ProjectBuildId == delivery.ProjectBuildId)
             .OrderBy(a => a.Id)
-            .Select(a => new { a.Id, a.FileName, a.AppId, a.CarriedFromBuildId })
+            .Select(a => new { a.Id, a.FileName, a.AppId, a.CarriedFromBuildId, a.SizeBytes })
             .ToListAsync(ct);
         // An app the build carried over unchanged from an earlier build (#1094). Where the
         // environment already has it, or something newer from another pipeline, or has it
@@ -2036,7 +2133,7 @@ public sealed class DeliveryService
         {
             installed = await target.ListInstalledAppsAsync(ct);
         }
-        catch (BcApiException ex)
+        catch (DeliveryTargetException ex)
         {
             await FailAsync(delivery, log, $"Couldn't read the apps installed on {delivery.EnvironmentName}. " + Short(ex.Message), ct);
             return;
@@ -2114,7 +2211,7 @@ public sealed class DeliveryService
             {
                 waiting = await target.ListHeldInstallsAsync(ct);
             }
-            catch (BcApiException ex)
+            catch (DeliveryTargetException ex)
             {
                 // Not a reason to stop: this read only buys a clearer message, and the
                 // upload itself reports a real conflict.
@@ -2122,21 +2219,87 @@ public sealed class DeliveryService
             }
         }
 
+        // Each app as the target is handed it. The content is loaded only when a target
+        // asks for it, one app at a time.
+        DeliveryPackage PackageFor(int i)
+        {
+            var artifact = artifacts[i];
+            var artifactId = artifact.Id;
+            return new DeliveryPackage(
+                artifactId, artifact.FileName, appIds[i], ordered[i].AppName, ordered[i].AppVersion, artifact.SizeBytes,
+                token => _db.OeProjectBuildArtifacts.AsNoTracking()
+                    .Where(a => a.Id == artifactId)
+                    .Select(a => a.Content)
+                    .FirstAsync(token));
+        }
+
+        // Whether app i is left alone without asking the environment: it is already on
+        // this version, or carried over unchanged with something newer installed. The loop
+        // below says so on the app; this is the same rule, asked up front.
+        bool LeftAlone(int i) =>
+            (InstalledMatch(i)?.Version is { Length: > 0 } on && string.Equals(on, ordered[i].AppVersion, StringComparison.OrdinalIgnoreCase))
+            || (Carried(i) && InstalledMatch(i)?.Version is { Length: > 0 } newer
+                && ProjectConnectionService.CompareVersions(newer, ordered[i].AppVersion) > 0)
+            || (Carried(i) && AlreadyWaiting(waiting, appIds[i], ordered[i], delivery) is not null);
+
+        // Every app the run will send, in order, told to the target before the first goes:
+        // the gateway installs them as one command (#1367). The list stops where the loop
+        // below would: at a missing artifact, or an app already waiting for an update.
+        var sending = new List<DeliveryPackage>();
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            if (i >= artifacts.Count) break;
+            if (LeftAlone(i)) continue;
+            if (AlreadyWaiting(waiting, appIds[i], ordered[i], delivery) is not null) break;
+            sending.Add(PackageFor(i));
+        }
+        // A target that takes the whole batch hands the run off (the gateway, #1367); one
+        // whose own rules refuse it says so, and the first app it would have sent carries
+        // the refusal.
+        DeliveryHandOff? handOff = null;
+        string? batchRefusal = null;
+        if (sending.Count > 0)
+        {
+            // A target that queues the batch (the gateway) writes its command inside this
+            // transaction, and HandOffAsync commits it together with the deployment that
+            // records it: a crash in between leaves neither, so no command is ever queued
+            // that no deployment follows. A target that hands nothing off wrote nothing in
+            // it, and it ends straight away.
+            await _db.Database.BeginTransactionAsync(ct);
+            try
+            {
+                handOff = await target.PrepareInstallsAsync(new DeliveryInstallBatch(
+                    sending, delivery.SchemaSyncMode,
+                    UnpublishPrevious: await _db.OeReleasePipelines.AsNoTracking()
+                        .Where(r => r.Id == delivery.ReleasePipelineId)
+                        .Select(r => r.UnpublishPrevious)
+                        .FirstOrDefaultAsync(ct),
+                    RequestedByUserId: _orgContext.CurrentUserId ?? delivery.TriggeredByUserId,
+                    StartedByAgent: delivery.StartedByAgent,
+                    WindowEndsAtUtc: await DeliveryWindowEndAsync(delivery, ct)), ct);
+            }
+            catch (DeliveryTargetRefusedException ex)
+            {
+                batchRefusal = ex.Message;
+            }
+            catch (DeliveryTargetException ex)
+            {
+                await AbandonHandOffAsync();
+                await FailAsync(delivery, log, ex.Message, ct);
+                return;
+            }
+            if (handOff is null) await AbandonHandOffAsync();
+        }
+
         var results = ordered;
-        var failedIndex = -1;
-        // Whether anything went up. A run where every app was already on its version
-        // hands nothing to Business Central, so it ends as deployed, not handed off.
-        var uploadedAny = false;
-        // The one line the delivery carries when Business Central reported the failure;
-        // the detail (its message) stays on the app, so the two never say the same twice.
-        string? failureLine = null;
-        // A refusal is already the whole sentence; it isn't prefixed like an app's failure.
-        string? refusal = null;
+        var tally = new RunTally();
+        // Whether an app went to the gateway in the command the run was handed off with.
+        var handedOff = false;
 
         for (var i = 0; i < results.Count; i++)
         {
             var result = results[i];
-            if (failedIndex >= 0)
+            if (tally.FailedIndex >= 0)
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
                 result.UpdatedAt = DateTime.UtcNow;
@@ -2146,7 +2309,7 @@ public sealed class DeliveryService
             var label = $"{result.AppName} {result.AppVersion}";
             if (i >= artifacts.Count)
             {
-                failedIndex = i;
+                tally.FailedIndex = i;
                 result.Status = ProjectDeliveryResultStatus.Failed;
                 result.FinishedAt = DateTime.UtcNow;
                 result.Message = "The build's deliverables changed under the delivery.";
@@ -2190,14 +2353,40 @@ public sealed class DeliveryService
                     await SaveResultAsync(delivery, log, ct);
                     continue;
                 }
-                failedIndex = i;
-                refusal = waitingRefusal;
+                tally.FailedIndex = i;
+                tally.Refusal = waitingRefusal;
                 result.Status = ProjectDeliveryResultStatus.Failed;
                 result.FinishedAt = DateTime.UtcNow;
                 result.UpdatedAt = result.FinishedAt.Value;
                 result.Message = waitingRefusal;
                 Append(log, waitingRefusal);
                 break;
+            }
+
+            if (batchRefusal is { } refusedBatch)
+            {
+                tally.FailedIndex = i;
+                result.Status = ProjectDeliveryResultStatus.Refused;
+                result.Message = refusedBatch;
+                result.FinishedAt = DateTime.UtcNow;
+                result.UpdatedAt = result.FinishedAt.Value;
+                tally.Refusal = $"The gateway refused {label}: {refusedBatch}";
+                Append(log, $"REFUSED {label}: {refusedBatch}");
+                break;
+            }
+            if (handOff is not null)
+            {
+                // Already sent, with the rest, as the gateway's one command: from here the
+                // deployment is followed, not waited for (FollowGatewayDeliveriesAsync).
+                var sent = PackageFor(i);
+                result.Status = ProjectDeliveryResultStatus.Installing;
+                result.StartedAt = DateTime.UtcNow;
+                result.UpdatedAt = result.StartedAt.Value;
+                delivery.Status = ProjectDeliveryStatus.Installing;
+                delivery.InstallStartedAt ??= result.StartedAt;
+                Append(log, $"Sending {label} ({sent.Size} bytes) to the gateway...");
+                handedOff = true;
+                continue;
             }
 
             try
@@ -2210,25 +2399,24 @@ public sealed class DeliveryService
                     await target.RenewAsync(ct);
                 }
 
-                var artifact = artifacts[i];
-                var bytes = await _db.OeProjectBuildArtifacts.AsNoTracking()
-                    .Where(a => a.Id == artifact.Id)
-                    .Select(a => a.Content)
-                    .FirstAsync(ct);
+                var package = PackageFor(i);
 
                 result.Status = ProjectDeliveryResultStatus.Uploading;
                 result.StartedAt = DateTime.UtcNow;
                 result.UpdatedAt = result.StartedAt.Value;
-                Append(log, $"Uploading {label} ({bytes.Length} bytes)...");
+                Append(log, onPremises
+                    ? $"Sending {label} ({package.Size} bytes) to the gateway..."
+                    : $"Uploading {label} ({package.Size} bytes)...");
                 await SaveResultAsync(delivery, log, ct);
 
                 var operation = await target.StartInstallAsync(
-                    bytes, artifact.FileName, delivery.DeploymentSchedule, delivery.SchemaSyncMode, ct);
+                    package, delivery.DeploymentSchedule, delivery.SchemaSyncMode, ct);
 
-                uploadedAny = true;
-                result.OperationId = operation.Id;
-                result.AppId = operation.AppId?.ToString();
+                // The gateway's target has no operation of Business Central's own to record.
+                result.OperationId = operation.Id == Guid.Empty ? null : operation.Id;
+                result.AppId = operation.AppId?.ToString() ?? result.AppId;
                 result.UpdatedAt = DateTime.UtcNow;
+                var operationNote = operation.Id == Guid.Empty ? "" : $" (operation {operation.Id})";
 
                 // BC read the version out of the package it just accepted. If that isn't
                 // the version this delivery promised, something other than this build's
@@ -2236,7 +2424,7 @@ public sealed class DeliveryService
                 if (!string.IsNullOrEmpty(operation.TargetAppVersion)
                     && !string.Equals(operation.TargetAppVersion, result.AppVersion, StringComparison.OrdinalIgnoreCase))
                 {
-                    failedIndex = i;
+                    tally.FailedIndex = i;
                     result.Status = ProjectDeliveryResultStatus.Failed;
                     result.FinishedAt = DateTime.UtcNow;
                     result.Message = $"Business Central read version {operation.TargetAppVersion} from the uploaded app, but this build says {result.AppVersion}.";
@@ -2249,9 +2437,10 @@ public sealed class DeliveryService
                 {
                     // Nothing left to watch: BC runs this in its own window, and no poll
                     // of ours would ever see it go terminal.
+                    tally.UploadedAny = true;
                     result.Status = ProjectDeliveryResultStatus.Scheduled;
                     result.FinishedAt = DateTime.UtcNow;
-                    Append(log, $"Business Central has scheduled {label} (operation {operation.Id}).");
+                    Append(log, $"Business Central has scheduled {label}{operationNote}.");
                     await SaveResultAsync(delivery, log, ct);
                     continue;
                 }
@@ -2261,40 +2450,27 @@ public sealed class DeliveryService
                 delivery.Status = ProjectDeliveryStatus.Installing;
                 delivery.InstallStartedAt ??= result.UpdatedAt;
                 delivery.UpdatedAt = DateTime.UtcNow;
-                Append(log, $"Installing {label} (operation {operation.Id})...");
+                Append(log, $"Installing {label}{operationNote}...");
                 await SaveResultAsync(delivery, log, ct);
 
-                var outcome = await target.WaitForInstallAsync(operation, PollDelay, PollTimeoutPerApp, ct);
-                if (outcome.Completed)
-                {
-                    result.Status = ProjectDeliveryResultStatus.Completed;
-                    result.Message = outcome.Message;
-                    Append(log, $"Installed {label}.");
-                }
-                else
-                {
-                    failedIndex = i;
-                    result.Status = ProjectDeliveryResultStatus.Failed;
-                    result.Message = outcome.Message;
-                    // The log keeps Business Central's text whole, wrapper and JSON included:
-                    // it is what support needs, and what the page parses back (#930).
-                    if (outcome.Failure is { } reported)
+                // What the environment says while it works (the gateway's lines, as it
+                // posts them) goes into this deployment's log as it arrives, so the page,
+                // which re-reads the deployment every two seconds, shows it live.
+                var outcome = await target.WaitForInstallAsync(operation, PollDelay, PollTimeoutPerApp,
+                    async (lines, token) =>
                     {
-                        Append(log, $"FAILED {label}: {BcFailureText.ForLog(reported, outcome.Raw)}");
-                        failureLine = BcFailureText.WhatHappened(reported.Code, label);
-                    }
-                    else
-                    {
-                        Append(log, $"FAILED {label}: {outcome.Message}");
-                    }
-                }
+                        foreach (var line in lines) Append(log, (onPremises ? "Gateway: " : "") + line);
+                        delivery.UpdatedAt = DateTime.UtcNow;
+                        await SaveResultAsync(delivery, log, token);
+                    }, ct);
+                ApplyOutcome(result, label, i, outcome, tally, log);
                 result.FinishedAt = DateTime.UtcNow;
                 result.UpdatedAt = result.FinishedAt.Value;
                 await SaveResultAsync(delivery, log, ct);
             }
-            catch (BcApiException ex)
+            catch (DeliveryTargetException ex)
             {
-                failedIndex = i;
+                tally.FailedIndex = i;
                 result.Status = ProjectDeliveryResultStatus.Failed;
                 // A refused upload can carry the same Data Plane Admin Service text as a
                 // failed install; when it names a code, say it the same way.
@@ -2302,7 +2478,7 @@ public sealed class DeliveryService
                 if (refused.Code.Length > 0)
                 {
                     result.Message = BcFailureText.AppMessage(refused);
-                    failureLine = BcFailureText.WhatHappened(refused.Code, label);
+                    tally.FailureLine = BcFailureText.WhatHappened(refused.Code, label);
                 }
                 else
                 {
@@ -2314,22 +2490,327 @@ public sealed class DeliveryService
             }
         }
 
-        var endNow = DateTime.UtcNow;
-        if (failedIndex >= 0)
+        if (handOff is not null && handedOff)
         {
-            var failed = results[failedIndex];
+            if (tally.FailedIndex < 0)
+            {
+                await HandOffAsync(delivery, log, handOff);
+                return;
+            }
+            // Stopped after the command was written (a deliverable went missing under it):
+            // the command was never committed, so rolling back takes it away before any
+            // gateway could see it.
+            await AbandonHandOffAsync();
+            foreach (var r in results.Where(r => r.Status == ProjectDeliveryResultStatus.Installing))
+            {
+                r.Status = ProjectDeliveryResultStatus.Skipped;
+                r.UpdatedAt = DateTime.UtcNow;
+            }
+        }
+
+        SettleRun(delivery, results, tally, log);
+        await _db.SaveChangesAsync(ct);
+
+        // We have just changed what this customer's environment has installed or has
+        // queued to install, so the cached panel is now wrong — and a consultant checking
+        // "did my deployment land?" is exactly who would read it next. A delivery names its
+        // environment rather than carrying its id, so the whole project's entries go.
+        _panelCache.InvalidateProject(delivery.ProjectId);
+    }
+
+    /// <summary>
+    /// Ends the run of an on-premises deployment once its gateway command is queued (#1367):
+    /// the command is recorded on the deployment in the same save that marks its apps as
+    /// installing, and from then on <see cref="FollowGatewayDeliveriesAsync"/> carries it.
+    /// No worker lane waits on a command that may run for hours, and a restart neither
+    /// fails the deployment nor sends it a second time. Saved whatever the token says:
+    /// the command is already queued, so the record of it must not be lost.
+    /// </summary>
+    private async Task HandOffAsync(OeProjectDelivery delivery, StringBuilder log, DeliveryHandOff handOff)
+    {
+        var now = DateTime.UtcNow;
+        delivery.GatewayCommandId = handOff.GatewayCommandId;
+        delivery.GatewayLogOffset = 0;
+        delivery.UpdatedAt = now;
+        Append(log, "Waiting for the gateway to pick it up.");
+        delivery.DiagnosticsLog = log.ToString();
+        try
+        {
+            await _db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch
+        {
+            // The command is rolled back with this save, so the failure recorded next
+            // must not point at it.
+            delivery.GatewayCommandId = null;
+            throw;
+        }
+        // The command and the deployment that records it become visible together.
+        if (_db.Database.CurrentTransaction is { } tx)
+        {
+            await tx.CommitAsync(CancellationToken.None);
+            await tx.DisposeAsync();
+        }
+        _targets.GatewayCommands?.Wake(handOff.GatewayId);
+        _logger.LogInformation(
+            "Delivery {DeliveryId} to {Env} handed to gateway command {CommandId}; it is followed from here.",
+            delivery.Id, delivery.EnvironmentName, handOff.GatewayCommandId);
+    }
+
+    /// <summary>
+    /// Gives up a hand-off that has not been committed (#1367): rolls back the transaction
+    /// the queued command was written in, so the gateway never sees it, and forgets the
+    /// command rows the context still tracks as saved, so a later save of the deployment
+    /// neither re-sends them nor points at them. A no-op with no transaction open.
+    /// </summary>
+    private async Task AbandonHandOffAsync()
+    {
+        if (_db.Database.CurrentTransaction is not { } tx) return;
+        await tx.RollbackAsync(CancellationToken.None);
+        await tx.DisposeAsync();
+        foreach (var entry in _db.ChangeTracker.Entries()
+                     .Where(e => e.Entity is GatewayCommand or GatewayCommandFile).ToList())
+        {
+            entry.State = EntityState.Detached;
+        }
+    }
+
+    // ── Following on-premises deployments (#1367) ─────────────────────────────
+
+    /// <summary>
+    /// One pass over the current organisation's on-premises deployments that are waiting on
+    /// their gateway command: copies what the gateway has said since the last pass into each
+    /// deployment's log (the page shows it live), and finishes each one whose command has
+    /// ended, app by app from the command's result, with the same rules as a run that waits.
+    /// A command followed for longer than <see cref="GatewayDeliveryTarget.HardWaitLimit"/>
+    /// is given up: taken back if the gateway never collected it, otherwise recorded as not
+    /// confirmed, since only the gateway can say what it did. Called by
+    /// <see cref="GatewayDeliveryFollower"/> inside the organisation's ambient scope; returns
+    /// the deployments it finished, so the people behind them can be told.
+    /// </summary>
+    public async Task<List<int>> FollowGatewayDeliveriesAsync(CancellationToken ct = default)
+    {
+        var finished = new List<int>();
+        if (_targets.GatewayCommands is not { } commands) return finished;
+        var ids = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Status == ProjectDeliveryStatus.Installing && d.GatewayCommandId != null)
+            .OrderBy(d => d.Id)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        foreach (var id in ids)
+        {
+            try
+            {
+                if (await FollowGatewayDeliveryAsync(commands, id, ct)) finished.Add(id);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Following delivery {DeliveryId} on its gateway failed; trying again on the next pass.", id);
+            }
+            finally
+            {
+                _db.ChangeTracker.Clear();
+            }
+        }
+        return finished;
+    }
+
+    /// <summary>What a deployment says when it stops following a command the gateway never collected.</summary>
+    internal const string GaveUpUncollected =
+        "AL Workbench stopped waiting after a day, and the gateway had not picked this up, so nothing was sent.";
+
+    /// <summary>What a deployment says when it stops following a command the gateway has.</summary>
+    internal const string GaveUpCollected =
+        "AL Workbench stopped waiting after a day without a report from the gateway.";
+
+    private async Task<bool> FollowGatewayDeliveryAsync(GatewayCommandService commands, int deliveryId, CancellationToken ct)
+    {
+        var delivery = await _db.OeProjectDeliveries
+            .Include(d => d.Results.OrderBy(r => r.Ordering))
+            .FirstOrDefaultAsync(d => d.Id == deliveryId
+                                      && d.Status == ProjectDeliveryStatus.Installing
+                                      && d.GatewayCommandId != null, ct);
+        if (delivery is null) return false;
+        var commandId = delivery.GatewayCommandId!.Value;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var log = new StringBuilder(delivery.DiagnosticsLog ?? string.Empty);
+
+        var progress = await commands.ReadProgressAsync(commandId, delivery.GatewayLogOffset, ct)
+            ?? new GatewayCommandProgress(GatewayCommandStatus.Failed, "The gateway command is no longer there.", null,
+                string.Empty, delivery.GatewayLogOffset, LeftQueue: true);
+        var lines = GatewayDeliveryTarget.GatewayLines(progress.NewLog);
+        foreach (var line in lines) Append(log, "Gateway: " + line);
+        delivery.GatewayLogOffset = progress.LogOffset;
+
+        if (!progress.IsFinal)
+        {
+            var since = delivery.InstallStartedAt ?? delivery.StartedAt ?? delivery.ClaimedAt ?? now;
+            if (now - since < GatewayDeliveryTarget.HardWaitLimit)
+            {
+                if (lines.Count == 0) return false;
+                delivery.UpdatedAt = now;
+                delivery.DiagnosticsLog = log.ToString();
+                await _db.SaveChangesAsync(ct);
+                return false;
+            }
+            _logger.LogWarning("Stopped following gateway command {CommandId} of delivery {DeliveryId} after {Limit}.",
+                commandId, deliveryId, GatewayDeliveryTarget.HardWaitLimit);
+            progress = await commands.CancelQueuedAsync(commandId, GaveUpUncollected, ct)
+                ? progress with { Status = GatewayCommandStatus.Failed, FailureMessage = GaveUpUncollected, Result = null, LeftQueue = false }
+                : progress with { Status = GatewayCommandStatus.Failed, FailureMessage = GaveUpCollected, Result = null, LeftQueue = true };
+        }
+
+        // The apps the command carried are the ones the run marked installing, in order.
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        var tally = new RunTally();
+        var sent = 0;
+        for (var i = 0; i < results.Count; i++)
+        {
+            var result = results[i];
+            if (result.Status != ProjectDeliveryResultStatus.Installing) continue;
+            var index = sent++;
+            if (tally.FailedIndex >= 0)
+            {
+                result.Status = ProjectDeliveryResultStatus.Skipped;
+                result.UpdatedAt = now;
+                continue;
+            }
+            var outcome = GatewayDeliveryTarget.OutcomeFor(progress, index, result.AppVersion);
+            ApplyOutcome(result, $"{result.AppName} {result.AppVersion}", i, outcome, tally, log);
+        }
+        SettleRun(delivery, results, tally, log);
+        await _db.SaveChangesAsync(ct);
+        _panelCache.InvalidateProject(delivery.ProjectId);
+        _logger.LogInformation("Delivery {DeliveryId} finished from gateway command {CommandId}: {Status}.",
+            deliveryId, commandId, delivery.Status);
+        return true;
+    }
+
+    /// <summary>
+    /// What one run of a deployment has found so far: the app that stopped it, and what
+    /// the deployment's end says. Shared by the run and by the follower that finishes an
+    /// on-premises deployment from its gateway command, so both end a deployment alike.
+    /// </summary>
+    private sealed class RunTally
+    {
+        /// <summary>The position of the app that stopped the run; -1 while none has.</summary>
+        public int FailedIndex { get; set; } = -1;
+
+        /// <summary>
+        /// Whether anything went in (or was handed to Business Central). A run where every
+        /// app was already on its version changes nothing, so it ends as deployed, not
+        /// handed off.
+        /// </summary>
+        public bool UploadedAny { get; set; }
+
+        /// <summary>What the gateway said about restarting the service tiers, when it said anything.</summary>
+        public bool? TiersRestarted { get; set; }
+
+        /// <summary>
+        /// The one line the delivery carries when Business Central reported the failure;
+        /// the detail (its message) stays on the app, so the two never say the same twice.
+        /// </summary>
+        public string? FailureLine { get; set; }
+
+        /// <summary>A refusal is already the whole sentence; it isn't prefixed like an app's failure.</summary>
+        public string? Refusal { get; set; }
+
+        /// <summary>The gateway lost sight of the apps: whether they went in is not known.</summary>
+        public string? Unconfirmed { get; set; }
+    }
+
+    /// <summary>One app's outcome as the target reported it, written to its result row and the log.</summary>
+    private static void ApplyOutcome(OeProjectDeliveryResult result, string label, int i, DeliveryInstallOutcome outcome,
+        RunTally tally, StringBuilder log)
+    {
+        tally.TiersRestarted = outcome.TiersRestarted ?? tally.TiersRestarted;
+        if (outcome.FromVersion is { Length: > 0 } from && result.PreviousVersion is null)
+        {
+            result.PreviousVersion = from;
+        }
+        if (outcome.Completed)
+        {
+            tally.UploadedAny = true;
+            result.Status = ProjectDeliveryResultStatus.Completed;
+            result.Message = outcome.Message;
+            Append(log, $"Installed {label}.");
+        }
+        else if (outcome.Outcome is DeliveryAppOutcome.AlreadyInstalled or DeliveryAppOutcome.Skipped)
+        {
+            // The gateway found it already on this version (#931), or did not start
+            // it because another app of the same command stopped: neither is this
+            // app's failure, and the run goes on to the app that did stop.
+            result.Status = ProjectDeliveryResultStatus.Skipped;
+            result.Message = outcome.Message;
+            Append(log, $"Skipped {label}: {outcome.Message}");
+        }
+        else if (outcome.Outcome == DeliveryAppOutcome.Refused)
+        {
+            // Refused before anything ran for it: told apart from a failure, since
+            // nothing was changed for this app and the fix is the customer's
+            // settings or the file, not the environment.
+            tally.FailedIndex = i;
+            result.Status = ProjectDeliveryResultStatus.Refused;
+            result.Message = outcome.Message;
+            tally.Refusal = $"The gateway refused {label}: {outcome.Message}";
+            Append(log, $"REFUSED {label}: {outcome.Message}");
+        }
+        else if (outcome.Outcome == DeliveryAppOutcome.Unconfirmed)
+        {
+            // Neither this app's failure nor a success: the gateway lost sight of it after
+            // it may have started, and of the apps after it in the same way, so the run
+            // goes on through them rather than calling them skipped.
+            result.Status = ProjectDeliveryResultStatus.Unconfirmed;
+            result.Message = outcome.Message;
+            tally.Unconfirmed ??= outcome.Message;
+            Append(log, $"NOT CONFIRMED {label}: {outcome.Message}");
+        }
+        else
+        {
+            tally.FailedIndex = i;
+            result.Status = ProjectDeliveryResultStatus.Failed;
+            result.Message = outcome.Message;
+            // The log keeps Business Central's text whole, wrapper and JSON included:
+            // it is what support needs, and what the page parses back (#930).
+            if (outcome.Failure is { } reported)
+            {
+                Append(log, $"FAILED {label}: {BcFailureText.ForLog(reported, outcome.Raw)}");
+                tally.FailureLine = BcFailureText.WhatHappened(reported.Code, label);
+            }
+            else
+            {
+                Append(log, $"FAILED {label}: {outcome.Message}");
+            }
+        }
+        result.FinishedAt = DateTime.UtcNow;
+        result.UpdatedAt = result.FinishedAt.Value;
+    }
+
+    /// <summary>The deployment's end, from what its apps came to.</summary>
+    private static void SettleRun(OeProjectDelivery delivery, List<OeProjectDeliveryResult> results, RunTally tally, StringBuilder log)
+    {
+        var endNow = DateTime.UtcNow;
+        if (tally.FailedIndex >= 0)
+        {
+            var failed = results[tally.FailedIndex];
             // The branches that stop the loop with a break leave the apps after the
             // failed one pending; they didn't get there either.
-            foreach (var r in results.Skip(failedIndex + 1).Where(r => r.Status == ProjectDeliveryResultStatus.Pending))
+            foreach (var r in results.Skip(tally.FailedIndex + 1).Where(r => r.Status == ProjectDeliveryResultStatus.Pending))
             {
                 r.Status = ProjectDeliveryResultStatus.Skipped;
                 r.UpdatedAt = endNow;
             }
             delivery.Status = ProjectDeliveryStatus.Failed;
-            delivery.FailureMessage = refusal ?? failureLine ?? $"{failed.AppName} {failed.AppVersion} failed: {failed.Message}";
+            delivery.FailureMessage = tally.Refusal ?? tally.FailureLine ?? $"{failed.AppName} {failed.AppVersion} failed: {failed.Message}";
             Append(log, "Delivery failed.");
         }
-        else if (!uploadedAny)
+        else if (tally.Unconfirmed is not null)
+        {
+            delivery.Status = ProjectDeliveryStatus.Failed;
+            delivery.FailureMessage = UnknownOutcome(delivery.EnvironmentName);
+            Append(log, "Delivery not confirmed: " + delivery.FailureMessage);
+        }
+        else if (!tally.UploadedAny)
         {
             delivery.Status = ProjectDeliveryStatus.Deployed;
             Append(log, $"Every app was already on this version in {delivery.EnvironmentName}; nothing to install.");
@@ -2346,17 +2827,28 @@ public sealed class DeliveryService
             delivery.Status = ProjectDeliveryStatus.Deployed;
             Append(log, "Delivery complete.");
         }
+        // Said as it is: until the gateway restarts tiers (#1368) it reports that it did
+        // not, and a session that stays open keeps the old version's event subscribers.
+        if (tally.TiersRestarted is { } restarted)
+        {
+            delivery.TiersRestarted = restarted;
+            if (!restarted && delivery.Status == ProjectDeliveryStatus.Deployed && tally.UploadedAny)
+            {
+                Append(log, TiersNotRestartedLine);
+            }
+        }
         delivery.FinishedAt = endNow;
         delivery.UpdatedAt = endNow;
         delivery.DiagnosticsLog = log.ToString();
-        await _db.SaveChangesAsync(ct);
-
-        // We have just changed what this customer's environment has installed or has
-        // queued to install, so the cached panel is now wrong — and a consultant checking
-        // "did my deployment land?" is exactly who would read it next. A delivery names its
-        // environment rather than carrying its id, so the whole project's entries go.
-        _panelCache.InvalidateProject(delivery.ProjectId);
     }
+
+    /// <summary>
+    /// The failure line of an on-premises deployment whose gateway stopped before it said
+    /// what it installed (#1367). Not "failed": some apps may well have gone in.
+    /// </summary>
+    internal static string UnknownOutcome(string environmentName) =>
+        $"The gateway stopped before it reported what it installed, so whether the apps went in is not known. "
+        + $"Check the apps on {environmentName} after the gateway's next inventory, then deploy again if they are not there.";
 
     /// <summary>
     /// The refusal for an app whose exact version Business Central is already holding for
@@ -2407,13 +2899,13 @@ public sealed class DeliveryService
         {
             live = await target.ReadStatusAsync(ct);
         }
-        catch (BcApiException ex)
+        catch (DeliveryTargetException ex)
         {
             _logger.LogWarning("Delivery {DeliveryId}: couldn't re-read environment {Env} before publishing: {Message}.",
                 delivery.Id, delivery.EnvironmentName, ex.Message);
             // Without the live answer, the type as last read decides: an unapproved
             // deployment never goes ahead on a guess.
-            return await NotASandboxRefusalAsync(delivery, env?.Type, ct);
+            return await NotASandboxRefusalAsync(delivery, env?.Type, ct, env?.Kind == OeEnvironmentKind.OnPremises);
         }
 
         if (!live.Exists)
@@ -2421,7 +2913,10 @@ public sealed class DeliveryService
             return live.Refusal;
         }
 
-        if (env is not null)
+        // Only news is written back: the gateway's target answers from the inventory the
+        // row was itself written from, and stamping that as read now would make it look
+        // fresher than it is.
+        if (env is not null && live.ReadLive)
         {
             var stamped = DateTime.UtcNow;
             await _db.OeProjectEnvironments.Where(e => e.Id == env.Id)
@@ -2430,7 +2925,7 @@ public sealed class DeliveryService
                     .SetProperty(e => e.StatusFetchedAt, stamped), ct);
         }
 
-        if (await NotASandboxRefusalAsync(delivery, live.Type, ct) is { } notSandbox)
+        if (await NotASandboxRefusalAsync(delivery, live.Type, ct, env?.Kind == OeEnvironmentKind.OnPremises) is { } notSandbox)
         {
             _logger.LogWarning("Delivery {DeliveryId} refused: it was not approved and environment {Env} is {Type}, not a sandbox.",
                 delivery.Id, delivery.EnvironmentName, live.Type);
@@ -2453,12 +2948,19 @@ public sealed class DeliveryService
     /// for every other deployment. This is what keeps both away from a Production
     /// environment even when the environment's type changed after they were started.
     /// </summary>
-    private async Task<string?> NotASandboxRefusalAsync(OeProjectDelivery delivery, string? environmentType, CancellationToken ct)
+    private async Task<string?> NotASandboxRefusalAsync(OeProjectDelivery delivery, string? environmentType, CancellationToken ct, bool onPremises = false)
     {
         if (BcEnvironmentTypes.IsSandbox(environmentType)) return null;
         if (delivery.DeployedWithoutApproval)
         {
             return $"Not deployed: {delivery.EnvironmentName} is no longer a sandbox, and only a sandbox can be deployed to without approval. Deploy this build from the pipeline's page if it should go there.";
+        }
+        // On-premises production is never an assistant's, whatever the organisation allows
+        // for Business Central online (#1367): the tier may have been made production by
+        // the customer's IT after the assistant started the deployment.
+        if (delivery.StartedByAgent && onPremises)
+        {
+            return "Not deployed: " + OnPremisesProductionRefusedForAgents(delivery.EnvironmentName);
         }
         if (delivery.StartedByAgent && !await _db.OrganizationSettings.AsNoTracking()
                 .Where(s => s.OrganizationId == delivery.OrganizationId)
@@ -2550,6 +3052,7 @@ public sealed class DeliveryService
                 BuildBranch = d.ProjectBuild != null ? d.ProjectBuild.Branch : null,
                 BuildReleaseTag = d.ProjectBuild != null ? d.ProjectBuild.GithubReleaseTag : null,
                 DiagnosticsLog = d.DiagnosticsLog,
+                TiersRestarted = d.TiersRestarted,
             })
             .ToListAsync(ct);
 
@@ -2586,7 +3089,7 @@ public sealed class DeliveryService
             .OrderBy(r => r.Ordering)
             .Select(r => new { r.Ordering, r.Status, r.AppId, r.AppName, r.AppVersion })
             .ToListAsync(ct);
-        var failed = results.FirstOrDefault(r => r.Status == ProjectDeliveryResultStatus.Failed);
+        var failed = results.FirstOrDefault(r => r.Status is ProjectDeliveryResultStatus.Failed or ProjectDeliveryResultStatus.Refused);
         if (failed is null) return null;
 
         // Results line up with the build's artifacts by position: both were taken from
@@ -2928,6 +3431,12 @@ public sealed record DeliveryHistoryRow(
 
     /// <summary>For a prepared deployment a newer build replaced: that build's id. Null otherwise.</summary>
     public int? ReplacedByBuildId { get; init; }
+
+    /// <summary>
+    /// On-premises: whether the gateway restarted the service tiers after installing (#1367).
+    /// False until the gateway restarts tiers (#1368); null online, where there are none to restart.
+    /// </summary>
+    public bool? TiersRestarted { get; init; }
 }
 
 /// <summary>One app's outcome within a delivery, for the history's per-app breakdown.</summary>

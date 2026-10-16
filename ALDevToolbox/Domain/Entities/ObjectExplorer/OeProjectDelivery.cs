@@ -134,6 +134,30 @@ public class OeProjectDelivery
     public bool StartedByAgent { get; set; }
 
     /// <summary>
+    /// Whether the service tiers were restarted after an on-premises deployment installed
+    /// its apps, as the gateway reported it. Null for Business Central online, where there
+    /// is nothing of ours to restart, and for an on-premises run that never got that far.
+    /// False is shown as it is ("Service tiers were not restarted"): until the gateway
+    /// restarts tiers (#1368) it always reports false. See <c>.design/on-prem-gateway.md</c>.
+    /// </summary>
+    public bool? TiersRestarted { get; set; }
+
+    /// <summary>
+    /// The gateway command an on-premises deployment was sent as (#1367). Set when the
+    /// command is queued, in the same save that moves the deployment to installing; from
+    /// then on the deployment is followed by <c>GatewayDeliveryFollower</c> rather than by
+    /// the worker that queued it, so a restart neither fails it nor sends it twice. Null for
+    /// Business Central online and for an on-premises run that never got that far.
+    /// </summary>
+    public long? GatewayCommandId { get; set; }
+
+    /// <summary>
+    /// How much of the gateway command's log has been copied into
+    /// <see cref="DiagnosticsLog"/>, in characters, so the follower only appends what is new.
+    /// </summary>
+    public int GatewayLogOffset { get; set; }
+
+    /// <summary>
     /// The newer build that replaced this prepared release before anyone approved it
     /// (#934), for a <see cref="ProjectDeliveryStatus.Dismissed"/> row; null when a person
     /// dismissed it, and on every other row. A plain id, not a foreign key: it is a fact

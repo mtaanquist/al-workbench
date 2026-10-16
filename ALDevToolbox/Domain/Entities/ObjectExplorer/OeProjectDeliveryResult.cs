@@ -97,4 +97,13 @@ public static class ProjectDeliveryResultStatus
     /// Business Central installed it is not known (#1115).
     /// </summary>
     public const string Unconfirmed = "unconfirmed";
+
+    /// <summary>
+    /// On-premises: the gateway refused the app before anything ran for it - the file was
+    /// not the app declared, or the customer's gateway settings do not allow it (#1367). A
+    /// kind of failure, told apart because nothing was changed for this app and the fix is
+    /// the file or the customer's settings. The status column is free text, so no
+    /// migration was needed.
+    /// </summary>
+    public const string Refused = "refused";
 }

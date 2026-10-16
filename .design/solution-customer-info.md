@@ -66,7 +66,7 @@ An on-premises Solution gets an **Environments** tab instead, where an org Admin
 customer's service tiers from an on-premises gateway (`on-prem-gateway.md`, "An on-premises
 environment is an OeProjectEnvironment row"). A linked tier is an environment like any
 other on the Environments list, the environment page, the palette and the MCP reads,
-showing only what on-premises has. Deploying to one waits for #1367.
+showing only what on-premises has. Deployment pipelines can target one since #1367.
 
 The two hosting rules mirror each other, so a Solution never has both kinds of
 environment: setting an on-premises hosting type is refused while Business Central

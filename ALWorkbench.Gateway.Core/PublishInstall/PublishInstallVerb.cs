@@ -118,7 +118,7 @@ public sealed class PublishInstallVerb : ICommandExecutor
         foreach (var report in reports)
         {
             report.Step(GatewayPublishInstallSteps.Verify, GatewayPublishInstallStepOutcomes.Done);
-            context.Progress($"{report.Title}: checked. The file is the app declared, from {report.File!.Publisher}, Business Central reads it the same way, and its SHA-256 matches.");
+            context.Progress($"{report.Title}: verified the file. It is the app declared, from {report.File!.Publisher}, Business Central reads it the same way, and its SHA-256 matches.");
             if (report.Signature is { } signature)
             {
                 report.Step(GatewayPublishInstallSteps.Signature, signature.Valid ? GatewayPublishInstallStepOutcomes.Done : GatewayPublishInstallStepOutcomes.Skipped,

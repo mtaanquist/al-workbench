@@ -77,6 +77,26 @@ public static class UpdateWindow
         return TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(candidate, DateTimeKind.Unspecified), tz);
     }
 
+    /// <summary>
+    /// When the window that is open at <paramref name="fromUtc"/> closes: the next
+    /// occurrence of <c>end</c> after it. Null when no window is configured, the bounds are
+    /// equal (always open), or the window is not open at <paramref name="fromUtc"/>.
+    /// </summary>
+    public static DateTime? ClosingUtc(TimeOnly? start, TimeOnly? end, TimeZoneInfo tz, DateTime fromUtc)
+    {
+        var from = EnsureUtc(fromUtc);
+        if (!IsConfigured(start, end) || start == end || !IsWithin(start, end, tz, from)) return null;
+
+        var fromLocal = TimeZoneInfo.ConvertTimeFromUtc(from, tz);
+        var candidate = fromLocal.Date + end!.Value.ToTimeSpan();
+        if (candidate <= fromLocal) candidate = candidate.AddDays(1);
+        for (var i = 0; i < 4 && tz.IsInvalidTime(candidate); i++)
+        {
+            candidate = candidate.AddHours(1);
+        }
+        return TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(candidate, DateTimeKind.Unspecified), tz);
+    }
+
     private static DateTime EnsureUtc(DateTime utc) =>
         utc.Kind == DateTimeKind.Utc ? utc : DateTime.SpecifyKind(utc, DateTimeKind.Utc);
 }

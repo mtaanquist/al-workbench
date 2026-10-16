@@ -813,7 +813,9 @@ makes the data migration required rather than optional.
 
 Per-app result statuses are `pending → uploading → installing → completed | failed | skipped`, plus
 `scheduled` for an app handed to BC's own window. A `skipped` row is one an earlier app's failure
-short-circuited.
+short-circuited. On-premises adds `refused`: the customer's gateway settings refused that app, which
+stops the run like a failure; and it also uses `unconfirmed` (above) for an app whose command the
+gateway took and then stopped before it said what became of the app (`on-prem-gateway.md`, "Deploying to on-premises, as built").
 
 **Failure detail comes from the codes, never the message.** A failed operation carries `errorMessage`
 localized to the *environment's* language (a real failure came back in Danish) with the structured
@@ -848,7 +850,10 @@ whole. The page reads the log line back through the same parser, so a deployment
   scheduler and cancel surface land in the scheduling slice. **Since #1374** everything the run
   asks of the environment goes through **`IDeliveryTarget`**, built per environment by
   `DeliveryTargetFactory`; `AdminCenterDeliveryTarget` holds the token source, the application
-  family and the calls above, and reports whether deferred schedules exist. See
+  family and the calls above, and reports whether deferred schedules exist; since #1367
+  `GatewayDeliveryTarget` installs on-premises through the gateway: the run hands the build to one
+  gateway command and returns, and `GatewayDeliveryFollower` finishes the deployment when the
+  command ends, so no worker waits on an install that can take hours. See
   `on-prem-gateway.md`, "Deploying to on-premises".
 - **`DeliveryScheduler`** (`BackgroundService`) — polls for due `scheduled` rows, enqueues to
   **`DeliveryQueue`** (bounded `Channel`); **`DeliveryWorker`** drains and runs the publish under the

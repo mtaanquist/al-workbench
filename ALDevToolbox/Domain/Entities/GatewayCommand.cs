@@ -132,4 +132,16 @@ public class GatewayCommandFile
     /// forever is pure weight. The name, hash and size stay as the record of what was sent.
     /// </summary>
     public byte[]? Content { get; set; }
+
+    /// <summary>
+    /// The build artifact this file is, when it is one (an <c>.app</c> of a deployment):
+    /// the content is then read from that artifact when the gateway downloads it, rather
+    /// than copied into <see cref="Content"/> for every deployment (#1367).
+    /// <see cref="Sha256"/> is still worked out from the artifact's bytes when the command
+    /// is queued, so the gateway checks exactly what was meant to be sent. Null for a file
+    /// carried with the command itself. <c>SET NULL</c> when the artifact is deleted, and a
+    /// download then finds nothing.
+    /// </summary>
+    public int? ProjectBuildArtifactId { get; set; }
+    public ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectBuildArtifact? ProjectBuildArtifact { get; set; }
 }

@@ -439,6 +439,23 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 .rp-page .page-head__actions,
 .pb-page .page-head__actions { flex: 0 1 auto; flex-wrap: wrap; }
 
+/* A pinned head is for a long form on a screen with room to spare. At phone width it
+   takes a third of the screen and its actions squeeze the title, so it scrolls away
+   with the page there; Save is back in reach at the top (#1367, design review). */
+@container (max-width: 700px) {
+    .page-head--sticky { position: static; }
+}
+
+/* The deployment pipeline editor (#1367): its head wraps the actions under the title
+   at phone width, and a target's long name ("CRONUS-BC01 BC250 (on-premises, test) -
+   Active") shrinks with the select instead of widening the form past the screen - a
+   grid item's minimum width is otherwise its content's. */
+.rpe-page .page-head { flex-wrap: wrap; }
+.rpe-page .page-head > div:first-child { min-width: 0; flex: 1 1 300px; }
+.rpe-page .page-head__actions { flex: 0 1 auto; flex-wrap: wrap; min-width: 0; }
+.rpe-page .edit-col > *, .rpe-page .card, .rpe-page .field { min-width: 0; }
+.rpe-page .select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+
 /* The cookbook suggestion review's head holds four actions while rejecting
    (reason, Cancel, Confirm reject, Approve), too wide for a narrow window; a
    head that cannot wrap widens the page and clips Approve off screen. */

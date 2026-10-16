@@ -145,6 +145,7 @@ services:
       # DISABLE_USAGE_SNAPSHOT_SCHEDULER: "1"   # 15-min storage-usage snapshots (StorageBar)
       # DISABLE_DEPENDENCY_DRIFT_SCHEDULER: "1" # app.json dependency drift checks after BC releases
       # DISABLE_GATEWAY_COMMAND_SWEEP: "1"      # expire/fail on-premises gateway commands, gateway offline notices
+      # DISABLE_GATEWAY_DELIVERY_FOLLOWER: "1"  # follow and finish on-premises deployments the gateway is running
       # DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER: "1" # resend failed GitHub deliveries, close interrupted PR builds
       # DISABLE_GITHUB_HOOK_ADDRESS_REFRESH: "1" # daily read of GitHub's webhook addresses; unset, other senders are refused
       # DISABLE_BUILD_RESOURCE_MONITOR: "1"     # warn when running builds are short of CPU or memory

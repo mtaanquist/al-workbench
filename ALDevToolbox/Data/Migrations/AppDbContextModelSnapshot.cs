@@ -707,6 +707,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
 
+                    b.Property<int?>("ProjectBuildArtifactId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_build_artifact_id");
+
                     b.Property<string>("Sha256")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -722,6 +726,8 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("CommandId");
 
                     b.HasIndex("OrganizationId");
+
+                    b.HasIndex("ProjectBuildArtifactId");
 
                     b.ToTable("gateway_command_files", (string)null);
                 });
@@ -4062,6 +4068,16 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("finished_at");
 
+                    b.Property<long?>("GatewayCommandId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("gateway_command_id");
+
+                    b.Property<int>("GatewayLogOffset")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0)
+                        .HasColumnName("gateway_log_offset");
+
                     b.Property<DateTime?>("InstallStartedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("install_started_at");
@@ -4123,6 +4139,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)")
                         .HasColumnName("status");
+
+                    b.Property<bool?>("TiersRestarted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("tiers_restarted");
 
                     b.Property<int?>("TriggeredByUserId")
                         .HasColumnType("integer")
@@ -5028,6 +5048,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("schema_sync_mode");
+
+                    b.Property<bool>("UnpublishPrevious")
+                        .HasColumnType("boolean")
+                        .HasColumnName("unpublish_previous");
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -8028,7 +8052,14 @@ namespace ALDevToolbox.Data.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectBuildArtifact", "ProjectBuildArtifact")
+                        .WithMany()
+                        .HasForeignKey("ProjectBuildArtifactId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("Command");
+
+                    b.Navigation("ProjectBuildArtifact");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstance", b =>
