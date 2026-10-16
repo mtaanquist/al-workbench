@@ -185,8 +185,8 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
 
         var refused = await act.Should().ThrowAsync<PlanValidationException>();
         refused.Which.Errors["environment"].Should().Be(
-            "Restarting CRONUS-BC01 / BC250, CRONUS-BC02 / BC250 would also sign out the users of another Solution that also uses them. "
-            + "Ask the customer's IT to allow shared restarts for this database in the gateway's settings file (shared_restart), or to give each Solution its own service tiers. Nothing was sent.");
+            "Restarting CRONUS-BC01 / BC250, CRONUS-BC02 / BC250 would also sign out people using another Solution on the same database. "
+            + "Ask the customer's IT to allow shared restarts for this database in the AL Workbench gateway's settings (the shared_restart setting), or to give each Solution its own service tiers. Nothing was sent.");
         await NothingSentAsync();
     }
 
@@ -200,7 +200,7 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         {
             var act = () => RequestAsync(action);
             (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["environment"]
-                .Should().Contain("would also sign out the users of another Solution that also uses it").And.Contain("shared_restart");
+                .Should().Contain("would also sign out people using another Solution on the same service tier").And.Contain("shared_restart");
         }
         await NothingSentAsync();
 
@@ -356,7 +356,219 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         read.Single().Outcome.Should().Be("Restarted 2 service tiers: CRONUS-BC01 / BC250, CRONUS-BC02 / BC250. They are all running.");
     }
 
+    // ---------------------------------------------------------------- Production
+
+    [Fact]
+    public async Task Restarting_a_test_environments_tier_that_also_carries_the_solutions_production_asks_as_production_does()
+    {
+        await SetPolicyAsync(bc01Environment: "test", bc02Environment: "test");
+        // The same tier carries the Solution's Production tenant and a Test tenant.
+        int testId;
+        await using (var write = _db.NewContext())
+        {
+            var test = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, Name = "Test", Type = "Sandbox",
+                Kind = OeEnvironmentKind.OnPremises, GatewayInstanceId = _bc01, TenantId = "test",
+                Status = BcEnvironmentStatus.Active, FetchedAt = Start.UtcDateTime,
+            };
+            write.OeProjectEnvironments.Add(test);
+            await write.SaveChangesAsync();
+            testId = test.Id;
+        }
+
+        await using var ctx = _db.NewContext();
+        var plan = (await Service(ctx).GetPlanAsync(testId, ServiceTierAction.Restart))!;
+
+        plan.IsProduction.Should().BeTrue("restarting the tier signs out the Production tenant's people too");
+        plan.IsOwnProduction.Should().BeFalse();
+        plan.OtherProduction.Should().Equal("CRONUS Coffee Production");
+    }
+
+    [Fact]
+    public async Task Restarting_all_tiers_from_a_test_environment_asks_as_production_when_the_settings_call_a_tier_in_the_group_production()
+    {
+        await SetPolicyAsync(bc01Environment: "test", bc02Environment: "production");
+        await using (var write = _db.NewContext())
+        {
+            await write.OeProjectEnvironments.Where(e => e.Id == _environmentId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Type, "Sandbox").SetProperty(e => e.Name, "Test"));
+        }
+
+        await using var ctx = _db.NewContext();
+        (await Service(ctx).GetPlanAsync(_environmentId, ServiceTierAction.Restart))!.IsProduction
+            .Should().BeFalse("the environment's own tier is a test tier, and nothing Production uses it");
+        var all = (await Service(ctx).GetPlanAsync(_environmentId, ServiceTierAction.RestartAll))!;
+        all.IsProduction.Should().BeTrue("CRONUS-BC02 / BC250 is production in the customer's settings");
+        all.OtherProduction.Should().BeEmpty();
+    }
+
+    // ---------------------------------------------------------------- one thing at a time
+
+    [Fact]
+    public async Task Two_requests_at_once_send_one_and_tell_the_other_what_is_running()
+    {
+        await SetPolicyAsync();
+
+        async Task<string?> Attempt(ServiceTierAction action)
+        {
+            await using var ctx = _db.NewContext();
+            try
+            {
+                await Service(ctx).RequestAsync(_environmentId, action);
+                return null;
+            }
+            catch (PlanValidationException ex)
+            {
+                return ex.Errors["environment"];
+            }
+        }
+
+        var outcomes = await Task.WhenAll(Attempt(ServiceTierAction.Restart), Attempt(ServiceTierAction.Stop));
+
+        outcomes.Count(o => o is null).Should().Be(1, "the gateway's lock lets one through, whichever arrives first");
+        outcomes.Single(o => o is not null).Should().MatchRegex("^A (restart|stop) of CRONUS-BC01 / BC250 is still waiting for the gateway; try again when it has finished\\.$");
+        await using var check = _db.NewContext();
+        (await check.GatewayCommands.CountAsync()).Should().Be(1);
+        (await check.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_deployment_running_on_the_database_holds_back_every_action_on_its_tiers()
+    {
+        await SetPolicyAsync();
+        await AddCommandAsync(GatewayVerb.PublishInstall, GatewayCommandStatus.Running, "CRONUS-BC01", "BC250");
+
+        foreach (var action in new[] { ServiceTierAction.Restart, ServiceTierAction.RestartAll, ServiceTierAction.Stop })
+        {
+            var act = () => RequestAsync(action);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["environment"]
+                .Should().Be("A deployment to this server is still running; try again when it has finished.");
+        }
+
+        await using var ctx = _db.NewContext();
+        (await ctx.GatewayCommands.CountAsync()).Should().Be(1, "only the deployment");
+        (await ctx.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(0);
+        (await Service(ctx).GetViewAsync(_environmentId))!.Choices
+            .Should().OnlyContain(c => c.Unavailable == "A deployment to this server is still running; try again when it has finished.");
+    }
+
+    [Fact]
+    public async Task Work_on_another_tier_of_the_gateway_does_not_hold_this_one_back()
+    {
+        await SetPolicyAsync();
+        // A stop of BC02 alone does not touch BC01, so restarting BC01 alone may go ahead.
+        await AddCommandAsync(GatewayVerb.StopInstance, GatewayCommandStatus.Running, "CRONUS-BC02", "BC250");
+
+        await RequestAsync(ServiceTierAction.Restart);
+
+        var all = () => RequestAsync(ServiceTierAction.RestartAll);
+        (await all.Should().ThrowAsync<PlanValidationException>()).Which.Errors["environment"]
+            .Should().Be("A stop of CRONUS-BC02 / BC250 is still running; try again when it has finished.");
+    }
+
+    // ---------------------------------------------------------------- after the action
+
+    [Fact]
+    public async Task A_tier_just_stopped_offers_start_at_once_rather_than_after_the_next_inventory()
+    {
+        await SetPolicyAsync();
+        await RequestAsync(ServiceTierAction.Stop);
+        await using (var write = _db.NewContext())
+        {
+            await write.GatewayCommands.ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Status, GatewayCommandStatus.Succeeded)
+                .SetProperty(c => c.FinishedAt, Start.UtcDateTime.AddMinutes(2))
+                .SetProperty(c => c.ResultJson, new GatewayServiceTierResult
+                {
+                    Action = "stop", Machine = "CRONUS-BC01", Instance = "BC250", Done = true, Before = "Running", State = "Stopped",
+                }.ToJson().ToJsonString()));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var view = (await Service(ctx).GetViewAsync(_environmentId))!;
+            view.State.Should().Be("Stopped");
+            view.StateFromAction.Should().BeTrue("the inventory still reads it Running from before the stop");
+            view.Choices.Select(c => c.Action).Should().Equal(ServiceTierAction.RestartAll, ServiceTierAction.Start);
+        }
+
+        // The next inventory, after the stop, is believed again.
+        await using (var write = _db.NewContext())
+        {
+            await write.GatewayInstances.Where(i => i.Id == _bc01).ExecuteUpdateAsync(s => s
+                .SetProperty(i => i.ReadAt, Start.UtcDateTime.AddMinutes(10))
+                .SetProperty(i => i.State, "Stopped"));
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var view = (await Service(ctx).GetViewAsync(_environmentId))!;
+            view.StateFromAction.Should().BeFalse();
+            view.Choices.Select(c => c.Action).Should().Contain(ServiceTierAction.Start);
+        }
+    }
+
+    [Fact]
+    public async Task A_tier_with_no_session_count_makes_the_number_a_floor()
+    {
+        await SetPolicyAsync();
+        await using (var write = _db.NewContext())
+        {
+            await write.GatewayInstances.Where(i => i.Id == _bc01).ExecuteUpdateAsync(s => s.SetProperty(i => i.SessionCount, 7));
+            await write.GatewayInstances.Where(i => i.Id == _bc02).ExecuteUpdateAsync(s => s.SetProperty(i => i.SessionCount, (int?)null));
+        }
+
+        await using var ctx = _db.NewContext();
+        var all = (await Service(ctx).GetPlanAsync(_environmentId, ServiceTierAction.RestartAll))!;
+
+        all.Sessions.OnTiers.Should().Be(7);
+        all.Sessions.Uncounted.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_save_that_fails_after_the_command_was_queued_leaves_nothing_behind_for_the_next_request()
+    {
+        await SetPolicyAsync();
+        var failing = new FailFirstSaveOf<OeEnvironmentUpgradeAction>();
+        await using var ctx = _db.NewContext(failing);
+        var service = Service(ctx);
+
+        var first = () => service.RequestAsync(_environmentId, ServiceTierAction.Restart);
+        await first.Should().ThrowAsync<InvalidOperationException>();
+        failing.Failed.Should().BeTrue();
+        await NothingSentAsync();
+
+        // Same scoped context, as the page would use: the rolled-back rows must not ride along.
+        await service.RequestAsync(_environmentId, ServiceTierAction.Restart);
+        await using var check = _db.NewContext();
+        var command = await check.GatewayCommands.SingleAsync();
+        (await check.OeEnvironmentUpgradeActions.SingleAsync()).GatewayCommandId.Should().Be(command.Id);
+        (await check.AuditLog.CountAsync(a => a.EntityType == AuditEntityType.ProjectEnvironment)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task The_history_names_the_database_a_restart_of_every_tier_was_for()
+    {
+        await SetPolicyAsync();
+        await RequestAsync(ServiceTierAction.RestartAll);
+
+        (await LatestAsync()).TierDatabase.Should().Be("CRONUS-SQL01 / CRONUS");
+    }
+
     // ---------------------------------------------------------------- building blocks
+
+    private async Task AddCommandAsync(GatewayVerb verb, GatewayCommandStatus status, string machine, string instance)
+    {
+        await using var ctx = _db.NewContext();
+        var now = Start.UtcDateTime;
+        ctx.GatewayCommands.Add(new GatewayCommand
+        {
+            OrganizationId = TestDb.DefaultOrgId, GatewayId = _gatewayId, Verb = verb, Status = status,
+            ParametersJson = new GatewayServiceTierParameters { Machine = machine, Instance = instance }.ToParameters().ToJsonString(),
+            CreatedAt = now, DueAt = now, ExpiresAt = now.AddMinutes(15),
+        });
+        await ctx.SaveChangesAsync();
+    }
 
     private OnPremisesTierActionService Service(AppDbContext ctx) => new(
         ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
@@ -439,7 +651,8 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
     };
 
     /// <summary>The customer's settings: one database published on BC01 that restarts BC01 and BC02.</summary>
-    private async Task SetPolicyAsync(string[]? bc01Allow = null, string[]? bc02Allow = null, bool shared = false)
+    private async Task SetPolicyAsync(string[]? bc01Allow = null, string[]? bc02Allow = null, bool shared = false,
+        string bc01Environment = "production", string bc02Environment = "production")
     {
         var policy = new GatewayPolicyReport
         {
@@ -448,12 +661,12 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
             [
                 new GatewayPolicyInstance
                 {
-                    Machine = "CRONUS-BC01", Name = "BC250", Environment = "production",
+                    Machine = "CRONUS-BC01", Name = "BC250", Environment = bc01Environment,
                     Allow = bc01Allow ?? ["inventory", "publish", "restart", "service_control"], Tenants = ["default"],
                 },
                 new GatewayPolicyInstance
                 {
-                    Machine = "CRONUS-BC02", Name = "BC250", Environment = "production",
+                    Machine = "CRONUS-BC02", Name = "BC250", Environment = bc02Environment,
                     Allow = bc02Allow ?? ["inventory", "restart", "service_control"], Tenants = ["default"],
                 },
             ],

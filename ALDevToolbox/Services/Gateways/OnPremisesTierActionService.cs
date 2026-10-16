@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -33,14 +34,26 @@ public sealed record ServiceTierActionChoice(ServiceTierAction Action, string? U
 /// <param name="CanManage">The person manages the Solution, so may act at all.</param>
 /// <param name="TierName">The environment's service tier, <c>SERVER / INSTANCE</c>.</param>
 /// <param name="GroupTierCount">How many tiers restart with the database's restart group; "Restart all" is offered from two.</param>
-/// <param name="Choices">The actions offered for the tier's last known state, each with why not, when not.</param>
+/// <param name="Choices">The actions offered for the tier's state, each with why not, when not.</param>
 /// <param name="Latest">The newest service tier action on this environment, with how it went; null when there has been none.</param>
+/// <param name="State">
+/// The tier's state as far as AL Workbench knows it: what the last finished action left it in
+/// when that is newer than the last inventory, else the inventory's word. Null when not read.
+/// </param>
+/// <param name="StateFromAction">True when <paramref name="State"/> comes from the last action rather than the inventory.</param>
+/// <param name="SharedRefusal">
+/// The <c>shared_restart</c> refusal, said once above the buttons when it holds them back;
+/// null when it does not apply. The choices it holds back carry no reason of their own.
+/// </param>
 public sealed record ServiceTierActionsView(
     bool CanManage,
     string TierName,
     int GroupTierCount,
     IReadOnlyList<ServiceTierActionChoice> Choices,
-    UpgradeActionRow? Latest)
+    UpgradeActionRow? Latest,
+    string? State = null,
+    bool StateFromAction = false,
+    string? SharedRefusal = null)
 {
     /// <summary>True while the newest action is still waiting for the gateway or running.</summary>
     public bool InFlight => Latest?.TierProgress is not null;
@@ -51,13 +64,23 @@ public sealed record ServiceTierActionsView(
 /// <param name="OnDatabase">Sessions on every tier the gateways report on the same database; null when none was counted.</param>
 /// <param name="DatabaseTiers">How many tiers the gateways report on that database.</param>
 /// <param name="CountedAt">When the oldest of the counts was read; null when nothing was counted.</param>
-public sealed record ServiceTierSessions(int? OnTiers, int? OnDatabase, int DatabaseTiers, DateTime? CountedAt);
+/// <param name="Uncounted">How many of the tiers the action stops have no count, so <paramref name="OnTiers"/> is a floor.</param>
+public sealed record ServiceTierSessions(int? OnTiers, int? OnDatabase, int DatabaseTiers, DateTime? CountedAt, int Uncounted = 0);
 
 /// <summary>What one action will do, as its confirmation says before anything is sent.</summary>
+/// <param name="IsProduction">
+/// The action reaches Production: this environment is Production, another environment
+/// linked to a touched tier is, or the customer's settings call a touched tier production.
+/// </param>
 /// <param name="Tiers">The tiers it stops or starts, <c>SERVER / INSTANCE</c>, in order.</param>
 /// <param name="OneByOne">A group restart brings each tier back before the next goes down.</param>
 /// <param name="LeftAlone">Tiers on the same database that a group restart leaves running.</param>
 /// <param name="Refusal">Why it cannot be done; null when it can.</param>
+/// <param name="OtherProduction">
+/// Other environments' names (<c>Solution Environment</c>) that are Production and linked to a
+/// touched tier, when this environment is not Production itself.
+/// </param>
+/// <param name="IsOwnProduction">This environment itself is Production.</param>
 public sealed record ServiceTierActionPlan(
     ServiceTierAction Action,
     string EnvironmentName,
@@ -67,7 +90,9 @@ public sealed record ServiceTierActionPlan(
     bool OneByOne,
     IReadOnlyList<string> LeftAlone,
     ServiceTierSessions Sessions,
-    string? Refusal)
+    string? Refusal,
+    IReadOnlyList<string>? OtherProduction = null,
+    bool IsOwnProduction = false)
 {
     /// <summary>True for the actions that sign people out (all but Start).</summary>
     public bool SignsPeopleOut => Action != ServiceTierAction.Start;
@@ -94,6 +119,19 @@ public sealed class OnPremisesTierActionService
 {
     /// <summary>The permission every tier acted on needs in the customer's gateway settings.</summary>
     public const string ServiceControlPermission = "service_control";
+
+    /// <summary>
+    /// The first key of the transaction lock that lets one request at a time per gateway
+    /// decide whether something else is already working on its tiers ("STAC").
+    /// </summary>
+    private const int TierActionLockClass = 0x53_54_41_43;
+
+    /// <summary>The verbs that stop, start or restart tiers, so overlap with a tier action.</summary>
+    private static readonly GatewayVerb[] TierVerbs =
+    [
+        GatewayVerb.PublishInstall, GatewayVerb.ImportLicence, GatewayVerb.RestartGroup,
+        GatewayVerb.RestartInstance, GatewayVerb.StopInstance, GatewayVerb.StartInstance,
+    ];
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -137,19 +175,28 @@ public sealed class OnPremisesTierActionService
         var latest = await LatestAsync(env.ProjectId, environmentId, ct);
         var group = await RestartGroupPlan.LoadAsync(_db, facts, ct);
         var tier = await RestartGroupPlan.LoadForTierAsync(_db, facts, ct);
+        var pending = await PendingAsync(facts, ct);
+        var (state, fromAction) = await StateAsync(facts, ct);
 
-        var stopped = IsStopped(facts.InstanceState);
-        var running = IsRunning(facts.InstanceState);
+        var stopped = IsStopped(state);
+        var running = IsRunning(state);
         var offered = new List<ServiceTierAction>();
         if (!stopped) offered.Add(ServiceTierAction.Restart);
         if ((group?.Tiers.Count ?? 0) > 1) offered.Add(ServiceTierAction.RestartAll);
-        if (!stopped) offered.Add(ServiceTierAction.Stop);
         if (!running) offered.Add(ServiceTierAction.Start);
+        // Last: the one action that leaves people unable to work until someone acts again.
+        if (!stopped) offered.Add(ServiceTierAction.Stop);
 
         var choices = offered
-            .Select(a => new ServiceTierActionChoice(a, Refusal(a, facts, group, tier, latest, forDialog: true)))
+            .Select(a => new ServiceTierActionChoice(a, Refusal(a, facts, group, tier, pending, forDialog: true)))
             .ToList();
-        return new ServiceTierActionsView(canManage, facts.TierName, group?.Tiers.Count ?? 1, choices, latest);
+        // The shared rule holds back restart and stop for one reason; the card says it once.
+        var shared = choices.Select(c => c.Unavailable).FirstOrDefault(IsSharedRefusal);
+        if (shared is not null)
+        {
+            choices = choices.Select(c => IsSharedRefusal(c.Unavailable) ? c with { Unavailable = string.Empty } : c).ToList();
+        }
+        return new ServiceTierActionsView(canManage, facts.TierName, group?.Tiers.Count ?? 1, choices, latest, state, fromAction, shared);
     }
 
     /// <summary>
@@ -212,6 +259,7 @@ public sealed class OnPremisesTierActionService
         var parameters = new GatewayServiceTierParameters { Machine = facts.Machine!, Instance = facts.InstanceName! }.ToParameters();
         var userId = _orgContext.CurrentUserId;
         var actor = await AuditActor.ResolveAsync(_db, userId, ct);
+        var gatewayId = facts.GatewayId!.Value;
         var now = Now;
 
         // The command, the history line and the audit row become visible together: a crash
@@ -222,57 +270,78 @@ public sealed class OnPremisesTierActionService
         {
             try
             {
-                commandId = await _commands.EnqueueAsync(new GatewayCommandRequest(
-                    facts.GatewayId!.Value, verb, parameters, RequestedByUserId: userId), ct);
-            }
-            catch (PlanValidationException ex)
-            {
-                throw new PlanValidationException(new Dictionary<string, string>
+                // One request per gateway at a time gets past here, and only after the one
+                // before it committed: two people pressing Restart at once send one restart,
+                // and the second is told what is already running.
+                await _db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock({TierActionLockClass}, {gatewayId})", ct);
+                var busy = Busy(plan.Tiers, await GroupTiersAsync(facts, ct), await PendingAsync(facts, ct));
+                if (busy is not null)
                 {
-                    ["environment"] = string.Join(" ", ex.Errors.Values) + " Nothing was sent.",
+                    throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = busy });
+                }
+
+                try
+                {
+                    commandId = await _commands.EnqueueAsync(new GatewayCommandRequest(
+                        gatewayId, verb, parameters, RequestedByUserId: userId), ct);
+                }
+                catch (PlanValidationException ex)
+                {
+                    throw new PlanValidationException(new Dictionary<string, string>
+                    {
+                        ["environment"] = string.Join(" ", ex.Errors.Values) + " Nothing was sent.",
+                    });
+                }
+                row = new OeEnvironmentUpgradeAction
+                {
+                    OrganizationId = orgId,
+                    ProjectId = env.ProjectId,
+                    EnvironmentId = environmentId,
+                    Kind = kind,
+                    Status = UpgradeActionStatus.Sent,
+                    RequestedByUserId = userId,
+                    RequestedBy = actor,
+                    RequestedAt = now,
+                    ExecuteAfter = now,
+                    SentAt = now,
+                    GatewayCommandId = commandId,
+                };
+                _db.OeEnvironmentUpgradeActions.Add(row);
+                // The history table is itself a log and is not audited row by row; the act that
+                // reaches the customer's server is, as ProjectConnectionService's writes are.
+                _db.AuditLog.Add(new AuditLogEntry
+                {
+                    Timestamp = now,
+                    ChangedBy = actor,
+                    ChangedByUserId = userId,
+                    OrganizationId = orgId,
+                    EntityType = AuditEntityType.ProjectEnvironment,
+                    EntityId = environmentId,
+                    Action = AuditAction.Updated,
+                    EntityName = env.Name,
+                    SnapshotJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["Action"] = words,
+                        ["Project"] = plan.SolutionName,
+                        ["Name"] = env.Name,
+                        ["ServiceTier"] = facts.TierName,
+                        ["ServiceTiers"] = plan.Tiers,
+                        ["GatewayCommandId"] = commandId,
+                    }, PersistenceJson.Options),
                 });
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
             }
-            row = new OeEnvironmentUpgradeAction
+            catch
             {
-                OrganizationId = orgId,
-                ProjectId = env.ProjectId,
-                EnvironmentId = environmentId,
-                Kind = kind,
-                Status = UpgradeActionStatus.Sent,
-                RequestedByUserId = userId,
-                RequestedBy = actor,
-                RequestedAt = now,
-                ExecuteAfter = now,
-                SentAt = now,
-                GatewayCommandId = commandId,
-            };
-            _db.OeEnvironmentUpgradeActions.Add(row);
-            // The history table is itself a log and is not audited row by row; the act that
-            // reaches the customer's server is, as ProjectConnectionService's writes are.
-            _db.AuditLog.Add(new AuditLogEntry
-            {
-                Timestamp = now,
-                ChangedBy = actor,
-                ChangedByUserId = userId,
-                OrganizationId = orgId,
-                EntityType = AuditEntityType.ProjectEnvironment,
-                EntityId = environmentId,
-                Action = AuditAction.Updated,
-                EntityName = env.Name,
-                SnapshotJson = JsonSerializer.Serialize(new Dictionary<string, object?>
-                {
-                    ["Action"] = words,
-                    ["Project"] = plan.SolutionName,
-                    ["Name"] = env.Name,
-                    ["ServiceTier"] = facts.TierName,
-                    ["ServiceTiers"] = plan.Tiers,
-                    ["GatewayCommandId"] = commandId,
-                }, PersistenceJson.Options),
-            });
-            await _db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
+                // The command EnqueueAsync saved, and the rows added after it, are rolled back
+                // with the transaction but would stay tracked; the next save on this scoped
+                // context would then write a history line for a command that does not exist.
+                _db.ChangeTracker.Clear();
+                throw;
+            }
         }
-        _commands.Wake(facts.GatewayId.Value);
+        _commands.Wake(gatewayId);
 
         _logger.LogInformation(
             "{Action} asked for on environment {EnvironmentId} ({Tier}) by user {UserId}: {Verb} command {CommandId} queued, history row {ActionId}.",
@@ -281,6 +350,9 @@ public sealed class OnPremisesTierActionService
     }
 
     private sealed record EnvironmentRow(int ProjectId, string Name, int? CreatedBy, string ProjectName);
+
+    /// <summary>A command on the gateway that stops, starts or restarts tiers and has not finished.</summary>
+    private sealed record PendingCommand(GatewayVerb Verb, GatewayCommandStatus Status, string? Tier);
 
     private async Task<EnvironmentRow?> EnvironmentAsync(int environmentId, CancellationToken ct) =>
         await _db.OeProjectEnvironments.AsNoTracking()
@@ -293,19 +365,60 @@ public sealed class OnPremisesTierActionService
     {
         var group = await RestartGroupPlan.LoadAsync(_db, facts, ct);
         var tier = await RestartGroupPlan.LoadForTierAsync(_db, facts, ct);
-        var latest = await LatestAsync(env.ProjectId, facts.EnvironmentId, ct);
+        var pending = await PendingAsync(facts, ct);
         var tiers = action == ServiceTierAction.RestartAll && group is not null ? group.Tiers : [facts.TierName];
         var sessions = await SessionsAsync(facts, tiers, ct);
+
+        // Production is about the people on the tiers, not the page the button is on: a Test
+        // environment's tier can also carry the same Solution's Production tenant, and a
+        // restart of every tier can reach a tier the customer calls production.
+        var ownProduction = string.Equals(facts.EnvironmentType, "Production", StringComparison.OrdinalIgnoreCase);
+        var otherProduction = ownProduction ? [] : await OtherProductionAsync(facts, tiers, ct);
+        var policyProduction = facts.Policy is { State: GatewayPolicyStates.Valid } policy
+            && tiers.Any(n => PolicyEntry(policy, n) is { } entry
+                              && string.Equals(entry.Environment?.Trim(), "production", StringComparison.OrdinalIgnoreCase));
         return new ServiceTierActionPlan(
             action,
             facts.EnvironmentName,
             env.ProjectName,
-            string.Equals(facts.EnvironmentType, "Production", StringComparison.OrdinalIgnoreCase),
+            ownProduction || otherProduction.Count > 0 || policyProduction,
             tiers,
             OneByOne: action == ServiceTierAction.RestartAll && group?.OneByOne == true,
             action == ServiceTierAction.RestartAll ? group?.MissingFromGroup ?? [] : [],
             sessions,
-            Refusal(action, facts, group, tier, latest, forDialog));
+            Refusal(action, facts, group, tier, pending, forDialog),
+            otherProduction,
+            ownProduction);
+    }
+
+    /// <summary>Production environments other than this one linked to any of <paramref name="tiers"/>, as <c>Solution Environment</c>.</summary>
+    private async Task<List<string>> OtherProductionAsync(OnPremisesDeployFacts facts, IReadOnlyList<string> tiers, CancellationToken ct)
+    {
+        var ids = await TierIdsAsync(facts, tiers, ct);
+        if (ids.Count == 0) return [];
+        var rows = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Kind == OeEnvironmentKind.OnPremises
+                        && e.MissingSince == null
+                        && e.Id != facts.EnvironmentId
+                        && e.GatewayInstanceId != null
+                        && ids.Contains(e.GatewayInstanceId.Value))
+            .Select(e => new { Solution = e.Project!.Name, e.Name, e.Type })
+            .ToListAsync(ct);
+        return rows.Where(r => string.Equals(r.Type, "Production", StringComparison.OrdinalIgnoreCase))
+            .Select(r => $"{r.Solution} {r.Name}")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>The live gateway instances on this environment's gateway named by <paramref name="tiers"/>.</summary>
+    private async Task<List<int>> TierIdsAsync(OnPremisesDeployFacts facts, IReadOnlyList<string> tiers, CancellationToken ct)
+    {
+        var all = await _db.GatewayInstances.AsNoTracking()
+            .Where(i => i.GatewayId == facts.GatewayId && (i.MissingSince == null || i.Id == facts.InstanceId))
+            .Select(i => new { i.Id, i.Machine, i.Name })
+            .ToListAsync(ct);
+        return all.Where(i => tiers.Any(n => Same(n, $"{i.Machine} / {i.Name}"))).Select(i => i.Id).ToList();
     }
 
     /// <summary>
@@ -313,7 +426,7 @@ public sealed class OnPremisesTierActionService
     /// gateway would refuse, so the first thing said is the first thing to fix.
     /// </summary>
     private string? Refusal(ServiceTierAction action, OnPremisesDeployFacts facts, RestartGroupPlan? group, RestartGroupPlan? tier,
-        UpgradeActionRow? latest, bool forDialog)
+        IReadOnlyList<PendingCommand> pending, bool forDialog)
     {
         var notAllowed = OnPremisesDeployFacts.NotAllowed;
         if (facts.EnvironmentUnlinked)
@@ -322,7 +435,7 @@ public sealed class OnPremisesTierActionService
         }
         if (facts.InstanceMissing)
         {
-            return $"The gateway no longer reports {facts.TierName}. Check the service tier with the customer's IT.";
+            return $"The gateway no longer reports {facts.TierName}, so it can't be restarted from here. Ask the customer's IT to check the gateway.";
         }
         switch (facts.GatewayStatusAt(Now))
         {
@@ -361,38 +474,144 @@ public sealed class OnPremisesTierActionService
         {
             return $"{notAllowed}: {string.Join(", ", notControllable)} may not be stopped, started or restarted from AL Workbench. Ask the customer's IT to allow it.";
         }
-        if (latest is { TierProgress: { } progress })
+        if (Busy(touched, group?.Tiers ?? [facts.TierName], pending) is { } busy)
         {
-            return progress == ServiceTierProgress.Waiting
-                ? "The last action on this service tier is still waiting for the gateway to pick it up. Wait for it to finish, then try again."
-                : "The gateway is still carrying out the last action on this service tier. Wait for it to finish, then try again.";
+            return busy;
         }
         // Someone else's users are on these tiers, and the customer has not said that is
         // allowed. Only AL Workbench knows which Solutions use a tier, so this never reaches
         // the gateway. Starting a tier signs nobody out, so it is not held to the rule.
         return action switch
         {
-            ServiceTierAction.RestartAll when group is { Refused: true } => SharedRefusal("Restarting", group, forDialog),
-            // One sentence for both, so the card says it once rather than twice over.
-            ServiceTierAction.Restart or ServiceTierAction.Stop when tier is { Refused: true } => SharedRefusal("Restarting or stopping", tier, forDialog),
+            ServiceTierAction.RestartAll when group is { Refused: true } => SharedRefusal(group, sameTier: false, forDialog),
+            ServiceTierAction.Restart or ServiceTierAction.Stop when tier is { Refused: true } => SharedRefusal(tier, sameTier: true, forDialog),
             _ => null,
         };
     }
 
+    /// <summary>The wording every <c>shared_restart</c> refusal from this service starts with, so the card can tell it apart.</summary>
+    private const string SharedRefusalMarker = "would also sign out people using ";
+
+    private static bool IsSharedRefusal(string? reason) =>
+        reason is not null && reason.Contains(SharedRefusalMarker, StringComparison.Ordinal);
+
     /// <summary>
-    /// The <c>shared_restart</c> refusal for a tier action, in the shape deployments and
-    /// licence imports give it: the effect first, then what the customer's IT can change.
+    /// The <c>shared_restart</c> refusal for a tier action: the effect first, then what the
+    /// customer's IT can change. <c>shared_restart</c> is a line in the gateway's settings on
+    /// the customer's server, with no screen in AL Workbench, so it is named as that, as
+    /// <see cref="RestartGroupPlan.RefusalFor"/> names it for deployments.
     /// </summary>
-    internal static string SharedRefusal(string doing, RestartGroupPlan plan, bool forDialog)
+    internal static string SharedRefusal(RestartGroupPlan plan, bool sameTier, bool forDialog)
     {
-        var tiers = string.Join(", ", plan.Tiers);
-        var them = plan.Tiers.Count == 1 ? "it" : "them";
-        var others = plan.OtherSolutions == 1
-            ? $"another Solution that also uses {them}"
-            : $"{plan.OtherSolutions} other Solutions that also use {them}";
-        return $"{doing} {tiers} would also sign out the users of {others}. "
-            + "Ask the customer's IT to allow shared restarts for this database in the gateway's settings file (shared_restart), or to give each Solution its own service tiers"
-            + (forDialog ? ", then try again." : ". Nothing was sent.");
+        var others = plan.OtherSolutions == 1 ? "another Solution" : $"{plan.OtherSolutions} other Solutions";
+        var where = sameTier ? "the same service tier" : "the same database";
+        return $"Restarting {string.Join(", ", plan.Tiers)} {SharedRefusalMarker}{others} on {where}. "
+            + "Ask the customer's IT to allow shared restarts for this database in the AL Workbench gateway's settings (the shared_restart setting), "
+            + $"or to give each Solution its own service tier{(sameTier ? "" : "s")}."
+            + (forDialog ? "" : " Nothing was sent.");
+    }
+
+    /// <summary>
+    /// What is already working on <paramref name="touched"/>, as the plain sentence the person
+    /// reads; null when nothing is. A deployment, a licence import and a restart of every tier
+    /// reach the whole restart group <paramref name="groupTiers"/> when the tier they name is
+    /// in it; the single-tier verbs reach their own tier.
+    /// </summary>
+    private static string? Busy(IReadOnlyList<string> touched, IReadOnlyList<string> groupTiers, IReadOnlyList<PendingCommand> pending)
+    {
+        foreach (var command in pending)
+        {
+            if (command.Tier is not { } tier) continue;
+            var groupWide = command.Verb is GatewayVerb.PublishInstall or GatewayVerb.ImportLicence or GatewayVerb.RestartGroup;
+            IReadOnlyList<string> reach = groupWide && groupTiers.Any(g => Same(g, tier)) ? groupTiers : [tier];
+            if (!reach.Any(r => touched.Any(t => Same(t, r)))) continue;
+
+            var what = command.Verb switch
+            {
+                GatewayVerb.PublishInstall => "A deployment to this server",
+                GatewayVerb.ImportLicence => "A licence import on this server",
+                GatewayVerb.RestartGroup => "A restart of every service tier on this database",
+                GatewayVerb.StopInstance => $"A stop of {tier}",
+                GatewayVerb.StartInstance => $"A start of {tier}",
+                _ => $"A restart of {tier}",
+            };
+            var where = command.Status == GatewayCommandStatus.Running ? "is still running" : "is still waiting for the gateway";
+            return $"{what} {where}; try again when it has finished.";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The unfinished commands on this environment's gateway that stop, start or restart tiers,
+    /// oldest first. Inside <see cref="RequestAsync"/> this is read under the gateway's lock.
+    /// </summary>
+    private async Task<List<PendingCommand>> PendingAsync(OnPremisesDeployFacts facts, CancellationToken ct)
+    {
+        if (facts.GatewayId is not { } gatewayId) return [];
+        var rows = await _db.GatewayCommands.AsNoTracking()
+            .Where(c => c.GatewayId == gatewayId
+                        && (c.Status == GatewayCommandStatus.Queued || c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running)
+                        && TierVerbs.Contains(c.Verb))
+            .OrderBy(c => c.CreatedAt).ThenBy(c => c.Id)
+            .Select(c => new { c.Verb, c.Status, c.ParametersJson })
+            .ToListAsync(ct);
+        return rows.Select(c => new PendingCommand(c.Verb, c.Status, ServiceTierActionOutcome.TierOf(c.ParametersJson))).ToList();
+    }
+
+    private async Task<IReadOnlyList<string>> GroupTiersAsync(OnPremisesDeployFacts facts, CancellationToken ct) =>
+        (await RestartGroupPlan.LoadAsync(_db, facts, ct))?.Tiers ?? [facts.TierName];
+
+    /// <summary>
+    /// The tier's state for what the page offers: what the last finished action on it left it
+    /// in, when that finished after the inventory last read the tier, else the inventory's
+    /// word. So a tier stopped a moment ago offers Start at once rather than after the next
+    /// inventory, up to 15 minutes later.
+    /// </summary>
+    private async Task<(string? State, bool FromAction)> StateAsync(OnPremisesDeployFacts facts, CancellationToken ct)
+    {
+        if (facts.GatewayId is not { } gatewayId || facts.InstanceId is not { } instanceId) return (facts.InstanceState, false);
+        var readAt = await _db.GatewayInstances.AsNoTracking()
+            .Where(i => i.Id == instanceId)
+            .Select(i => i.ReadAt)
+            .FirstOrDefaultAsync(ct);
+        var finished = await _db.GatewayCommands.AsNoTracking()
+            .Where(c => c.GatewayId == gatewayId
+                        && c.Status == GatewayCommandStatus.Succeeded
+                        && c.FinishedAt != null
+                        && (readAt == null || c.FinishedAt > readAt)
+                        && (c.Verb == GatewayVerb.RestartInstance || c.Verb == GatewayVerb.StopInstance
+                            || c.Verb == GatewayVerb.StartInstance || c.Verb == GatewayVerb.RestartGroup))
+            .OrderByDescending(c => c.FinishedAt).ThenByDescending(c => c.Id)
+            .Select(c => new { c.Verb, c.ParametersJson, c.ResultJson })
+            .Take(20)
+            .ToListAsync(ct);
+        foreach (var command in finished)
+        {
+            var result = ParseObject(command.ResultJson);
+            if (command.Verb == GatewayVerb.RestartGroup)
+            {
+                var tier = GatewayRestartGroupResult.FromJson(result)?.Tiers
+                    .FirstOrDefault(t => Same($"{t.Machine} / {t.Instance}", facts.TierName));
+                if (tier is null) continue;
+                return tier.Outcome == GatewayRestartTierOutcomes.Restarted ? ("Running", true) : (tier.State ?? facts.InstanceState, tier.State is not null);
+            }
+            if (!Same(ServiceTierActionOutcome.TierOf(command.ParametersJson), facts.TierName)) continue;
+            return GatewayServiceTierResult.FromJson(result)?.State is { } state ? (state, true) : (facts.InstanceState, false);
+        }
+        return (facts.InstanceState, false);
+    }
+
+    private static JsonObject? ParseObject(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return JsonNode.Parse(json) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static GatewayPolicyInstance? PolicyEntry(GatewayPolicyReport policy, string tierName)
@@ -465,7 +684,8 @@ public sealed class OnPremisesTierActionService
             Sum(acted.Select(t => t.SessionCount)),
             Sum(sharing.Select(t => t.SessionCount)),
             sharing.Count,
-            counted.Count == 0 ? null : counted.Min(t => t.ReadAt));
+            counted.Count == 0 ? null : counted.Min(t => t.ReadAt),
+            acted.Count(t => t.SessionCount is null));
     }
 
     private static bool IsStopped(string? state) => Same(state, "Stopped");

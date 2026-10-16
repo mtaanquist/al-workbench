@@ -642,7 +642,13 @@ public sealed record UpgradeActionRow(
     /// other kind. Such a row reads as <see cref="UpgradeActionStatus.Pending"/> meanwhile,
     /// though nothing about it can be cancelled.
     /// </summary>
-    ALDevToolbox.Services.Gateways.ServiceTierProgress? TierProgress = null)
+    ALDevToolbox.Services.Gateways.ServiceTierProgress? TierProgress = null,
+    /// <summary>
+    /// The database a service tier action's tier serves, <c>SERVER\INSTANCE / Database</c> as the
+    /// gateway last read it, so a restart of every tier on it can name it. Null when not read,
+    /// and for every other kind.
+    /// </summary>
+    string? TierDatabase = null)
 {
     /// <summary>True for a service tier action on an on-premises environment (#1371).</summary>
     public bool IsServiceTierAction => UpgradeActionService.IsServiceTierAction(Kind);
