@@ -141,6 +141,7 @@ app.MapEntraAuthEndpoints();
 app.MapStepUpEndpoints();
 app.MapGitHubAppEndpoints();
 app.MapGitHubWebhookEndpoints();
+app.MapGatewayEndpoints();
 app.MapAdminUserEndpoints();
 app.MapObjectExplorerEndpoints();
 app.MapCookbookEndpoints();

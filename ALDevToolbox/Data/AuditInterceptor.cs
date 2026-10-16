@@ -85,6 +85,13 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             // customer's tenant — see the IsAuditableEnvironmentChange gate below. Every
             // other column on it is fetched cache that a Refresh rewrites wholesale.
             [typeof(OeProjectEnvironment)] = AuditEntityType.ProjectEnvironment,
+            // On-premises gateways (.design/on-prem-gateway.md): registering, approving,
+            // renaming, replacing a key and revoking are all trust decisions worth a row.
+            // The heartbeat columns are written with ExecuteUpdateAsync and never get here.
+            [typeof(Gateway)] = AuditEntityType.Gateway,
+            [typeof(GatewayRegistrationCode)] = AuditEntityType.GatewayRegistrationCode,
+            // Deliberately absent: GatewaySeenToken, the replay table - one row per
+            // gateway request, and nobody's decision.
             // Deliberately absent: OeEnvironmentUpgradeAction
             // (oe_environment_upgrade_actions). That table is itself a log — who asked
             // for which platform-update action, when it fired, and what came back — and

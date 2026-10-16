@@ -88,12 +88,14 @@ public sealed class AuditEntityNameTests
     /// audited type whose name field is not on the candidate list fails here
     /// with the type named, instead of quietly logging unnamed rows forever.
     ///
-    /// <para>The six exceptions are deliberate and are listed so that adding a
-    /// seventh is a decision: two singletons the reading side words as "the system
+    /// <para>The seven exceptions are deliberate and are listed so that adding an
+    /// eighth is a decision: two singletons the reading side words as "the system
     /// settings", three join rows with no name of their own
     /// (<c>RuntimeTemplateDefaultModule</c>, <c>TeamMember</c>, <c>OeProjectTeam</c> —
     /// a membership or an assignment is named by the two things it joins, both of
-    /// which the snapshot carries), and the org's single logo asset.</para>
+    /// which the snapshot carries), the org's single logo asset, and a gateway
+    /// registration code, which is a secret and so has nothing to show but the
+    /// gateway it led to.</para>
     /// </summary>
     [Fact]
     public void Every_audited_entity_type_either_resolves_a_name_or_is_a_known_exception()
@@ -127,6 +129,7 @@ public sealed class AuditEntityNameTests
             "OrganizationAsset",
             "TeamMember",
             "OeProjectTeam",
+            "GatewayRegistrationCode",
         }, "adding an audited type whose name field is not a candidate would log unnamed rows silently");
     }
 

@@ -99,13 +99,16 @@ external dependency, CLAUDE.md), inbound access or a VPN (customers will not ope
 4. **An Admin approves it.** The Gateways page shows the pending gateway's machine name and a short
    fingerprint of its key; the gateway prints the same fingerprint when it registers. Until an Admin
    compares them and presses Approve, the gateway can heartbeat but receives no commands and no
-   files. A leaked registration code therefore cannot quietly enrol a rogue machine.
+   files. A leaked registration code therefore cannot quietly enrol a rogue machine. Approval is
+   bound to the fingerprint the Admin compared: if the gateway re-keyed in the meantime, Approve is
+   refused and the Admin compares again.
 5. From then on every request carries a JWT the gateway signs itself, one per request:
    `iss` = gateway id, `aud` = the workbench origin + `/gateway`, `iat`, `exp` (at most 60 seconds
    after `iat`), `jti`, and the request it is for: `htm` (method), `htu` (path) and, for a request
    with a body, `bh` (SHA-256 of the body). AL Workbench verifies the signature against the stored
-   public key, the audience, the request binding, the times (60 seconds of clock skew), and refuses
-   a `jti` it has seen before. Seen `jti`s are kept in a small table until they expire
+   public key and every claim before it reads the body, then compares the body hash, and refuses
+   a `jti` it has seen before. An unknown gateway and a bad signature get the same refusal, and
+   every gateway route carries a per-address rate limit. Seen `jti`s are kept in a small table until they expire
    (`gateway_seen_tokens`, swept with the commands), so a restart of the app does not open a replay
    window. No reusable secret ever crosses the wire, and a database leak exposes no credential.
 6. The **authentication handler** is its own scheme, registered like the PAT scheme and opted into
@@ -120,7 +123,8 @@ external dependency, CLAUDE.md), inbound access or a VPN (customers will not ope
 **Revoke, rotate, retire.** Revoking stamps `revoked_at` and refuses the next request. Rotating is a
 new registration code bound to that gateway's id; on exchange the new key replaces the old one, which
 is refused from then on, and the gateway goes back to pending until an Admin approves the new
-fingerprint. Retiring
+fingerprint. Only the newest rotation code for a gateway works: issuing or using one makes the older
+ones useless. Retiring
 revokes it, unlinks its environments (below) and cancels scheduled deployments to them, after a
 confirmation that says how many. All three are audited.
 

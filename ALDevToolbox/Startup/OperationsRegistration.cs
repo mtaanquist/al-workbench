@@ -113,6 +113,49 @@ public static class OperationsRegistration
                         QueueLimit = 0,
                     }));
 
+            // POST /gateway/register exchanges a one-time registration code for a
+            // pending gateway (.design/on-prem-gateway.md). It is anonymous - the code
+            // in the body is the credential - so the limit is what keeps a script
+            // from guessing codes. Customer IT registers a gateway once and may
+            // retype a code a few times; ten an hour per address is plenty for that
+            // and nothing for a guesser against 160 random bits. The address is the
+            // forwarded client address when the proxy is trusted (ForwardedHeadersSetup).
+            options.AddPolicy(GatewayEndpoints.RegisterRateLimitPolicy, httpContext =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 10,
+                        Window = TimeSpan.FromHours(1),
+                        QueueLimit = 0,
+                    }));
+
+            // Every other /gateway route is authenticated by a token the gateway signs,
+            // but the handler still looks the issuer up and verifies a signature before
+            // it can refuse a stranger, so this caps how much of that one address can
+            // make it do. It is the backstop, not traffic shaping, and is sized well
+            // above what real gateways send. One gateway sends a heartbeat a minute
+            // (GatewayProtocol.HeartbeatInterval), a long-poll for its next command that
+            // re-opens as soon as one answers, and a handful of progress posts and file
+            // downloads per command it runs - single digits a minute when idle, a burst
+            // of tens while a command runs. Several gateways may share one address
+            // behind a customer's NAT. 600 tokens of burst and 300 a minute sustained
+            // (five a second) covers dozens of busy gateways behind one address and
+            // still bounds a script. /gateway/register carries its own, stricter
+            // policy above, which the endpoint's own RequireRateLimiting puts in place
+            // of this group-wide one.
+            options.AddPolicy(GatewayEndpoints.GatewayRateLimitPolicy, httpContext =>
+                RateLimitPartition.GetTokenBucketLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new TokenBucketRateLimiterOptions
+                    {
+                        TokenLimit = 600,
+                        TokensPerPeriod = 300,
+                        ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+                        AutoReplenishment = true,
+                        QueueLimit = 0,
+                    }));
+
             // POST /github/webhook is the workbench's one inbound route (#627). It is
             // anonymous by necessity - GitHub carries no cookie - so the limiter is
             // the backstop against somebody pointing a load generator at it. The

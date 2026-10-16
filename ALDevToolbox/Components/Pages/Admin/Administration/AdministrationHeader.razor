@@ -19,7 +19,7 @@
 </SettingsPage>
 
 @code {
-    public enum Tab { Identity, Tools, Translation, Repositories, BusinessCentral, Users, Teams, OAuthClients, Export }
+    public enum Tab { Identity, Tools, Translation, Repositories, BusinessCentral, Gateways, Users, Teams, OAuthClients, Export }
 
     [Parameter, EditorRequired] public Tab ActiveTab { get; set; }
 
@@ -44,6 +44,7 @@
             new HeaderTabs.HeaderTabItem("Translation",   "/admin/administration/translation",   ActiveTab == Tab.Translation),
             new HeaderTabs.HeaderTabItem("Repositories",  "/admin/administration/repositories",  ActiveTab == Tab.Repositories),
             new HeaderTabs.HeaderTabItem("Business Central", "/admin/administration/business-central", ActiveTab == Tab.BusinessCentral),
+            new HeaderTabs.HeaderTabItem("Gateways",      "/admin/administration/gateways",      ActiveTab == Tab.Gateways),
             new HeaderTabs.HeaderTabItem("Users",         "/admin/administration/users",         ActiveTab == Tab.Users),
             new HeaderTabs.HeaderTabItem("Teams",         "/admin/administration/teams",         ActiveTab == Tab.Teams),
             new HeaderTabs.HeaderTabItem("OAuth clients", "/admin/administration/oauth-clients", ActiveTab == Tab.OAuthClients),

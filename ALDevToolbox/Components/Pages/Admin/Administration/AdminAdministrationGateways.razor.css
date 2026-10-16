@@ -1,0 +1,93 @@
+/* The check code an Admin compares by eye against the one the gateway printed:
+   large enough to read group by group. */
+.gw-check {
+    margin: var(--space-3) 0;
+    text-align: center;
+}
+
+.gw-check .code {
+    font-size: var(--text-lg);
+    padding: var(--space-2) var(--space-3);
+    letter-spacing: .04em;
+}
+
+.gw-table {
+    overflow-x: auto;
+}
+
+.gw-steps {
+    margin: 0 0 var(--space-3);
+    padding-left: var(--space-5);
+    display: grid;
+    gap: var(--space-2);
+}
+
+.gw-steps .code-block {
+    margin-top: var(--space-2);
+}
+
+/* Inside the empty state the steps read as a list, not as centred prose. */
+.gw-steps--empty {
+    margin: var(--space-3) auto 0;
+    max-width: 34rem;
+    text-align: left;
+}
+
+.gw-version-inline {
+    display: none;
+}
+
+.gw-label-narrow {
+    display: none;
+}
+
+/* On a phone the table becomes one block per gateway: name and actions on the
+   first line, so Approve is on screen without scrolling sideways, then the
+   status and when it was last seen. The Version column moves under the name. */
+@media (max-width: 700px) {
+    .gw-col-version {
+        display: none;
+    }
+
+    .gw-label-narrow {
+        display: inline;
+    }
+
+    .gw-version-inline {
+        display: block;
+    }
+
+    .gw-table thead {
+        display: none;
+    }
+
+    .gw-table tbody tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+            "name actions"
+            "status status"
+            "seen seen";
+        column-gap: var(--space-3);
+        padding: var(--space-3) var(--space-4);
+        border-bottom: 1px solid var(--border);
+    }
+
+    .gw-table tbody tr:last-child {
+        border-bottom: 0;
+    }
+
+    .gw-table tbody td {
+        display: block;
+        width: auto;
+        height: auto;
+        padding: 0;
+        border: 0;
+    }
+
+    .gw-table tbody td.gw-col-version { display: none; }
+    .gw-table tbody td:nth-child(1) { grid-area: name; }
+    .gw-table tbody td:nth-child(2) { grid-area: status; margin-top: var(--space-2); }
+    .gw-table tbody td:nth-child(3) { grid-area: seen; margin-top: var(--space-1); }
+    .gw-table tbody td:nth-child(5) { grid-area: actions; align-self: start; }
+}

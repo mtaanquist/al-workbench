@@ -130,6 +130,8 @@ public static class AdminPageHelpers
         // environment setting" - the row is only ever written for a deliberate change.
         AuditEntityType.ProjectEnvironment => "Environment setting",
         AuditEntityType.GitHubRepository => "GitHub repository",
+        // "Gateway" itself falls through - the enum name is already the word.
+        AuditEntityType.GatewayRegistrationCode => "Gateway registration code",
         _ => type.ToString(),
     };
 

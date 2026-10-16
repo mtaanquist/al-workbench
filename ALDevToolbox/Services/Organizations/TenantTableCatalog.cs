@@ -156,6 +156,12 @@ internal static class TenantTableCatalog
         // restored either, so a restore keeps the choices people have now.
         "user_notification_settings",
         "oauth_consents",
+        // On-premises gateways: a gateway row is a credential (its public key) and
+        // an Admin's trust decision, and a code is a one-hour credential. Replaying
+        // either from a snapshot would bring back a key that was rotated or revoked
+        // since. See .design/on-prem-gateway.md.
+        "gateways",
+        "gateway_registration_codes",
         "audit_log",
     ];
 
@@ -172,6 +178,7 @@ internal static class TenantTableCatalog
             ["organization_usage_snapshots"] = "Derived storage figures, recomputed on a schedule by UsageSnapshotScheduler. Backing them up would restore stale numbers over fresh ones. Never cascade-deleted by a restore: its only parent is organizations.",
             ["email_outbox"] = "Transactional email in flight. Restoring it would re-send mail the recipient either already got or no longer needs, carrying reset and invite links that expired long before the restore. Rows are pruned within a day of sending anyway, and its organization_id is a label for the SiteAdmin list rather than a tenant link - there is no foreign key to cascade. See issue #790.",
             ["notification_digest_items"] = "Notifications waiting for someone's next daily or weekly digest. Restoring them would send old news again in the next digest, and they are deleted as soon as that digest goes out (or after 30 days). A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
+            ["gateway_seen_tokens"] = "The replay memory for on-premises gateway requests: one row per request, kept for about two minutes and then cleared. Restoring it would bring back rows for tokens that expired long ago, and losing it costs nothing once they have. A restore never cascade-deletes it, since its parents (organizations, gateways) are not restored content. See .design/on-prem-gateway.md.",
             ["user_notifications"] = "The in-app list of notifications. Restoring it would bring back old news as unread, it is tied to users (which are not restored), and rows are deleted after 30 days anyway. A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
         };
 

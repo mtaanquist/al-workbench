@@ -8,7 +8,12 @@ one of its sections.
 
 ## Where things live
 
-App folders are relative to `ALDevToolbox/`.
+App folders are relative to `ALDevToolbox/`. Beside the app and its tests, the repo root
+holds `ALWorkbench.Gateway.Contracts/`: what the app and the on-premises gateway agree on
+(the request and response records, `GatewayProtocol` with the protocol version and the
+routes, the signed request token and the key fingerprint). It is plain `net10.0` with no
+package references, because everything in it ships inside the gateway too; the Dockerfile's
+restore layer copies its csproj beside the app's. See `.design/on-prem-gateway.md`.
 
 | Folder                       | What goes there                                                              |
 |------------------------------|------------------------------------------------------------------------------|
@@ -36,6 +41,7 @@ App folders are relative to `ALDevToolbox/`.
 | `Services/Translation/`      | Translator services: translation memory, machine-translation providers and their per-organisation settings (`MachineTranslationSettingsService`), suggestion coordination. |
 | `Services/Mcp/`              | MCP tool implementations and their DTOs (see the MCP-parity guide below).    |
 | `Services/OAuth/`            | The MCP OAuth surface: client resolution, claims transformation, bearer policy. |
+| `Services/Gateways/`         | On-premises gateways: `GatewayService` (registration codes, the anonymous exchange, approve / rename / revoke / new key, the heartbeat, and the file's two sanctioned `IgnoreQueryFilters()` reads), `GatewayAuthenticationHandler` (the per-request token scheme the `/gateway/*` routes require, and nothing else accepts) and the pure `GatewayTokenValidator` it calls. The routes are `Endpoints/GatewayEndpoints.cs`; the page is Administration → Gateways. See `.design/on-prem-gateway.md`. |
 | `Services/Offsite/`          | `IOffsiteStorageProvider` and its S3 / Azure Blob implementations, plus `OffsiteStorageProviderFactory`. Raw transport only — the orchestration on top of it lives in `Services/Backups/`. |
 | `Services/Backups/`          | Backing the database up and putting it back: `BackupService` (the `pg_dump` / restore), `BackupScheduler`, `BackupCoordination`, the per-tenant snapshots (`PerTenantBackupService`, `PerTenantBackupJson`) and the off-site orchestration (`OffsiteBackupService`, `OffsiteRestoreJobs`) that delegates transport to `Services/Offsite/`. |
 | `Services/GitHub/`           | The GitHub App integration: `GitHubAppClient` (REST, the App JWT and the user-to-server token exchange), `GitHubConnectionService` (the per-organisation connection), `GitHubAccessService` (the per-user account link and the access checks every feature asks), `GitHubRepositoryService` (the shared repository resolver every caller routes through); phase 2 adds the feature services on top - `GitHubRecipeDeliveryService`, `GitHubReleaseService`, `GitHubRepositoryStandardsService`, `RepositoryDiscoveryService` (+ scheduler), `DependencyDriftService`, and the pull-request compile gate (`GitHubWebhookQueue`, `GitHubPullRequestBuildWorker`, `GitHubCheckRunService`) - with `GitHubAppClient` split into per-feature partial files. |

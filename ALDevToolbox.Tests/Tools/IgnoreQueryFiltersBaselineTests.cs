@@ -57,6 +57,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Services/Account/TotpService.cs"] = 8,
         ["ALDevToolbox/Services/Account/UserAdministrationService.cs"] = 14,
         ["ALDevToolbox/Services/Backups/PerTenantBackupService.cs"] = 1,
+        ["ALDevToolbox/Services/Gateways/GatewayService.cs"] = 2,
         ["ALDevToolbox/Services/GitHub/GitHubConnectionService.cs"] = 1,
         ["ALDevToolbox/Services/OAuth/OAuthClaimsTransformer.cs"] = 1,
         ["ALDevToolbox/Services/OAuth/OAuthClientAdminService.cs"] = 5,
