@@ -300,4 +300,65 @@ public sealed class GatewayCommandEndpointTests : IDisposable
         heartbeat.StatusCode.Should().Be(HttpStatusCode.OK);
         (await StatusAsync(id)).Should().Be(GatewayCommandStatus.Claimed, "a pending gateway's command lists are ignored");
     }
+
+    // ---------------------------------------------------------------- inventory
+
+    private static GatewayInventoryReport InventoryReport(int tenants = 1) => new()
+    {
+        Roster = [new GatewayPolicyTier { Machine = "CRONUS-BC01", Instance = "BC250" }],
+        Instances =
+        [
+            new GatewayInstanceInventory
+            {
+                Machine = "CRONUS-BC01",
+                Name = "BC250",
+                State = "Running",
+                Tenants = Enumerable.Range(0, tenants).Select(i => new GatewayTenantInventory { Id = $"tenant{i}" }).ToList(),
+            },
+        ],
+    };
+
+    [Fact]
+    public async Task An_approved_gateways_inventory_is_stored_under_its_organisation()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var gateway = await GatewayAsync(key);
+
+        using var response = await client.SendAsync(SignedJson(key, gateway, GatewayProtocol.InventoryPath, InventoryReport()));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        await using var ctx = _db.NewContext();
+        var instance = await ctx.GatewayInstances.AsNoTracking().Include(i => i.Tenants).SingleAsync();
+        (instance.GatewayId, instance.OrganizationId, instance.Name).Should().Be((gateway, TestDb.DefaultOrgId, "BC250"));
+        instance.Tenants.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_pending_gateway_cannot_send_an_inventory()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var gateway = await GatewayAsync(key, approve: false);
+
+        using var response = await client.SendAsync(SignedJson(key, gateway, GatewayProtocol.InventoryPath, InventoryReport()));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        await using var ctx = _db.NewContext();
+        (await ctx.GatewayInstances.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task An_inventory_over_a_limit_is_refused_with_a_reason()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var gateway = await GatewayAsync(key);
+
+        using var response = await client.SendAsync(SignedJson(key, gateway, GatewayProtocol.InventoryPath,
+            InventoryReport(tenants: GatewayInventoryLimits.MaxTenantsPerInstance + 1)));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorsOf(response))["tenants"].Should().Contain("marked as cut");
+    }
 }

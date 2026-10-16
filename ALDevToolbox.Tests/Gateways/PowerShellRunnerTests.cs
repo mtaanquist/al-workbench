@@ -87,8 +87,26 @@ public sealed class PowerShellRunnerTests
         spec.FileName.Should().Be(Programs.PowerShell7);
         spec.Arguments.Take(6).Should().Equal("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand");
         var script = Script(spec);
-        script.Should().Contain("[Console]::In.ReadToEnd()").And.Contain("ConvertFrom-Json").And.Contain(Echo.Script);
+        script.Should().Be(PowerShellRunner.Bootstrap);
+        script.Should().Contain("[Console]::In.ReadToEnd()").And.Contain("ConvertFrom-Json");
+        Envelope(spec)["operation"]!.GetValue<string>().Should().Be(Echo.Script);
         Envelope(spec)["moduleFolder"].Should().BeNull("an operation that needs no administration module loads none");
+    }
+
+    [Fact]
+    public void The_command_line_is_the_same_for_every_operation_so_a_long_one_still_fits()
+    {
+        var runner = new PowerShellRunner(new CapturingRunner(), Programs, new FakeFileAccess());
+        var target = new PowerShellTarget(PowerShellEdition.WindowsPowerShell, @"C:\Program Files\Microsoft Dynamics 365 Business Central\140\Service");
+
+        var selfTest = runner.BuildSpec(PowerShellOperations.SelfTest, target, new JsonObject(), TimeSpan.FromMinutes(1), "M");
+        // Four times what an encoded command could carry.
+        var longOperation = new PowerShellOperation("long", string.Concat(Enumerable.Repeat("Write-GatewayLog 'a line of a long operation'\n", 1000)));
+        var inventory = runner.BuildSpec(longOperation, target, new JsonObject(), TimeSpan.FromMinutes(1), "M");
+
+        inventory.Arguments.Should().Equal(selfTest.Arguments);
+        (inventory.FileName.Length + inventory.Arguments.Sum(a => a.Length + 3)).Should().BeLessThan(PowerShellRunner.MaxCommandLineChars);
+        Envelope(inventory)["operation"]!.GetValue<string>().Should().Be(longOperation.Script);
     }
 
     [Fact]

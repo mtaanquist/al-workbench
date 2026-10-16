@@ -109,6 +109,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Cal\Fixtures\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </None>
+    <!-- What the gateway's inventory script prints for one service tier (#1365).
+         SYNTHETIC until replaced with captures from our own servers: see the
+         README in the folder. -->
+    <None Include="Gateways\InventorySamples\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Gateways\InventorySamples\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </None>
   </ItemGroup>
 
 </Project>

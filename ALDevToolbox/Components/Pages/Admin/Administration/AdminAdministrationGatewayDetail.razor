@@ -1,0 +1,410 @@
+@page "/admin/administration/gateways/{Id:int}"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Roles = "Admin")]
+@rendermode InteractiveServer
+@implements IDisposable
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.Gateways
+@using ALWorkbench.Gateway.Contracts
+@inject GatewayInventoryService Inventory
+@inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
+@inject ILogger<AdminAdministrationGatewayDetail> Log
+
+@*
+    One gateway's own page (#1365, .design/on-prem-gateway.md "Inventory, as built").
+
+    Named user: an org Admin who has just approved a gateway on a customer's server
+    and wants to see that it found the customer's Business Central servers - which
+    ones, which version each runs, whether it is running, which database it uses,
+    how many tenants and apps, and when the licence runs out. Later, the same Admin
+    checks a version or a licence date before a deployment. They know Business
+    Central; they do not know how the gateway reads it.
+
+    The page only shows what the gateway reported. Its one action is "Refresh now"
+    (an outline button, as nothing here is the page's primary purpose), which asks
+    the gateway to read everything again instead of waiting up to 15 minutes. A
+    service tier the gateway stopped reporting stays listed, marked, because the
+    on-premises environments linked to it (#1366) must not vanish with it.
+*@
+
+<PageTitle>@(_view?.Gateway.Name ?? "Gateway") · Gateways · AL Workbench</PageTitle>
+
+<DetailPage IsLoading="@(!_loaded)"
+            LoadingText="Loading gateway..."
+            IsNotFound="@(_loaded && _view is null)"
+            Title="@_view?.Gateway.Name"
+            LoadingTrail='@([new("Administration", "/admin/administration"), new("Gateways", "/admin/administration/gateways")])'
+            Trail='@([new("Administration", "/admin/administration"), new("Gateways", "/admin/administration/gateways"), new(_view?.Gateway.Name ?? "Gateway")])'
+            PageClass="gw-detail">
+    <NotFound>
+        <div class="card">
+            <EmptyState Icon="server" Title="That gateway is not here" Heading="true">
+                <Text>It may have been added in another organisation, or the link is wrong.</Text>
+                <Action><a class="btn" href="/admin/administration/gateways">Back to Gateways</a></Action>
+            </EmptyState>
+        </div>
+    </NotFound>
+    <TitleRow>
+        <StatusPill Tone="@GatewayStatusText.ToneOf(_view!.Gateway.Status)">@GatewayStatusText.LabelOf(_view.Gateway.Status)</StatusPill>
+    </TitleRow>
+    <SubtitleContent>
+        The Business Central service tiers this gateway can see. Updated every @IntervalMinutes minutes.
+    </SubtitleContent>
+    <Actions>
+        @if (CanRefresh && _view!.Instances.Count > 0)
+        {
+            @RefreshButton
+        }
+    </Actions>
+    <Meta>
+        <div class="meta-item">
+            <span class="meta-item__label">Server</span>
+            <span class="meta-item__value">@_view!.Gateway.MachineName</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-item__label">Last seen</span>
+            <span class="meta-item__value"><Timestamp Value="@_view!.Gateway.LastSeenAt" Relative="true" Placeholder="@("Never")" /></span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-item__label">Gateway version</span>
+            <span class="meta-item__value">@(_view!.Gateway.ReportedVersion ?? "-")</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-item__label">Service tiers</span>
+            <span class="meta-item__value gw-meta-wrap">@TierCount</span>
+        </div>
+    </Meta>
+    <ChildContent>
+        @if (_error is not null)
+        {
+            <Alert Tone="AlertTone.Danger"><span>@_error</span></Alert>
+        }
+        @if (_view!.RefreshRequestedAt is { } asked)
+        {
+            <p class="gw-refresh-note u-muted" role="status">
+                @if (_view.Gateway.Status == GatewayStatus.Offline)
+                {
+                    <Icon Name="plug" Width="14" Height="14" />
+                    <span>
+                        The gateway is offline (last seen <Timestamp Value="@_view.Gateway.LastSeenAt" Relative="true" Placeholder="@("never")" />).
+                        It will read again when it reconnects.
+                    </span>
+                }
+                else
+                {
+                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                    <span>Asked the gateway to read its service tiers <Timestamp Value="@asked" Relative="true" />. This page updates when it has.</span>
+                }
+            </p>
+        }
+
+        @if (_view!.Instances.Count == 0)
+        {
+            <div class="card">
+                @if (_view.Gateway.Status == GatewayStatus.WaitingForApproval)
+                {
+                    <EmptyState Icon="shield" Title="Approve the gateway first">
+                        <Text>It starts reading the customer's service tiers once an Admin has approved it.</Text>
+                        <Action><a class="btn" href="/admin/administration/gateways">Approve on the Gateways list</a></Action>
+                    </EmptyState>
+                }
+                else if (_view.Gateway.Status == GatewayStatus.Revoked)
+                {
+                    <EmptyState Icon="shield-off" Title="This gateway is revoked">
+                        <Text>It never reported any service tiers, and a revoked gateway cannot report any more.</Text>
+                        <Action><a class="btn" href="/admin/administration/gateways">Back to Gateways</a></Action>
+                    </EmptyState>
+                }
+                else if (_view.Gateway.Status == GatewayStatus.Offline)
+                {
+                    <EmptyState Icon="plug" Title="The gateway is offline">
+                        <Text>
+                            The gateway has not been in touch since
+                            <Timestamp Value="@_view.Gateway.LastSeenAt" Placeholder="@("it was added")" />.
+                            Ask the customer's IT to check that the AL Workbench Gateway service is running on
+                            @_view.Gateway.MachineName.
+                        </Text>
+                    </EmptyState>
+                }
+                else
+                {
+                    <EmptyState Icon="server" Title="No service tiers reported yet">
+                        <Text>
+                            The gateway reports each Business Central service tier that its settings file on
+                            the server lets it read, a minute or two after it starts. If none appear, ask the
+                            customer's IT to list the service tiers in the gateway's settings and restart the
+                            AL Workbench Gateway service.
+                        </Text>
+                        <Action>
+                            @if (CanRefresh)
+                            {
+                                @RefreshButton
+                            }
+                        </Action>
+                    </EmptyState>
+                }
+            </div>
+        }
+        else
+        {
+            <section class="card">
+                <div class="card__head"><h2 class="card__title">Service tiers</h2></div>
+                <div class="gw-tiers">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">Service tier</th>
+                                <th scope="col">State</th>
+                                <th scope="col">Version</th>
+                                <th scope="col">Database</th>
+                                <th scope="col" class="u-num">Tenants</th>
+                                <th scope="col" class="u-num">Apps</th>
+                                <th scope="col">Licence expires</th>
+                                <th scope="col">Last read</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var tier in _view.Instances)
+                            {
+                                <tr class="@(tier.MissingSince is null ? null : "gw-tier--missing")">
+                                    <td>
+                                        <span class="u-nowrap"><strong>@tier.Name</strong></span>
+                                        <span class="tag">@EnvironmentWord(tier.Environment)</span>
+                                        <div class="u-muted">on <span class="u-nowrap">@tier.Machine</span></div>
+                                        @if (tier.ReadError is not null)
+                                        {
+                                            <div class="gw-tier-problem">@GatewayStatusText.PlainReadError(tier.ReadError)</div>
+                                            <details class="gw-tier-unread">
+                                                <summary>What the gateway said</summary>
+                                                <p>@tier.ReadError</p>
+                                            </details>
+                                        }
+                                        @if (tier.Unavailable.Count > 0)
+                                        {
+                                            <details class="gw-tier-unread">
+                                                <summary>@NotReadSummary(tier)</summary>
+                                                <ul>
+                                                    @foreach (var (part, reason) in tier.Unavailable)
+                                                    {
+                                                        <li><strong>@PartName(part)</strong>: @reason</li>
+                                                    }
+                                                </ul>
+                                            </details>
+                                        }
+                                    </td>
+                                    <td data-label="State">
+                                        @if (tier.MissingSince is { } since)
+                                        {
+                                            @* One block, so on a phone it is one value beside its label. *@
+                                            <div>
+                                                <StatusPill Tone="muted">No longer reported</StatusPill>
+                                                <div class="u-muted">since <Timestamp Value="@since" Format="yyyy-MM-dd" /></div>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <StatusPill Tone="@StateTone(tier.State)">@(tier.State ?? "Unknown")</StatusPill>
+                                        }
+                                    </td>
+                                    <td data-label="Version" class="u-nowrap">@(tier.Version ?? "-")</td>
+                                    <td data-label="Database">@(tier.Database ?? "-")</td>
+                                    @* A count of nothing that was never read is "-", not 0. *@
+                                    <td data-label="Tenants" class="u-num">@Count(tier.TenantCount, tier, "tenants")</td>
+                                    <td data-label="Apps" class="u-num">@Count(tier.AppCount, tier, "apps")</td>
+                                    <td data-label="Licence expires">
+                                        @if (!tier.HasLicence)
+                                        {
+                                            <span class="u-muted">Not read</span>
+                                        }
+                                        else if (tier.LicenceExpiresOn is { } expires)
+                                        {
+                                            <span class="u-nowrap">@GatewayStatusText.LicenceDate(expires)</span>
+                                            @if (LicenceTone(expires) is { } tone)
+                                            {
+                                                <div><StatusPill Tone="@tone">@(tone == "danger" ? "Expired" : "Expires soon")</StatusPill></div>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <span class="u-muted">No expiry date</span>
+                                        }
+                                    </td>
+                                    <td data-label="Last read" class="u-muted">
+                                        <Timestamp Value="@tier.ReadAt" Relative="true" Placeholder="@("Never")" />
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    </ChildContent>
+</DetailPage>
+
+@code {
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PollFor = TimeSpan.FromMinutes(3);
+
+    [Parameter] public int Id { get; set; }
+
+    private static readonly int IntervalMinutes = (int)GatewayInventoryLimits.Interval.TotalMinutes;
+
+    private GatewayInventoryView? _view;
+    private bool _loaded;
+    private bool _busy;
+    private string? _error;
+    private CancellationTokenSource? _pollCts;
+
+    /// <summary>Only a gateway that can take commands can be asked; and only once at a time.</summary>
+    private bool CanRefresh => _view is { RefreshRequestedAt: null } view
+        && view.Gateway.Status is GatewayStatus.Online or GatewayStatus.Offline or GatewayStatus.NotConnectedYet;
+
+    /// <summary>The tiers reported now, with the ones no longer reported counted beside them so the number matches the table.</summary>
+    private string TierCount
+    {
+        get
+        {
+            var missing = _view!.Instances.Count(i => i.MissingSince is not null);
+            var current = _view.Instances.Count - missing;
+            return missing == 0 ? current.ToString(System.Globalization.CultureInfo.CurrentCulture) : $"{current} ({missing} no longer reported)";
+        }
+    }
+
+    private static string Count(int count, GatewayInstanceRow tier, string section) =>
+        count == 0 && (tier.Unavailable.ContainsKey(section) || tier.ReadAt is null) ? "-" : count.ToString(System.Globalization.CultureInfo.CurrentCulture);
+
+    private RenderFragment RefreshButton => @<button type="button" class="btn @(_busy ? "btn--loading" : "")" @onclick="RefreshAsync" disabled="@_busy">
+        <Icon Name="refresh-cw" Width="15" Height="15" />
+        <span class="btn__label">@(_busy ? "Asking the gateway" : "Refresh now")</span>
+    </button>;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _view = await Inventory.GetViewAsync(Id);
+        _loaded = true;
+        if (_view?.RefreshRequestedAt is not null) StartPolling();
+    }
+
+    private async Task RefreshAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await Inventory.RequestRefreshAsync(Id);
+            _view = await Inventory.GetViewAsync(Id);
+            StartPolling();
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = string.Join(" ", ex.Errors.Values);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogError(ex, "Asking gateway {GatewayId} for a fresh inventory failed.", Id);
+            _error = "That did not work. Try again, and if it keeps failing, ask your site administrator to check the log.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>
+    /// While a refresh is on its way, re-reads the page every few seconds so the new
+    /// readings appear without a reload. Stops when the refresh is done or after a few
+    /// minutes (an offline gateway's request simply expires).
+    /// </summary>
+    private void StartPolling()
+    {
+        StopPolling();
+        var cts = new CancellationTokenSource(PollFor);
+        _pollCts = cts;
+        _ = PollAsync(cts.Token);
+    }
+
+    private async Task PollAsync(CancellationToken token)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(PollInterval);
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                // Own DI scope per tick: this runs off the circuit's dispatcher, and the
+                // page's own service shares the circuit's DbContext with clicks (#679).
+                GatewayInventoryView? view;
+                await using (var scope = ScopeFactory.CreateAsyncScope())
+                {
+                    view = await scope.ServiceProvider.GetRequiredService<GatewayInventoryService>().GetViewAsync(Id, token);
+                }
+                await InvokeAsync(() =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    _view = view;
+                    StateHasChanged();
+                });
+                if (view?.RefreshRequestedAt is null) break;
+            }
+        }
+        catch (OperationCanceledException) { /* done waiting, or the page was left */ }
+        catch (ObjectDisposedException) when (token.IsCancellationRequested) { /* torn down mid-poll */ }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Re-reading gateway {GatewayId} failed; the page stops updating until it is reloaded.", Id);
+        }
+    }
+
+    private void StopPolling()
+    {
+        var cts = Interlocked.Exchange(ref _pollCts, null);
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { /* already gone */ }
+        cts?.Dispose();
+    }
+
+    public void Dispose() => StopPolling();
+
+    private static string EnvironmentWord(string environment) => environment switch
+    {
+        "test" => "Test",
+        "development" => "Development",
+        _ => "Production",
+    };
+
+    private static string StateTone(string? state) => state switch
+    {
+        "Running" => "success",
+        "Stopped" => "danger",
+        null => "muted",
+        _ => "warn",
+    };
+
+    /// <summary>Red once expired, amber in the last 30 days, as the licence notice will be (#1369).</summary>
+    private string? LicenceTone(DateOnly expires)
+    {
+        var today = DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+        if (expires < today) return "danger";
+        return expires <= today.AddDays(30) ? "warn" : null;
+    }
+
+    private static string NotReadSummary(GatewayInstanceRow tier)
+    {
+        var parts = tier.Unavailable.Keys.Select(PartName).Distinct().ToList();
+        return "Not read: " + string.Join(", ", parts);
+    }
+
+    /// <summary>The part of a reading, in words. One tenant's apps are named with the tenant.</summary>
+    private static string PartName(string part) => part switch
+    {
+        "instance" => "state and version",
+        "service" => "Windows service",
+        "configuration" => "settings",
+        "tenants" => "tenants",
+        "apps" => "apps",
+        "apps.tenantSpecificProperties" => "data version per app",
+        "sessions" => "sessions",
+        "licence" => "licence",
+        _ when part.StartsWith("apps:", StringComparison.Ordinal) => $"apps of tenant {part[5..]}",
+        _ => part,
+    };
+}

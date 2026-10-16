@@ -70,6 +70,12 @@ public sealed class WorkbenchClient : IDisposable
         return await ReadJsonAsync<GatewayCommandMessage>(response, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Sends what one round of inventory read (or one part of it).</summary>
+    public async Task PostInventoryAsync(GatewayInventoryReport report, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Post, GatewayProtocol.InventoryPath, Json(report), RequestTimeout, ct).ConfigureAwait(false);
+    }
+
     public async Task PostProgressAsync(long commandId, IReadOnlyList<string> lines, long sequence, CancellationToken ct)
     {
         using var response = await SendAsync(HttpMethod.Post, GatewayProtocol.CommandProgressPath(commandId),
@@ -196,9 +202,9 @@ public sealed class WorkbenchClient : IDisposable
                 HttpStatusCode.Conflict => new CommandClosedException(reason),
                 (HttpStatusCode)GatewayProtocol.OutdatedStatusCode => new GatewayOutdatedException(reason),
                 HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout or HttpStatusCode.ProxyAuthenticationRequired
-                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}"),
+                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}", status: response.StatusCode),
                 >= HttpStatusCode.InternalServerError
-                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}"),
+                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}", status: response.StatusCode),
                 _ => new WorkbenchRefusedException(response.StatusCode, reason),
             };
         }

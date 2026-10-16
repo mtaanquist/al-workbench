@@ -247,6 +247,9 @@ internal sealed class AllowEveryCommandPolicy : ALWorkbench.Gateway.Core.Policy.
 
     public ALWorkbench.Gateway.Core.Policy.PolicySnapshot Snapshot { get; set; } = new(new GatewayPolicyReport { State = GatewayPolicyStates.Valid }, 1);
 
+    /// <summary>What the inventory reads: nothing unless a test says otherwise.</summary>
+    public ALWorkbench.Gateway.Core.Policy.GatewayPolicy InForce { get; set; } = ALWorkbench.Gateway.Core.Policy.GatewayPolicy.Empty;
+
     public IReadOnlyList<string> Start() => StartProblems;
 
     public ALWorkbench.Gateway.Core.Policy.PolicySnapshot Refresh() => Snapshot;
@@ -279,4 +282,25 @@ internal sealed class FakeFileAccess : ALWorkbench.Gateway.Core.Policy.IFileAcce
     public Dictionary<string, List<string>> FolderContents { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<string> Contents(string folder) => FolderContents.GetValueOrDefault(folder) ?? [];
+}
+
+/// <summary>An inventory reader that answers from a function and records which tiers it was asked for.</summary>
+internal sealed class FakeInventoryReader : ALWorkbench.Gateway.Core.Inventory.IInventoryReader
+{
+    public ConcurrentQueue<string> Read { get; } = new();
+
+    public Func<ALWorkbench.Gateway.Core.Policy.EffectiveInstance, GatewayInstanceInventory> Answer { get; set; } = tier => new GatewayInstanceInventory
+    {
+        Machine = tier.Tier.Machine,
+        Name = tier.Tier.Instance,
+        State = "Running",
+        Version = "25.4.29661.29927",
+        Tenants = [new GatewayTenantInventory { Id = "default", Apps = [] }],
+    };
+
+    public Task<GatewayInstanceInventory> ReadAsync(ALWorkbench.Gateway.Core.Policy.EffectiveInstance tier, Action<string>? progress, CancellationToken ct)
+    {
+        Read.Enqueue(tier.Tier.ToString());
+        return Task.FromResult(Answer(tier));
+    }
 }

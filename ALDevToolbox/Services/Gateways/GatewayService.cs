@@ -569,11 +569,18 @@ public sealed class GatewayService
 
     // ---------------------------------------------------------------- helpers
 
-    private async Task EnsureAdminAsync(CancellationToken ct)
+    private Task EnsureAdminAsync(CancellationToken ct) => EnsureAdminAsync(_db, _orgContext, ct);
+
+    /// <summary>
+    /// Refuses anyone but an org Admin (or a SiteAdmin inside an organisation). Shared
+    /// with <see cref="GatewayInventoryService"/>: the gateway pages are Admin only, and
+    /// the services check it again rather than trusting the page.
+    /// </summary>
+    internal static async Task EnsureAdminAsync(AppDbContext db, IOrganizationContext orgContext, CancellationToken ct)
     {
-        if (_orgContext.IsSiteAdmin && _orgContext.CurrentOrganizationId is not null) return;
-        var userId = _orgContext.CurrentUserId;
-        var isAdmin = userId is not null && await _db.Users.AsNoTracking()
+        if (orgContext.IsSiteAdmin && orgContext.CurrentOrganizationId is not null) return;
+        var userId = orgContext.CurrentUserId;
+        var isAdmin = userId is not null && await db.Users.AsNoTracking()
             .Where(u => u.Id == userId.Value)
             .Select(u => u.Role)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false) == UserRole.Admin;

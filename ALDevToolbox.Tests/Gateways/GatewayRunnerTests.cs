@@ -53,19 +53,20 @@ public sealed class GatewayRunnerTests : IDisposable
         _scratch.Dispose();
     }
 
-    private GatewayRunner Runner(TimeSpan? resultGrace = null, IGatewaySettingsStore? settings = null) =>
+    private GatewayRunner Runner(TimeSpan? resultGrace = null, IGatewaySettingsStore? settings = null,
+        ALWorkbench.Gateway.Core.Inventory.GatewayInventory? inventory = null) =>
         new(_workbench.Client(), settings ?? _settings, _keys, _runOnce, _executor, _policy, _clock, _log,
             new GatewayRunnerOptions(_folder.WorkFolder, "CRONUS-BC01", "1.0.0")
             {
                 ResultGrace = resultGrace ?? GatewayRunnerOptions.DefaultResultGrace,
             },
-            new Random(1362));
+            new Random(1362), inventory);
 
-    private async Task<GatewayRunOutcome> RunAsync()
+    private async Task<GatewayRunOutcome> RunAsync(ALWorkbench.Gateway.Core.Inventory.GatewayInventory? inventory = null)
     {
         try
         {
-            return await Runner().RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
+            return await Runner(inventory: inventory).RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
         }
         catch (TimeoutException)
         {
@@ -106,7 +107,8 @@ public sealed class GatewayRunnerTests : IDisposable
                 if (Results().Count >= expected) _stop.Cancel();
                 return FakeWorkbench.NoContent();
             }
-            if (request.Path.EndsWith("/progress", StringComparison.Ordinal) || request.Path.EndsWith("/result", StringComparison.Ordinal))
+            if (request.Path.EndsWith("/progress", StringComparison.Ordinal) || request.Path.EndsWith("/result", StringComparison.Ordinal)
+                || request.Path == GatewayProtocol.InventoryPath)
             {
                 return FakeWorkbench.NoContent();
             }
@@ -733,6 +735,182 @@ public sealed class GatewayRunnerTests : IDisposable
         Results().Single().Result.Succeeded.Should().BeTrue();
         // Released once the verb is done: the working folder could be removed.
         Directory.Exists(Path.GetDirectoryName(path)).Should().BeFalse();
+    }
+
+    // ---------------------------------------------------------------- inventory
+
+    private readonly FakeInventoryReader _reader = new();
+
+    private List<GatewayInventoryReport> InventoryPosts() => _workbench.Requests
+        .Where(r => r.Path == GatewayProtocol.InventoryPath)
+        .Select(r => r.Json<GatewayInventoryReport>())
+        .ToList();
+
+    [Fact]
+    public async Task Once_approved_the_gateway_reads_the_readable_tiers_and_sends_each_with_the_roster()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        Serve([]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        _reader.Read.Should().Equal("CRONUS-BC01 / BC140", "CRONUS-BC01 / BC250", "CRONUS-BC01 / BC140TEST");
+        var posts = InventoryPosts();
+        posts.Should().HaveCount(3);
+        posts.Should().OnlyContain(p => p.SchemaVersion == GatewayInventoryReport.CurrentSchemaVersion && p.Roster!.Count == 3);
+        _executor.Calls.Should().BeEmpty("the scheduled round is not a command");
+        _log.Messages(GatewayLog.InventorySentId).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_refresh_inventory_command_reads_the_named_tier_itself_without_the_executor()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        var command = Command(21) with
+        {
+            Parameters = new JsonObject
+            {
+                [GatewayCommandParameters.Machine] = "CRONUS-BC01",
+                [GatewayCommandParameters.Instance] = "BC250",
+            },
+        };
+        Serve([command]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        _executor.Calls.Should().BeEmpty();
+        var result = Results().Should().ContainSingle().Subject.Result;
+        result.Succeeded.Should().BeTrue();
+        result.Result!["read"]!.GetValue<int>().Should().Be(1);
+        var posts = InventoryPosts();
+        posts.Should().HaveCount(4, "three from the round at start, one for the command");
+        posts[^1].Roster.Should().BeNull();
+        posts[^1].Instances.Should().ContainSingle().Which.Name.Should().Be("BC250");
+    }
+
+    [Fact]
+    public async Task A_refresh_of_a_tier_the_policy_does_not_let_the_gateway_read_fails()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        var command = Command(22) with
+        {
+            Parameters = new JsonObject
+            {
+                [GatewayCommandParameters.Machine] = "CRONUS-BC01",
+                [GatewayCommandParameters.Instance] = "BC260",
+            },
+        };
+        Serve([command]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        var result = Results().Should().ContainSingle().Subject.Result;
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Contain("BC260");
+    }
+
+    [Fact]
+    public async Task After_a_command_that_changes_something_the_tiers_are_read_again()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        Serve([Command(23) with { Verb = GatewayVerb.RestartInstance }]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        _executor.Calls.Should().ContainSingle();
+        InventoryPosts().Should().HaveCount(6, "one round at start and one after the restart");
+    }
+
+    [Fact]
+    public async Task Nothing_is_read_while_the_gateways_files_are_not_safe()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        _policy.Snapshot = new(new GatewayPolicyReport { State = GatewayPolicyStates.Unsafe }, 1);
+        Serve([]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        _reader.Read.Should().BeEmpty();
+        InventoryPosts().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task With_no_settings_in_force_nothing_is_read_or_reported_missing()
+    {
+        // No gateway.toml, or a broken one with no earlier good version: the policy in
+        // force is the empty stand-in, and an empty roster would mark every tier missing.
+        _policy.InForce = ALWorkbench.Gateway.Core.Policy.GatewayPolicy.Empty;
+        Serve([]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        _reader.Read.Should().BeEmpty();
+        InventoryPosts().Should().BeEmpty();
+        _log.Messages(GatewayLog.InventorySkippedId).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_refresh_with_no_settings_in_force_fails_without_reporting_anything()
+    {
+        _policy.InForce = ALWorkbench.Gateway.Core.Policy.GatewayPolicy.Empty;
+        Serve([Command(24)]);
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        var result = Results().Should().ContainSingle().Subject.Result;
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Contain("gateway.toml");
+        InventoryPosts().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_tier_AL_Workbench_refuses_is_logged_and_does_not_hold_back_the_others()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        var inventoryPosts = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.HeartbeatPath) return FakeWorkbench.Heartbeat(approved: true);
+            if (request.Path == GatewayProtocol.InventoryPath)
+            {
+                var report = request.Json<GatewayInventoryReport>();
+                inventoryPosts++;
+                return report.Instances.Any(i => i.Name == "BC140")
+                    ? FakeWorkbench.Refused(HttpStatusCode.BadRequest, "Too large.")
+                    : FakeWorkbench.NoContent();
+            }
+            _stop.Cancel();
+            return FakeWorkbench.NoContent();
+        };
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        inventoryPosts.Should().Be(3, "the refused tier did not stop the other two");
+        _log.Messages(GatewayLog.InventoryRefusedId).Should().ContainSingle().Which.Should().Contain("BC140");
+        _log.Messages(GatewayLog.InventoryNotSentId).Should().BeEmpty("a refused tier is not retried in two minutes");
+        _log.Messages(GatewayLog.InventorySentId).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_round_that_cannot_be_sent_is_tried_again_two_minutes_later()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        var attempts = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.HeartbeatPath) return FakeWorkbench.Heartbeat(approved: true);
+            if (request.Path == GatewayProtocol.InventoryPath)
+            {
+                return ++attempts == 1 ? FakeWorkbench.Refused(HttpStatusCode.ServiceUnavailable, "Restarting.") : FakeWorkbench.NoContent();
+            }
+            if (attempts >= 4) _stop.Cancel();
+            return FakeWorkbench.NoContent();
+        };
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        _log.Messages(GatewayLog.InventoryNotSentId).Should().ContainSingle().Which.Should().Contain("2 minutes");
+        attempts.Should().Be(4, "the failed first post, then the three of the retry");
     }
 
     private static bool OpenedByThisProcess(string path)

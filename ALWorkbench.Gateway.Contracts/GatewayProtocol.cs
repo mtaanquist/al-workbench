@@ -80,6 +80,14 @@ public static class GatewayProtocol
     /// <summary>Where a gateway downloads file <paramref name="fileId"/> of command <paramref name="commandId"/>.</summary>
     public static string CommandFilePath(long commandId, long fileId) => $"{PathPrefix}/commands/{commandId}/files/{fileId}";
 
+    /// <summary>
+    /// Where a gateway posts what it read from its service tiers (<c>GatewayInventoryReport</c>):
+    /// every <c>GatewayInventoryLimits.Interval</c>, after a command, and when asked
+    /// with <c>refresh-inventory</c>. A route added after protocol version 1 shipped to
+    /// no one; an older gateway never calls it.
+    /// </summary>
+    public const string InventoryPath = PathPrefix + "/inventory";
+
     /// <summary>How often a gateway calls <see cref="HeartbeatPath"/>.</summary>
     public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(60);
 

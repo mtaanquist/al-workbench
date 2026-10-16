@@ -1,7 +1,9 @@
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using ALWorkbench.Gateway.Core;
+using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
+using ALWorkbench.Gateway.Core.PowerShell;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -69,7 +71,11 @@ internal sealed class GatewayWorker : BackgroundService
             policy,
             clock,
             _logger,
-            new GatewayRunnerOptions(_folder.WorkFolder, Environment.MachineName, GatewayHttp.ProgramVersion));
+            new GatewayRunnerOptions(_folder.WorkFolder, Environment.MachineName, GatewayHttp.ProgramVersion),
+            inventory: new GatewayInventory(new PowerShellInventoryReader(
+                new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck()),
+                new RegistryServiceTierLocator(),
+                Environment.MachineName)));
         return await runner.RunAsync(stoppingToken).ConfigureAwait(false);
     }
 
