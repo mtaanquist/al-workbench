@@ -84,7 +84,13 @@ allow = ["inventory", "publish", "unpublish", "restart", "service_control", "lic
 #                   allow any publisher.
 #   allow_unsigned  true to allow apps that are not signed. Apps built by
 #                   AL Workbench are not signed today, so deployments need this.
-#   scope           "tenant" (the default) publishes an app for one tenant only;
+#   signers         only accept signatures from these certificates, by thumbprint
+#                   or subject (e.g. "CN=CRONUS Partner"). Leave it out to accept
+#                   any signature Windows says is valid.
+#   allow_force_sync
+#                   true to allow ForceSync, which can delete tables and fields
+#                   with their data. Leave it out (false) to allow only Add.
+#   scope          "tenant" (the default) publishes an app for one tenant only;
 #                   "global" publishes it for the whole server.
 #   powershell      "5.1" or "7" to choose the PowerShell for this tier. Leave it
 #                   out and the gateway picks one from the tier's version.

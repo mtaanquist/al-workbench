@@ -116,6 +116,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Gateways\InventorySamples\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </None>
+    <!-- What the gateway's publish-install verb reads from a tier, and stand-in
+         administration tools for BC 14 and a current version (#1375). SYNTHETIC
+         until replaced with captures: see the README in the folder. -->
+    <None Include="Gateways\PublishInstallSamples\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Gateways\PublishInstallSamples\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </None>
   </ItemGroup>
 
 </Project>

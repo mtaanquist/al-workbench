@@ -1,0 +1,52 @@
+[
+  {
+    "schema": 2,
+    "tenantSpecificProperties": true,
+    "installedFrom": "TenantSpecificProperties",
+    "parameters": {
+      "publishScope": true,
+      "publishTenant": true,
+      "syncTenant": true,
+      "installTenant": true,
+      "upgradeTenant": true,
+      "unpublishTenant": true
+    },
+    "versions": [
+      {
+        "version": "1.2.0.0",
+        "name": "CRONUS Coffee",
+        "publisher": "CRONUS Partner",
+        "scope": "Global",
+        "isInstalled": "False",
+        "isPublished": "True",
+        "dataVersion": "1.3.0.0",
+        "syncState": "Synced",
+        "packageId": "1d2c3b4a-5f6e-4d7c-8b9a-0f1e2d3c4b5a"
+      },
+      {
+        "version": "1.3.0.0",
+        "name": "CRONUS Coffee",
+        "publisher": "CRONUS Partner",
+        "scope": "Global",
+        "isInstalled": "True",
+        "isPublished": "True",
+        "dataVersion": "1.3.0.0",
+        "syncState": "Synced",
+        "packageId": "6c1e2a3b-4d5f-4a6b-8c7d-9e0f1a2b3c4d"
+      }
+    ],
+    "otherTenants": [
+      {
+        "id": "cronus-se",
+        "installed": [
+          "1.3.0.0"
+        ]
+      },
+      {
+        "id": "cronus-no",
+        "installed": []
+      }
+    ],
+    "otherTenantsUnknown": null
+  }
+]

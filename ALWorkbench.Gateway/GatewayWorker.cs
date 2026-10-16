@@ -4,6 +4,7 @@ using ALWorkbench.Gateway.Core;
 using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
+using ALWorkbench.Gateway.Core.PublishInstall;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -62,20 +63,23 @@ internal sealed class GatewayWorker : BackgroundService
         var clock = SystemGatewayClock.Instance;
         using var http = GatewayHttp.Create();
         var policy = new GatewayPolicySource(PolicyOptions(), new WindowsFileAccessCheck(), clock, TimeZoneInfo.Local, _logger);
+        var powerShell = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck());
+        var locator = new RegistryServiceTierLocator();
+        var verbs = new VerbExecutors(new Dictionary<ALWorkbench.Gateway.Contracts.GatewayVerb, ICommandExecutor>
+        {
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName),
+        });
         var runner = new GatewayRunner(
             http,
             new JsonFileGatewaySettingsStore(_folder.SettingsFile),
             new CngSigningKeyStore(),
             new FileRunOnceStore(_folder.RunOnceFile, clock),
-            new NotSupportedCommandExecutor(),
+            verbs,
             policy,
             clock,
             _logger,
             new GatewayRunnerOptions(_folder.WorkFolder, Environment.MachineName, GatewayHttp.ProgramVersion),
-            inventory: new GatewayInventory(new PowerShellInventoryReader(
-                new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck()),
-                new RegistryServiceTierLocator(),
-                Environment.MachineName)));
+            inventory: new GatewayInventory(new PowerShellInventoryReader(powerShell, locator, Environment.MachineName)));
         return await runner.RunAsync(stoppingToken).ConfigureAwait(false);
     }
 

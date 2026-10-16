@@ -20,7 +20,10 @@ public sealed record PolicyDecision(bool Allowed, string? Reason)
 /// <param name="File">The name of the command's file that holds the app.</param>
 /// <param name="Publisher">The publisher the command declares.</param>
 /// <param name="Signed">Whether the command declares the app signed.</param>
-public sealed record AppToPublish(string File, string Publisher, bool Signed);
+/// <param name="Id">The app id the command declares; the policy check does not need it, the verb does.</param>
+/// <param name="Name">The app name the command declares, when it sends one.</param>
+/// <param name="Version">The version the command declares; the verb needs it.</param>
+public sealed record AppToPublish(string File, string Publisher, bool Signed, string? Id = null, string? Name = null, string? Version = null);
 
 /// <summary>
 /// What the local policy check needs to know about a command, read from its
@@ -32,7 +35,8 @@ public sealed record PolicyRequest(
     string Tenant,
     IReadOnlyList<AppToPublish> Apps,
     bool UnpublishPrevious,
-    bool StartedByAgent)
+    bool StartedByAgent,
+    string SyncMode = GatewaySyncModes.Add)
 {
     /// <summary>
     /// Reads the request out of a command, or says why it cannot. A parameter of the
@@ -73,7 +77,13 @@ public sealed record PolicyRequest(
                     problem ??= "An app in the command has no publisher.";
                     return null;
                 }
-                if (!TryText(app, GatewayCommandParameters.AppFile, out var file, ref problem)) return null;
+                if (!TryText(app, GatewayCommandParameters.AppFile, out var file, ref problem)
+                    || !TryText(app, GatewayCommandParameters.AppId, out var id, ref problem)
+                    || !TryText(app, GatewayCommandParameters.AppName, out var name, ref problem)
+                    || !TryText(app, GatewayCommandParameters.AppVersion, out var version, ref problem))
+                {
+                    return null;
+                }
                 if (app[GatewayCommandParameters.AppSigned] is { } signedNode
                     && (signedNode.GetValueKind() is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False)))
                 {
@@ -81,7 +91,7 @@ public sealed record PolicyRequest(
                     return null;
                 }
                 var signed = app[GatewayCommandParameters.AppSigned]?.GetValue<bool>() ?? false;
-                apps.Add(new AppToPublish(file ?? string.Empty, publisher, signed));
+                apps.Add(new AppToPublish(file ?? string.Empty, publisher, signed, id, name, version));
             }
         }
         if (command.Verb == GatewayVerb.PublishInstall && (problem = AppsMatchFiles(apps, command.Files)) is not null)
@@ -100,13 +110,25 @@ public sealed record PolicyRequest(
             unpublish = unpublishNode.GetValue<bool>();
         }
 
+        if (!TryText(parameters, GatewayCommandParameters.SyncMode, out var syncMode, ref problem))
+        {
+            return null;
+        }
+        syncMode ??= GatewaySyncModes.Add;
+        if (!GatewaySyncModes.All.Contains(syncMode, StringComparer.Ordinal))
+        {
+            problem = $"The command asks for a schema sync mode the gateway does not know; it takes {string.Join(" or ", GatewaySyncModes.All)}.";
+            return null;
+        }
+
         return new PolicyRequest(
             command.Verb,
             machine is null ? null : new TierRef(machine, instance!),
             tenant ?? GatewayCommandParameters.DefaultTenant,
             apps,
             unpublish,
-            command.StartedByAgent);
+            command.StartedByAgent,
+            syncMode);
     }
 
     /// <summary>
@@ -161,7 +183,7 @@ public sealed record PolicyRequest(
 /// by <c>change_hours</c> or by who asked.</item>
 /// <item><c>publish-install</c>: sent to the database's publishing tier; <c>publish</c>
 /// there, the tenant and every publisher on its lists, <c>allow_unsigned</c> for an
-/// unsigned app, <c>unpublish</c> when previous versions are removed, <c>scripts</c>
+/// unsigned app, <c>allow_force_sync</c> for a ForceSync, <c>unpublish</c> when previous versions are removed, <c>scripts</c>
 /// when the database names a before or after script, and <c>restart</c> on every tier
 /// of the restart group.</item>
 /// <item><c>import-licence</c>: sent to the publishing tier of a database with a
@@ -214,6 +236,7 @@ public static class PolicyEnforcer
                     ?? Need(tier, PolicyPermission.Publish)
                     ?? Tenant(tier, request.Tenant)
                     ?? Apps(tier, request.Apps)
+                    ?? ForceSync(tier, request.SyncMode)
                     ?? (request.UnpublishPrevious ? Need(tier, PolicyPermission.Unpublish) : null)
                     ?? (database is { Before: not null } or { After: not null } ? Need(tier, PolicyPermission.Scripts) : null)
                     ?? NeedAll(group, PolicyPermission.Restart);
@@ -286,6 +309,12 @@ public static class PolicyEnforcer
     private static PolicyDecision? Tenant(EffectiveInstance tier, string tenant) => tier.AllowsTenant(tenant)
         ? null
         : PolicyDecision.Refuse($"Not allowed by {Settings}: {tier.Tier} may not act on tenant '{tenant}'.");
+
+    /// <summary>ForceSync can drop tables and fields with their data, so the tier has to allow it by name.</summary>
+    internal static PolicyDecision? ForceSync(EffectiveInstance tier, string syncMode) =>
+        syncMode != GatewaySyncModes.ForceSync || tier.AllowForceSync
+            ? null
+            : PolicyDecision.Refuse($"Not allowed by {Settings}: {tier.Tier} does not allow ForceSync (allow_force_sync).");
 
     private static PolicyDecision? Apps(EffectiveInstance tier, IReadOnlyList<AppToPublish> apps)
     {

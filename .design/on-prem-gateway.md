@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365) and linking service tiers to a Solution (#1366) exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374) and the gateway side of `publish-install` (#1375) exist; the other verbs, and deploying through the gateway from AL Workbench (#1367), do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -168,7 +168,8 @@ As built (#1361), in `Services/Gateways/GatewayCommandService.cs`:
   answer, accepted without appending its lines again. A post without a number (0) is always appended.
 - A heartbeat's running and interrupted lists are applied only for an approved gateway.
 - Files are stored with the command (`gateway_command_files.content`), not referenced from the
-  artifact row. #1375 decides whether command files reference the build's artifacts instead. A file
+  artifact row. Whether command files reference the build's artifacts instead is left to #1367,
+  which builds the command; the gateway only sees a file id and its hash either way. A file
   is at most 128 MB (an .app the BC admin API accepts is at most 50 MB), the download is streamed
   rather than buffered, and the sweep drops the content once the command is final, keeping its
   name, hash and size.
@@ -267,6 +268,8 @@ allow = ["inventory", "publish", "unpublish", "restart", "licence"]   # override
 tenants = ["default"]          # multitenant servers: the tenants this gateway may target
 publishers = ["CRONUS Partner"] # optional allow-list of app publishers
 allow_unsigned = true          # Publish-NAVApp -SkipVerification (our builds are unsigned)
+signers = ["3F2A9C41D07E5B86A1C2E4F60718293A4B5C6D7E"] # optional: accept signatures only from these (thumbprint or subject)
+allow_force_sync = false       # optional: true lets a deployment sync with ForceSync (default false)
 scope = "tenant"               # tenant (default) or global
 
 [[instance]]
@@ -321,6 +324,16 @@ with "Not allowed by the customer's gateway settings".
 | `service_control` | Stop, start and restart the tier on demand from the environment page |
 | `licence` | Import a licence file |
 | `scripts` | Run the before and after scripts named for its database |
+
+Three per-tier settings narrow what `publish` may publish, and are not permissions in `allow`
+because they qualify one rather than grant one:
+
+| Setting | Means |
+| --- | --- |
+| `publishers` | Only apps from these publishers, compared ignoring case. Left out: any publisher |
+| `allow_unsigned` | `true` takes apps without a signature (published with `-SkipVerification`). Off unless set |
+| `signers` | Only signatures from these certificates, each a thumbprint (case and spaces ignored) or a subject (case ignored). Left out: any signature Windows calls valid. When set, a signed app from anyone else is refused even where `allow_unsigned = true` |
+| `allow_force_sync` | `true` lets a deployment sync with `ForceSync`, which can delete tables and fields with their data. Off unless set: a ForceSync command is refused by the policy check before its files download, and again by the verb before any cmdlet runs. Reported with the policy (`allowForceSync`) so AL Workbench can hide ForceSync for a tier that does not allow it (#1367) |
 
 `change_hours` (per kind or per tier) limits every permission except `inventory` to a local time window, on top of the
 delivery window set in AL Workbench, so customer IT can rule out daytime changes whatever the
@@ -416,7 +429,8 @@ every command, reads included.
 downloaded). A refusal is reported as the command's failure with the reason and "Nothing was
 changed.", and logged with event id 1003. The command names its tier with the parameters in
 `GatewayCommandParameters` (`machine`, `instance`, `tenant`, and for `publish-install` `apps`
-with each app's `file`, `publisher` and `signed`, and `unpublishPrevious`); a parameter of the wrong
+with each app's `file`, `publisher` and `signed`, and `unpublishPrevious`; the verb itself also
+reads each app's `id`, `name` and `version` and the command's `syncMode`, #1375); a parameter of the wrong
 shape refuses the command. A `publish-install` must list its apps, never an empty list, with exactly
 one app for each of the command's files, named by the file's name; otherwise it is refused, because
 an empty list would pass every publisher and signing rule while the verb published whatever files
@@ -425,7 +439,7 @@ came with it. What each verb needs:
 | Verb | Needs |
 | --- | --- |
 | `refresh-inventory` | `inventory` on the named tier; with no tier named, the verb reads only the tiers that allow it |
-| `publish-install` | Sent to the database's `publish_on` tier: `publish` there, the tenant and each publisher on its lists, `allow_unsigned` for an unsigned app, `unpublish` when previous versions go, `scripts` when the database names a script, and `restart` on every tier of the restart group |
+| `publish-install` | Sent to the database's `publish_on` tier: `publish` there, the tenant and each publisher on its lists, `allow_unsigned` for an unsigned app, `allow_force_sync` for `syncMode = ForceSync` (any other mode than `Add` or `ForceSync` refuses the command), `unpublish` when previous versions go, `scripts` when the database names a script, and `restart` on every tier of the restart group |
 | `import-licence` | Sent to the `publish_on` tier of a database with a `licence_target`: `licence` there (and the tenant for `Tenant`), `restart` on every tier of the group |
 | `restart-group` | `service_control` on every tier of the group |
 | `restart-instance`, `stop-instance`, `start-instance` | `service_control` on the tier |
@@ -434,7 +448,8 @@ Then, for every change: refused when any tier it touches is `production` and an 
 ("AI assistants cannot change on-premises production"), and refused outside any touched tier's
 `change_hours`. Everything this check knows about an app is what the command declares: the
 publisher, the `signed` flag and which file is which. It refuses on the claim early; the
-`publish-install` verb (#1375) must verify it against the files (see the open items). The shared-tier rule
+`publish-install` verb (#1375) then checks it against the files themselves ("The `publish-install`
+verb, as built"). The shared-tier rule
 (`shared_restart`) needs to know which Solutions each tier is linked to, which only AL Workbench
 knows; it is enforced with the restart group (#1368).
 
@@ -498,11 +513,14 @@ first exercised with #1365.
   been run against a real server; "Inventory, as built" lists what to check.
 - **`shared_restart`** (#1368). The gateway cannot tell which Solutions share a tier, so the rule is
   parsed and reported but not enforced; the restart group enforces it.
-- **Each `.app` against the declared list** (#1375). The policy check sees only what the command
-  declares. Before publishing anything, `publish-install` must check that the files are exactly the
-  apps declared (as many, one each), read each `.app`'s publisher from its own manifest and refuse
-  a mismatch with the declared one, and verify each signature itself: with `allow_unsigned = false`,
-  an app whose Authenticode or NAVX signature does not verify is refused whatever `signed` claimed.
+- ~~**Each `.app` against the declared list** (#1375).~~ Closed by #1375. The policy check still sees
+  only what the command declares; before any cmdlet runs, `publish-install` now hashes each file
+  again, reads its id, name, publisher and version from the `.app`'s own manifest and refuses a
+  mismatch with what was declared, checks the file's publisher against the tier's list, and, with
+  `allow_unsigned = false`, refuses a file that carries no signature whatever `signed` claimed, then
+  has Business Central read each file too (`Get-NAVAppInfo -Path`) and Windows verify the signature
+  and its signer (`signers`), and publishes without `-SkipVerification`. "The `publish-install`
+  verb, as built" has how, and where that check stops short off Windows.
 
 ### Inventory, as built (#1365)
 
@@ -861,6 +879,188 @@ that everyone's sessions will drop.
 *before* script stops the deployment before anything is published; a failing *after* script fails
 the deployment with the install reported as done. Output goes to the deployment log.
 
+### The `publish-install` verb, as built (#1375)
+
+The gateway side only: nothing in AL Workbench sends the command yet (#1367), and the restart group
+and the before and after scripts are #1368's. In `ALWorkbench.Gateway.Core/PublishInstall/`;
+`PublishInstallVerb` is an `ICommandExecutor`, routed to by `VerbExecutors`, which the Windows
+service gives the loop.
+
+**The command** (contracts: `GatewayCommandParameters`, and `GatewayPublishInstallParameters`,
+which writes exactly that object for #1367 to send): `machine` and `instance` of the publishing
+tier, `tenant` (left out on a single-tenant server), `syncMode` (`Add`, the default, or
+`ForceSync`; `GatewaySyncModes`, the same words as `BcSyncMode`; any other word refuses the
+command, and `ForceSync` needs `allow_force_sync` on the tier), `unpublishPrevious`, and `apps` in
+installation order, each with `file`, `id`, `name`, `publisher`, `version` and `signed`. `id` and
+`version` are new and required: the verb refuses a command without them, because it cannot check
+the file against an app it was not told about. `name` is optional on both sides:
+`GatewayPublishInstallParameters` leaves it out when it is empty, and the gateway checks it only
+when it is there, refusing a `name` that is present but blank, as it does any blank parameter.
+
+**Before any cmdlet runs**, after the loop's own policy check and download:
+
+1. The policy file is checked again, as it is now (a large download takes a while), and the tier is
+   looked up in it for its scope, its publishers and whether it takes unsigned apps.
+2. The tier must be on this computer and have a Windows service (other computers are #1368's).
+3. For every app: its SHA-256 again, against the hash the command carries (defence in depth: the
+   loop already refused a mismatch, and holds the file open against writes, but only Windows
+   enforces that); then `AppFile` reads the `.app` itself. The layout it relies on: a 40-byte
+   header, `NAVX`, header length, format version, package id, package length (64-bit), `NAVX`;
+   then the package (a ZIP with `NavxManifest.xml`), exactly that long; then, in a signed file, the
+   signature. Id, version, publisher and (when sent) name must match what was declared (id and
+   version exactly, a version as four parts; publisher and name without regard to case, as the
+   publisher allow-list compares); the file's publisher must be on the tier's list; the same app
+   may not be listed twice; and with `allow_unsigned = false` a file with nothing after its package
+   is refused as unsigned whatever `signed` said. An encrypted package (`NAVX.NEA`, AppSource's) is
+   refused: its manifest cannot be read, so its publisher cannot be checked. A package with more
+   than one entry named `NavxManifest.xml` (or `readytorunappmanifest.json`), compared without
+   regard to case, is refused: which one Business Central reads is not the gateway's to guess, and a
+   second manifest naming an allowed publisher would otherwise get another app past the list. A
+   Ready2Run wrapper is read through to the app inside. The manifest is read with no DTD and a size
+   cap, and the header's package length is checked against what is left of the file after the
+   header, never summed with it, so a length near the 64-bit limit cannot overflow into one that
+   passes.
+4. `PublishInstallScript.Examine`, one read-only child process for all the command's files, has
+   Business Central read each file (`Get-NAVAppInfo -Path`) and, where it is asked for, Windows
+   read its signature (`Get-AuthenticodeSignature`). Business Central's id, name, publisher,
+   version and, where it reports one, package id must equal the gateway's own reading, so the
+   publisher that passed the list is the one Business Central installs; a version whose
+   `Get-NAVAppInfo` has no `-Path`, or that cannot read the file, refuses the command. The
+   signature is asked for when the tier does not take unsigned apps and whenever the file carries
+   one; its signer (the certificate's subject and thumbprint) is recorded in the `signature` step
+   and the app's result either way. Where the tier does not take unsigned apps, or lists `signers`
+   and the file is signed, anything but `Valid` is refused, as is a valid signature whose subject
+   and thumbprint are both missing from `signers`.
+
+One refusal refuses the command with "Nothing was changed."; the refused app is `refused` in the
+result and the others `skipped`.
+
+**Then app by app**, each in two child processes, with the decision between them in C#:
+
+- `PublishInstallScript.Inspect` (read-only) returns every version of the app `Get-NAVAppInfo
+  -Tenant` lists for the tenant, each with its `PackageId`, and whether it is installed and its
+  data version. `IsInstalled` is filled only with `-TenantSpecificProperties`, so the script
+  passes the switch wherever the cmdlet has it, for this tenant and every other one, and reads
+  `IsInstalled` only then. Where the cmdlet lacks it, which tenants have each version installed
+  comes from `Get-NAVAppTenant -Name -Publisher -Version` (each result's `Id`, else `TenantId`);
+  with neither, the installed state is reported as unknown, never as "not installed". When
+  previous versions are to go it also returns which versions each other tenant has installed
+  (`Get-NAVTenant`, then the same read for each); anything unknown there leaves the list out. And
+  which optional parameters this version's cmdlets have.
+- `AppInstallPlanner` decides. Any version whose installed state is unknown: refused, since
+  install, upgrade and the downgrade check all depend on it. The same version already published
+  as a different build (its `PackageId` is not the file's header package id): refused, "a
+  different build with the same version is already published". The same version installed:
+  nothing (`already-installed`, #931). A newer version installed, or data kept from a newer one:
+  refused, never a downgrade. An older version installed, or none installed with data kept from an
+  older one: publish, sync, `Start-NAVAppDataUpgrade`. Otherwise (never installed, or data kept at
+  this very version): publish, sync, `Install-NAVApp`. Publishing is left out when this version is
+  already published as this very build (a deployment that failed after publishing, sent again);
+  when the server does not report the published build's `PackageId`, the app is refused rather
+  than installed in the file's place. Publishing is `-Scope Tenant -Tenant` unless the tier says
+  `scope = "global"`; `-SkipVerification` exactly when the tier allows unsigned apps; the
+  signature was checked before anything ran (step 4 above). Previous versions, when asked:
+  one published to this tenant is unpublished with `-Tenant`; one published for every tenant (or
+  whose scope the server does not report) only when no other tenant has it installed, otherwise
+  the step is `skipped` with the tenants named, and when the other tenants cannot be read it is
+  left too, saying so.
+- `PublishInstallScript.Apply` runs the planned steps in order, from a fixed set of step kinds,
+  each cmdlet given `-Name`, `-Publisher` and `-Version` read from the file, and stops at the first
+  that fails. Each step writes a line before it starts, so a long data upgrade shows in the log
+  while it runs, and whatever the cmdlets print goes to the log too.
+
+Deciding before publishing rather than after syncing, as the list above reads, is deliberate:
+publishing and syncing change neither what is installed nor the data version, so the decision is
+the same, and it keeps the decision in C# where it is tested without Business Central, at the cost
+of two module loads per app rather than one.
+
+**Business Central 14 and later.** Each optional parameter (`-TenantSpecificProperties`; `-Path`
+on `Get-NAVAppInfo`; `-Scope` and `-Tenant` on `Publish-NAVApp`; `-Tenant` on the others) is
+looked up with `Get-Command` first. Without `-TenantSpecificProperties` there is no data version,
+so an app uninstalled with its data kept is installed rather than upgraded, and Business Central's
+own refusal is what the person sees; whether an app is installed then comes from
+`Get-NAVAppTenant`. Which of the two BC 14 has is to be verified (below): the switch is believed
+to exist there, and the fallback covers a version that lacks it.
+A cmdlet without `-Tenant` is called without it on tenant `default` and refuses for any other
+tenant; a tenant-scoped publish where `Publish-NAVApp` has no `-Scope` refuses, saying customer IT
+can set `scope = "global"`, rather than quietly publishing to every tenant.
+
+**Signatures, and where the check stops.** Three layers where unsigned apps are not allowed: the
+gateway refuses a file that carries no signature (it can tell that much on any platform, from the
+header); Windows checks the signature (`Get-AuthenticodeSignature`, which reads an `.app`'s
+signature through the component Business Central installs for that file type, and must answer
+`Valid`, from a signer on `signers` when the tier lists any); and `Publish-NAVApp` runs without
+`-SkipVerification`, so Business Central checks it again. A valid signature on its own proves only
+that someone with a trusted code-signing certificate signed the file, which is why the signer is
+always recorded and `signers` can pin it. The gateway itself does not verify the signature's cryptography: how the signature is laid
+out after the package is undocumented, and Windows' answer is the authoritative one. Where
+Windows cannot check (no `Get-AuthenticodeSignature`, or the component is not installed and the
+answer is anything but `Valid`) the app is refused, never published unchecked. Off Windows (the
+tests) there is no `Get-AuthenticodeSignature` at all, so that layer is only exercised against a
+stand-in.
+
+**Reporting.** Each step is a line in the command's log ("CRONUS Coffee 1.4.0.0: upgraded from
+1.3.0.0."), sent in the numbered progress batches. The first failure fails the command with the
+app, the step and Business Central's own words, and the apps after it are `skipped`. Every app is
+in the result, `GatewayPublishInstallResult` (contracts, `schema` 1): per app its file, id, name,
+publisher, version, `outcome` (`installed`, `upgraded`, `already-installed`, `failed`, `refused`,
+`skipped`), `fromVersion`, a message, `signerSubject` and `signerThumbprint` when the signature
+was read, and its steps (`verify`, `signature`, `publish`, `sync`, `install` or `upgrade`,
+`unpublish`, each `done`, `failed` or `skipped`; the `signature` step carries the signer too), and
+`restarted`. The signer fields are additive, so the schema stays 1.
+
+**The restart group's hook.** `PublishInstallVerb.RunRestartGroupAsync` runs only after every app
+went through. Today it writes "The service tiers were not restarted: this version of the gateway
+does not restart them yet." and the result says `restarted: false`; #1368 fills it in, with the
+after script.
+
+**Where it differs from the steps above:** an unpublish that fails fails the deployment (the new
+version is installed; the step says so), as the first failure stops everything; a downgrade is
+refused on the gateway too, not only by `DeliveryService`; and an encrypted AppSource package
+cannot be deployed through the gateway.
+
+**Samples are synthetic.** `ALDevToolbox.Tests/Gateways/PublishInstallSamples/` holds what the
+inspect script prints for BC 14 (under 5.1) and BC 25, and stand-in `NavAdminTool.ps1` files for
+both that the real scripts run against under `pwsh`. None came from a server; they were written
+from the cmdlets' documented parameters and output, and are to be replaced with real captures (the
+folder's README says how). Tests: `PublishInstallVerbTests` (against a fake Business Central behind
+the fake process runner), `PublishInstallSampleTests` (the samples, and the real scripts when
+`pwsh` is on the PATH), `GatewayAppFileTests`, and two in `GatewayRunnerTests`: a download whose
+hash does not match, and a file rewritten while the verb runs. The runner holds each file open with
+`FileShare.Read`, which Windows enforces; elsewhere .NET's file sharing is an advisory lock that a
+writer can get past, so off Windows that test shows the verb's own hash catching the change, and on
+Windows that the write is refused.
+
+**To verify on real servers** before the verb is trusted:
+
+- the `.app` layout above against signed and unsigned files from the AL compiler and AppSource,
+  including where the signature sits;
+- `Get-AuthenticodeSignature` on a signed `.app`, an unsigned one and a tampered one, on a server
+  with Business Central installed, and what it answers where the component is missing. It reads an
+  `.app` through Business Central's subject interface package (NavSip), which is registered per
+  bitness: if it is not registered for the PowerShell the gateway runs (64-bit 5.1 or 7), every
+  signed app comes back as not `Valid` and is refused. That fails closed, but it would stop all
+  signed deployments, so check it on each Business Central version, and what `SignerCertificate`
+  holds;
+- each cmdlet's parameters on BC 14 and a current version, against the stand-ins, especially
+  `-Scope`/`-Tenant` on `Publish-NAVApp`, `-Tenant` on `Unpublish-NAVApp`,
+  `-TenantSpecificProperties` and `-Path` on `Get-NAVAppInfo`. Whether BC 14's `Get-NAVAppInfo`
+  has `-TenantSpecificProperties` decides which path its tiers take; the stand-in assumes it does
+  not, so the `Get-NAVAppTenant` fallback is what the tests run;
+- `Get-NAVAppTenant` on BC 14: that it exists in the apps management module, takes `-Name`,
+  `-Publisher` and `-Version`, lists the tenants that have that version *installed* (not those it
+  is published to), and what property names the tenant id (`Id` or `TenantId`);
+- that `Get-NAVAppInfo` reports `PackageId` for a published version, on BC 14 and a current one,
+  and that it equals the package id in the `.app`'s NAVX header (for a Ready2Run package, which
+  of the two ids it reports); where it is missing, a re-sent deployment of an already published
+  version is refused;
+- what `Get-NAVAppInfo -Path` returns for a normal, a signed and a Ready2Run `.app`;
+- what `Get-NAVAppInfo -Tenant` lists for a version published to another tenant, and whether
+  `Scope` and `ExtensionDataVersion` are reported as the planner expects (and `0.0.0.0` for none);
+- that `Publish-NAVApp -Path` can read the file from the gateway's work folder under the gateway's
+  service account;
+- how long a large data upgrade takes against the six-hour limit per app.
+
 ## Licences
 
 **Upload and import (#1369).** On an on-premises environment a person who manages the Solution
@@ -936,7 +1136,8 @@ install any app on any tier the policy allows. The hash is chosen by the server,
 allow-list checks what the app says about itself. The real limits are the policy file (which tiers,
 what each tier allows, the hours changes may run) and the customer's choice to install a gateway at all. If that is not enough for a
 customer, two later options exist: local approval on the gateway before an install, or apps signed
-with a certificate the customer trusts and `allow_unsigned = false`. The setup guide says this to
+with a certificate the customer trusts, `allow_unsigned = false` and that certificate in `signers`
+(a valid signature from anyone else is not enough). The setup guide says this to
 customer IT in plain words.
 
 **Tenant isolation.** Two new `IgnoreQueryFilters()` call sites, both category 1 (pre-auth routing),
@@ -984,8 +1185,10 @@ gateway is refused with a message saying to update. "Versions and updates" below
 ### The Windows service, as built (#1362)
 
 The frame: it registers, keeps its key, heartbeats, polls, downloads and checks files, and reports.
-It runs no verb yet; every command fails with "This version of the gateway cannot run '<verb>'
-commands yet" until #1365 onward plug executors in behind `ICommandExecutor`.
+As first built it ran no verb; a command whose verb has no executor still fails with "This version
+of the gateway cannot run '<verb>' commands yet". Verbs plug in behind `ICommandExecutor`: the
+service hands the loop a `VerbExecutors` that routes each verb to its own (`publish-install` since
+#1375), and `refresh-inventory` stays the loop's own because the loop also runs it on a schedule.
 
 **Commands customer IT runs** (from an administrator prompt), in either order:
 

@@ -137,6 +137,47 @@ public sealed class GatewayPolicyParserTests
         tier.Tenants.Should().Equal("default");
         tier.Publishers.Should().BeNull();
         tier.AllowUnsigned.Should().BeFalse();
+        tier.Signers.Should().BeNull("any valid signature, unless customer IT names the signers");
+        tier.AllowForceSync.Should().BeFalse("ForceSync can drop data, so it is off unless set");
+    }
+
+    [Fact]
+    public void Signers_and_allow_force_sync_are_read_and_reported()
+    {
+        var tier = Valid("""
+            [[instance]]
+            machine = "CRONUS-BC01"
+            name = "BC140"
+            signers = ["3F2A9C41D07E5B86A1C2E4F60718293A4B5C6D7E", "CN=CRONUS Partner, O=CRONUS Partner, C=DK"]
+            allow_force_sync = true
+            """).Instances.Single();
+
+        tier.Signers.Should().Equal("3F2A9C41D07E5B86A1C2E4F60718293A4B5C6D7E", "CN=CRONUS Partner, O=CRONUS Partner, C=DK");
+        tier.AllowForceSync.Should().BeTrue();
+        var report = tier.ToReport();
+        report.Signers.Should().Equal(tier.Signers);
+        report.AllowForceSync.Should().BeTrue();
+        tier.AllowsSigner("CN=Someone Else", "3f2a 9c41 d07e 5b86 a1c2 e4f6 0718 293a 4b5c 6d7e").Should().BeTrue("a thumbprint matches ignoring case and spaces");
+        tier.AllowsSigner("cn=cronus partner, o=cronus partner, c=dk", "0000").Should().BeTrue("a subject matches ignoring case");
+        tier.AllowsSigner("CN=Fabrikam", "0000").Should().BeFalse();
+        tier.AllowsSigner(null, null).Should().BeFalse("an unsigned file or an unread certificate is no one on the list");
+    }
+
+    [Fact]
+    public void A_file_kept_in_force_read_only_keeps_its_signers()
+    {
+        var policy = Valid("""
+            [[instance]]
+            machine = "CRONUS-BC01"
+            name = "BC140"
+            allow = ["inventory", "publish"]
+            signers = ["CN=CRONUS Partner"]
+            allow_force_sync = true
+            """).ReadOnly();
+
+        var tier = policy.Instances.Single();
+        tier.Allow.Should().Equal(PolicyPermission.Inventory);
+        tier.Signers.Should().Equal("CN=CRONUS Partner");
     }
 
     [Fact]
@@ -318,6 +359,10 @@ public sealed class GatewayPolicyParserTests
     [InlineData("scope = \"Tenant\"", "scope = \"Tenant\" is not one of the choices")]
     [InlineData("powershell = \"6\"", "powershell = \"6\" is not one of the choices. Use \"5.1\" or \"7\"")]
     [InlineData("allow_unsigned = \"yes\"", "allow_unsigned must be true or false")]
+    [InlineData("allow_force_sync = \"yes\"", "allow_force_sync must be true or false")]
+    [InlineData("signers = []", "signers is an empty list")]
+    [InlineData("signers = \"CN=CRONUS Partner\"", "signers must be a list")]
+    [InlineData("signer = [\"CN=CRONUS Partner\"]", "signer")]
     [InlineData("tenants = []", "tenants is an empty list")]
     [InlineData("tenants = \"default\"", "tenants must be a list")]
     [InlineData("change_hours = \"25:00-06:00\"", "has a time that does not exist")]

@@ -35,7 +35,30 @@ public interface ICommandExecutor
 }
 
 /// <summary>
-/// The executor until the verbs exist: every command fails with a message saying so.
+/// Hands each command to the executor of its verb; a verb with none fails with
+/// <see cref="NotSupportedCommandExecutor"/>'s message. What the Windows service gives
+/// <c>GatewayRunner</c>: a new verb is one more entry here, not a change to the loop.
+/// (<c>refresh-inventory</c> is the loop's own, because the loop also runs it on a schedule.)
+/// </summary>
+public sealed class VerbExecutors : ICommandExecutor
+{
+    private static readonly NotSupportedCommandExecutor NotSupported = new();
+    private readonly IReadOnlyDictionary<GatewayVerb, ICommandExecutor> _verbs;
+
+    public VerbExecutors(IReadOnlyDictionary<GatewayVerb, ICommandExecutor> verbs)
+    {
+        _verbs = verbs;
+    }
+
+    public Task<GatewayCommandOutcome> ExecuteAsync(GatewayCommandContext context, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return (_verbs.GetValueOrDefault(context.Command.Verb) ?? NotSupported).ExecuteAsync(context, ct);
+    }
+}
+
+/// <summary>
+/// The executor for a verb this version cannot run: every command fails with a message saying so.
 /// It keeps the loop whole end to end - claim, download, report - before any verb can
 /// touch a service tier.
 /// </summary>

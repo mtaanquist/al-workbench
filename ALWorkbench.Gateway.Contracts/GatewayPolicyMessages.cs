@@ -114,6 +114,22 @@ public sealed record GatewayPolicyInstance
     [JsonPropertyName("allowUnsigned")]
     public bool AllowUnsigned { get; init; }
 
+    /// <summary>
+    /// The signers whose signatures the tier accepts (certificate thumbprints or subjects);
+    /// null when any valid signature is accepted. Added after protocol version 1; an older
+    /// gateway leaves it out, which reads as null.
+    /// </summary>
+    [JsonPropertyName("signers")]
+    public IReadOnlyList<string>? Signers { get; init; }
+
+    /// <summary>
+    /// Whether a deployment may sync with <c>ForceSync</c> (destructive schema changes).
+    /// AL Workbench hides ForceSync for a tier that does not allow it (#1367). Additive;
+    /// an older gateway leaves it out, which reads as false.
+    /// </summary>
+    [JsonPropertyName("allowForceSync")]
+    public bool AllowForceSync { get; init; }
+
     /// <summary><c>tenant</c> or <c>global</c>: how apps are published.</summary>
     [JsonPropertyName("scope")]
     public string Scope { get; init; } = "tenant";

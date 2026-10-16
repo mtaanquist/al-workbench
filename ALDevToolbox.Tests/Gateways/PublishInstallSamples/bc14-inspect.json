@@ -1,0 +1,36 @@
+[
+  {
+    "schema": 2,
+    "tenantSpecificProperties": false,
+    "installedFrom": "Get-NAVAppTenant",
+    "parameters": {
+      "publishScope": true,
+      "publishTenant": true,
+      "syncTenant": true,
+      "installTenant": true,
+      "upgradeTenant": true,
+      "unpublishTenant": false
+    },
+    "versions": {
+      "value": [
+        {
+          "version": "1.3.0.0",
+          "name": "CRONUS Coffee",
+          "publisher": "CRONUS Partner",
+          "scope": "Global",
+          "isInstalled": "True",
+          "isPublished": "True",
+          "dataVersion": null,
+          "syncState": null,
+          "packageId": "{6c1e2a3b-4d5f-4a6b-8c7d-9e0f1a2b3c4d}"
+        }
+      ],
+      "Count": 1
+    },
+    "otherTenants": {
+      "value": [],
+      "Count": 0
+    },
+    "otherTenantsUnknown": null
+  }
+]
