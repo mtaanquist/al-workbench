@@ -345,14 +345,22 @@ public sealed class UpgradeActionService
     {
         await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
 
-        return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+        var rows = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId)
             .OrderByDescending(a => a.RequestedAt)
             .ThenByDescending(a => a.Id)
             .Take(FeedLimit)
             .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
+        // A service tier action on an on-premises tier is a gateway command; how it went is
+        // read from there (#1371).
+        return await Gateways.ServiceTierActionOutcome.ApplyAsync(_db, rows, ct).ConfigureAwait(false);
     }
+
+    /// <summary>The kinds that are service tier actions on an on-premises environment, carried by a gateway command (#1371).</summary>
+    public static bool IsServiceTierAction(UpgradeActionKind kind) =>
+        kind is UpgradeActionKind.RestartServiceTier or UpgradeActionKind.RestartServiceTiers
+            or UpgradeActionKind.StopServiceTier or UpgradeActionKind.StartServiceTier;
 
     /// <summary>
     /// Every action still waiting to fire across the projects this caller can see — what
@@ -406,7 +414,8 @@ public sealed class UpgradeActionService
             a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
             a.CancelledBy, a.CancelledAt, a.TargetVersion,
             a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder,
-            a.AppName, a.Kind == UpgradeActionKind.UpdateApp ? a.BcAppId : null, a.PrerequisiteAppIds);
+            a.AppName, a.Kind == UpgradeActionKind.UpdateApp ? a.BcAppId : null, a.PrerequisiteAppIds,
+            a.GatewayCommandId);
 
     // ── Shared with the worker ──────────────────────────────────────────
 
@@ -622,8 +631,22 @@ public sealed record UpgradeActionRow(
     /// <summary>The app a booked AppSource update moves. Null for every other kind.</summary>
     Guid? AppId = null,
     /// <summary>The apps a booked AppSource update was agreed to bring along. Null for every other kind.</summary>
-    IReadOnlyList<Guid>? PrerequisiteAppIds = null)
+    IReadOnlyList<Guid>? PrerequisiteAppIds = null,
+    /// <summary>The gateway command a service tier action on an on-premises environment rides on (#1371). Null for every other kind.</summary>
+    long? GatewayCommandId = null,
+    /// <summary>The service tier a service tier action named, <c>SERVER / INSTANCE</c>, read from its command. Null for every other kind.</summary>
+    string? TierName = null,
+    /// <summary>
+    /// Where a service tier action's command stands while it is not finished: the gateway
+    /// has not picked it up yet, or is running it. Null once it is finished, and for every
+    /// other kind. Such a row reads as <see cref="UpgradeActionStatus.Pending"/> meanwhile,
+    /// though nothing about it can be cancelled.
+    /// </summary>
+    ALDevToolbox.Services.Gateways.ServiceTierProgress? TierProgress = null)
 {
+    /// <summary>True for a service tier action on an on-premises environment (#1371).</summary>
+    public bool IsServiceTierAction => UpgradeActionService.IsServiceTierAction(Kind);
+
     /// <summary>True while the action is still waiting for its slot — the only state with a Cancel.</summary>
     public bool IsPending => Status == UpgradeActionStatus.Pending;
 

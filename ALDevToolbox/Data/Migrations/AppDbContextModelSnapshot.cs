@@ -2164,6 +2164,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("execute_after");
 
+                    b.Property<long?>("GatewayCommandId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("gateway_command_id");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(40)

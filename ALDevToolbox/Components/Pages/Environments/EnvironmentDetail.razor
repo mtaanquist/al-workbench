@@ -11,6 +11,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService UpgradeActions
 @inject ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService OnPremisesLinks
 @inject ALDevToolbox.Services.Gateways.OnPremisesLicenceService Licences
+@inject ALDevToolbox.Services.Gateways.OnPremisesTierActionService TierActions
 @inject DeliveryService Deliveries
 @inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
 @inject ILogger<EnvironmentDetail> Log
@@ -293,7 +294,9 @@
             <OnPremisesEnvironmentSections Row="Row" ShowApps="@(_tab == Section.Apps)" Apps="_onPremisesApps"
                                            DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway"
                                            CanManage="_canManage" Licence="_licence" LicenceError="@_licenceError"
-                                           UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync" />
+                                           UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync"
+                                           TierActions="_tierActions" TierActionBusy="_tierActionBusy" OnTierAction="TierActionAsync"
+                                           HistoryHref="@TabHref(Section.History)" />
         }
         else if (_tab == Section.Overview)
         {
@@ -1034,6 +1037,7 @@
 <ConfirmDialog @ref="_confirm" />
 
 <UploadLicenceDialog @ref="_licenceDialog" />
+<ServiceTierActionDialog @ref="_tierActionDialog" />
 
 @* Its own dialog because it asks a question the others do not: when. It asks it the
    way the upload dialog does, because both are bookings the workbench sends at the
@@ -1311,6 +1315,7 @@
             StopLicenceWatch();
             _licence = null;
             _licenceError = null;
+            _tierActions = null;
             await Zone.EnsureLoadedAsync();
             await LoadEnvironmentAsync();
             _loaded = true;
@@ -1327,6 +1332,7 @@
                 _onPremisesApps = await Read(ct => Fleet.ListInstalledAppsAsync(Id, ct)) ?? [];
                 _canSeeGateway = await Read(ct => OnPremisesLinks.CanLinkAsync(ct));
                 await LoadLicenceAsync();
+                await LoadTierActionsAsync();
             }
             else
             {
@@ -2101,12 +2107,13 @@
             Log.LogError(ex, "Reading the licence for environment {EnvId} failed.", Id);
             _licenceError = "Couldn't read the licence. Reload the page to try again.";
         }
-        if (_licence?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running }) WatchLicenceImport();
+        if (LicencePending(_licence)) WatchLicenceImport();
     }
 
     /// <summary>
-    /// Re-reads the licence every few seconds while its last upload is being imported, so
-    /// the card says how it went without a reload. Stops when the import ends, when the
+    /// Re-reads the licence and the service tier actions every few seconds while a licence
+    /// is being imported or a restart, stop or start is with the gateway (#1371), so the
+    /// cards say how it went without a reload. Stops when the import ends, when the
     /// page is left, when the page moves on to another environment (which starts its own
     /// watch if it needs one), or after 30 minutes - a restart group of slow tiers is the
     /// long case.
@@ -2131,9 +2138,16 @@
                         // The page may have moved to another environment meanwhile.
                         if (watch.IsCancellationRequested || _loadedId != environmentId) return;
                         var view = await Read(ct => Licences.GetViewAsync(environmentId, ct));
+                        var actions = await Read(ct => TierActions.GetViewAsync(environmentId, ct));
                         if (watch.IsCancellationRequested || _loadedId != environmentId) return;
                         _licence = view;
-                        pending = view?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running };
+                        // A service tier action that just finished belongs in the history too.
+                        if (_tierActions?.InFlight == true && actions?.InFlight != true)
+                        {
+                            _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, environmentId, ct));
+                        }
+                        _tierActions = actions;
+                        pending = LicencePending(view) || actions?.InFlight == true;
                         if (!pending)
                         {
                             // Imported or not, the tier's own reading moved too.
@@ -2159,6 +2173,9 @@
             }
         });
     }
+
+    private static bool LicencePending(OnPremisesLicenceView? view) =>
+        view?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running };
 
     /// <summary>Stops the licence import watch, if one runs.</summary>
     private void StopLicenceWatch()
@@ -2214,6 +2231,79 @@
             _settingBusy = null;
         }
         await LoadLicenceAsync();
+    }
+
+    // ── Restarting, stopping and starting an on-premises service tier (#1371) ──
+
+    private ServiceTierActionDialog? _tierActionDialog;
+    private ServiceTierActionsView? _tierActions;
+    private ServiceTierAction? _tierActionBusy;
+
+    private async Task LoadTierActionsAsync()
+    {
+        try
+        {
+            _tierActions = await Read(ct => TierActions.GetViewAsync(Id, ct));
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _tierActions = null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The rest of the page still works; the card simply offers no actions.
+            Log.LogError(ex, "Reading the service tier actions for environment {EnvId} failed.", Id);
+            _tierActions = null;
+        }
+        // The same watch that follows a licence import follows the action until it ends.
+        if (_tierActions?.InFlight == true) WatchLicenceImport();
+    }
+
+    private async Task TierActionAsync(ServiceTierAction action)
+    {
+        if (_tierActionDialog is null || _tierActions is null || _tierActionBusy is not null) return;
+        var confirmed = await _tierActionDialog.OpenAsync(Id, Row.EnvironmentName, _tierActions.TierName, _tierActions.GroupTierCount, action);
+        if (!confirmed) return;
+
+        _tierActionBusy = action;
+        _settingError = null;
+        _settingDone = null;
+        _settingDoneLink = null;
+        StateHasChanged();
+        try
+        {
+            await Write(() => TierActions.RequestAsync(Id, action));
+            _settingDone = action switch
+            {
+                ServiceTierAction.RestartAll => "The restart of every service tier on this database was sent to the gateway. The Service tier card shows how it goes.",
+                ServiceTierAction.Stop => $"The stop of {_tierActions.TierName} was sent to the gateway. The Service tier card shows how it goes.",
+                ServiceTierAction.Start => $"The start of {_tierActions.TierName} was sent to the gateway. The Service tier card shows how it goes.",
+                _ => $"The restart of {_tierActions.TierName} was sent to the gateway. The Service tier card shows how it goes.",
+            };
+        }
+        catch (PlanValidationException ex)
+        {
+            _settingError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't send that to the gateway.";
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _settingError = ex.Message;
+        }
+        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Sending {Action} for environment {EnvId} failed.", action, Id);
+            _settingError = "Couldn't send that to the gateway. Try again; if it keeps failing, check the gateway under Administration → Gateways.";
+        }
+        finally
+        {
+            _tierActionBusy = null;
+        }
+        _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+        await LoadTierActionsAsync();
     }
 
     // ── Uploading an app ────────────────────────────────────────────────

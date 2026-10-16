@@ -14,3 +14,8 @@
    screen and under it on a phone. */
 .onprem__expiry { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); min-width: 0; }
 .onprem__expiry > span { flex: 1 1 24rem; min-width: 0; }
+
+/* The service tier actions (#1371): the last action and how it went, then the buttons the
+   card's head does not carry, wrapping on a phone. */
+.onprem__actions { border-top: 1px solid var(--border); display: grid; gap: var(--space-2); }
+.onprem__action-row { display: flex; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }

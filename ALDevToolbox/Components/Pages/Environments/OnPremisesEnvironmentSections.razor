@@ -126,6 +126,12 @@ else if (!ShowApps)
                 <h2 class="card__title">Service tier</h2>
                 <p class="card__sub">The Business Central server this environment is, as the on-premises gateway in the customer's network reports it.</p>
             </div>
+            @* The one thing a consultant whose customer says Business Central is stuck came
+               for. Outline, like every button on this page. *@
+            @if (tier is not null && TierActions is { CanManage: true } actions && Lead(actions) is { } lead)
+            {
+                @TierButton(lead, actions)
+            }
         </div>
         <div class="card__body">
             @if (tier is null)
@@ -155,6 +161,67 @@ else if (!ShowApps)
                 </p>
             }
         </div>
+        @if (tier is not null && TierActions is { } view)
+        {
+            <div class="card__body onprem__actions">
+                @if (view.Latest is { } last)
+                {
+                    <div class="onprem__upload-line">
+                        <StatusPill Tone="@LastTone(last)">@LastWord(last)</StatusPill>
+                        <span>
+                            @ALDevToolbox.Components.Shared.EnvironmentActivityFeed.Headline(last)
+                            <span class="u-muted">by @last.RequestedByName <Timestamp Value="@last.RequestedAt" Relative="true" /></span>
+                        </span>
+                    </div>
+                    @if (last.TierProgress == ServiceTierProgress.Waiting)
+                    {
+                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. If this does not change within a minute or two, the gateway may be offline: ask the customer's IT to check it.</p>
+                    }
+                    else if (last.TierProgress == ServiceTierProgress.Running)
+                    {
+                        <p class="u-muted onprem__upload-detail">The gateway is on it. A restart usually takes a minute or two; this page shows the result when it is done.</p>
+                    }
+                    else if (last.Outcome is { } outcome && last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed)
+                    {
+                        <FieldError Class="onprem__upload-detail" Message="@outcome" />
+                    }
+                    else if (last.Outcome is { } done)
+                    {
+                        <p class="onprem__upload-detail onprem__upload-note">@done</p>
+                    }
+                }
+                @if (view.CanManage)
+                {
+                    var others = view.Choices.Where(c => c.Action != Lead(view)?.Action).ToList();
+                    @if (others.Count > 0)
+                    {
+                        <div class="onprem__action-row">
+                            @foreach (var choice in others)
+                            {
+                                @TierButton(choice, view)
+                            }
+                        </div>
+                    }
+                    @* Why a button is greyed out, once per reason rather than once per button:
+                       when the gateway is offline every one of them says the same thing. *@
+                    @if (!view.InFlight)
+                    {
+                        @foreach (var reason in view.Choices.Select(c => c.Unavailable).OfType<string>().Distinct())
+                        {
+                            <p class="u-muted onprem__upload-detail">@reason</p>
+                        }
+                    }
+                }
+                else
+                {
+                    <p class="u-muted onprem__upload-detail">Only people who manage this Solution can restart, stop or start the service tier.</p>
+                }
+                @if (view.Latest is not null && !string.IsNullOrEmpty(HistoryHref))
+                {
+                    <p class="onprem__upload-detail"><a href="@HistoryHref">See every action in the Workbench history</a></p>
+                }
+            </div>
+        }
     </div>
 
     @* The licence: what the tier runs, the last upload, and the one action. An outline
@@ -346,6 +413,65 @@ else
 
     /// <summary>Opens the upload dialog.</summary>
     [Parameter] public EventCallback OnUploadLicence { get; set; }
+
+    /// <summary>The service tier actions (#1371); null while they are read, or when there are none to offer.</summary>
+    [Parameter] public ServiceTierActionsView? TierActions { get; set; }
+
+    /// <summary>The action being sent, while it is; null otherwise.</summary>
+    [Parameter] public ServiceTierAction? TierActionBusy { get; set; }
+
+    /// <summary>Opens the confirmation for an action.</summary>
+    [Parameter] public EventCallback<ServiceTierAction> OnTierAction { get; set; }
+
+    /// <summary>The Workbench history tab's address.</summary>
+    [Parameter] public string? HistoryHref { get; set; }
+
+    /// <summary>
+    /// The action the card's head offers: restart a tier that runs, start one that is
+    /// stopped. The rest sit in the row under the facts.
+    /// </summary>
+    private static ServiceTierActionChoice? Lead(ServiceTierActionsView view) =>
+        view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Restart)
+        ?? view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Start);
+
+    private RenderFragment TierButton(ServiceTierActionChoice choice, ServiceTierActionsView view) =>
+        @<button type="button" class="btn btn--sm @(TierActionBusy == choice.Action ? "btn--loading" : "")"
+                 disabled="@(choice.Unavailable is not null || view.InFlight || TierActionBusy is not null)"
+                 @onclick="() => OnTierAction.InvokeAsync(choice.Action)">
+            <Icon Name="@ActionIcon(choice.Action)" Width="14" Height="14" />
+            <span class="btn__label">@ActionLabel(choice.Action, view)</span>
+        </button>;
+
+    private static string ActionIcon(ServiceTierAction action) => action switch
+    {
+        ServiceTierAction.Start => "circle-play",
+        ServiceTierAction.Stop => "circle-stop",
+        _ => "rotate-cw",
+    };
+
+    private string ActionLabel(ServiceTierAction action, ServiceTierActionsView view) => TierActionBusy == action
+        ? "Sending"
+        : action switch
+        {
+            ServiceTierAction.RestartAll => $"Restart all {view.GroupTierCount} tiers on this database...",
+            ServiceTierAction.Stop => "Stop service tier...",
+            ServiceTierAction.Start => "Start service tier...",
+            _ => "Restart service tier...",
+        };
+
+    private static string LastTone(ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionRow last) => last.TierProgress switch
+    {
+        ServiceTierProgress.Running => "running",
+        ServiceTierProgress.Waiting => "queued",
+        _ => last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed ? "danger" : "success",
+    };
+
+    private static string LastWord(ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionRow last) => last.TierProgress switch
+    {
+        ServiceTierProgress.Running => "Running",
+        ServiceTierProgress.Waiting => "Waiting",
+        _ => last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed ? "Didn't work" : "Done",
+    };
 
     /// <summary>Today on the customer's calendar, which is when a licence runs out.</summary>
     private DateOnly Today => OnPremisesLicenceService.TodayFor(Clock.GetUtcNow(), Row.TimeZone);

@@ -125,6 +125,17 @@ public class OeEnvironmentUpgradeAction
     /// </summary>
     public List<Guid>? PrerequisiteAppIds { get; set; }
 
+    /// <summary>
+    /// The gateway command that carries a service tier action on an on-premises environment
+    /// (#1371: <see cref="UpgradeActionKind.RestartServiceTier"/> and its siblings). Such a
+    /// row is written <c>Sent</c> when the command is queued, and how it went is read from
+    /// the command, never stored here, as a licence upload's import is. No foreign key, as
+    /// on <c>oe_project_licenses</c>: commands outlive nothing they are not asked to, and a
+    /// gateway removed outright leaves the history saying the result is not known. Null for
+    /// every other kind.
+    /// </summary>
+    public long? GatewayCommandId { get; set; }
+
     /// <summary>Where the action has got to. See <see cref="UpgradeActionStatus"/>.</summary>
     public UpgradeActionStatus Status { get; set; } = UpgradeActionStatus.Pending;
 
@@ -246,6 +257,22 @@ public enum UpgradeActionKind
     /// rollout; nothing about the date is sent. Issue #960.
     /// </summary>
     SelectVersion,
+
+    /// <summary>
+    /// An on-premises service tier was restarted from its environment page (#1371), through
+    /// the gateway (<see cref="OeEnvironmentUpgradeAction.GatewayCommandId"/>). Written
+    /// <c>Sent</c> when the command is queued; how it went is read from the command.
+    /// </summary>
+    RestartServiceTier,
+
+    /// <summary>Every service tier of the on-premises database's restart group was restarted (#1371). As <see cref="RestartServiceTier"/>.</summary>
+    RestartServiceTiers,
+
+    /// <summary>An on-premises service tier was stopped, on purpose, from its environment page (#1371). As <see cref="RestartServiceTier"/>.</summary>
+    StopServiceTier,
+
+    /// <summary>An on-premises service tier was started from its environment page (#1371). As <see cref="RestartServiceTier"/>.</summary>
+    StartServiceTier,
 }
 
 /// <summary>

@@ -67,7 +67,7 @@ else
                         @* Beside the sentence it acts on, not pinned to the right: this
                            feed is embedded in a panel narrower than the page, and a
                            right-aligned button there ends up somewhere nobody looks. *@
-                        @if (entry.IsPending && CanCancel(entry) && !IsMidInstall(entry))
+                        @if (entry.IsPending && !entry.IsServiceTierAction && CanCancel(entry) && !IsMidInstall(entry))
                         {
                             <button type="button" class="btn btn--sm eaf__cancel"
                                     disabled="@(_cancelling == entry.Id)"
@@ -182,6 +182,23 @@ else
                 _ => $"Asked to install {file} now",
             };
         }
+        // An on-premises service tier action (#1371) names its tier, read from its command;
+        // while the gateway has it, it says it was asked for, since it has not happened yet.
+        if (entry.IsServiceTierAction)
+        {
+            var tier = entry.TierName ?? "the service tier";
+            var asked = entry.TierProgress is not null;
+            var failed = entry.Status == UpgradeActionStatus.Failed;
+            return entry.Kind switch
+            {
+                UpgradeActionKind.RestartServiceTiers => asked ? $"Asked to restart every service tier on {tier}'s database"
+                    : failed ? $"Tried to restart every service tier on {tier}'s database"
+                    : $"Restarted every service tier on {tier}'s database",
+                UpgradeActionKind.StopServiceTier => asked ? $"Asked to stop {tier}" : failed ? $"Tried to stop {tier}" : $"Stopped {tier}",
+                UpgradeActionKind.StartServiceTier => asked ? $"Asked to start {tier}" : failed ? $"Tried to start {tier}" : $"Started {tier}",
+                _ => asked ? $"Asked to restart {tier}" : failed ? $"Tried to restart {tier}" : $"Restarted {tier}",
+            };
+        }
         if (entry.Kind == UpgradeActionKind.RecoverEnvironment) return "Recovered the environment";
         if (entry.Kind == UpgradeActionKind.CopyEnvironment) return "Copied the environment";
         if (entry.Kind == UpgradeActionKind.CancelSession) return "Ended a signed-in session";
@@ -221,6 +238,11 @@ else
             // A booked slot leads with when it runs: that is what somebody deciding whether
             // to cancel it needs. Past its slot and still waiting is a different fact and
             // says so plainly rather than promising a time that has gone.
+            // A service tier action the gateway has not finished: nothing to cancel, and no slot.
+            UpgradeActionStatus.Pending when entry.TierProgress == ALDevToolbox.Services.Gateways.ServiceTierProgress.Waiting
+                => @<text>Waiting for the gateway to pick it up</text>,
+            UpgradeActionStatus.Pending when entry.TierProgress == ALDevToolbox.Services.Gateways.ServiceTierProgress.Running
+                => @<text>Running now</text>,
             UpgradeActionStatus.Pending when entry.Kind == UpgradeActionKind.UpdateApp && entry.SentAt is not null
                 => @<text>Updating now</text>,
             UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.SentAt is not null
