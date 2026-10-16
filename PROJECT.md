@@ -229,7 +229,8 @@ The MCP server (`Services/Mcp/Tools/*Tools.cs`) is a parallel front-end on the s
   added there by accident is a red build. Its twelve tools, one line each:
   `get_solution` (hosting, version, address, connection, environments in a line),
   `list_environments` (the fleet with solution/type/status/version/storage/next-update
-  filters), `get_environment` (one environment with its installed apps),
+  filters; linked on-premises service tiers too, marked `onPremises` with their
+  gateway's state), `get_environment` (one environment with its installed apps),
   `list_environment_history` (the Workbench history), `list_upgrades` (the Upgrades fleet,
   behind the environment-updates grant), `list_planned_upgrades` and `get_upgrade` (the
   planned upgrades of #984 and one upgrade's lines with their derived states, behind the

@@ -833,8 +833,10 @@
             // into the environment, so there is nothing further to choose inside one.
             // Keep an environment that's the current edit's target even if it's since gone
             // missing, so editing doesn't silently drop the existing selection.
+            // An on-premises service tier cannot be deployed to yet (#1367), so it is not
+            // offered as a target; one a pipeline already points at is kept, as above.
             _environments = envs
-                .Where(env => env.MissingSince is null || env.Id == _environmentId)
+                .Where(env => (env.MissingSince is null && !env.IsOnPremises) || env.Id == _environmentId)
                 .ToList();
             // With nothing built here yet, GitHub releases are the only source there is:
             // show that picker rather than an empty one for build pipelines.

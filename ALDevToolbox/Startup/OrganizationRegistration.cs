@@ -27,6 +27,7 @@ public static class OrganizationRegistration
         services.AddSingleton<ALDevToolbox.Services.Gateways.GatewayCommandSignal>();
         // The on-premises mirror the gateways report into (#1365).
         services.AddScoped<ALDevToolbox.Services.Gateways.GatewayInventoryService>();
+        services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService>();
         // Build-time stamps only: the gateway download and the version gateways are compared with (#1363).
         services.AddSingleton(ALDevToolbox.Services.Gateways.GatewayBuild.FromAssembly(typeof(ALDevToolbox.Services.Gateways.GatewayBuild).Assembly));
         return services;

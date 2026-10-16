@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Services.Gateways;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 
@@ -65,8 +66,14 @@ public sealed class UpgradeFleetService
     /// is looking for when it gets there.</para>
     /// </summary>
     /// <param name="includeSoftDeleted">Keep environments the customer has deleted but can still restore.</param>
+    /// <param name="includeOnPremises">
+    /// Keep linked on-premises service tiers. The Environments list and the MCP
+    /// environment reads want them; the Upgrades page does not, because Microsoft's
+    /// platform updates are all it is about. See <c>.design/on-prem-gateway.md</c>,
+    /// "Readers of OeProjectEnvironments".
+    /// </param>
     public async Task<List<UpgradeFleetRow>> ListFleetAsync(
-        bool includeSoftDeleted = false, CancellationToken ct = default)
+        bool includeSoftDeleted = false, CancellationToken ct = default, bool includeOnPremises = false)
     {
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
@@ -79,6 +86,11 @@ public sealed class UpgradeFleetService
         if (!includeSoftDeleted)
         {
             query = query.Where(EnvironmentQueries.NotSoftDeleted);
+        }
+
+        if (!includeOnPremises)
+        {
+            query = query.Where(EnvironmentQueries.Online);
         }
 
         var rows = await query
@@ -182,9 +194,9 @@ public sealed class UpgradeFleetService
     /// the two halves cannot disagree about which environments exist.
     /// </summary>
     public async Task<List<EnvironmentDetailRow>> ListFleetDetailsAsync(
-        bool includeSoftDeleted = false, CancellationToken ct = default)
+        bool includeSoftDeleted = false, CancellationToken ct = default, bool includeOnPremises = false)
     {
-        var fleet = await ListFleetAsync(includeSoftDeleted, ct).ConfigureAwait(false);
+        var fleet = await ListFleetAsync(includeSoftDeleted, ct, includeOnPremises).ConfigureAwait(false);
         if (fleet.Count == 0) return [];
 
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
@@ -294,7 +306,9 @@ public sealed class UpgradeFleetService
             e.BcNextUpdateFetchedAt,
             _db.OeProjects.Where(actionable).Any(p => p.Id == e.ProjectId),
             e.FetchedAt,
-            e.AadTenantId ?? e.Project!.BcTenantId,
+            // An on-premises tier is not in Microsoft's cloud, whatever tenant the
+            // customer has there: no link to businesscentral.dynamics.com for it.
+            e.Kind == OeEnvironmentKind.OnPremises ? null : e.AadTenantId ?? e.Project!.BcTenantId,
             e.BcDatabaseKb,
             e.Project!.BcStorageQuotaKb,
             // The allowance is the tenant's, so what counts against it is every
@@ -307,7 +321,36 @@ public sealed class UpgradeFleetService
             _db.OeProjects.Where(manageable).Any(p => p.Id == e.ProjectId),
             e.BcOfferedVersions,
             e.Project!.ShortName,
-            e.Project!.Slug);
+            e.Project!.Slug,
+            e.Kind == OeEnvironmentKind.OnPremises,
+            e.Kind == OeEnvironmentKind.OnPremises && e.GatewayInstance != null
+                ? new OnPremisesTierFacts(
+                    e.GatewayInstance.GatewayId,
+                    e.GatewayInstance.Gateway!.Name,
+                    e.GatewayInstance.Gateway.State,
+                    e.GatewayInstance.Gateway.LastSeenAt,
+                    e.GatewayInstance.Gateway.RevokedAt,
+                    e.GatewayInstance.Id,
+                    e.GatewayInstance.Machine,
+                    e.GatewayInstance.Name,
+                    e.TenantId ?? OnPremisesEnvironmentService.DefaultTenant,
+                    e.GatewayInstance.Environment,
+                    e.GatewayInstance.Multitenant == true || e.GatewayInstance.Tenants.Count(t => t.MissingSince == null) > 1,
+                    e.GatewayInstance.DatabaseServer,
+                    e.GatewayInstance.DatabaseInstance,
+                    e.GatewayInstance.DatabaseName,
+                    e.GatewayInstance.ServiceState,
+                    e.GatewayInstance.SessionCount,
+                    e.GatewayInstance.ReportedAt,
+                    e.GatewayInstance.ReadAt,
+                    // The tier, or the tenant on it, that the gateway stopped reporting.
+                    e.GatewayInstance.MissingSince
+                        ?? e.GatewayInstance.Tenants.Where(t => t.TenantId == e.TenantId).Select(t => t.MissingSince).FirstOrDefault(),
+                    e.GatewayInstance.ReadError,
+                    e.GatewayInstance.Licence == null ? null : e.GatewayInstance.Licence.ExpiresOn,
+                    e.GatewayInstance.Licence == null ? null : e.GatewayInstance.Licence.Licensee,
+                    e.WebClientLoginUrl)
+                : null);
 
     // ── Change the next version (issue #960) ────────────────────────────
 
@@ -614,7 +657,15 @@ public sealed record UpgradeFleetRow(
     /// </summary>
     string? ProjectShortName = null,
     /// <summary>The solution's key in its web address; see <see cref="SolutionSlug"/>.</summary>
-    string? ProjectSlug = null)
+    string? ProjectSlug = null,
+    /// <summary>
+    /// A linked on-premises service tier rather than an online environment. Only the
+    /// fields the gateway reports are filled; Microsoft's (the next update, storage, the
+    /// update window) stay null. See <c>.design/on-prem-gateway.md</c>.
+    /// </summary>
+    bool IsOnPremises = false,
+    /// <summary>What the on-premises mirror knows about the tier behind the row; null for an online one.</summary>
+    OnPremisesTierFacts? OnPremises = null)
 {
     /// <summary>
     /// This environment's own page, on <paramref name="tab"/> when given - the readable
@@ -646,9 +697,11 @@ public sealed record UpgradeFleetRow(
     /// The environment in Business Central's own web client, or null when the tenant is
     /// not known. The environment name is a path segment, so it is escaped.
     /// </summary>
-    public string? BusinessCentralUrl => TenantId is { } tenant
-        ? $"https://businesscentral.dynamics.com/{tenant:D}/{Uri.EscapeDataString(EnvironmentName)}"
-        : null;
+    public string? BusinessCentralUrl => IsOnPremises
+        ? OnPremises?.WebClientUrl
+        : TenantId is { } tenant
+            ? $"https://businesscentral.dynamics.com/{tenant:D}/{Uri.EscapeDataString(EnvironmentName)}"
+            : null;
 
     /// <summary>
     /// The customer tenant's Business Central admin centre, or null when the tenant is not

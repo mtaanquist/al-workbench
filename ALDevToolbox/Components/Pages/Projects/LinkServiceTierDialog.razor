@@ -1,0 +1,161 @@
+@*
+    Pick one of the customer's Business Central servers, as an on-premises gateway
+    reports it, and give it a name in this Solution. Only collects the answer; the
+    Environments tab sends it (OnPremisesEnvironmentService.LinkAsync) and reports the
+    outcome. Named user: an org Admin who set up the gateway with the customer's IT and
+    now wants a customer's Solution to show its servers. They know the server and instance
+    names from that conversation, so each choice is worded the way customer IT names a
+    tier: SERVER / INSTANCE, then the tenant on a server that has several. See
+    .design/on-prem-gateway.md, "An on-premises environment is an OeProjectEnvironment row".
+*@
+@using ALDevToolbox.Services.Gateways
+
+<ConfirmDialog @ref="_confirm"
+               Wide="true"
+               Title="Link a service tier"
+               Message="@Intro"
+               ConfirmLabel="@ConfirmLabel"
+               ConfirmButtonClass="btn--primary"
+               ConfirmIcon="link"
+               HeadIcon="server"
+               ConfirmDisabled="@(Problem is not null)">
+    @if (_tiers.Count == 0)
+    {
+        <p class="note note--info link-tier__none">
+            <span class="note__icon"><Icon Name="info" Width="17" Height="17" /></span>
+            <span class="note__body">
+                No gateway reports a service tier yet. Set one up with the customer's IT under
+                <a href="/admin/administration/gateways">Administration → Gateways</a>; its servers appear
+                here once it has read them.
+            </span>
+        </p>
+    }
+    else
+    {
+        <fieldset class="link-tier__list">
+            <legend class="link-tier__legend">Which server?</legend>
+            @foreach (var gateway in _tiers.GroupBy(t => (t.GatewayId, t.GatewayName, t.GatewayStatus)))
+            {
+                <p class="link-tier__gateway">
+                    Gateway @gateway.Key.GatewayName
+                    @if (gateway.Key.GatewayStatus != GatewayStatus.Online)
+                    {
+                        <span class="link-tier__muted"> - not online right now</span>
+                    }
+                </p>
+                @foreach (var tier in gateway)
+                {
+                    var key = Key(tier);
+                    <label class="link-tier__opt @(tier.IsFree ? "" : "is-taken")">
+                        <input type="radio" name="link-tier" disabled="@(!tier.IsFree)"
+                               checked="@(_picked == key)" @onchange="() => Pick(tier)" />
+                        <span class="link-tier__text">
+                            <span class="link-tier__name">
+                                @tier.Machine / @tier.InstanceName
+                                @if (tier.Multitenant)
+                                {
+                                    <text> - tenant @tier.TenantId</text>
+                                }
+                            </span>
+                            <span class="link-tier__muted">
+                                @tier.EnvironmentLabel@(tier.Version is { Length: > 0 } v ? $" - BC version {v}" : "")
+                                @if (!tier.IsFree)
+                                {
+                                    <text> - @(tier.LinkedToThisSolution ? "already linked here" : $"linked to {tier.LinkedToProjectName}")</text>
+                                }
+                            </span>
+                        </span>
+                    </label>
+                }
+            }
+        </fieldset>
+
+        <div class="field link-tier__field">
+            <label class="field__label" for="link-tier-name">Name in this solution</label>
+            <input id="link-tier-name" class="input" type="text" required
+                   maxlength="@OnPremisesEnvironmentService.MaxNameLength"
+                   placeholder="e.g. Production" autocomplete="off" spellcheck="false"
+                   aria-invalid="@(NameProblem is not null ? "true" : null)"
+                   aria-describedby="link-tier-name-help"
+                   value="@_name" @oninput="e => _name = e.Value?.ToString() ?? string.Empty" />
+            @if (NameProblem is { } problem && _picked is not null)
+            {
+                <FieldError Id="link-tier-name-help" Message="@problem" />
+            }
+            else
+            {
+                <small id="link-tier-name-help" class="field__hint">What people call it when they talk about this customer, e.g. Production or Test.</small>
+            }
+        </div>
+        <p class="link-tier__wait">
+            Production, Test or Development is set by the customer's IT on the gateway. The name here
+            is only a label.
+        </p>
+    }
+</ConfirmDialog>
+
+@code {
+    private ConfirmDialog? _confirm;
+    private List<LinkableTier> _tiers = [];
+    private HashSet<string> _takenNames = new(StringComparer.OrdinalIgnoreCase);
+    private string? _picked;
+    private string _name = string.Empty;
+    private string _solution = string.Empty;
+
+    /// <summary>What the Admin chose.</summary>
+    public sealed record Choice(int InstanceId, string TenantId, string Name);
+
+    private string Intro =>
+        $"Choose one of {_solution}'s Business Central servers. Everyone who can see the solution then sees "
+        + "its version and installed apps, read by the gateway every 15 minutes.";
+
+    private string ConfirmLabel => _name.Trim() is { Length: > 0 } name && Problem is null ? $"Link as {name}" : "Link";
+
+    private string? NameProblem
+    {
+        get
+        {
+            var name = _name.Trim();
+            if (name.Length == 0) return "Give it a name, e.g. Production.";
+            if (name.Length > OnPremisesEnvironmentService.MaxNameLength) return $"Keep the name under {OnPremisesEnvironmentService.MaxNameLength} characters.";
+            if (_takenNames.Contains(name)) return $"This solution already has an environment called {name}.";
+            return null;
+        }
+    }
+
+    private string? Problem => _picked is null ? "Choose a server." : NameProblem;
+
+    private static string Key(LinkableTier tier) => $"{tier.InstanceId}|{tier.TenantId}";
+
+    private void Pick(LinkableTier tier)
+    {
+        var before = _tiers.FirstOrDefault(t => Key(t) == _picked);
+        _picked = Key(tier);
+        // Suggest the customer's own word until the Admin has typed one of their own.
+        var suggested = before is null ? string.Empty : Suggest(before);
+        if (_name.Trim().Length == 0 || _name.Trim() == suggested) _name = Suggest(tier);
+    }
+
+    private static string Suggest(LinkableTier tier) =>
+        tier.Multitenant && !string.Equals(tier.TenantId, OnPremisesEnvironmentService.DefaultTenant, StringComparison.OrdinalIgnoreCase)
+            ? $"{tier.EnvironmentLabel} {tier.TenantId}"
+            : tier.EnvironmentLabel;
+
+    /// <summary>Asks which tier and what to call it. Null when the Admin backed out.</summary>
+    /// <param name="existingNames">The names the solution's environments already have; a name is unique per solution.</param>
+    public async Task<Choice?> OpenAsync(string solutionName, List<LinkableTier> tiers, IEnumerable<string> existingNames)
+    {
+        if (_confirm is null) return null;
+        _solution = solutionName;
+        _tiers = tiers;
+        _takenNames = existingNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _picked = null;
+        _name = string.Empty;
+        if (tiers.Count(t => t.IsFree) == 1) Pick(tiers.First(t => t.IsFree));
+        StateHasChanged();
+
+        var confirmed = await _confirm.OpenAsync();
+        var tier = _tiers.FirstOrDefault(t => Key(t) == _picked);
+        return confirmed && tier is not null && Problem is null ? new Choice(tier.InstanceId, tier.TenantId, _name.Trim()) : null;
+    }
+}

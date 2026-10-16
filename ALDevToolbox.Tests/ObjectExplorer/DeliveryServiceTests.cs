@@ -114,6 +114,23 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReleaseBuildNowAsync_refuses_an_on_premises_service_tier_until_the_gateway_can_deploy()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises)
+                .SetProperty(e => e.TenantId, "default"));
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironment"];
+        error.Should().Contain("on-premises service tier").And.Contain("nothing was sent");
+        _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued for a tier the gateway cannot deploy to yet");
+    }
+
+    [Fact]
     public async Task RunDeliveryAsync_fails_the_run_when_the_environment_started_upgrading_after_it_was_scheduled()
     {
         int deliveryId;

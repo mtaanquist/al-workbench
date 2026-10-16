@@ -60,7 +60,9 @@ public sealed class ProjectCustomerInfoService
     /// What Business Central last reported about each solution's production
     /// environment, for the solutions where that overrides what was typed: online, with a
     /// connection configured, and a current Production environment that has told us a
-    /// version or an address. A solution missing from the answer keeps its typed values.
+    /// version or an address; or on-premises, with a linked Production service tier that
+    /// has (see <c>.design/on-prem-gateway.md</c>). A solution missing from the answer
+    /// keeps its typed values, and they come back when the last tier is unlinked.
     /// <para>
     /// Only Production counts - a sandbox's version is not what support means by "the
     /// customer's version" - and among several the first by name. One read whatever the
@@ -79,14 +81,23 @@ public sealed class ProjectCustomerInfoService
             .Where(p => p.HostingType == null || p.HostingType == ProjectHostingType.MicrosoftCloud);
         if (projectIds is not null) connected = connected.Where(p => projectIds.Contains(p.Id));
         var connectedIds = connected.Select(p => p.Id);
+        // On-premises: no connection to test, the link is the whole of it. The hosting
+        // check keeps a tier left linked to a Solution switched online from counting.
+        var onPremises = db.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null && p.HostingType != null && p.HostingType != ProjectHostingType.MicrosoftCloud);
+        if (projectIds is not null) onPremises = onPremises.Where(p => projectIds.Contains(p.Id));
+        var onPremisesIds = onPremises.Select(p => p.Id);
 
         var rows = await db.OeProjectEnvironments.AsNoTracking()
             .Where(EnvironmentQueries.NotSoftDeleted)
-            .Where(e => connectedIds.Contains(e.ProjectId)
+            .Where(e => ((e.Kind == OeEnvironmentKind.Online && connectedIds.Contains(e.ProjectId))
+                    || (e.Kind == OeEnvironmentKind.OnPremises && onPremisesIds.Contains(e.ProjectId)))
                 && e.MissingSince == null
                 && e.Type.Trim().ToUpper() == "PRODUCTION"
                 && (e.Version != null || e.WebClientLoginUrl != null))
-            .Select(e => new { e.ProjectId, e.Name, e.Version, e.WebClientLoginUrl, e.FetchedAt })
+            // A tier, or tenant, the gateway no longer reports is not the customer's current version.
+            .Where(EnvironmentQueries.StillReported)
+            .Select(e => new { e.ProjectId, e.Name, e.Version, e.WebClientLoginUrl, e.FetchedAt, OnPremises = e.Kind == OeEnvironmentKind.OnPremises })
             .ToListAsync(ct);
 
         return rows
@@ -94,7 +105,7 @@ public sealed class ProjectCustomerInfoService
             .ToDictionary(
                 g => g.Key,
                 g => g.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
-                    .Select(r => new ProductionEnvironmentFacts(r.Name, Blank(r.Version), Blank(r.WebClientLoginUrl), r.FetchedAt))
+                    .Select(r => new ProductionEnvironmentFacts(r.Name, Blank(r.Version), Blank(r.WebClientLoginUrl), r.FetchedAt, r.OnPremises))
                     .First());
 
         static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
@@ -104,7 +115,9 @@ public sealed class ProjectCustomerInfoService
     /// Saves the basics. Every field is optional. Refuses an on-premises hosting type
     /// while Business Central online reports environments for the solution: the
     /// surfaces that show them disappear for an on-premises solution, and live ones
-    /// must not be hidden.
+    /// must not be hidden. The mirror rule: refuses Microsoft's cloud while an
+    /// on-premises service tier is linked, which only an Admin can undo. See
+    /// <c>.design/on-prem-gateway.md</c>, "What on-premises turns off, revised".
     /// <para>
     /// The tenant id is the customer's Microsoft tenant, which an on-premises customer
     /// has too. For an online solution the Business Central tab owns it (changing it
@@ -146,9 +159,22 @@ public sealed class ProjectCustomerInfoService
 
         var onPremises = input.HostingType is not (null or ProjectHostingType.MicrosoftCloud);
         Guid? tenantId = null;
+        if (!onPremises)
+        {
+            var linked = await _db.OeProjectEnvironments.CountAsync(
+                e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null, ct);
+            if (linked > 0)
+            {
+                errors["HostingType"] = (linked == 1
+                        ? "An on-premises service tier is linked to this solution"
+                        : $"{linked} on-premises service tiers are linked to this solution")
+                    + ", so it can't be in Microsoft's cloud. An administrator can unlink them on the Environments tab.";
+            }
+        }
         if (onPremises)
         {
-            var environments = await _db.OeProjectEnvironments.CountAsync(e => e.ProjectId == project.Id, ct);
+            var environments = await _db.OeProjectEnvironments.CountAsync(
+                e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.Online, ct);
             if (environments > 0)
             {
                 errors["HostingType"] = environments == 1
@@ -167,8 +193,7 @@ public sealed class ProjectCustomerInfoService
         // hidden, not replaced: a form opened before the connection was made must not
         // overwrite them, and they come back if the connection goes. Nor can what it
         // carried for them fail the save of fields the person could see.
-        var fromBusinessCentral = !onPremises
-            && (await ReadProductionFactsAsync(_db, [project.Id], ct)).ContainsKey(project.Id);
+        var fromBusinessCentral = (await ReadProductionFactsAsync(_db, [project.Id], ct)).ContainsKey(project.Id);
         if (fromBusinessCentral)
         {
             errors.Remove("BcVersion");
@@ -566,7 +591,8 @@ public sealed record CustomerBasics(
 }
 
 /// <summary>What Business Central last reported for a solution's production environment. See <see cref="ProjectCustomerInfoService.ReadProductionFactsAsync"/>.</summary>
-public sealed record ProductionEnvironmentFacts(string EnvironmentName, string? Version, string? WebClientLoginUrl, DateTime FetchedAt);
+/// <param name="FromServiceTier">True when it is a linked on-premises service tier rather than a Business Central online environment.</param>
+public sealed record ProductionEnvironmentFacts(string EnvironmentName, string? Version, string? WebClientLoginUrl, DateTime FetchedAt, bool FromServiceTier = false);
 
 public sealed record CustomerBasicsInput(
     ProjectHostingType? HostingType,

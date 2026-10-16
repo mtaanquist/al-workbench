@@ -15,6 +15,12 @@ internal sealed class ProjectEnvironmentConfiguration : IEntityTypeConfiguration
         entity.Property(e => e.ProjectId).HasColumnName("project_id").IsRequired();
         entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
         entity.Property(e => e.Type).HasColumnName("type").HasMaxLength(50).IsRequired();
+        // Text, like the other enums; every existing row is online, so the column's
+        // default does the backfill.
+        entity.Property(e => e.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(20)
+            .IsRequired().HasDefaultValue(OeEnvironmentKind.Online).HasSentinel((OeEnvironmentKind)(-1));
+        entity.Property(e => e.GatewayInstanceId).HasColumnName("gateway_instance_id");
+        entity.Property(e => e.TenantId).HasColumnName("tenant_id").HasMaxLength(255);
         entity.Property(e => e.FetchedAt).HasColumnName("fetched_at").IsRequired();
         entity.Property(e => e.MissingSince).HasColumnName("missing_since");
         entity.Property(e => e.UpdateWindowStart).HasColumnName("update_window_start");
@@ -71,10 +77,40 @@ internal sealed class ProjectEnvironmentConfiguration : IEntityTypeConfiguration
             .HasForeignKey(e => e.ProjectId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // A linked service tier. SetNull rather than Restrict: the mirror never deletes a
+        // tier, and if one ever goes the environment reads as unlinked instead of
+        // blocking the delete. The partial unique index below cannot serve that SET NULL
+        // lookup (it leaves unlinked rows out), so the foreign key has a plain index of
+        // its own - see OeFactTableIndexTests.
+        entity.HasOne(e => e.GatewayInstance)
+            .WithMany()
+            .HasForeignKey(e => e.GatewayInstanceId)
+            .OnDelete(DeleteBehavior.SetNull);
+        entity.HasIndex(e => e.GatewayInstanceId)
+            .HasDatabaseName("ix_oe_project_environments_gateway_instance_id");
+
+        // One service tier and tenant belongs to one Solution at a time. Unlinked rows
+        // (missing_since set) are left out, so a tier unlinked from one Solution can be
+        // linked to another while the old row stays for its pipelines' history. A
+        // single-tenant server is stored as tenant "default", never null, so the index
+        // cannot be dodged. See .design/on-prem-gateway.md.
+        entity.HasIndex(e => new { e.GatewayInstanceId, e.TenantId })
+            .IsUnique()
+            .HasFilter("kind = 'OnPremises' AND missing_since IS NULL")
+            .HasDatabaseName("ix_oe_project_environments_gateway_tenant");
+
         // The refresh upsert matches on (project_id, name); a unique index keeps
-        // it one row per environment per project and backs the lookup.
+        // it one row per environment per project and backs the lookup. An unlinked
+        // on-premises row keeps its row (pipelines point at it) but not its name: a
+        // customer who moves online, or a tier relinked after a gateway is rebuilt, takes
+        // the name again. Online rows hold their name whether present or not, as before.
         entity.HasIndex(e => new { e.ProjectId, e.Name })
             .IsUnique()
+            .HasFilter("missing_since IS NULL OR kind = 'Online'")
             .HasDatabaseName("ix_oe_project_environments_project_name");
+        // Now that the index above is filtered it no longer serves the project foreign
+        // key's cascade, which has to find every row of a deleted project.
+        entity.HasIndex(e => e.ProjectId)
+            .HasDatabaseName("ix_oe_project_environments_project_id");
     }
 }

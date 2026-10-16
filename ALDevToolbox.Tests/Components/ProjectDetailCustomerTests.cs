@@ -378,6 +378,50 @@ public sealed class ProjectDetailCustomerTests : IDisposable
         cut.Markup.Should().Contain("26.1.30000.0")
             .And.Contain("https://businesscentral.dynamics.com/tenant/Production")
             .And.NotContain("BC 25.3", "the typed version is hidden while Business Central's wins");
+        // Read, not typed: each says where it came from and how old it is.
+        // The relative time renders once the display time zone has loaded.
+        cut.WaitForAssertion(() => cut.FindAll(".cust__from").Select(e => e.TextContent.Trim())
+            .Should().Equal(Enumerable.Repeat("From the Production environment, read 3 hours ago.", 2)));
+    }
+
+    [Fact]
+    public async Task A_linked_production_service_tier_says_it_is_one_under_the_version_and_address()
+    {
+        // #1366: an on-premises customer whose Production server is linked through the
+        // gateway. The caption names the service tier, and there is nothing to refresh:
+        // the gateway reads it on its own.
+        var id = await SeedAsync(p => p.HostingType = ProjectHostingType.OurCloud);
+        await using (var ctx = _db.NewContext())
+        {
+            var gateway = new Gateway
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS hosting", MachineName = "CRONUS-GW01",
+                State = GatewayState.Approved, RegisteredAt = DateTime.UtcNow, KeyRegisteredAt = DateTime.UtcNow,
+                LastSeenAt = DateTime.UtcNow,
+            };
+            var instance = new GatewayInstance
+            {
+                OrganizationId = TestDb.DefaultOrgId, Gateway = gateway, Machine = "CRONUS-BC01", Name = "BC250",
+                FirstReportedAt = DateTime.UtcNow, ReportedAt = DateTime.UtcNow, ReadAt = DateTime.UtcNow,
+            };
+            ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, Name = "Production", Type = "Production",
+                Kind = OeEnvironmentKind.OnPremises, GatewayInstance = instance, TenantId = "default",
+                Version = "25.4.29661.29927", WebClientLoginUrl = "https://bc.cronus.example/BC250",
+                FetchedAt = DateTime.UtcNow.AddMinutes(-33),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() => cut.FindAll(".cust__from").Select(e => e.TextContent.Trim())
+            .Should().Equal(Enumerable.Repeat("From the Production service tier, read 33 minutes ago.", 2)));
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Edit customer details").Click();
+        cut.WaitForAssertion(() => cut.FindAll(".field__hint").Select(h => h.TextContent.Trim())
+            .Count(t => t == "From the Production service tier, read 33 minutes ago. The gateway reads it every 15 minutes.").Should().Be(2));
+        cut.FindAll(".field__hint a").Should().NotContain(a => a.TextContent.Contains("Refresh"), "a service tier is not refreshed from the Business Central tab");
     }
 
     [Fact]

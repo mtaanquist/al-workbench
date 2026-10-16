@@ -7,6 +7,7 @@
 @inject ILogger<EnvironmentsList> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.ObjectExplorer.Bc
@@ -177,9 +178,9 @@
             <div class="card">
                 <EmptyState Icon="server" Title="No environments to show yet">
                     <Text>
-                        Environments appear here once a solution has a Business Central connection.
-                        Open a solution, add its Entra tenant and app registration, and its
-                        environments are read in automatically.
+                        Environments appear here once a solution has a Business Central connection,
+                        or an administrator links its on-premises service tiers. Open a solution
+                        to do either.
                     </Text>
                     <Action>
                         <a class="btn btn--primary" href="/solutions">Go to solutions</a>
@@ -284,7 +285,7 @@
         {
             @BulkBar(shownIds)
         }
-        <table class="data-table data-table--edge">
+        <table class="data-table data-table--edge env-fleet">
             <thead>
                 <tr>
                     <th class="data-table__col-check">
@@ -319,7 +320,7 @@
                 @foreach (var row in shown)
                 {
                     var picked = _selection.Contains(row.EnvironmentId);
-                    var rowState = RowState(row) + (picked ? " is-selected" : "");
+                    var rowState = RowState(row, Now) + (picked ? " is-selected" : "");
                     <tr class="@rowState">
                         @* A deleted environment has nothing to set: Business Central is only
                            keeping it so it can be brought back. *@
@@ -340,8 +341,8 @@
                                touch - so for every state but Running the word is also
                                written out under Next update, where the design puts it. *@
                             <span class="data-table__state data-table__state--icon" role="img"
-                                  aria-label="@StatusWord(row)" title="@StatusWord(row)">
-                                <Icon Name="@StatusIcon(row)" Width="15" Height="15" />
+                                  aria-label="@StatusWord(row, Now)" title="@StatusWord(row, Now)">
+                                <Icon Name="@StatusIcon(row, Now)" Width="15" Height="15" />
                             </span>
                         </td>
                         @* The environment leads: this is a list of environments, so the
@@ -349,24 +350,31 @@
                         <td>
                             <span class="cell-stack">
                                 <a class="cell-stack__main" href="@row.Href()">@row.EnvironmentName</a>
-                                <span class="cell-stack__sub">@row.EnvironmentType</span>
+                                <span class="cell-stack__sub">@TypeLabel(row)</span>
                             </span>
                         </td>
-                        <td>
+                        <td data-label="Solution">
                             <a href="@row.SolutionHref">@row.ProjectName</a>
                             @if (!string.IsNullOrWhiteSpace(row.ProjectShortName))
                             {
                                 <span class="sol-list__short" title="Short name">@row.ProjectShortName</span>
                             }
                         </td>
-                        <td class="u-num">@(row.Version ?? "—")</td>
-                        <td>
+                        <td class="u-num env-fleet__version" data-label="Now on">@(row.Version ?? "—")</td>
+                        <td data-label="@(_tab == Tab.Deleted ? "Gone for good" : "Next update")">
                             @* For a deleted environment the deadline takes the bold line
                                the version would have had: it is the fact the row is here
                                for, and a dash in bold over it in grey reads backwards. *@
                             <span class="cell-stack">
-                                <span class="cell-stack__main" style="font-weight: var(--fw-semibold)">
-                                    @if (!row.IsSoftDeleted)
+                                <span class="@(row.IsOnPremises ? "cell-stack__main env-fleet__wrap" : "cell-stack__main")" style="font-weight: var(--fw-semibold)">
+                                    @if (row.IsOnPremises)
+                                    {
+                                        @* Microsoft's platform updates do not reach an on-premises
+                                           tier, so nothing is ever scheduled; the line under it
+                                           says whether its gateway is still telling us anything. *@
+                                        <text>Not scheduled (on-premises)</text>
+                                    }
+                                    else if (!row.IsSoftDeleted)
                                     {
                                         @NextVersion(row)
                                     }
@@ -380,7 +388,11 @@
                                     }
                                 </span>
                                 <span class="cell-stack__sub">
-                                    @if (row.IsSoftDeleted && row.HardDeletePendingOn is null && row.SoftDeletedOn is { } deleted)
+                                    @if (row.IsOnPremises)
+                                    {
+                                        <OnPremisesTierState Row="row" />
+                                    }
+                                    else if (row.IsSoftDeleted && row.HardDeletePendingOn is null && row.SoftDeletedOn is { } deleted)
                                     {
                                         <text>Deleted <Timestamp Value="@deleted" Format="dd MMM yyyy" /></text>
                                     }
@@ -399,7 +411,7 @@
                                 </span>
                             </span>
                         </td>
-                        <td>
+                        <td data-label="Storage">
                             @* The size is this environment's; the bar is the customer's whole
                                tenant against its allowance, because that is what runs out. It
                                repeats on each of a customer's rows so it is never a scroll away. *@
@@ -422,7 +434,7 @@
                                 <span class="u-muted">—</span>
                             }
                         </td>
-                        <td class="u-muted">
+                        <td class="u-muted" data-label="Last checked">
                             @* fetched_at is NOT NULL on the row, so this always has a real
                                answer; the dash is only for a projection that somehow didn't
                                carry it. *@
@@ -457,7 +469,9 @@
                                     <a class="menu__item" role="menuitem" href="@bcUrl"
                                        target="_blank" rel="noopener">Open in Business Central</a>
                                 }
-                                @if (!row.IsSoftDeleted)
+                                @* Upload and Copy go through Microsoft's admin centre, which an
+                                   on-premises service tier is not in. *@
+                                @if (!row.IsSoftDeleted && !row.IsOnPremises)
                                 {
                                     <button type="button" class="menu__item" role="menuitem"
                                             disabled="@_busy" @onclick="() => UploadAppAsync(row)">Upload apps...</button>
@@ -466,7 +480,7 @@
                                    solution. The others are one click and a refusal; this one
                                    asks for a name and two decisions first, and taking all that
                                    back with "you may not" is a worse answer than never asking. *@
-                                @if (row.CanManage && !row.IsSoftDeleted)
+                                @if (row.CanManage && !row.IsSoftDeleted && !row.IsOnPremises)
                                 {
                                     <button type="button" class="menu__item" role="menuitem"
                                             disabled="@_busy" @onclick="() => CopyAsync(row)">Copy this environment...</button>
@@ -601,8 +615,8 @@
         try
         {
             var rows = ownScope
-                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true))
-                : await Fleet.ListFleetAsync(includeSoftDeleted: true);
+                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true, includeOnPremises: true))
+                : await Fleet.ListFleetAsync(includeSoftDeleted: true, includeOnPremises: true);
             if (load != _loads) return;
             _rows = rows;
             _error = null;
@@ -647,7 +661,8 @@
         _refreshNote = null;
         try
         {
-            var projectIds = _rows.Select(r => r.ProjectId).Distinct().ToList();
+            // On-premises tiers are not asked: their gateway reports them on its own.
+            var projectIds = _rows.Where(r => !r.IsOnPremises).Select(r => r.ProjectId).Distinct().ToList();
             // On a scope of its own: the auto-refresh timer comes through here too, and
             // its tick can land while a click is still awaiting the circuit's context.
             var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force));
@@ -976,7 +991,7 @@
     /// particular it is not something that "needs attention", which is a list of things
     /// somebody has to go and do.
     /// </summary>
-    private static bool MatchesTab(UpgradeFleetRow row, Tab tab) => tab switch
+    private bool MatchesTab(UpgradeFleetRow row, Tab tab) => tab switch
     {
         Tab.Deleted => row.IsSoftDeleted,
         _ when row.IsSoftDeleted => false,
@@ -995,9 +1010,15 @@
     /// <para>A customer at or over their storage allowance counts too: nothing is broken
     /// yet, but it is a conversation somebody has to have. Filling up (amber) does not -
     /// the bar already says so, and a list of things to do should not grow on a warning.</para>
+    /// <para>An on-premises tier whose gateway has gone quiet counts as well: what the
+    /// row shows is the last state it heard, and nobody can tell from here whether the
+    /// server is still up. See .design/on-prem-gateway.md.</para>
     /// </summary>
-    private static bool NeedsAttention(UpgradeFleetRow row) =>
-        StateUnknown(row) || RowState(row) is "is-failed" or "is-queued" || row.TenantStorageUse >= 1;
+    private bool NeedsAttention(UpgradeFleetRow row) =>
+        StateUnknown(row) || RowState(row, Now) is "is-failed" or "is-queued" or "is-draft" || row.TenantStorageUse >= 1;
+
+    /// <summary>The clock the out-of-touch test reads, from the injected TimeProvider so tests can pin it.</summary>
+    private DateTime Now => Clock.GetUtcNow().UtcDateTime;
 
     // ── Presentation ─────────────────────────────────────────────────────
 
@@ -1014,6 +1035,14 @@
         // not plain Running - the state cell is a glyph, and this keeps the word on screen.
         return IsRunning(row) ? "Nothing scheduled" : StatusWord(row);
     }
+
+    /// <summary>
+    /// The line under the name: the type, and for an on-premises tier the customer's own
+    /// word for it (their policy file says Test or Development, never Sandbox).
+    /// </summary>
+    private static string TypeLabel(UpgradeFleetRow row) => row.IsOnPremises
+        ? $"On-premises - {row.OnPremises?.EnvironmentLabel ?? row.EnvironmentType}"
+        : row.EnvironmentType;
 
     /// <summary>The next version, or a dash when Business Central is offering none.</summary>
     private static string NextVersion(UpgradeFleetRow row) => row.IsSoftDeleted ? "—" : row.NextUpdateVersion ?? "—";

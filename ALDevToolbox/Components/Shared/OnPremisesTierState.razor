@@ -1,0 +1,55 @@
+@using ALDevToolbox.Services.Gateways
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@inject TimeProvider Clock
+
+@*
+    One line saying how much to trust an on-premises service tier's facts: whose
+    gateway reports it, and whether that gateway is still reporting. The facts are
+    pushed by a gateway in the customer's network, so "when did we last hear" is the
+    question a consultant needs answered before quoting a version. Shared by the
+    Environments list and the environment page so the two never word it differently.
+    See .design/on-prem-gateway.md.
+*@
+
+@if (Row.OnPremises is not { } tier)
+{
+    <span>The gateway no longer reports this service tier</span>
+}
+else
+{
+    var now = Clock.GetUtcNow().UtcDateTime;
+    var status = tier.GatewayStatusAt(now);
+    if (status == GatewayStatus.Revoked)
+    {
+        <span class="tier-state--warn">Gateway @tier.GatewayName was revoked</span>
+    }
+    else if (status == GatewayStatus.Offline && tier.GatewayLastSeenAt is { } seen)
+    {
+        <span class="tier-state--warn">Gateway offline since <Timestamp Value="@seen" Format="dd MMM yyyy, HH:mm" /></span>
+    }
+    else if (status is GatewayStatus.NotConnectedYet or GatewayStatus.WaitingForApproval)
+    {
+        <span class="tier-state--warn">Gateway @tier.GatewayName is not connected yet</span>
+    }
+    else if (tier.NoLongerReportedSince is not null)
+    {
+        <span class="tier-state--warn">The gateway no longer reports this service tier</span>
+    }
+    else if (tier.ReadAt is not { } read)
+    {
+        <span>Not read by the gateway yet</span>
+    }
+    else if (tier.IsStale(now))
+    {
+        <span class="tier-state--warn">Not read since <Timestamp Value="@read" Format="dd MMM yyyy, HH:mm" /></span>
+    }
+    else
+    {
+        <span>Via gateway @tier.GatewayName</span>
+    }
+}
+
+@code {
+    /// <summary>An on-premises row of the fleet.</summary>
+    [Parameter, EditorRequired] public UpgradeFleetRow Row { get; set; } = default!;
+}

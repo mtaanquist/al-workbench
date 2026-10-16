@@ -527,9 +527,36 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         entry.State == EntityState.Modified
         && entry.Properties.Any(p => p.IsModified && ProjectConnectionColumns.Contains(p.Metadata.Name));
 
-    private static bool IsAuditableEnvironmentChange(EntityEntry entry) =>
-        entry.State == EntityState.Modified
-        && entry.Properties.Any(p => p.IsModified && EnvironmentSettingColumns.Contains(p.Metadata.Name));
+    private static bool IsAuditableEnvironmentChange(EntityEntry entry)
+    {
+        // Linking a service tier to a Solution, linking it again, and unlinking it are an
+        // Admin's decisions (.design/on-prem-gateway.md), unlike everything an inventory
+        // writes onto the same row.
+        if (entry.Entity is OeProjectEnvironment { Kind: OeEnvironmentKind.OnPremises })
+        {
+            if (entry.State == EntityState.Added) return true;
+            if (entry.State == EntityState.Modified
+                && entry.Properties.Any(p => p.IsModified && OnPremisesLinkColumns.Contains(p.Metadata.Name)))
+            {
+                return true;
+            }
+        }
+        return entry.State == EntityState.Modified
+            && entry.Properties.Any(p => p.IsModified && EnvironmentSettingColumns.Contains(p.Metadata.Name));
+    }
+
+    /// <summary>
+    /// The columns of an on-premises environment row that only linking and unlinking
+    /// write: the stamp that says it is no longer linked, and the name and tier an Admin
+    /// chose.
+    /// </summary>
+    private static readonly HashSet<string> OnPremisesLinkColumns = new()
+    {
+        nameof(OeProjectEnvironment.MissingSince),
+        nameof(OeProjectEnvironment.Name),
+        nameof(OeProjectEnvironment.GatewayInstanceId),
+        nameof(OeProjectEnvironment.TenantId),
+    };
 
     private static AuditEntityType MapEntityType(Type t) =>
         AuditedTypeMap.TryGetValue(t, out var kind)

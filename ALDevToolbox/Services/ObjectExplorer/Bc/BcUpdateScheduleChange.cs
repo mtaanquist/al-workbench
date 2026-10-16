@@ -50,6 +50,8 @@ public sealed record BcUpdateScheduleSnapshot(string? Version, DateTime? Date, D
     public BcUpdateScheduleChange? CompareWith(OeProjectEnvironment after, DateTime now)
     {
         if (FetchedAt is null) return null;
+        // Microsoft's platform updates only: an on-premises tier has none to announce.
+        if (after.Kind == OeEnvironmentKind.OnPremises) return null;
         if (after.BcNextUpdateVersion is not { Length: > 0 } version || after.BcNextUpdateDate is not { } date) return null;
         // An update under way, or one whose date has come, is not news about a date:
         // Business Central may restamp or clear it while it runs.

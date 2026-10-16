@@ -265,6 +265,10 @@
                 {
                     <ProjectDetailCustomer Id="Id.Value" SolutionSlug="@_loadedProject?.Slug" CanManage="CanEditCustomer" CanChangeHosting="_canManage" OnSaved="OnCustomerSavedAsync" />
                 }
+                else if (_section == Section.Environments && Id is not null && IsOnPremises)
+                {
+                    <ProjectDetailEnvironments Id="Id.Value" SolutionName="@_loadedProject?.Name" OnChanged="OnEnvironmentsChangedAsync" />
+                }
                 else if (_section == Section.Bc && Id is not null && _canManage && !IsOnPremises)
                 {
                     <ProjectDetailBc Id="Id.Value" SolutionSlug="@_loadedProject?.Slug" />
@@ -321,7 +325,7 @@
     /// </summary>
     [SupplyParameterFromQuery(Name = "tab")] public string? OpenTab { get; set; }
 
-    private enum Section { General, Repos, Customer, Bc, Pipelines, Symbols, Access }
+    private enum Section { General, Repos, Customer, Environments, Bc, Pipelines, Symbols, Access }
     private Section _section = Section.General;
 
     /// <summary>
@@ -345,6 +349,9 @@
         if (Id is not null) yield return ("Customer", Section.Customer);
         yield return ("General", Section.General);
         yield return ("Repositories", Section.Repos);
+        // An on-premises customer's servers, linked from the gateway. Anyone who can
+        // see the solution reads them; only an Admin links them.
+        if (Id is not null && IsOnPremises) yield return ("Environments", Section.Environments);
 
         if (Id is not null && _canManage)
         {
@@ -675,6 +682,7 @@
     private Section SectionFor(string? tab) => tab?.ToLowerInvariant() switch
     {
         "bc" => Section.Bc,
+        "environments" => Section.Environments,
         "general" => Section.General,
         "repositories" => Section.Repos,
         "customer" => Section.Customer,
@@ -693,6 +701,7 @@
         Section.General => "general",
         Section.Repos => "repositories",
         Section.Bc => "bc",
+        Section.Environments => "environments",
         Section.Pipelines => "pipelines",
         Section.Symbols => "symbols",
         Section.Access => "access",
@@ -893,6 +902,16 @@
 
     /// <summary>Hosted anywhere but Business Central online. See .design/solution-customer-info.md.</summary>
     private bool IsOnPremises => _loadedProject?.IsOnPremises == true;
+
+    /// <summary>
+    /// A linked or unlinked production tier changes what the Customer tab shows (its
+    /// version and modules come from the tier), so the solution is read again.
+    /// </summary>
+    private async Task OnEnvironmentsChangedAsync()
+    {
+        if (Id is null) return;
+        _loadedProject = await Projects.GetProjectAsync(Id.Value) ?? _loadedProject;
+    }
 
     /// <summary>The hosting may have changed, and with it which tabs there are.</summary>
     private async Task OnCustomerSavedAsync()

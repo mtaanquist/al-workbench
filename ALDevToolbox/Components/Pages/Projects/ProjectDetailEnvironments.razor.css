@@ -1,0 +1,26 @@
+/* On a phone each linked tier is a short card rather than four squeezed columns:
+   the version is what a consultant opens this for, so nothing may be cut off. */
+@media (max-width: 640px) {
+    .pd-tiers thead { display: none; }
+    .pd-tiers, .pd-tiers tbody, .pd-tiers tr, .pd-tiers td { display: block; width: 100%; }
+    .pd-tiers tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: var(--space-1) var(--space-3);
+        padding: var(--space-3);
+        border-bottom: 1px solid var(--border);
+    }
+    .pd-tiers tr:last-child { border-bottom: 0; }
+    /* No grey behind a cell: the table's hover tint stays on the whole card. */
+    .pd-tiers tbody tr td,
+    .pd-tiers tbody tr:hover td { padding: 0; border: 0; grid-column: 1; background: transparent; height: auto; }
+    .pd-tiers tbody tr:hover { background: var(--surface-2); }
+    /* The two values that are only a number or a time say what they are; the name, the
+       server and the state already do. */
+    .pd-tiers [data-label]::before {
+        content: attr(data-label) ": ";
+        color: var(--ink-3);
+    }
+    .pd-tiers td.data-table__actions { grid-column: 2; grid-row: 1; align-self: start; }
+    .pd-tiers td.u-num { text-align: left; }
+}

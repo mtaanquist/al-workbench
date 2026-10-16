@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALWorkbench.Gateway.Contracts;
 using Microsoft.EntityFrameworkCore;
@@ -149,6 +150,7 @@ public sealed class GatewayInventoryService
             .Include(i => i.Licence)
             .ToListAsync(ct).ConfigureAwait(false);
 
+        var applied = new List<GatewayInstance>();
         foreach (var reported in report.Instances)
         {
             var row = instances.FirstOrDefault(i => SameName(i.Machine, reported.Machine) && SameName(i.Name, reported.Name));
@@ -164,7 +166,9 @@ public sealed class GatewayInventoryService
                 instances.Add(row);
             }
             await ApplyInstanceAsync(orgId, row, reported.Machine.Trim(), reported.Name.Trim(), reported, now, ct).ConfigureAwait(false);
+            applied.Add(row);
         }
+        await SyncLinkedEnvironmentsAsync(applied, now, ct).ConfigureAwait(false);
 
         if (report.Roster is { } roster)
         {
@@ -365,6 +369,44 @@ public sealed class GatewayInventoryService
                 ToId = range.ToId,
                 Permissions = range.Permissions,
             });
+        }
+    }
+
+    /// <summary>
+    /// Brings every Solution environment linked to one of <paramref name="applied"/> in
+    /// line with what was just stored: type, version, status, web client address, and its
+    /// installed apps (#1366). In the same save as the report, so a linked environment
+    /// never says something the mirror does not. A tier new in this report cannot be
+    /// linked yet, so only stored ones are looked up.
+    /// </summary>
+    private async Task SyncLinkedEnvironmentsAsync(List<GatewayInstance> applied, DateTime now, CancellationToken ct)
+    {
+        var ids = applied.Where(i => i.Id != 0).Select(i => i.Id).Distinct().ToList();
+        if (ids.Count == 0) return;
+        var linked = await _db.OeProjectEnvironments
+            .Where(e => e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null
+                        && e.GatewayInstanceId != null && ids.Contains(e.GatewayInstanceId.Value))
+            .ToListAsync(ct).ConfigureAwait(false);
+        if (linked.Count == 0) return;
+
+        var linkedIds = linked.Select(e => e.Id).ToList();
+        var mirrors = (await _db.OeEnvironmentApps
+                .Where(a => linkedIds.Contains(a.EnvironmentId))
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToLookup(a => a.EnvironmentId);
+        foreach (var environment in linked)
+        {
+            var instance = applied.First(i => i.Id == environment.GatewayInstanceId);
+            var tenant = instance.Tenants.FirstOrDefault(t => environment.TenantId is not null && SameName(t.TenantId, environment.TenantId));
+            // A tenant the gateway stopped reporting: its environment keeps its last facts,
+            // which the readers then show as no longer reported (EnvironmentQueries.StillReported),
+            // rather than having the server's newer version written onto a tenant that is gone.
+            if (tenant?.MissingSince is not null) continue;
+            OnPremisesEnvironmentService.Apply(environment, instance, now);
+            if (tenant is null) continue;
+            var apps = _db.Entry(tenant).Collection(t => t.Apps);
+            if (tenant.Id != 0 && !apps.IsLoaded) await apps.LoadAsync(ct).ConfigureAwait(false);
+            OnPremisesEnvironmentService.SyncApps(_db, environment, tenant, mirrors[environment.Id].ToList(), now);
         }
     }
 

@@ -106,7 +106,10 @@ public sealed class UpgradeActionService
         // The environment has to belong to the project the gate was checked against —
         // otherwise a request could name someone else's environment with a project it is
         // allowed to act on.
+        // Online only: platform updates are Microsoft's, and an on-premises service tier
+        // has none to move or start.
         var exists = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(EnvironmentQueries.Online)
             .AnyAsync(e => e.Id == environmentId && e.ProjectId == projectId, ct).ConfigureAwait(false);
         if (!exists)
         {

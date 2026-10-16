@@ -4,6 +4,18 @@
 .cust__grid .meta-item__value { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 .cust__url { margin: var(--space-4) 0 0; overflow-wrap: anywhere; }
 
+/* Where a reported value came from and when, under the value: read, not typed, so the
+   reader can tell how far to trust it. */
+.cust__from { font-size: var(--text-xs); color: var(--ink-4); }
+/* A caption makes its cell taller than its neighbours; they keep their label and value
+   at the top instead of spreading them over the extra height. */
+.cust__grid .meta-item { align-content: start; }
+
+/* Two across on a phone: three columns there split a version number mid-digit. */
+@media (max-width: 640px) {
+    .cust__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* The version and address Business Central reported, in the editor where the inputs
    would be: read, not typed, so plain text on the field's baseline. */
 .cust__fixed { display: block; padding: var(--space-2) 0; overflow-wrap: anywhere; }

@@ -52,6 +52,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
                 .AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<UpgradeFleetService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService>();
         _ctx.Services.AddScoped<UpgradeActionService>();
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddSingleton<IBcAdminClient>(_admin);
@@ -834,6 +835,34 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         // The filter re-renders on its own turn, so the narrowed list is waited for.
         cut.WaitForAssertion(() => Sources().Should().Equal("Continia Core / AppSource"));
+    }
+
+    [Fact]
+    public async Task An_on_premises_service_tier_has_three_tabs_and_never_asks_business_central_online()
+    {
+        var (projectId, envId) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.HostingType, ProjectHostingType.OurCloud));
+            await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises).SetProperty(e => e.TenantId, "default"));
+        }
+
+        var cut = Render(envId);
+        cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Workbench history");
+        cut.Markup.Should().Contain("On-premises service tier in CRONUS Denmark");
+        cut.FindAll("button").Should().NotContain(b => b.TextContent.Contains("Copy"), "a service tier cannot be copied from here");
+        // No gateway reports this tier, so its last state is not vouched for in green.
+        var pill = cut.Find(".status-pill");
+        pill.TextContent.Trim().Should().StartWith("Last seen");
+        pill.ClassList.Should().Contain("status-pill--muted");
+
+        // An address naming Business Central online's live tabs lands on Overview.
+        Render(envId, "operations");
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().Uri
+            .Should().EndWith($"/environments/{envId}");
+        _admin.Reads.Should().Be(0, "nothing on an on-premises page reads Business Central online");
     }
 
     [Fact]

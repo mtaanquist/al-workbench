@@ -86,6 +86,11 @@ public static class BcEnvironmentStatus
             "updating" or "upgrading" => "Update in progress",
             "preparing" => "Being prepared",
             "suspended" => "Suspended by Microsoft",
+            // An on-premises service tier's own states (Get-NAVServerInstance); a running
+            // one is stored as Active, so it reads as every other running environment.
+            "stopped" => "Stopped",
+            "starting" => "Starting",
+            "stopping" => "Stopping",
             "softdeleted" => Humanise(status),
             "" => "State not reported",
             // Every documented failure ends in "Failed" (UpgradingFailed, ...); Classify

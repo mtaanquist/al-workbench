@@ -8,12 +8,14 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService UpgradeActions
+@inject ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService OnPremisesLinks
 @inject DeliveryService Deliveries
 @inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
 @inject ILogger<EnvironmentDetail> Log
 @inject NavigationManager Nav
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using System.Globalization
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
@@ -85,8 +87,17 @@
         <span>@Row.EnvironmentName</span>
     </Crumbs>
     <TitleRow>
-        <StatusPill Tone="@StatusTone()">@StatusWord(Row)</StatusPill>
-        <span class="tag">@Row.EnvironmentType</span>
+        <StatusPill Tone="@StatusTone()">@StatusWord(Row, Clock.GetUtcNow().UtcDateTime)</StatusPill>
+        @if (Row.IsOnPremises)
+        {
+            @* The customer's own word for the tier, and where it runs. *@
+            <span class="tag">@(Row.OnPremises?.EnvironmentLabel ?? Row.EnvironmentType)</span>
+            <span class="tag">On-premises</span>
+        }
+        else
+        {
+            <span class="tag">@Row.EnvironmentType</span>
+        }
     </TitleRow>
     <SubtitleContent>@SubtitleText()</SubtitleContent>
     <Actions>
@@ -109,7 +120,7 @@
            customer's tenant, and nothing on this page is the primary action. A
            deleted environment has nothing to copy - the alert below offers the one
            thing left to do to it. *@
-        @if (_canManage && !Row.IsSoftDeleted)
+        @if (_canManage && !Row.IsSoftDeleted && !Row.IsOnPremises)
         {
             <button type="button" class="btn @(_settingBusy == "copy" ? "btn--loading" : "")"
                     @onclick="CopyAsync" disabled="@_settingSaving">
@@ -119,6 +130,13 @@
         }
     </Actions>
     <ChildContent>
+        @if (Row.IsOnPremises)
+        {
+            <OnPremisesEnvironmentSections Row="Row" Head="true" Apps="_onPremisesApps"
+                                           DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway" />
+        }
+        else
+        {
         <div class="freshness @FreshnessClass()">
             <Icon Name="cloud-download" Width="15" Height="15" Css="freshness__icon" />
             <span class="freshness__text">
@@ -169,6 +187,7 @@
                 </span>
             }
         </div>
+        }
 
         @* What the last write did. Up here, not beside the control that did it: the
            writes are spread over a long page (an app, a scheduled install, three
@@ -234,6 +253,8 @@
 
         @* Under the freshness strip, as the sheet has it, so the strip qualifies the
            numbers below it - which is why this is not the frame's Meta slot. *@
+        @if (!Row.IsOnPremises)
+        {
         <div class="meta-row">
             <span class="meta-item"><span class="meta-item__label">Type</span><span class="meta-item__value">@Row.EnvironmentType</span></span>
             <span class="meta-item"><span class="meta-item__label">BC version</span><span class="meta-item__value meta-item__value--mono">@(Row.Version ?? "—")</span></span>
@@ -243,6 +264,7 @@
             <span class="meta-item"><span class="meta-item__label">Database</span><span class="meta-item__value">@(Row.DatabaseKb is { } dbSize ? StorageDisplay.Size(dbSize) : "—")</span></span>
             <span class="meta-item"><span class="meta-item__label">Apps installed</span><span class="meta-item__value">@(_panel is { InstalledAppsError: null } p ? p.InstalledApps.Count.ToString() : _panel is null && _panelError is null ? "—" : "Not read")</span></span>
         </div>
+        }
 
         @if (Row.TenantStorageUse is { } storageUse && StorageDisplay.Tone(storageUse) is { Length: > 0 } storageTone)
         {
@@ -262,7 +284,12 @@
             <HeaderTabs Items="@SectionTabs" AriaLabel="Environment sections" />
         </div>
 
-        @if (_tab == Section.Overview)
+        @if (Row.IsOnPremises && _tab != Section.History)
+        {
+            <OnPremisesEnvironmentSections Row="Row" ShowApps="@(_tab == Section.Apps)" Apps="_onPremisesApps"
+                                           DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway" />
+        }
+        else if (_tab == Section.Overview)
         {
             <div class="card">
                 <div class="card__head">
@@ -977,8 +1004,11 @@
                         <h2 class="card__title">Workbench history</h2>
                         <p class="card__sub">
                             What people did to @Row.EnvironmentName from AL Workbench, and what is still booked.
-                            Everything Business Central itself recorded, whoever started it, is under
-                            <a href="@TabHref(Section.Operations)">Operations</a>.
+                            @if (!Row.IsOnPremises)
+                            {
+                                <text>Everything Business Central itself recorded, whoever started it, is under
+                                <a href="@TabHref(Section.Operations)">Operations</a>.</text>
+                            }
                         </p>
                     </div>
                 </div>
@@ -1141,14 +1171,31 @@
     [Parameter] public TimeSpan SessionsLiveEvery { get; set; } = TimeSpan.FromSeconds(30);
     [Parameter] public TimeSpan SessionsLiveFor { get; set; } = TimeSpan.FromMinutes(10);
 
-    private List<HeaderTabs.HeaderTabItem> SectionTabs =>
-    [
-        Tab("Overview", Section.Overview),
-        Tab("Apps", Section.Apps),
-        Tab("Operations", Section.Operations),
-        Tab("Sessions", Section.Sessions),
-        Tab("Workbench history", Section.History),
-    ];
+    /// <summary>
+    /// Operations and Sessions are Business Central online's live reads, which an
+    /// on-premises service tier does not have; its apps come from the gateway's report.
+    /// </summary>
+    private List<HeaderTabs.HeaderTabItem> SectionTabs => _env is not null && Row.IsOnPremises
+        ?
+        [
+            Tab("Overview", Section.Overview),
+            Tab("Apps", Section.Apps),
+            Tab("Workbench history", Section.History),
+        ]
+        :
+        [
+            Tab("Overview", Section.Overview),
+            Tab("Apps", Section.Apps),
+            Tab("Operations", Section.Operations),
+            Tab("Sessions", Section.Sessions),
+            Tab("Workbench history", Section.History),
+        ];
+
+    /// <summary>An on-premises tier's installed apps, from the gateway's report; null until read.</summary>
+    private List<InstalledAppRow>? _onPremisesApps;
+
+    /// <summary>True for an Admin, who may open the gateway behind an on-premises tier.</summary>
+    private bool _canSeeGateway;
 
     private HeaderTabs.HeaderTabItem Tab(string label, Section section) =>
         new(label, TabHref(section), IsActive: _tab == section);
@@ -1261,7 +1308,18 @@
 
             _canManage = await Read(ct => Access.CanManageAsync(Row.ProjectId, _env.CreatedByUserId, ct));
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
-            await LoadBookedInstallsAsync();
+            _onPremisesApps = null;
+            if (Row.IsOnPremises)
+            {
+                // Everything an on-premises tier shows is our own mirror: read it now,
+                // the gateway is never asked from here.
+                _onPremisesApps = await Read(ct => Fleet.ListInstalledAppsAsync(Id, ct)) ?? [];
+                _canSeeGateway = await Read(ct => OnPremisesLinks.CanLinkAsync(ct));
+            }
+            else
+            {
+                await LoadBookedInstallsAsync();
+            }
         }
         if (_env is null) return;
 
@@ -1272,6 +1330,14 @@
         if (EnvironmentId is not null && Row.ProjectSlug is not null)
         {
             Nav.NavigateTo(SectionHref(_tab == Section.Overview ? null : _tab.ToString().ToLowerInvariant()), replace: true);
+            return;
+        }
+
+        // An on-premises tier has no live half: Operations and Sessions are Business
+        // Central online's, so an address naming them lands on Overview.
+        if (Row.IsOnPremises)
+        {
+            if (_tab is Section.Operations or Section.Sessions) Nav.NavigateTo(SectionHref(null), replace: true);
             return;
         }
 
@@ -1742,7 +1808,12 @@
 
     // ── Head ────────────────────────────────────────────────────────────
 
-    private string StatusTone() => BcEnvironmentStatus.Classify(Row.Status) switch
+    /// <summary>
+    /// The head pill's colour. An on-premises tier whose gateway has gone quiet is muted
+    /// whatever it last reported: a green "Running" there would vouch for a server nobody
+    /// has heard from. See .design/on-prem-gateway.md.
+    /// </summary>
+    private string StatusTone() => IsOutOfTouch(Row, Clock.GetUtcNow().UtcDateTime) ? "muted" : BcEnvironmentStatus.Classify(Row.Status) switch
     {
         BcEnvironmentReadiness.Ready => "success",
         BcEnvironmentReadiness.Busy => "warn",
@@ -1752,7 +1823,10 @@
 
     private string SubtitleText()
     {
-        var parts = new List<string> { $"Business Central environment in {Row.ProjectName}" };
+        var parts = new List<string>
+        {
+            Row.IsOnPremises ? $"On-premises service tier in {Row.ProjectName}" : $"Business Central environment in {Row.ProjectName}",
+        };
         if (CurrentVersionShort() is { Length: > 0 } version && version != "—") parts.Add($"BC version {version}");
         if (!string.IsNullOrWhiteSpace(_env!.LocationName)) parts.Add(_env.LocationName!);
         return string.Join(" - ", parts);

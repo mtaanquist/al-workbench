@@ -678,11 +678,19 @@ public sealed class ReleasePipelineService
         // the user would hit later, just earlier and while they can still change it.
         var environment = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == input.ProjectEnvironmentId && e.ProjectId == input.ProjectId)
-            .Select(e => new { e.Name, e.Type, e.Status, Missing = e.MissingSince != null, e.UpdateWindowStart, e.UpdateWindowEnd })
+            .Select(e => new { e.Name, e.Type, e.Status, Missing = e.MissingSince != null, e.UpdateWindowStart, e.UpdateWindowEnd, OnPremises = e.Kind == OeEnvironmentKind.OnPremises })
             .FirstOrDefaultAsync(ct);
         if (environment is null)
         {
             errors["ProjectEnvironmentId"] = "Choose a target environment.";
+        }
+        else if (environment.OnPremises)
+        {
+            // Deploying to on-premises goes through the gateway, which is not built yet
+            // (#1374, #1367); the editor does not offer such a target, and this is the
+            // rule behind it. See .design/on-prem-gateway.md, "Deploying to on-premises".
+            errors["ProjectEnvironmentId"] =
+                $"{environment.Name} is an on-premises service tier. Deploying to on-premises through the gateway isn't available yet, so a deployment pipeline can't target it.";
         }
         else if (environment.Missing)
         {

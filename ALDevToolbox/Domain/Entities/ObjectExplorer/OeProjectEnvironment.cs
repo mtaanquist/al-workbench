@@ -1,6 +1,23 @@
 namespace ALDevToolbox.Domain.Entities.ObjectExplorer;
 
 /// <summary>
+/// Where an environment row comes from. See <c>.design/on-prem-gateway.md</c>,
+/// "An on-premises environment is an OeProjectEnvironment row".
+/// </summary>
+public enum OeEnvironmentKind
+{
+    /// <summary>Business Central online, read from the Admin Center API. Every row that existed before #1366 is one.</summary>
+    Online,
+
+    /// <summary>
+    /// A service tier (and tenant) an on-premises gateway reports, linked to the Solution
+    /// by an org Admin. Its facts are written by the gateway's inventory, never by the
+    /// Admin Center refresh.
+    /// </summary>
+    OnPremises,
+}
+
+/// <summary>
 /// A Business Central SaaS environment belonging to a <see cref="OeProject"/>
 /// (customer), fetched from the BC Admin Center API and cached so release
 /// pipelines can target it without re-typing a name. Refresh is a <em>stable
@@ -22,6 +39,29 @@ public class OeProjectEnvironment
     public int ProjectId { get; set; }
     public OeProject? Project { get; set; }
 
+    /// <summary>
+    /// Online (the default) or a linked on-premises service tier. Every reader decides
+    /// whether on-premises rows belong: the Admin Center refresh, the Upgrades page and
+    /// Microsoft's update notices leave them out. See <c>.design/on-prem-gateway.md</c>,
+    /// "Readers of OeProjectEnvironments".
+    /// </summary>
+    public OeEnvironmentKind Kind { get; set; } = OeEnvironmentKind.Online;
+
+    /// <summary>
+    /// The service tier an on-premises row is linked to; null for an online row. Kept when
+    /// the tier is unlinked (<see cref="MissingSince"/> set), so linking the same tier to
+    /// the same Solution again revives the row.
+    /// </summary>
+    public int? GatewayInstanceId { get; set; }
+    public GatewayInstance? GatewayInstance { get; set; }
+
+    /// <summary>
+    /// The Business Central tenant on <see cref="GatewayInstance"/> (e.g. <c>default</c>, which
+    /// is what a single-tenant server is stored as). Not the Microsoft Entra tenant, which is
+    /// <see cref="AadTenantId"/>. Null for an online row.
+    /// </summary>
+    public string? TenantId { get; set; }
+
     /// <summary>The environment name (e.g. <c>Production</c>) — keys the automation API URL and, with <see cref="ProjectId"/>, identifies the row across refreshes.</summary>
     public string Name { get; set; } = string.Empty;
 
@@ -31,7 +71,7 @@ public class OeProjectEnvironment
     /// <summary>When this environment was last seen in a fetch.</summary>
     public DateTime FetchedAt { get; set; }
 
-    /// <summary>Set when a refresh no longer returns this environment (the customer deleted it). Cleared if it reappears. The row is retained so any release pipeline pointing at it can show "no longer present" rather than break. Distinct from <see cref="SoftDeletedOn"/>: a soft-deleted environment still comes back from the API, a hard-deleted one vanishes from it.</summary>
+    /// <summary>Set when a refresh no longer returns this environment (the customer deleted it), or, for an on-premises row, when an Admin unlinked the tier ("no longer linked"). Cleared if it reappears or is linked again. The row is retained so any release pipeline pointing at it can show "no longer present" rather than break. Distinct from <see cref="SoftDeletedOn"/>: a soft-deleted environment still comes back from the API, a hard-deleted one vanishes from it.</summary>
     public DateTime? MissingSince { get; set; }
 
     // ── Fetched detail from the Admin Center API ──────────────────────────────

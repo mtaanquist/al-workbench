@@ -260,6 +260,32 @@ public sealed class EnvironmentsListTests : IDisposable
         tabs.First(t => t.StartsWith("Needs attention")).Should().EndWith("1");
     }
 
+    [Fact]
+    public async Task An_on_premises_tier_nobody_has_heard_from_does_not_read_as_running()
+    {
+        // #1366: a service tier whose gateway no longer reports it keeps "Running" as its
+        // last state. The row must not vouch for it: warning glyph and bar, "Last seen
+        // running", and it is something to go and look at.
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.ProjectId == id)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises).SetProperty(e => e.TenantId, "default"));
+        }
+
+        var cut = _ctx.Render<EnvironmentsList>();
+
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(1));
+        var row = cut.Find(".data-table tbody tr");
+        row.ClassList.Should().Contain("is-draft").And.NotContain("is-published");
+        row.QuerySelector(".data-table__state")!.GetAttribute("aria-label").Should().Be("Last seen running");
+        row.TextContent.Should().Contain("Not scheduled (on-premises)");
+        cut.FindAll(".pill-tab").Select(t => t.TextContent.Trim()).First(t => t.StartsWith("Needs attention"))
+            .Should().EndWith("1");
+    }
+
     /// <summary>
     /// The design gives a table row no status column: the state is the edge bar plus a
     /// glyph. Four states share two glyphs and a title does not exist on touch, so the

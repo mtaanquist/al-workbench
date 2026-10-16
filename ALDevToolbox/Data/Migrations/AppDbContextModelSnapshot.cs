@@ -4343,6 +4343,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(200)")
                         .HasColumnName("friendly_name");
 
+                    b.Property<int?>("GatewayInstanceId")
+                        .HasColumnType("integer")
+                        .HasColumnName("gateway_instance_id");
+
                     b.Property<string>("GeoName")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
@@ -4355,6 +4359,14 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime?>("HardDeletePendingOn")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("hard_delete_pending_on");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("Online")
+                        .HasColumnName("kind");
 
                     b.Property<string>("LocationName")
                         .HasMaxLength(100)
@@ -4397,6 +4409,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("status_fetched_at");
 
+                    b.Property<string>("TenantId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("tenant_id");
+
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -4423,11 +4440,23 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("GatewayInstanceId")
+                        .HasDatabaseName("ix_oe_project_environments_gateway_instance_id");
+
                     b.HasIndex("OrganizationId");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_oe_project_environments_project_id");
+
+                    b.HasIndex("GatewayInstanceId", "TenantId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_oe_project_environments_gateway_tenant")
+                        .HasFilter("kind = 'OnPremises' AND missing_since IS NULL");
 
                     b.HasIndex("ProjectId", "Name")
                         .IsUnique()
-                        .HasDatabaseName("ix_oe_project_environments_project_name");
+                        .HasDatabaseName("ix_oe_project_environments_project_name")
+                        .HasFilter("missing_since IS NULL OR kind = 'Online'");
 
                     b.ToTable("oe_project_environments", (string)null);
                 });
@@ -9081,6 +9110,11 @@ namespace ALDevToolbox.Data.Migrations
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment", b =>
                 {
+                    b.HasOne("ALDevToolbox.Domain.Entities.GatewayInstance", "GatewayInstance")
+                        .WithMany()
+                        .HasForeignKey("GatewayInstanceId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
                         .WithMany()
                         .HasForeignKey("OrganizationId")
@@ -9092,6 +9126,8 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("GatewayInstance");
 
                     b.Navigation("Organization");
 
