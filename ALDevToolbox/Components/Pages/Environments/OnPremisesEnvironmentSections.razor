@@ -124,7 +124,7 @@ else if (!ShowApps)
         <div class="card__head">
             <div>
                 <h2 class="card__title">Service tier</h2>
-                <p class="card__sub">The Business Central server this environment is, as the on-premises gateway in the customer's network reports it.</p>
+                <p class="card__sub">The Business Central server behind this environment, as reported by the AL Workbench gateway on the customer's network.</p>
             </div>
             @* The one thing a consultant whose customer says Business Central is stuck came
                for. Outline, like every button on this page. *@
@@ -133,10 +133,18 @@ else if (!ShowApps)
                 @TierButton(lead, actions)
             }
         </div>
+        @* Why restart and stop are held back, said once and before the buttons rather than
+           under one of them: it is the first thing someone with a stuck customer needs. *@
+        @if (tier is not null && TierActions is { CanManage: true, SharedRefusal: { } sharedRefusal })
+        {
+            <div class="card__body onprem__shared">
+                <Alert Tone="AlertTone.Warn"><span>@sharedRefusal</span></Alert>
+            </div>
+        }
         <div class="card__body">
             @if (tier is null)
             {
-                <p class="u-muted">Nothing is known about the service tier any more.</p>
+                <p class="u-muted">The gateway no longer reports this service tier, so it can't be restarted from here. Ask the customer's IT to check the gateway.</p>
             }
             else
             {
@@ -144,7 +152,7 @@ else if (!ShowApps)
                     <span class="meta-item"><span class="meta-item__label">Server</span><span class="meta-item__value">@tier.Machine</span></span>
                     <span class="meta-item"><span class="meta-item__label">Instance</span><span class="meta-item__value">@tier.InstanceName</span></span>
                     <span class="meta-item"><span class="meta-item__label">Tenant</span><span class="meta-item__value">@TenantText(tier)</span></span>
-                    <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@FleetRowState.StatusWord(Row, now)</span></span>
+                    <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@StateText(now)</span></span>
                     <span class="meta-item"><span class="meta-item__label">Database</span><span class="meta-item__value">@(tier.Database ?? "Not read yet")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Open sessions</span><span class="meta-item__value">@(tier.SessionCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "Not read")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Gateway</span><span class="meta-item__value">@tier.GatewayName</span></span>
@@ -179,7 +187,7 @@ else if (!ShowApps)
                     }
                     else if (last.TierProgress == ServiceTierProgress.Running)
                     {
-                        <p class="u-muted onprem__upload-detail">The gateway is on it. A restart usually takes a minute or two; this page shows the result when it is done.</p>
+                        <p class="u-muted onprem__upload-detail">AL Workbench has sent this to the gateway. It usually takes a minute or two; this page shows the result when it is done.</p>
                     }
                     else if (last.Outcome is { } outcome && last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed)
                     {
@@ -193,20 +201,33 @@ else if (!ShowApps)
                 @if (view.CanManage)
                 {
                     var others = view.Choices.Where(c => c.Action != Lead(view)?.Action).ToList();
+                    var stop = others.FirstOrDefault(c => c.Action == ServiceTierAction.Stop);
+                    var rest = others.Where(c => c.Action != ServiceTierAction.Stop).ToList();
                     @if (others.Count > 0)
                     {
                         <div class="onprem__action-row">
-                            @foreach (var choice in others)
+                            @foreach (var choice in rest)
                             {
                                 @TierButton(choice, view)
+                            }
+                            @* Stop last and set apart: it is the one that leaves people unable
+                               to work until someone acts again. *@
+                            @if (stop is not null)
+                            {
+                                @if (rest.Count > 0)
+                                {
+                                    <span class="onprem__action-sep" aria-hidden="true"></span>
+                                }
+                                @TierButton(stop, view)
                             }
                         </div>
                     }
                     @* Why a button is greyed out, once per reason rather than once per button:
-                       when the gateway is offline every one of them says the same thing. *@
+                       when the gateway is offline every one of them says the same thing. The
+                       shared-tier reason is said above the facts instead (an empty reason). *@
                     @if (!view.InFlight)
                     {
-                        @foreach (var reason in view.Choices.Select(c => c.Unavailable).OfType<string>().Distinct())
+                        @foreach (var reason in view.Choices.Select(c => c.Unavailable).Where(r => !string.IsNullOrEmpty(r)).Distinct())
                         {
                             <p class="u-muted onprem__upload-detail">@reason</p>
                         }
@@ -214,7 +235,7 @@ else if (!ShowApps)
                 }
                 else
                 {
-                    <p class="u-muted onprem__upload-detail">Only people who manage this Solution can restart, stop or start the service tier.</p>
+                    <p class="u-muted onprem__upload-detail">Only people who manage this Solution can restart, stop or start the service tier. Ask someone who manages this Solution, or an Admin.</p>
                 }
                 @if (view.Latest is not null && !string.IsNullOrEmpty(HistoryHref))
                 {
@@ -430,6 +451,14 @@ else
     /// The action the card's head offers: restart a tier that runs, start one that is
     /// stopped. The rest sit in the row under the facts.
     /// </summary>
+    /// <summary>
+    /// The tier's state: the inventory's word, unless an action finished since the inventory
+    /// last read the tier, which then says what it left the tier in.
+    /// </summary>
+    private string StateText(DateTime now) => TierActions is { StateFromAction: true, State: { } state }
+        ? state
+        : FleetRowState.StatusWord(Row, now);
+
     private static ServiceTierActionChoice? Lead(ServiceTierActionsView view) =>
         view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Restart)
         ?? view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Start);
@@ -453,8 +482,8 @@ else
         ? "Sending"
         : action switch
         {
-            ServiceTierAction.RestartAll => $"Restart all {view.GroupTierCount} tiers on this database...",
-            ServiceTierAction.Stop => "Stop service tier...",
+            ServiceTierAction.RestartAll => $"{ServiceTierActionDialog.RestartAllLabel(view.GroupTierCount)}...",
+            ServiceTierAction.Stop => "Stop service tier (stays stopped)...",
             ServiceTierAction.Start => "Start service tier...",
             _ => "Restart service tier...",
         };

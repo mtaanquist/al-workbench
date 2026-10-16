@@ -15,6 +15,7 @@
 @using ALDevToolbox.Services.Gateways
 @inject OnPremisesTierActionService TierActions
 @inject ILogger<ServiceTierActionDialog> Log
+@inject TimeProvider Clock
 
 <ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="@HeadIcon"
                ConfirmDisabled="@(_plan is null || _plan.Refusal is not null || (NeedsAck && !_ack))">
@@ -49,7 +50,7 @@
         {
             <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="tier-dialog__alert">
                 <div class="tier-dialog__warn">
-                    <p><b>@SessionsHeadline(_plan.Sessions)</b> @SessionsDetail(_plan)</p>
+                    <p><b>@SessionsHeadline(_plan)</b> @SessionsDetail(_plan)</p>
                     <p>@AfterSentence(_plan)</p>
                 </div>
             </Alert>
@@ -95,9 +96,9 @@
         var (title, message, label, css) = action switch
         {
             ServiceTierAction.RestartAll => (
-                $"Restart all {groupTierCount} service tiers of {environmentName}?",
-                "Every service tier on this database stops and starts again, as after a deployment. Use it when restarting one tier is not enough.",
-                "Restart all tiers", "btn--danger"),
+                $"{RestartAllLabel(groupTierCount)}?",
+                "Every service tier on this database stops and starts again. Use this when restarting one service tier did not help.",
+                RestartAllLabel(groupTierCount), "btn--danger"),
             ServiceTierAction.Stop => (
                 $"Stop {tierName}?",
                 "The service tier stops and stays stopped until someone starts it again, here or on the server.",
@@ -136,32 +137,38 @@
         _ => "This service tier stops and starts again:",
     };
 
-    private static string SessionsHeadline(ServiceTierSessions sessions) => sessions.OnTiers switch
-    {
-        null => "How many sessions are open is not known yet.",
-        0 => "No sessions were open when the gateway last counted.",
-        1 => "1 session is open.",
-        var n => $"{n} sessions are open.",
-    };
+    /// <summary>The label, title and confirm button for restarting the whole group, the same everywhere.</summary>
+    public static string RestartAllLabel(int tiers) =>
+        tiers == 2 ? "Restart both service tiers" : $"Restart all {tiers} service tiers";
 
-    private string SessionsDetail(ServiceTierActionPlan plan)
+    /// <summary>
+    /// "14 sessions are open on this service tier (23 across both service tiers on this
+    /// database)." A tier without a count makes the number a floor, and it says so.
+    /// </summary>
+    private static string SessionsHeadline(ServiceTierActionPlan plan)
     {
         var s = plan.Sessions;
-        var parts = new List<string>();
-        if (s.OnTiers is not null && s.DatabaseTiers > plan.Tiers.Count && s.OnDatabase is { } onDatabase)
+        var where = plan.Tiers.Count == 1 ? "this service tier" : "these service tiers";
+        if (s.OnTiers is not { } open) return "How many sessions are open is not known yet.";
+        var count = open == 1 ? "1 session is" : $"{open} sessions are";
+        var sentence = s.Uncounted > 0 ? $"At least {open} {(open == 1 ? "session is" : "sessions are")} open on {where}"
+            : open == 0 ? $"No sessions were open on {where} when the gateway last counted"
+            : $"{count} open on {where}";
+        if (s.DatabaseTiers > plan.Tiers.Count && s.OnDatabase is { } onDatabase)
         {
-            parts.Add($"{onDatabase} in all across the {s.DatabaseTiers} service tiers on this database.");
+            var all = s.DatabaseTiers == 2 ? "both service tiers" : $"all {s.DatabaseTiers} service tiers";
+            sentence += $" ({onDatabase} across {all} on this database)";
         }
-        if (s.CountedAt is { } counted)
+        if (s.Uncounted > 0)
         {
-            parts.Add($"The gateway counted them {Ago(counted)}, so the number may have changed.");
+            sentence += s.Uncounted == 1 ? "; one service tier did not report a count" : $"; {s.Uncounted} service tiers did not report a count";
         }
-        else
-        {
-            parts.Add("The gateway counts them every 15 minutes.");
-        }
-        return string.Join(" ", parts);
+        return sentence + ".";
     }
+
+    private string SessionsDetail(ServiceTierActionPlan plan) => plan.Sessions.CountedAt is { } counted
+        ? $"The gateway counted them {Ago(counted)}, so the number may have changed."
+        : "The gateway counts them every 15 minutes.";
 
     private static string AfterSentence(ServiceTierActionPlan plan) => plan.Action switch
     {
@@ -173,18 +180,28 @@
 
     private static string AckSentence(ServiceTierActionPlan plan)
     {
+        var verb = plan.Action == ServiceTierAction.Stop ? "stops" : "restarts";
+        var them = plan.Tiers.Count == 1 ? "it" : "them";
+        var tiers = plan.Tiers.Count == 1 ? plan.Tiers[0] : $"the {plan.Tiers.Count} service tiers listed";
+        // Production because of where the people are, said the way that is true: this
+        // environment, another environment on the same tiers, or the customer's own word.
+        if (plan.OtherProduction is { Count: > 0 } others)
+        {
+            return $"I understand this {verb} {tiers}, which also {(plan.Tiers.Count == 1 ? "serves" : "serve")} live Production ({string.Join(", ", others)}), and signs everyone out of {them}.";
+        }
+        if (!plan.IsOwnProduction)
+        {
+            return $"I understand this {verb} {tiers}, which the customer's IT runs as production, and signs everyone out of {them}.";
+        }
         var where = string.Equals(plan.EnvironmentName, "Production", StringComparison.OrdinalIgnoreCase)
             ? $"{plan.SolutionName}'s live Production environment"
             : $"{plan.EnvironmentName}, {plan.SolutionName}'s live Production environment";
-        var tiers = plan.Tiers.Count == 1 ? plan.Tiers[0] : $"the {plan.Tiers.Count} service tiers listed";
-        return plan.Action == ServiceTierAction.Stop
-            ? $"I understand this stops {where} on {tiers} and signs everyone out of it."
-            : $"I understand this restarts {where} on {tiers} and signs everyone out of {(plan.Tiers.Count == 1 ? "it" : "them")}.";
+        return $"I understand this {verb} {where} on {tiers} and signs everyone out of {them}.";
     }
 
-    private static string Ago(DateTime utc)
+    private string Ago(DateTime utc)
     {
-        var span = DateTime.UtcNow - utc;
+        var span = Clock.GetUtcNow().UtcDateTime - utc;
         if (span < TimeSpan.FromMinutes(1)) return "less than a minute ago";
         if (span < TimeSpan.FromHours(1)) return span.TotalMinutes < 2 ? "1 minute ago" : $"{(int)span.TotalMinutes} minutes ago";
         return span.TotalHours < 2 ? "1 hour ago" : $"{(int)span.TotalHours} hours ago";

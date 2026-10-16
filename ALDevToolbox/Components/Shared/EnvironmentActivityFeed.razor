@@ -44,7 +44,16 @@ else
         {
             <li class="@ItemClass(entry.Status)" @key="entry.Id">
                 <span class="eaf__icon" aria-hidden="true">
-                    <Icon Name="@StatusIcon(entry.Status)" Width="15" Height="15" />
+                    @* A service tier action the gateway is carrying out now is running, not
+                       booked for later: a spinner, as the card's Running pill, not a clock. *@
+                    @if (entry.TierProgress == ALDevToolbox.Services.Gateways.ServiceTierProgress.Running)
+                    {
+                        <span class="spinner"></span>
+                    }
+                    else
+                    {
+                        <Icon Name="@StatusIcon(entry.Status)" Width="15" Height="15" />
+                    }
                 </span>
                 <div class="eaf__body">
                     <div class="eaf__what">
@@ -189,11 +198,12 @@ else
             var tier = entry.TierName ?? "the service tier";
             var asked = entry.TierProgress is not null;
             var failed = entry.Status == UpgradeActionStatus.Failed;
+            var database = entry.TierDatabase is { } db ? $"database {db}" : $"{tier}'s database";
             return entry.Kind switch
             {
-                UpgradeActionKind.RestartServiceTiers => asked ? $"Asked to restart every service tier on {tier}'s database"
-                    : failed ? $"Tried to restart every service tier on {tier}'s database"
-                    : $"Restarted every service tier on {tier}'s database",
+                UpgradeActionKind.RestartServiceTiers => asked ? $"Asked to restart every service tier on {database}"
+                    : failed ? $"Tried to restart every service tier on {database}"
+                    : $"Restarted every service tier on {database}",
                 UpgradeActionKind.StopServiceTier => asked ? $"Asked to stop {tier}" : failed ? $"Tried to stop {tier}" : $"Stopped {tier}",
                 UpgradeActionKind.StartServiceTier => asked ? $"Asked to start {tier}" : failed ? $"Tried to start {tier}" : $"Started {tier}",
                 _ => asked ? $"Asked to restart {tier}" : failed ? $"Tried to restart {tier}" : $"Restarted {tier}",
@@ -242,7 +252,7 @@ else
             UpgradeActionStatus.Pending when entry.TierProgress == ALDevToolbox.Services.Gateways.ServiceTierProgress.Waiting
                 => @<text>Waiting for the gateway to pick it up</text>,
             UpgradeActionStatus.Pending when entry.TierProgress == ALDevToolbox.Services.Gateways.ServiceTierProgress.Running
-                => @<text>Running now</text>,
+                => @<StatusPill Tone="running">Running</StatusPill>,
             UpgradeActionStatus.Pending when entry.Kind == UpgradeActionKind.UpdateApp && entry.SentAt is not null
                 => @<text>Updating now</text>,
             UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.SentAt is not null

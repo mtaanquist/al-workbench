@@ -349,8 +349,19 @@ public sealed class OnPremisesLicenceService
                 GatewayCommandId = commandId,
             };
             _db.OeProjectLicenses.Add(row);
-            await _db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+            }
+            catch
+            {
+                // The command EnqueueAsync saved, and the upload added after it, are rolled
+                // back with the transaction but would stay tracked; the next save on this
+                // scoped context would then write an upload for a command that does not exist.
+                _db.ChangeTracker.Clear();
+                throw;
+            }
         }
         _commands.Wake(facts.GatewayId.Value);
 

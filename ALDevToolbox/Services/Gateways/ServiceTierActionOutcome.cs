@@ -55,17 +55,43 @@ public static class ServiceTierActionOutcome
             ? new Dictionary<long, CommandFacts>()
             : await db.GatewayCommands.AsNoTracking()
                 .Where(c => ids.Contains(c.Id))
-                .Select(c => new CommandFacts(c.Id, c.Status, c.FailureMessage, c.ResultJson, c.ParametersJson, c.FinishedAt))
+                .Select(c => new CommandFacts(c.Id, c.Status, c.FailureMessage, c.ResultJson, c.ParametersJson, c.FinishedAt, c.GatewayId))
                 .ToDictionaryAsync(c => c.Id, ct)
                 .ConfigureAwait(false);
-        return rows.Select(r => r.IsServiceTierAction
-                ? Apply(r, r.GatewayCommandId is { } id ? commands.GetValueOrDefault(id) : null)
-                : r)
+
+        // The database each command's tier serves, as its gateway last read it, so a restart
+        // of every tier on it can say which database that was.
+        var gatewayIds = commands.Values.Select(c => c.GatewayId).Distinct().ToList();
+        var instances = gatewayIds.Count == 0
+            ? []
+            : await db.GatewayInstances.AsNoTracking()
+                .Where(i => gatewayIds.Contains(i.GatewayId))
+                .Select(i => new TierDatabaseFacts(i.GatewayId, i.Machine, i.Name, i.DatabaseServer, i.DatabaseInstance, i.DatabaseName))
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+
+        return rows.Select(r =>
+            {
+                if (!r.IsServiceTierAction) return r;
+                var command = r.GatewayCommandId is { } id ? commands.GetValueOrDefault(id) : null;
+                return Apply(r, command) with { TierDatabase = DatabaseOf(command, instances) };
+            })
             .ToList();
     }
 
+    private sealed record TierDatabaseFacts(int GatewayId, string Machine, string Name, string? Server, string? Instance, string? Database);
+
+    private static string? DatabaseOf(CommandFacts? command, List<TierDatabaseFacts> instances)
+    {
+        if (command is null || TierOf(command.ParametersJson) is not { } tier) return null;
+        var i = instances.FirstOrDefault(x => x.GatewayId == command.GatewayId && Same($"{x.Machine} / {x.Name}", tier));
+        return i is null || (i.Database is null && i.Server is null)
+            ? null
+            : $"{i.Server}{(string.IsNullOrEmpty(i.Instance) ? string.Empty : "\\" + i.Instance)} / {i.Database}";
+    }
+
     /// <summary>What one gateway command says about the action it carries.</summary>
-    public sealed record CommandFacts(long Id, GatewayCommandStatus Status, string? FailureMessage, string? ResultJson, string ParametersJson, DateTime? FinishedAt);
+    public sealed record CommandFacts(long Id, GatewayCommandStatus Status, string? FailureMessage, string? ResultJson, string ParametersJson, DateTime? FinishedAt, int GatewayId = 0);
 
     /// <summary>One row read against its command; null <paramref name="command"/> means it is gone.</summary>
     public static UpgradeActionRow Apply(UpgradeActionRow row, CommandFacts? command)

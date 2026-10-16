@@ -552,6 +552,24 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         new GatewayCommandService(ctx, _db.OrgContext, new GatewayCommandSignal(), _clock, NullLogger<GatewayCommandService>.Instance),
         _clock, NullLogger<OnPremisesLicenceService>.Instance);
 
+    [Fact]
+    public async Task An_upload_whose_save_fails_after_the_command_was_queued_leaves_nothing_behind_for_the_next_one()
+    {
+        await SetPolicyAsync();
+        var failing = new FailFirstSaveOf<OeProjectLicense>();
+        await using var ctx = _db.NewContext(failing);
+        var service = Service(ctx);
+
+        var first = () => service.UploadAndImportAsync(_environmentId, "CRONUS.bclicense", Licence);
+        await first.Should().ThrowAsync<InvalidOperationException>();
+        failing.Failed.Should().BeTrue();
+
+        await service.UploadAndImportAsync(_environmentId, "CRONUS.bclicense", Licence);
+        await using var check = _db.NewContext();
+        var command = await check.GatewayCommands.SingleAsync();
+        (await check.OeProjectLicenses.SingleAsync()).GatewayCommandId.Should().Be(command.Id);
+    }
+
     private async Task<int> UploadAsync(string fileName, byte[] content)
     {
         await using var ctx = _db.NewContext();
