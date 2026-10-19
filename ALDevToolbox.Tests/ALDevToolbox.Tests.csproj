@@ -26,7 +26,7 @@
          Test Explorer, only the download. Recent Visual Studio drives MTP
          natively. Verified locally: all 2,623 tests still discover and run
          with both removed. -->
-    <PackageReference Include="xunit.v3" Version="4.0.1" />
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
     <!-- AwesomeAssertions is the community fork of FluentAssertions, kept on
          Apache-2.0. FluentAssertions 8 moved to the Xceed Community License,
          which is non-commercial only and needs a paid per-developer seat for
@@ -41,13 +41,13 @@
          10.*, but two projects floating independently can resolve to different
          patches when a new 10.0.x releases mid-restore -> CS1705. Keep this in
          lockstep with Microsoft.EntityFrameworkCore.Design in ALDevToolbox.csproj. -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.13" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <!-- WebApplicationFactory boots Program.cs end-to-end so the routing layer
          is exercised. Used by Routing/EndpointAmbiguityTests to detect route
          collisions at build time instead of at request time. -->
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.13" />
     <!-- bUnit renders Blazor components without a browser. Issue #72:
          pins the three-state-list and primary-button invariants from
          CLAUDE.md that the service-layer tests can't see. -->
@@ -55,7 +55,7 @@
     <!-- Testcontainers drives the local-dev path; CI bypasses it by setting
          ALDT_TEST_POSTGRES_CONNECTION to the runner-provided service container,
          so the package is restored but not exercised on the CI runner. -->
-    <PackageReference Include="Testcontainers.PostgreSql" Version="4.15.0" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.16.0" />
   </ItemGroup>
 
   <ItemGroup>
