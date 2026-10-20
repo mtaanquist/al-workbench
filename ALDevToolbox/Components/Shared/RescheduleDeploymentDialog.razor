@@ -164,7 +164,7 @@
     private string CityLabel => string.IsNullOrWhiteSpace(_options?.TimeZone) ? "UTC" : BcUpdateWindow.CityLabel(_options!.TimeZone!);
 
     private string WindowText => _options is { WindowStart: { } s, WindowEnd: { } e }
-        ? $"{UpdateWindow.Clock(s)}-{UpdateWindow.Clock(e)} ({CityLabel})"
+        ? $"{UpdateWindow.Clock(s)}-{UpdateWindow.Clock(e)}{UpdateWindow.DaysSuffix(_options.WindowDays)} ({CityLabel})"
         : string.Empty;
 
     /// <summary>
@@ -260,7 +260,7 @@
         get
         {
             if (_options is not { WindowStart: { } s, WindowEnd: { } e } o) return null;
-            if (UpdateWindow.IsWithin(s, e, _tz, PickedUtc)) return null;
+            if (UpdateWindow.IsWithin(s, e, _tz, PickedUtc, o.WindowDays)) return null;
             return $"This time is outside {o.EnvironmentName}'s delivery window ({WindowText}). It will still run at the time you picked, and the deployment history will show it ran outside the window.";
         }
     }

@@ -320,11 +320,18 @@
                                         <div class="env-detail__window-row">
                                             <label class="env-detail__window-time">From <input type="time" class="input input--sm" @bind="_winStart" disabled="@_windowSaving" /></label>
                                             <label class="env-detail__window-time">To <input type="time" class="input input--sm" @bind="_winEnd" disabled="@_windowSaving" /></label>
+                                        </div>
+                                        <DeliveryDaysPicker @bind-Value="_winDays" Disabled="@_windowSaving" />
+                                        @if (_winDays == DeliveryDays.None)
+                                        {
+                                            <small class="field__hint">Tick at least one day, or press Clear (any time) to allow deliveries whenever.</small>
+                                        }
+                                        <div class="env-detail__window-row">
                                             <button type="button" class="btn btn--sm" @onclick="SaveWindowAsync" disabled="@_windowSaving">Save window</button>
-                                            <button type="button" class="btn btn--sm" @onclick="() => PersistWindowAsync(null, null)" disabled="@_windowSaving">Clear (any time)</button>
+                                            <button type="button" class="btn btn--sm" @onclick="() => PersistWindowAsync(null, null, DeliveryDays.Every)" disabled="@_windowSaving">Clear (any time)</button>
                                             <button type="button" class="btn btn--sm" @onclick="() => _windowEditing = false" disabled="@_windowSaving">Cancel</button>
                                         </div>
-                                        <small class="field__hint">@WindowZoneCaption() These are the hours agreed with the customer for our own installs. Deployments prefill to the next opening; you can still deploy outside it. A window may run past midnight (e.g. 22:00 to 06:00).</small>
+                                        <small class="field__hint">@WindowZoneCaption() The hours and days the customer agreed to for our installs. You can still deploy outside them. A window may run past midnight (e.g. 22:00 to 06:00); tick the day it starts.</small>
                                         @if (_windowError is { } windowError)
                                         {
                                             <FieldError Message="@windowError" />
@@ -1829,7 +1836,7 @@
 
     private string DeliveryWindowText() =>
         _env!.DeliveryWindowStart is { } s && _env.DeliveryWindowEnd is { } e
-            ? $"{s:HH\\:mm}-{e:HH\\:mm} ({ZoneCity(Row.TimeZone) ?? "UTC"})"
+            ? $"{s:HH\\:mm}-{e:HH\\:mm}{UpdateWindow.DaysSuffix(_env.DeliveryWindowDays)} ({ZoneCity(Row.TimeZone) ?? "UTC"})"
             : "Any time";
 
     /// <summary>Microsoft's own window, in its own zone - not ours to set, so never worded like ours.</summary>
@@ -1967,7 +1974,7 @@
     {
         if (_updateConfirm is null) return;
         _updateAlongside = update.Requirements;
-        await _updateWhen.ResetAsync(Zone, _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, Row.TimeZone,
+        await _updateWhen.ResetAsync(Zone, _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, _env.DeliveryWindowDays, Row.TimeZone,
             _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana);
         var others = update.Requirements.Count;
         var installed = _panel?.InstalledApps.FirstOrDefault(a => a.AppId == update.AppId)?.Version;
@@ -2007,7 +2014,8 @@
         if (_uploadDialog is null) return;
         var upload = await _uploadDialog.OpenAsync(Row.ProjectName, Row.EnvironmentName, Row.IsProduction,
             _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, Row.TimeZone,
-            _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana);
+            _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana,
+            _env.DeliveryWindowDays);
         if (upload is null) return;
 
         UploadAppOutcome? outcome = null;
@@ -2214,6 +2222,7 @@
     private string? _windowError;
     private TimeOnly? _winStart;
     private TimeOnly? _winEnd;
+    private DeliveryDays _winDays = DeliveryDays.Every;
 
     private void OpenWindowEditor()
     {
@@ -2221,6 +2230,7 @@
         _windowError = null;
         _winStart = _env!.DeliveryWindowStart;
         _winEnd = _env.DeliveryWindowEnd;
+        _winDays = _env.DeliveryWindowDays;
     }
 
     private async Task SaveWindowAsync()
@@ -2230,16 +2240,21 @@
             _windowError = "Enter both a start and an end time, or use Clear for 'any time'.";
             return;
         }
-        await PersistWindowAsync(start, end);
+        if (_winDays == DeliveryDays.None)
+        {
+            _windowError = "Tick at least one day, or press Clear (any time) to allow deliveries whenever.";
+            return;
+        }
+        await PersistWindowAsync(start, end, _winDays);
     }
 
-    private async Task PersistWindowAsync(TimeOnly? start, TimeOnly? end)
+    private async Task PersistWindowAsync(TimeOnly? start, TimeOnly? end, DeliveryDays days)
     {
         _windowError = null;
         _windowSaving = true;
         try
         {
-            await Write(() => Connection.SetUpdateWindowAsync(Row.ProjectId, Id, start, end));
+            await Write(() => Connection.SetUpdateWindowAsync(Row.ProjectId, Id, start, end, days));
             _windowEditing = false;
             await LoadEnvironmentAsync();
         }

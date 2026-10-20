@@ -1,3 +1,5 @@
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+
 namespace ALDevToolbox.Domain.Entities.ObjectExplorer;
 
 /// <summary>
@@ -109,6 +111,13 @@ public class OeProjectEnvironment
 
     /// <summary>End of the daily delivery window (may wrap past midnight, e.g. 22:00–06:00). Null together with <see cref="UpdateWindowStart"/> = no window.</summary>
     public TimeOnly? UpdateWindowEnd { get; set; }
+
+    /// <summary>
+    /// The days of the week the delivery window opens on, in the project's zone
+    /// (a customer that only takes installs at Wednesday lunch). <see cref="DeliveryDays.Every"/>
+    /// for a daily window, and always that when no window is set.
+    /// </summary>
+    public DeliveryDays UpdateWindowDays { get; set; } = DeliveryDays.Every;
 
     // ── Microsoft's platform-update window, mirrored (read-only context) ──────────
     //

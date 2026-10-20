@@ -1,0 +1,40 @@
+@using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@* The days a delivery window opens on: seven checkboxes, Monday first. Shared by the
+   environment page's window editor and the "Set delivery window" dialog. *@
+
+<fieldset class="delivery-days">
+    <legend class="delivery-days__legend">Days</legend>
+    @foreach (var day in DeliveryDaysExtensions.Week)
+    {
+        var flag = day.ToDeliveryDay();
+        var on = (Value & flag) != 0;
+        <label class="check @(on ? "is-checked" : "")" title="@day">
+            <input type="checkbox" checked="@on" disabled="@Disabled" aria-label="@day"
+                   @onchange="e => ToggleAsync(flag, e.Value is true)" />
+            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+            @day.ToString()[..3]
+        </label>
+    }
+    <span class="delivery-days__presets">
+        <button type="button" class="btn btn--sm btn--ghost" disabled="@Disabled" @onclick="() => SetAsync(DeliveryDays.Every)">Every day</button>
+        <button type="button" class="btn btn--sm btn--ghost" disabled="@Disabled" @onclick="() => SetAsync(DeliveryDays.Weekdays)">Weekdays</button>
+        <button type="button" class="btn btn--sm btn--ghost" disabled="@Disabled" @onclick="() => SetAsync(DeliveryDays.None)">None</button>
+    </span>
+</fieldset>
+
+@code {
+    /// <summary>The days picked.</summary>
+    [Parameter] public DeliveryDays Value { get; set; } = DeliveryDays.Every;
+
+    [Parameter] public EventCallback<DeliveryDays> ValueChanged { get; set; }
+
+    [Parameter] public bool Disabled { get; set; }
+
+    private Task ToggleAsync(DeliveryDays flag, bool on) => SetAsync(on ? Value | flag : Value & ~flag);
+
+    private Task SetAsync(DeliveryDays days)
+    {
+        Value = days;
+        return ValueChanged.InvokeAsync(Value);
+    }
+}

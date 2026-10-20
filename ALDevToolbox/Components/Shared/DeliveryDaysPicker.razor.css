@@ -1,0 +1,22 @@
+.delivery-days {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+}
+
+.delivery-days__legend {
+    float: left;
+    padding: 0;
+    margin-right: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}
+
+.delivery-days .check { font-size: var(--text-sm); }
+
+.delivery-days__presets { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); }

@@ -7,7 +7,7 @@
 
 @*
     "Set delivery window..." for the rows ticked on the Environments list (issue #961).
-    One start and end, or Any time, for every selected environment; a preview grouped the
+    One start and end with the days it opens on, or Any time, for every selected environment; a preview grouped the
     way the Upgrades page groups its runs; then the per-row result. The grouping and the
     writes are ProjectConnectionService's - this only renders them.
 
@@ -44,7 +44,7 @@
             {
                 <div class="confirm-dialog__body bdw-body">
                     <p class="bdw-lead">
-                        The hours each day when AL Workbench may deploy apps to these environments.
+                        The hours and days when AL Workbench may deploy apps to these environments.
                         Business Central's own update window is not changed.
                     </p>
                     <div class="bdw-window">
@@ -63,12 +63,20 @@
                             <span>Any time (no window)</span>
                         </label>
                     </div>
+                    @if (!_anyTime)
+                    {
+                        <DeliveryDaysPicker Value="_days" ValueChanged="OnDaysChangedAsync" Disabled="@_saving" />
+                    }
                     <p class="field__hint bdw-zone">
                         Times are in each customer's own Business Central time zone: 22:00 means 22:00 where that customer is.
                     </p>
                     @if (IsHalfFilled)
                     {
                         <span class="field__hint">Enter the @(_start is null ? "start" : "end") time too, or tick Any time.</span>
+                    }
+                    else if (!_anyTime && _days == DeliveryDays.None)
+                    {
+                        <span class="field__hint">Tick at least one day, or tick Any time.</span>
                     }
 
                     @if (_preview is { } preview)
@@ -112,6 +120,7 @@
     private TimeOnly? _start;
     private TimeOnly? _end;
     private bool _anyTime;
+    private DeliveryDays _days = DeliveryDays.Every;
 
     private List<DeliveryWindowChangePreviewRow>? _preview;
     private bool _previewLoading;
@@ -129,7 +138,7 @@
     private bool IsHalfFilled => !_anyTime && _start is null != (_end is null);
 
     /// <summary>A window has been chosen: both times, or Any time on purpose. Two empty boxes are not a choice.</summary>
-    private bool HasChoice => _anyTime || (_start is not null && _end is not null);
+    private bool HasChoice => _anyTime || (_start is not null && _end is not null && _days != DeliveryDays.None);
 
     private int ChangeCount => _preview?.Count(p => p.Group == DeliveryWindowChangeGroup.WillChange) ?? 0;
 
@@ -160,6 +169,7 @@
         _start = null;
         _end = null;
         _anyTime = false;
+        _days = DeliveryDays.Every;
         _preview = null;
         _previewLoading = false;
         _previewAgain = false;
@@ -196,6 +206,12 @@
     }
 
     private static string TimeValue(TimeOnly? time) => time is { } t ? UpdateWindow.Clock(t) : string.Empty;
+
+    private async Task OnDaysChangedAsync(DeliveryDays days)
+    {
+        _days = days;
+        await RefreshPreviewAsync();
+    }
 
     private async Task OnAnyTimeChangedAsync(bool on)
     {
@@ -238,7 +254,7 @@
                     _preview = null;
                     break;
                 }
-                _preview = await Connection.PreviewUpdateWindowForManyAsync(_ids, Target().Start, Target().End);
+                _preview = await Connection.PreviewUpdateWindowForManyAsync(_ids, Target().Start, Target().End, Target().Days);
             }
             while (_previewAgain);
         }
@@ -259,7 +275,8 @@
         }
     }
 
-    private (TimeOnly? Start, TimeOnly? End) Target() => _anyTime ? (null, null) : (_start, _end);
+    private (TimeOnly? Start, TimeOnly? End, DeliveryDays Days) Target() =>
+        _anyTime ? (null, null, DeliveryDays.Every) : (_start, _end, _days);
 
     private async Task ApplyAsync()
     {
@@ -268,8 +285,8 @@
         _error = null;
         try
         {
-            var (start, end) = Target();
-            _results = await Connection.SetUpdateWindowForManyAsync(_ids, start, end);
+            var (start, end, days) = Target();
+            _results = await Connection.SetUpdateWindowForManyAsync(_ids, start, end, days);
             await OnApplied.InvokeAsync(_results);
         }
         catch (PlanValidationException ex)
@@ -300,10 +317,10 @@
 
     // ── Wording ─────────────────────────────────────────────────────────
 
-    private static string Window(TimeOnly? start, TimeOnly? end) =>
-        start is { } s && end is { } e ? $"{UpdateWindow.Clock(s)}-{UpdateWindow.Clock(e)}" : "any time";
+    private static string Window(TimeOnly? start, TimeOnly? end, DeliveryDays days) =>
+        start is { } s && end is { } e ? $"{UpdateWindow.Clock(s)}-{UpdateWindow.Clock(e)}{UpdateWindow.DaysSuffix(days)}" : "any time";
 
-    private string NewWindow => Window(Target().Start, Target().End);
+    private string NewWindow => Window(Target().Start, Target().End, Target().Days);
 
     private static string Capitalised(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
 
@@ -327,8 +344,8 @@
 
     private string What(DeliveryWindowChangePreviewRow row) => row.Group switch
     {
-        DeliveryWindowChangeGroup.WillChange => Capitalised($"{Window(row.CurrentStart, row.CurrentEnd)} → {NewWindow}"),
-        DeliveryWindowChangeGroup.AlreadySet => $"Already {Window(row.CurrentStart, row.CurrentEnd)}",
+        DeliveryWindowChangeGroup.WillChange => Capitalised($"{Window(row.CurrentStart, row.CurrentEnd, row.CurrentDays)} → {NewWindow}"),
+        DeliveryWindowChangeGroup.AlreadySet => $"Already {Window(row.CurrentStart, row.CurrentEnd, row.CurrentDays)}",
         DeliveryWindowChangeGroup.NoAccess => "Only people who manage this solution can change it - ask one of them",
         _ => "Not found in Business Central, or being deleted",
     };

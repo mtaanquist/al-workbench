@@ -392,6 +392,7 @@ public sealed class DeliveryService
                 EnvType = r.ProjectEnvironment.Type,
                 WindowStart = r.ProjectEnvironment.UpdateWindowStart,
                 WindowEnd = r.ProjectEnvironment.UpdateWindowEnd,
+                WindowDays = r.ProjectEnvironment.UpdateWindowDays,
             })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
@@ -534,7 +535,7 @@ public sealed class DeliveryService
         return new ReleasePlan(
             rp.Id, rp.ProjectId, rp.EnvName, rp.EnvType, wireSchedule,
             BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule), rp.SchemaSyncMode,
-            UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, build.Id, artifacts);
+            UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, rp.WindowDays, build.Id, artifacts);
     }
 
     /// <summary>What to do about an app older than the installed one, for both refusals.</summary>
@@ -594,11 +595,11 @@ public sealed class DeliveryService
     /// <summary>A deployment checked and ready to be written: see <see cref="ResolveReleaseAsync"/>.</summary>
     private sealed record ReleasePlan(
         int Id, int ProjectId, string EnvName, string? EnvType, string WireSchedule, bool ByDeliveryWindow, string SchemaSyncMode,
-        TimeZoneInfo Tz, TimeOnly? WindowStart, TimeOnly? WindowEnd, int BuildId, List<ReleaseApp> Artifacts)
+        TimeZoneInfo Tz, TimeOnly? WindowStart, TimeOnly? WindowEnd, DeliveryDays WindowDays, int BuildId, List<ReleaseApp> Artifacts)
     {
         /// <summary>True when a window is set and <paramref name="utc"/> falls outside it: the audited override.</summary>
         public bool IsOutsideWindow(DateTime utc) =>
-            UpdateWindow.IsConfigured(WindowStart, WindowEnd) && !UpdateWindow.IsWithin(WindowStart, WindowEnd, Tz, utc);
+            UpdateWindow.IsConfigured(WindowStart, WindowEnd) && !UpdateWindow.IsWithin(WindowStart, WindowEnd, Tz, utc, WindowDays);
 
         /// <summary>
         /// When the pipeline's own rule puts a deployment made at <paramref name="fromUtc"/>:
@@ -607,7 +608,7 @@ public sealed class DeliveryService
         /// schedules it for, so it runs the way the deploy dialog's prefill would have.
         /// </summary>
         public DateTime RuleTime(DateTime fromUtc) => ByDeliveryWindow
-            ? UpdateWindow.NextOpeningUtc(WindowStart, WindowEnd, Tz, fromUtc)
+            ? UpdateWindow.NextOpeningUtc(WindowStart, WindowEnd, Tz, fromUtc, WindowDays)
             : fromUtc;
     }
 
@@ -1107,7 +1108,7 @@ public sealed class DeliveryService
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
         var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
         DateTime? nextOpening = hasWindow
-            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, DateTime.UtcNow)
+            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, DateTime.UtcNow, info.WindowDays)
             : null;
         var current = CurrentTiming(info.DeploymentSchedule, info.ScheduledByDeliveryWindow, info.ScheduledOutsideWindow, hasWindow);
         var update = await _db.OeProjectEnvironments.AsNoTracking()
@@ -1121,6 +1122,7 @@ public sealed class DeliveryService
             info.TimeZone, info.WindowStart, info.WindowEnd, nextOpening,
             await WhyNotLaterUpdateAsync(info, ct))
         {
+            WindowDays = info.WindowDays,
             BuildId = info.ProjectBuildId,
             NextUpdateVersion = update?.BcNextUpdateVersion,
             NextUpdateType = update?.BcNextUpdateType,
@@ -1291,7 +1293,7 @@ public sealed class DeliveryService
                     throw Validation("Timing",
                         $"{info.EnvironmentName} has no delivery window. Set one on the environment, or pick a time.");
                 }
-                when = UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, now);
+                when = UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, now, info.WindowDays);
                 byWindow = true;
                 break;
             case RescheduleTiming.NextMinorUpdate:
@@ -1314,7 +1316,7 @@ public sealed class DeliveryService
         // update installs on Microsoft's schedule, not ours.
         var outsideWindow = schedule == BcDeploymentSchedule.Immediate
             && hasWindow
-            && !UpdateWindow.IsWithin(info.WindowStart, info.WindowEnd, tz, when);
+            && !UpdateWindow.IsWithin(info.WindowStart, info.WindowEnd, tz, when, info.WindowDays);
         return new ResolvedTiming(when, schedule, byWindow, outsideWindow);
     }
 
@@ -1514,7 +1516,7 @@ public sealed class DeliveryService
         int DeliveryId, int OrganizationId, int? TriggeredByUserId, int ProjectId, int? OwnerId, int ReleasePipelineId,
         int ProjectBuildId, int EnvironmentId, string EnvironmentName, string Status, DateTime ScheduledFor,
         string DeploymentSchedule, bool ScheduledByDeliveryWindow, bool ScheduledOutsideWindow,
-        string? TimeZone, TimeOnly? WindowStart, TimeOnly? WindowEnd, string SchemaSyncMode);
+        string? TimeZone, TimeOnly? WindowStart, TimeOnly? WindowEnd, DeliveryDays WindowDays, string SchemaSyncMode);
 
     private async Task<RescheduleInfo?> RescheduleInfoAsync(int deliveryId, CancellationToken ct)
     {
@@ -1538,14 +1540,14 @@ public sealed class DeliveryService
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == d.ProjectId && e.Name == d.EnvironmentName)
             .OrderBy(e => e.Id == d.PipelineEnvironmentId ? 0 : 1)
-            .Select(e => new { e.Id, e.UpdateWindowStart, e.UpdateWindowEnd })
+            .Select(e => new { e.Id, e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays })
             .FirstOrDefaultAsync(ct);
 
         return new RescheduleInfo(
             deliveryId, d.OrganizationId, d.TriggeredByUserId, d.ProjectId, d.OwnerId, d.ReleasePipelineId,
             d.ProjectBuildId, env?.Id ?? d.PipelineEnvironmentId, d.EnvironmentName, d.Status, d.ScheduledFor,
             d.DeploymentSchedule, d.ScheduledByDeliveryWindow, d.ScheduledOutsideWindow,
-            d.TimeZone, env?.UpdateWindowStart, env?.UpdateWindowEnd, d.SchemaSyncMode);
+            d.TimeZone, env?.UpdateWindowStart, env?.UpdateWindowEnd, env?.UpdateWindowDays ?? DeliveryDays.Every, d.SchemaSyncMode);
     }
 
     /// <summary>The one app a handed-off delivery left with Business Central, as the move cancels it.</summary>
@@ -1908,7 +1910,7 @@ public sealed class DeliveryService
         var window = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == d.ProjectId && e.Name == d.EnvironmentName)
             .OrderBy(e => e.Id == d.PipelineEnvironmentId ? 0 : 1)
-            .Select(e => new { e.UpdateWindowStart, e.UpdateWindowEnd })
+            .Select(e => new { e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays })
             .FirstOrDefaultAsync(ct);
         if (window is null || !UpdateWindow.IsConfigured(window.UpdateWindowStart, window.UpdateWindowEnd)) return false;
 
@@ -1916,9 +1918,9 @@ public sealed class DeliveryService
         var now = _clock.GetUtcNow().UtcDateTime;
         var startsAt = d.ScheduledFor > now ? d.ScheduledFor : now;
         var tz = UpdateWindow.ResolveTimeZone(d.TimeZone);
-        if (UpdateWindow.IsWithin(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt)) return false;
+        if (UpdateWindow.IsWithin(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt, window.UpdateWindowDays)) return false;
 
-        var next = UpdateWindow.NextOpeningUtc(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt);
+        var next = UpdateWindow.NextOpeningUtc(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt, window.UpdateWindowDays);
         // In the window's own time zone, the way the environment page shows the window.
         var nextLocal = TimeZoneInfo.ConvertTimeFromUtc(next, tz);
         var line = LogLine(string.Create(CultureInfo.InvariantCulture,
@@ -2822,6 +2824,9 @@ public sealed record RescheduleOptions(
     DateTime? NextWindowOpeningUtc,
     string? LaterUpdateUnavailable)
 {
+    /// <summary>The days the delivery window opens on.</summary>
+    public DeliveryDays WindowDays { get; init; } = DeliveryDays.Every;
+
     /// <summary>The build the deployment installs.</summary>
     public int BuildId { get; init; }
 

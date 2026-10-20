@@ -784,6 +784,37 @@ public sealed class DeliveryServiceTests : IDisposable
         (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
     }
 
+    [Fact]
+    public async Task A_deployment_the_window_chose_waits_for_a_day_the_window_opens_on()
+    {
+        int deliveryId;
+        var now = DateTime.UtcNow;
+        // Whole minutes, as people set windows: the database keeps microseconds, not ticks.
+        var openedAt = now.AddMinutes(-30);
+        var opened = new TimeOnly(openedAt.Hour, openedAt.Minute);
+        // Open at this hour, but only on the day after tomorrow (UTC project tz).
+        var onlyDay = now.AddDays(2).DayOfWeek;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" }, deploymentSchedule: BcDeploymentSchedule.OurDeliveryWindow);
+            await SetWindowAsync(ctx, seed.EnvironmentId, opened, opened.AddHours(2), onlyDay.ToDeliveryDay());
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-10))
+                    .SetProperty(d => d.ScheduledByDeliveryWindow, true)
+                    .SetProperty(d => d.ScheduledOutsideWindow, false));
+        }
+
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse("today is not one of the window's days");
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        delivery.ScheduledFor.DayOfWeek.Should().Be(onlyDay);
+        new TimeOnly(delivery.ScheduledFor.Hour, delivery.ScheduledFor.Minute).Should().Be(opened);
+    }
+
     [Theory]
     [InlineData("still-allowed")]
     [InlineData("disabled")]
@@ -3702,12 +3733,14 @@ public sealed class DeliveryServiceTests : IDisposable
         while (_queue.Reader.TryRead(out var job)) _queue.Complete(job.DeliveryId);
     }
 
-    private static async Task SetWindowAsync(AppDbContext ctx, int environmentId, TimeOnly start, TimeOnly end)
+    private static async Task SetWindowAsync(AppDbContext ctx, int environmentId, TimeOnly start, TimeOnly end,
+        DeliveryDays days = DeliveryDays.Every)
     {
         await ctx.OeProjectEnvironments.Where(e => e.Id == environmentId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(e => e.UpdateWindowStart, start)
-                .SetProperty(e => e.UpdateWindowEnd, end));
+                .SetProperty(e => e.UpdateWindowEnd, end)
+                .SetProperty(e => e.UpdateWindowDays, days));
     }
 
     private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>

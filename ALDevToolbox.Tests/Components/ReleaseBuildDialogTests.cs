@@ -1,3 +1,4 @@
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Components.Shared;
 using ALDevToolbox.Data;
 using ALDevToolbox.Services;
@@ -121,7 +122,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             ],
             timeZone: "Europe/Copenhagen",
             windowStart: null,
-            windowEnd: null)).GetAwaiter().GetResult();
+            windowEnd: null, windowDays: DeliveryDays.Every)).GetAwaiter().GetResult();
         return cut;
     }
 
@@ -173,7 +174,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             ],
             timeZone: "UTC",
             windowStart: opens,
-            windowEnd: opens.AddHours(2))).GetAwaiter().GetResult();
+            windowEnd: opens.AddHours(2), windowDays: DeliveryDays.Every)).GetAwaiter().GetResult();
 
         cut.Find("#rb-when").GetAttribute("value").Should().StartWith(expected.ToString("yyyy-MM-ddTHH:mm"));
         cut.Find(".rb-when-row + .field__hint").TextContent.Should()
@@ -221,7 +222,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             builds: [],
             timeZone: "Europe/Copenhagen",
             windowStart: null,
-            windowEnd: null,
+            windowEnd: null, windowDays: DeliveryDays.Every,
             secretExpiresAt: null,
             releases:
             [
@@ -256,7 +257,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             builds: [],
             timeZone: "Europe/Copenhagen",
             windowStart: null,
-            windowEnd: null,
+            windowEnd: null, windowDays: DeliveryDays.Every,
             secretExpiresAt: null,
             // One release, nothing installable attached to it.
             releases: [new ALDevToolbox.Services.GitHub.GitHubReleaseOption("v1.4.1.0", null, null, [])],
@@ -315,7 +316,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             releasePipelineId: 1, customerName: "CRONUS A/S", envName: "Test", envType: "Sandbox",
             deploymentSchedule: "Immediate", schemaSyncMode: "Add",
             builds: [new ReleaseBuildDialog.ReleasableBuildOption(412, "#412", [])],
-            timeZone: "UTC", windowStart: null, windowEnd: null)).GetAwaiter().GetResult();
+            timeZone: "UTC", windowStart: null, windowEnd: null, windowDays: DeliveryDays.Every)).GetAwaiter().GetResult();
         cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Should().Contain("Deploy now");
 
         cut.Find(".confirm-dialog__actions .btn--primary").Click();
@@ -338,7 +339,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             releasePipelineId: 1, customerName: "CRONUS A/S", envName: "Test", envType: "Sandbox",
             deploymentSchedule: "NextMinorUpdate", schemaSyncMode: "Add",
             builds: [new ReleaseBuildDialog.ReleasableBuildOption(412, "#412", [])],
-            timeZone: "UTC", windowStart: null, windowEnd: null)).GetAwaiter().GetResult();
+            timeZone: "UTC", windowStart: null, windowEnd: null, windowDays: DeliveryDays.Every)).GetAwaiter().GetResult();
 
         cut.Find(".confirm-dialog__actions .btn--primary").Click();
 

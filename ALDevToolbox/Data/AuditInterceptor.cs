@@ -153,6 +153,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     {
         nameof(OeProjectEnvironment.UpdateWindowStart),
         nameof(OeProjectEnvironment.UpdateWindowEnd),
+        nameof(OeProjectEnvironment.UpdateWindowDays),
         nameof(OeProjectEnvironment.AppSourceAppsUpdateCadence),
     };
 

@@ -501,7 +501,7 @@
     /// <summary>The window summary shown under an environment's name.</summary>
     private static string WindowText(ProjectEnvironmentRow env) =>
         env.UpdateWindowStart is { } s && env.UpdateWindowEnd is { } e
-            ? $"{s:HH\\:mm}-{e:HH\\:mm}"
+            ? $"{s:HH\\:mm}-{e:HH\\:mm}{UpdateWindow.DaysSuffix(env.UpdateWindowDays)}"
             : "any time";
 
     /// <summary>

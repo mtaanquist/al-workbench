@@ -687,7 +687,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         // Somebody clears it on the environment page, then the default itself changes.
         await using (var ctx = _db.NewContext())
-            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(id, envId, null, null);
+            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(id, envId, null, null, DeliveryDays.Every);
         await SetDefaultWindowsAsync(new DefaultDeliveryWindows(new TimeOnly(1, 0), new TimeOnly(3, 0), null, null));
         await using (var ctx = _db.NewContext())
             await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsAsync(id);
@@ -4015,7 +4015,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             await using var ctx = _db.NewContext();
             var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
 
-            await ((Func<Task>)(() => svc.SetUpdateWindowAsync(projectId, envId, Ten, Six)))
+            await ((Func<Task>)(() => svc.SetUpdateWindowAsync(projectId, envId, Ten, Six, DeliveryDays.Every)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
             await ((Func<Task>)(() => svc.CancelScheduledInstallAsync(
                     projectId, envId, Guid.NewGuid(), "2.0.0.0", BcDeploymentSchedule.UpdateWindow)))
@@ -4042,10 +4042,39 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var act = () => Svc(ctx, TokenOk())
-            .SetUpdateWindowAsync(projectId, envId, onlyStart ? Ten : null, onlyStart ? null : Six);
+            .SetUpdateWindowAsync(projectId, envId, onlyStart ? Ten : null, onlyStart ? null : Six, DeliveryDays.Every);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UpdateWindow"]
             .Should().Contain("both a start and an end");
+    }
+
+    [Fact]
+    public async Task A_delivery_window_keeps_the_days_it_opens_on_and_clearing_it_resets_them()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(projectId, envId, Ten, Six, DeliveryDays.Wednesday | DeliveryDays.Friday);
+        (await EnvironmentsAsync(projectId)).Single().UpdateWindowDays
+            .Should().Be(DeliveryDays.Wednesday | DeliveryDays.Friday);
+
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(projectId, envId, null, null, DeliveryDays.Wednesday);
+        var cleared = (await EnvironmentsAsync(projectId)).Single();
+        cleared.UpdateWindowStart.Should().BeNull();
+        cleared.UpdateWindowDays.Should().Be(DeliveryDays.Every, "no window means any time, on any day");
+    }
+
+    [Fact]
+    public async Task A_delivery_window_with_no_days_is_refused()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk()).SetUpdateWindowAsync(projectId, envId, Ten, Six, DeliveryDays.None);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UpdateWindowDays"]
+            .Should().Contain("at least one day");
     }
 
     // ── The organisation's own app registration ───────────────────────────
@@ -4422,7 +4451,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync(
-            [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six);
+            [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six, DeliveryDays.Every);
 
         preview.Select(p => (p.EnvironmentId, p.Group)).Should().Equal(
             (fleet.Changes, DeliveryWindowChangeGroup.WillChange),
@@ -4435,6 +4464,25 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         changing.ProjectName.Should().Be("CRONUS A/S");
         changing.CurrentStart.Should().BeNull("it has no window yet, which the dialog words as Any time");
         preview[4].EnvironmentName.Should().BeNull("an id nobody can read has no name to give");
+    }
+
+    [Fact]
+    public async Task The_bulk_window_counts_other_days_as_a_change_and_writes_them()
+    {
+        var fleet = await SeedWindowFleetAsync();
+
+        await using (var ctx = _db.NewContext())
+        {
+            var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync([fleet.AlreadySet], Ten, Six, DeliveryDays.Wednesday);
+            preview.Single().Group.Should().Be(DeliveryWindowChangeGroup.WillChange, "the hours match but the days don't");
+            preview.Single().CurrentDays.Should().Be(DeliveryDays.Every);
+        }
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.AlreadySet], Ten, Six, DeliveryDays.Wednesday);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == fleet.AlreadySet)).UpdateWindowDays
+            .Should().Be(DeliveryDays.Wednesday);
     }
 
     [Fact]
@@ -4476,7 +4524,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         }
 
         await using var ctx = _db.NewContext();
-        var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], Ten, Six);
+        var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], Ten, Six, DeliveryDays.Every);
 
         preview.Single(p => p.EnvironmentId == fleet.Changes).HasDeploymentWaitingForWindow.Should().BeTrue();
         preview.Single(p => p.EnvironmentId == fleet.AlreadySet).HasDeploymentWaitingForWindow.Should().BeFalse();
@@ -4492,7 +4540,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             results = await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync(
-                [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six);
+                [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six, DeliveryDays.Every);
         }
 
         results.Select(r => (r.Row.EnvironmentId, r.Outcome)).Should().Equal(
@@ -4519,7 +4567,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var results = await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], null, null);
+            var results = await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], null, null, DeliveryDays.Every);
             results.Select(r => r.Outcome).Should().Equal(DeliveryWindowChangeOutcome.Skipped, DeliveryWindowChangeOutcome.Changed);
         }
 
@@ -4536,7 +4584,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var act = () => Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes], Ten, null);
+            var act = () => Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes], Ten, null, DeliveryDays.Every);
             (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UpdateWindow");
         }
 

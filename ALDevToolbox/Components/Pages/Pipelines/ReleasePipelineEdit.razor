@@ -608,7 +608,7 @@
             if (BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule))
             {
                 return ChosenEnvironment is { } env && ChosenEnvironmentHasWindow
-                    ? $"Deployments are scheduled for the next opening of the delivery window agreed with the customer for {env.Name} ({env.UpdateWindowStart:HH:mm}-{env.UpdateWindowEnd:HH:mm}, solution's time zone). This is not Business Central's own update window. The person releasing can still choose to release now."
+                    ? $"Deployments are scheduled for the next opening of the delivery window agreed with the customer for {env.Name} ({env.UpdateWindowStart:HH:mm}-{env.UpdateWindowEnd:HH:mm}{UpdateWindow.DaysSuffix(env.UpdateWindowDays)}, solution's time zone). This is not Business Central's own update window. The person releasing can still choose to release now."
                     : "Deployments default to the next opening of the environment's delivery window.";
             }
             return BcDeploymentSchedule.Normalize(_deploymentSchedule) switch
