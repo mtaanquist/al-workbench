@@ -264,17 +264,23 @@ than erasing it.
 
 Every BC SaaS environment already *has* an update window in the admin center — a recurring daily
 time range during which Microsoft applies platform/app updates — so BC admins reach for exactly this
-model. We mirror it: two nullable columns on `OeProjectEnvironment`, interpreted in the project's
-`bc_time_zone`:
+model. We mirror it: two nullable columns on `OeProjectEnvironment`, plus the days the window
+opens on (#1410), interpreted in the project's `bc_time_zone`:
 
 | Column | Type | Why |
 |---|---|---|
 | `update_window_start` | `time?` | Start of the daily window (e.g. `22:00`), in `bc_time_zone`. |
 | `update_window_end` | `time?` | End of the daily window (e.g. `06:00`); may wrap past midnight. |
+| `update_window_days` | `smallint` | The weekdays the window opens on, as a `DeliveryDays` bit set (Monday = 1 ... Sunday = 64, 127 = every day). Every day when no window is set. |
 
 Both null ⇒ **no window** (deliver any time) — the normal Sandbox case. Set ⇒ a recurring default a
-Production environment is happy to receive updates in. v1 is a single daily range, matching BC's own
-admin-center field (no weekday mask — add one only if a real case needs it). The window is in
+Production environment is happy to receive updates in. It is one time range, on every day or only
+on the days picked: a customer that only takes installs at Wednesday lunch is 12:00-13:00 on
+Wednesdays. A day names when the window *opens*, so a Wednesday-only 22:00-06:00 window still runs
+into Thursday morning. At least one day must be picked while a window is set; clearing the window
+resets the days to every day. The days are ours alone: Business Central's own window has none, and
+the overlap warning against it compares hours only. The organisation's default windows (#962) have
+no days, so a new environment starts with every day. The window is in
 `bc_time_zone` for now; BC environments carry their *own* tz, which we could fetch from the admin API
 later, but one project-level tz is the v1 simplification consistent with the rest of this doc.
 
@@ -310,7 +316,7 @@ reads the setting under the org it has already pinned, through the query filter.
 
 **Many environments at once** (#961). The Environments list lets rows be ticked (not a deleted
 environment's) and offers **Set delivery window...**: one start and end, or "any time", for every
-ticked row, still read in each customer's own `bc_time_zone` - applying 22:00-06:00 to ten
+ticked row, with the days it opens on, still read in each customer's own `bc_time_zone` - applying 22:00-06:00 to ten
 customers gives ten local 22:00s. `ProjectConnectionService.PreviewUpdateWindowForManyAsync`
 groups the selection first (**Will change**, **Already set**, **No access** - the manage check is
 asked once per solution - and **Missing or being deleted**), and

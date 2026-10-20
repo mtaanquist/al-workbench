@@ -135,18 +135,19 @@
         /// </summary>
         /// <param name="zone">The page's display zone, which a picked time is read in.</param>
         /// <param name="deliveryWindowStart">The environment's delivery window, when set. Both bounds or neither.</param>
+        /// <param name="deliveryWindowDays">The days the delivery window opens on.</param>
         /// <param name="customerTimeZone">The IANA zone the delivery window is agreed in - the solution's.</param>
         /// <param name="bcWindowStart">Microsoft's update window as mirrored from the admin centre, when read. Both bounds or neither.</param>
         /// <param name="bcWindowTimeZone">The IANA zone Microsoft's window is expressed in; the customer's zone when unknown.</param>
         public async Task ResetAsync(DisplayTimeZone zone,
-            TimeOnly? deliveryWindowStart, TimeOnly? deliveryWindowEnd, string? customerTimeZone,
+            TimeOnly? deliveryWindowStart, TimeOnly? deliveryWindowEnd, DeliveryDays deliveryWindowDays, string? customerTimeZone,
             TimeOnly? bcWindowStart, TimeOnly? bcWindowEnd, string? bcWindowTimeZone)
         {
             await zone.EnsureLoadedAsync();
             _pageZone = zone.Zone;
             CustomerTimeZone = customerTimeZone;
             DeliveryWindowText = UpdateWindow.IsConfigured(deliveryWindowStart, deliveryWindowEnd)
-                ? WindowText(deliveryWindowStart!.Value, deliveryWindowEnd!.Value, customerTimeZone)
+                ? WindowText(deliveryWindowStart!.Value, deliveryWindowEnd!.Value, customerTimeZone, deliveryWindowDays)
                 : null;
             BcWindowText = UpdateWindow.IsConfigured(bcWindowStart, bcWindowEnd)
                 ? WindowText(bcWindowStart!.Value, bcWindowEnd!.Value, bcWindowTimeZone ?? customerTimeZone)
@@ -224,9 +225,9 @@
         return $"{UpdateWindow.Clock(TimeOnly.FromDateTime(local))} for the customer ({ZoneLabel(customerZone.Id)})";
     }
 
-    /// <summary>"22:00-04:00 (Copenhagen)": a window as the hours it was agreed in, with whose clock.</summary>
-    private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId) =>
-        $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)} ({ZoneLabel(ianaId)})";
+    /// <summary>"22:00-04:00 (Copenhagen)": a window as the hours (and days, when not daily) it was agreed in, with whose clock.</summary>
+    private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId, DeliveryDays days = DeliveryDays.Every) =>
+        $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)}{UpdateWindow.DaysSuffix(days)} ({ZoneLabel(ianaId)})";
 
     /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
     private static string ZoneLabel(string? ianaId) =>

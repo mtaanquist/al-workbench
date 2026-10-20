@@ -1,5 +1,6 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using System.Linq.Expressions;
@@ -129,6 +130,7 @@ public sealed class UpgradeFleetService
                 e.LocationName,
                 e.UpdateWindowStart,
                 e.UpdateWindowEnd,
+                e.UpdateWindowDays,
                 e.BcUpdateWindowStart,
                 e.BcUpdateWindowEnd,
                 e.BcUpdateWindowTimeZoneIana,
@@ -144,6 +146,7 @@ public sealed class UpgradeFleetService
             rest.LocationName,
             rest.UpdateWindowStart,
             rest.UpdateWindowEnd,
+            rest.UpdateWindowDays,
             rest.BcUpdateWindowStart,
             rest.BcUpdateWindowEnd,
             rest.BcUpdateWindowTimeZoneIana,
@@ -202,6 +205,7 @@ public sealed class UpgradeFleetService
                 e.LocationName,
                 e.UpdateWindowStart,
                 e.UpdateWindowEnd,
+                e.UpdateWindowDays,
                 e.BcUpdateWindowStart,
                 e.BcUpdateWindowEnd,
                 e.BcUpdateWindowTimeZoneIana,
@@ -217,7 +221,7 @@ public sealed class UpgradeFleetService
                 var x = rest[r.EnvironmentId];
                 return new EnvironmentDetailRow(
                     r, x.CreatedByUserId, x.CountryCode, x.LocationName,
-                    x.UpdateWindowStart, x.UpdateWindowEnd,
+                    x.UpdateWindowStart, x.UpdateWindowEnd, x.UpdateWindowDays,
                     x.BcUpdateWindowStart, x.BcUpdateWindowEnd,
                     x.BcUpdateWindowTimeZoneIana, x.BcUpdateWindowFetchedAt,
                     x.AppSourceAppsUpdateCadence);
@@ -768,6 +772,7 @@ public sealed record EnvironmentDetailRow(
     string? LocationName,
     TimeOnly? DeliveryWindowStart,
     TimeOnly? DeliveryWindowEnd,
+    DeliveryDays DeliveryWindowDays,
     TimeOnly? BcUpdateWindowStart,
     TimeOnly? BcUpdateWindowEnd,
     string? BcUpdateWindowTimeZoneIana,

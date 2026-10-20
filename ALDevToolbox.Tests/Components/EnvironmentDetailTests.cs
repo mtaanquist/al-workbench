@@ -1,3 +1,4 @@
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Components.Pages.Environments;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -758,6 +759,55 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         saved.UpdateWindowStart.Should().Be(new TimeOnly(22, 0));
         saved.UpdateWindowEnd.Should().Be(new TimeOnly(4, 0));
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("22:00-04:00"));
+    }
+
+    [Fact]
+    public async Task The_delivery_window_can_be_kept_to_some_days_of_the_week()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId);
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Change the delivery window").Click());
+        cut.WaitForAssertion(() => cut.FindAll(".env-detail__window input[type=time]")[0].Change("12:00:00"));
+        cut.WaitForAssertion(() => cut.FindAll(".env-detail__window input[type=time]")[1].Change("13:00:00"));
+        // Monday first: untick every day but Wednesday.
+        foreach (var index in new[] { 0, 1, 3, 4, 5, 6 })
+        {
+            cut.WaitForAssertion(() => cut.FindAll(".delivery-days input[type=checkbox]")[index].Change(false));
+        }
+        cut.WaitForAssertion(() => cut.FindAll("button").Single(b => b.TextContent.Trim() == "Save window").Click());
+
+        cut.WaitForAssertion(() => cut.FindAll(".env-detail__window").Should().BeEmpty());
+        await using var ctx = _db.NewContext();
+        var saved = await ctx.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId);
+        saved.UpdateWindowDays.Should().Be(DeliveryDays.Wednesday);
+        saved.UpdateWindowStart.Should().Be(new TimeOnly(12, 0));
+        saved.UpdateWindowEnd.Should().Be(new TimeOnly(13, 0));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("12:00-13:00 on Wednesdays"));
+    }
+
+    [Fact]
+    public async Task A_delivery_window_with_no_days_is_not_saved()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId);
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Change the delivery window").Click());
+        for (var index = 0; index < 7; index++)
+        {
+            var i = index;
+            cut.WaitForAssertion(() => cut.FindAll(".delivery-days input[type=checkbox]")[i].Change(false));
+        }
+        cut.WaitForAssertion(() => cut.FindAll("button").Single(b => b.TextContent.Trim() == "Save window").Click());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Tick at least one day"));
+        await using var ctx = _db.NewContext();
+        (await ctx.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId)).UpdateWindowDays
+            .Should().Be(DeliveryDays.Every);
     }
 
     [Fact]

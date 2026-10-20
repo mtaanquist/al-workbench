@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
@@ -166,7 +167,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "get_environment", ReadOnly = true)]
-    [Description("Returns one Business Central environment in full: everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
+    [Description("Returns one Business Central environment in full: everything list_environments gives, plus its country and Azure region, the window our own deliveries prefer (its hours, and in days the weekdays it opens on - null days means every day; a window past midnight belongs to the day it opens), how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
     public async Task<EnvironmentDetail> GetEnvironmentAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         CancellationToken ct = default)
@@ -180,7 +181,7 @@ public sealed class DeliverTools
             row.CountryCode,
             row.LocationName,
             row.DeliveryWindowStart is { } s && row.DeliveryWindowEnd is { } e
-                ? new TimeWindow(Clock(s), Clock(e), row.Fleet.TimeZone ?? "UTC")
+                ? new TimeWindow(Clock(s), Clock(e), row.Fleet.TimeZone ?? "UTC", DayNames(row.DeliveryWindowDays))
                 : null,
             row.AppSourceAppsUpdateCadence,
             apps.Select(a => new InstalledApp(a.AppId, a.Name, a.Publisher, a.Version, a.DeliveredFromWorkbench)).ToList(),
@@ -538,6 +539,12 @@ public sealed class DeliverTools
 
     private static string Clock(TimeOnly time) => time.ToString("HH:mm", CultureInfo.InvariantCulture);
 
+    /// <summary>The days a delivery window opens on, in English; null for every day.</summary>
+    private static List<string>? DayNames(DeliveryDays days) =>
+        days.Normalize() is DeliveryDays.Every or DeliveryDays.None
+            ? null
+            : DeliveryDaysExtensions.Week.Where(d => days.Includes(d)).Select(d => d.ToString()).ToList();
+
     private static DateTime? ParseDate(string? value, string name)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
@@ -618,8 +625,9 @@ public sealed record BusinessCentralConnection(
 public sealed record SolutionEnvironmentBrief(
     int EnvironmentId, string Name, string Type, string? Status, string? Version, bool Deleted, DateTime? ReadAt);
 
-/// <summary>A daily window, as clock times in <paramref name="TimeZone"/> (IANA).</summary>
-public sealed record TimeWindow(string Start, string End, string TimeZone);
+/// <summary>A recurring window, as clock times in <paramref name="TimeZone"/> (IANA).</summary>
+/// <param name="Days">The days it opens on ("Wednesday"), when not every day; null for a daily window.</param>
+public sealed record TimeWindow(string Start, string End, string TimeZone, IReadOnlyList<string>? Days = null);
 
 /// <summary>The platform update Business Central has waiting for an environment.</summary>
 /// <param name="LatestDate">The last date the update can still be moved to.</param>
@@ -656,7 +664,7 @@ public sealed record EnvironmentSummary(
     string? BusinessCentralUrl);
 
 /// <summary>One environment in full, for <c>get_environment</c>.</summary>
-/// <param name="DeliveryWindow">The daily window our own deliveries prefer, in the solution's time zone; null for "any time".</param>
+/// <param name="DeliveryWindow">The window our own deliveries prefer, in the solution's time zone, with the weekdays it opens on; null for "any time".</param>
 /// <param name="InstalledAppsReadAt">When the installed apps were last read; null when never.</param>
 public sealed record EnvironmentDetail(
     EnvironmentSummary Environment,

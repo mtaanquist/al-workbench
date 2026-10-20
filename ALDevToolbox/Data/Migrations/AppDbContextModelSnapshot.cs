@@ -3687,6 +3687,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("type");
 
+                    b.Property<short>("UpdateWindowDays")
+                        .HasColumnType("smallint")
+                        .HasColumnName("update_window_days");
+
                     b.Property<TimeOnly?>("UpdateWindowEnd")
                         .HasColumnType("time without time zone")
                         .HasColumnName("update_window_end");

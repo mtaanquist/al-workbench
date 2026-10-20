@@ -531,7 +531,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .ThenBy(e => e.Name)
             .Select(e => new ProjectEnvironmentRow(
                 e.Id, e.Name, e.Type, e.FetchedAt, e.MissingSince,
-                e.UpdateWindowStart, e.UpdateWindowEnd,
+                e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays,
                 e.Status,
                 e.AppSourceAppsUpdateCadence,
                 e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana, e.BcUpdateWindowFetchedAt,
@@ -2065,7 +2065,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .Where(e => e.Id == environmentId)
             .Select(e => new
             {
-                e.UpdateWindowStart, e.UpdateWindowEnd, e.Project!.BcTimeZone,
+                e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays, e.Project!.BcTimeZone,
                 e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana,
             })
             .FirstAsync(ct);
@@ -2089,7 +2089,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             }
             case UploadAppTiming.DeliveryWindow when UpdateWindow.IsConfigured(windows.UpdateWindowStart, windows.UpdateWindowEnd):
                 runsAt = UpdateWindow.NextOpeningUtc(
-                    windows.UpdateWindowStart, windows.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(windows.BcTimeZone), now);
+                    windows.UpdateWindowStart, windows.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(windows.BcTimeZone), now,
+                    windows.UpdateWindowDays);
                 break;
             case UploadAppTiming.DeliveryWindow:
             case UploadAppTiming.BcUpdateWindow:
@@ -2267,11 +2268,14 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <summary>
     /// Sets or clears an environment's recurring update window. Pass both
     /// <paramref name="start"/> and <paramref name="end"/> to set it, or both null to
-    /// clear it ("any time"); passing only one is a validation error. Interpreted in the
+    /// clear it ("any time"); passing only one is a validation error. <paramref name="days"/>
+    /// are the days it opens on; a window needs at least one, and clearing the window
+    /// resets them to every day. Interpreted in the
     /// project's timezone. Access-gated; survives a Refresh (the discovery upsert only
     /// touches fetched fields). See <c>.design/saas-delivery.md</c> ("Update window").
     /// </summary>
-    public async Task SetUpdateWindowAsync(int projectId, int environmentId, TimeOnly? start, TimeOnly? end, CancellationToken ct = default)
+    public async Task SetUpdateWindowAsync(
+        int projectId, int environmentId, TimeOnly? start, TimeOnly? end, DeliveryDays days, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var ownerId = await _db.OeProjects.AsNoTracking()
@@ -2284,6 +2288,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             throw Validation("UpdateWindow", "Set both a start and an end time for the window, or clear both for 'any time'.");
         }
+        days = CheckWindowDays(start, days);
 
         var env = await _db.OeProjectEnvironments
             .FirstOrDefaultAsync(e => e.Id == environmentId && e.ProjectId == projectId, ct)
@@ -2291,9 +2296,25 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         env.UpdateWindowStart = start;
         env.UpdateWindowEnd = end;
+        env.UpdateWindowDays = days;
         await _db.SaveChangesAsync(ct);
-        _logger.LogInformation("Set update window {Start}-{End} for environment {EnvId} (project {ProjectId}).",
-            start, end, environmentId, projectId);
+        _logger.LogInformation("Set update window {Start}-{End} on {Days} for environment {EnvId} (project {ProjectId}).",
+            start, end, days, environmentId, projectId);
+    }
+
+    /// <summary>
+    /// The days to store with a window: at least one when a window is set (one that never
+    /// opens would park every deployment that follows it), every day when it is cleared.
+    /// </summary>
+    private static DeliveryDays CheckWindowDays(TimeOnly? start, DeliveryDays days)
+    {
+        if (start is null) return DeliveryDays.Every;
+        days = days.Normalize();
+        if (days == DeliveryDays.None)
+        {
+            throw Validation("UpdateWindowDays", "Tick at least one day for the window, or clear it for 'any time'.");
+        }
+        return days;
     }
 
     /// <summary>
@@ -2308,7 +2329,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// does not exist, as <see cref="UpgradeFleetService.GetEnvironmentAsync"/> does.</para>
     /// </summary>
     public async Task<List<DeliveryWindowChangePreviewRow>> PreviewUpdateWindowForManyAsync(
-        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, CancellationToken ct = default)
+        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, DeliveryDays days, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(environmentIds);
         RequireOrganizationId();
@@ -2316,6 +2337,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             throw Validation("UpdateWindow", "Set both a start and an end time for the window, or clear both for 'any time'.");
         }
+        days = CheckWindowDays(start, days);
 
         var ids = environmentIds.Distinct().ToList();
         if (ids.Count == 0) return [];
@@ -2338,16 +2360,16 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             if (!found.TryGetValue(id, out var e))
             {
                 rows.Add(new DeliveryWindowChangePreviewRow(
-                    id, null, null, null, null, null, null, DeliveryWindowChangeGroup.Missing, false));
+                    id, null, null, null, null, null, null, DeliveryDays.Every, DeliveryWindowChangeGroup.Missing, false));
                 continue;
             }
 
             var group = e.IsGone ? DeliveryWindowChangeGroup.Missing
                 : !canManage[e.ProjectId] ? DeliveryWindowChangeGroup.NoAccess
-                : e.UpdateWindowStart == start && e.UpdateWindowEnd == end ? DeliveryWindowChangeGroup.AlreadySet
+                : e.UpdateWindowStart == start && e.UpdateWindowEnd == end && e.UpdateWindowDays == days ? DeliveryWindowChangeGroup.AlreadySet
                 : DeliveryWindowChangeGroup.WillChange;
             rows.Add(new DeliveryWindowChangePreviewRow(
-                id, e.ProjectId, e.ProjectName, e.Name, e.Type, e.UpdateWindowStart, e.UpdateWindowEnd,
+                id, e.ProjectId, e.ProjectName, e.Name, e.Type, e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays,
                 group, group == DeliveryWindowChangeGroup.WillChange && waiting.Contains(id)));
         }
         return rows;
@@ -2363,9 +2385,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// per id, which is what the dialog shows afterwards.
     /// </summary>
     public async Task<List<DeliveryWindowChangeResult>> SetUpdateWindowForManyAsync(
-        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, CancellationToken ct = default)
+        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, DeliveryDays days, CancellationToken ct = default)
     {
-        var preview = await PreviewUpdateWindowForManyAsync(environmentIds, start, end, ct);
+        var preview = await PreviewUpdateWindowForManyAsync(environmentIds, start, end, days, ct);
         var results = new List<DeliveryWindowChangeResult>(preview.Count);
         foreach (var row in preview)
         {
@@ -2376,7 +2398,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             }
             try
             {
-                await SetUpdateWindowAsync(row.ProjectId!.Value, row.EnvironmentId, start, end, ct);
+                await SetUpdateWindowAsync(row.ProjectId!.Value, row.EnvironmentId, start, end, days, ct);
                 results.Add(new DeliveryWindowChangeResult(row, DeliveryWindowChangeOutcome.Changed, null));
             }
             catch (PlanValidationException ex)
@@ -2391,8 +2413,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         _logger.LogInformation(
-            "User {UserId} set the delivery window {Start}-{End} on {Changed} of {Selected} environment(s) ({Failed} failed).",
-            _orgContext.CurrentUserId, start, end,
+            "User {UserId} set the delivery window {Start}-{End} on {Days} on {Changed} of {Selected} environment(s) ({Failed} failed).",
+            _orgContext.CurrentUserId, start, end, days,
             results.Count(r => r.Outcome == DeliveryWindowChangeOutcome.Changed), results.Count,
             results.Count(r => r.Outcome == DeliveryWindowChangeOutcome.Failed));
         return results;
@@ -2557,6 +2579,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 e.MissingSince,
                 e.UpdateWindowStart,
                 e.UpdateWindowEnd,
+                e.UpdateWindowDays,
                 e.AppSourceAppsUpdateCadence))
             .ToDictionaryAsync(e => e.Id, ct);
 
@@ -2584,6 +2607,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         DateTime? MissingSince,
         TimeOnly? UpdateWindowStart,
         TimeOnly? UpdateWindowEnd,
+        DeliveryDays UpdateWindowDays,
         string? AppSourceAppsUpdateCadence)
     {
         /// <summary>Its solution is deleted, or Business Central no longer has it or is deleting it.</summary>
@@ -2766,6 +2790,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             survivor.UpdateWindowStart = stale.UpdateWindowStart;
             survivor.UpdateWindowEnd = stale.UpdateWindowEnd;
+            survivor.UpdateWindowDays = stale.UpdateWindowDays;
         }
 
         _db.OeProjectEnvironments.Remove(stale);
@@ -3219,6 +3244,7 @@ public sealed record DeliveryWindowChangePreviewRow(
     string? EnvironmentType,
     TimeOnly? CurrentStart,
     TimeOnly? CurrentEnd,
+    DeliveryDays CurrentDays,
     DeliveryWindowChangeGroup Group,
     bool HasDeploymentWaitingForWindow)
 {
@@ -3287,6 +3313,8 @@ public sealed record ProjectEnvironmentRow(
     DateTime? MissingSince,
     TimeOnly? UpdateWindowStart,
     TimeOnly? UpdateWindowEnd,
+    /// <summary>The days the delivery window opens on; every day when there is no window.</summary>
+    DeliveryDays UpdateWindowDays,
     /// <summary>Lifecycle status from the last fetch, verbatim. Null on rows fetched before it was captured.</summary>
     string? Status,
     /// <summary>How often Marketplace apps update on the environment (a <see cref="BcAppUpdateCadence"/> value).</summary>

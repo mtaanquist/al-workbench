@@ -9,6 +9,7 @@
 @inject IServiceScopeFactory ScopeFactory
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer.Bc
 @using static ALDevToolbox.Components.Shared.FleetRowState
 
@@ -1081,7 +1082,8 @@
         var detail = await Fleet.GetEnvironmentAsync(row.EnvironmentId);
         var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction,
             detail?.DeliveryWindowStart, detail?.DeliveryWindowEnd, row.TimeZone,
-            detail?.BcUpdateWindowStart, detail?.BcUpdateWindowEnd, detail?.BcUpdateWindowTimeZoneIana);
+            detail?.BcUpdateWindowStart, detail?.BcUpdateWindowEnd, detail?.BcUpdateWindowTimeZoneIana,
+            detail?.DeliveryWindowDays ?? DeliveryDays.Every);
         if (upload is null) return;
 
         _busy = true;

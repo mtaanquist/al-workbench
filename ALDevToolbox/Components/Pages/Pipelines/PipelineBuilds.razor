@@ -1394,7 +1394,7 @@
             await _releaseDialog.OpenAsync(
                 rp.Id, rp.Project?.Name ?? _header?.ProjectName ?? "", env.Name, env.Type,
                 rp.DeploymentSchedule, rp.SchemaSyncMode, options,
-                rp.Project?.BcTimeZone, env.UpdateWindowStart, env.UpdateWindowEnd,
+                rp.Project?.BcTimeZone, env.UpdateWindowStart, env.UpdateWindowEnd, env.UpdateWindowDays,
                 secretExpiresAt,
                 selectedBuildId: buildId);
         }

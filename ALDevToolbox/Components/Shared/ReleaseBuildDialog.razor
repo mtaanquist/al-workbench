@@ -232,12 +232,13 @@
     private string _tzLabel = "UTC";
     private TimeOnly? _winStart;
     private TimeOnly? _winEnd;
+    private DeliveryDays _winDays = DeliveryDays.Every;
     private bool _hasWindow;
     private DateTime _scheduledLocal; // Unspecified kind = customer-tz wall-clock
     private DateTime _windowOpeningLocal; // the prefilled next opening, same kind as _scheduledLocal
     private DateTime? _secretExpiresAt; // UTC instant the BC client secret lapses, if known
 
-    private string WindowLabel => _hasWindow ? $"{_winStart:HH:mm}-{_winEnd:HH:mm}" : "";
+    private string WindowLabel => _hasWindow ? $"{_winStart:HH:mm}-{_winEnd:HH:mm}{UpdateWindow.DaysSuffix(_winDays)}" : "";
 
     /// <summary>True when the deployment pipeline is set to install in the environment's delivery window.</summary>
     private bool ByDeliveryWindow => BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule);
@@ -311,7 +312,7 @@
     private bool IsImmediate => ScheduledUtc <= DateTime.UtcNow.AddMinutes(1);
 
     private bool IsOutsideWindow =>
-        UpdateWindow.IsConfigured(_winStart, _winEnd) && !UpdateWindow.IsWithin(_winStart, _winEnd, _tz, ScheduledUtc);
+        UpdateWindow.IsConfigured(_winStart, _winEnd) && !UpdateWindow.IsWithin(_winStart, _winEnd, _tz, ScheduledUtc, _winDays);
 
     /// <summary>
     /// Warn-but-allow: the deployment runs under the customer's S2S secret, which fails once
@@ -359,13 +360,14 @@
     /// Opens the dialog for a deployment pipeline. <paramref name="builds"/> must be its
     /// successful builds (newest first). <paramref name="timeZone"/> is the solution's
     /// IANA tz; <paramref name="windowStart"/>/<paramref name="windowEnd"/> the target
-    /// environment's update window (both null = none). <paramref name="selectedBuildId"/>
+    /// environment's update window (both null = none), opening on <paramref name="windowDays"/>. <paramref name="selectedBuildId"/>
     /// preselects one of <paramref name="builds"/> - the build list opens the dialog
     /// from a specific build's row (#938); it falls back to the latest when that build
     /// is not among them.
     /// </summary>
     public Task OpenAsync(int releasePipelineId, string customerName, string envName, string envType, string deploymentSchedule, string schemaSyncMode,
         IReadOnlyList<ReleasableBuildOption> builds, string? timeZone, TimeOnly? windowStart, TimeOnly? windowEnd,
+        DeliveryDays windowDays,
         DateTime? secretExpiresAt = null,
         IReadOnlyList<GitHubReleaseOption>? releases = null,
         string? repositoryName = null,
@@ -400,11 +402,12 @@
         _tzLabel = string.IsNullOrWhiteSpace(timeZone) ? "UTC" : timeZone!;
         _winStart = windowStart;
         _winEnd = windowEnd;
+        _winDays = windowDays;
         _hasWindow = UpdateWindow.IsConfigured(windowStart, windowEnd);
 
         // Prefill to the next opening of the window (or now if there's none), expressed
         // as a customer-tz wall-clock for the datetime-local input.
-        var prefillUtc = UpdateWindow.NextOpeningUtc(windowStart, windowEnd, _tz, DateTime.UtcNow);
+        var prefillUtc = UpdateWindow.NextOpeningUtc(windowStart, windowEnd, _tz, DateTime.UtcNow, windowDays);
         _scheduledLocal = Trim(TimeZoneInfo.ConvertTimeFromUtc(prefillUtc, _tz));
         _windowOpeningLocal = _scheduledLocal;
 

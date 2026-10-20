@@ -1022,6 +1022,7 @@
             _rp.Id, _rp.Project?.Name ?? "", _rp.ProjectEnvironment!.Name, _rp.ProjectEnvironment.Type,
             _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,
             _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
+            _rp.ProjectEnvironment.UpdateWindowDays,
             _secretExpiresAt,
             selectedBuildId: buildId);
     }
@@ -1033,6 +1034,7 @@
             _rp.Id, _rp.Project?.Name ?? "", _rp.ProjectEnvironment!.Name, _rp.ProjectEnvironment.Type,
             _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,
             _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
+            _rp.ProjectEnvironment.UpdateWindowDays,
             _secretExpiresAt,
             _fromReleases ? _releaseOptions : null,
             _fromReleases ? SourceName : null);
@@ -1146,7 +1148,7 @@
     {
         var env = _rp?.ProjectEnvironment;
         if (env is null || !UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd)) return null;
-        if (UpdateWindow.IsWithin(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow)) return null;
+        if (UpdateWindow.IsWithin(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays)) return null;
         return $"{EnvName}'s delivery window ({DeliveryWindow}) isn't open now. Deploying again installs outside the hours agreed with the customer, and the deployment history will record that.";
     }
 
@@ -1179,7 +1181,7 @@
         if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
             && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
         {
-            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow)
+            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays)
                 <= DateTime.UtcNow.AddMinutes(1);
         }
         return !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_rp?.DeploymentSchedule));
@@ -1192,7 +1194,7 @@
         if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
             && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
         {
-            var opening = UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow);
+            var opening = UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays);
             return opening <= DateTime.UtcNow.AddMinutes(1)
                 ? "right away, while the delivery window is open"
                 : $"in the next delivery window ({WhenPhrase(opening)})";
@@ -1574,7 +1576,7 @@
         {
             var env = _rp?.ProjectEnvironment;
             if (env?.UpdateWindowStart is not { } start || env.UpdateWindowEnd is not { } end) return null;
-            return $"{start:HH\\:mm}-{end:HH\\:mm}";
+            return $"{start:HH\\:mm}-{end:HH\\:mm}{UpdateWindow.DaysSuffix(env.UpdateWindowDays)}";
         }
     }
 
