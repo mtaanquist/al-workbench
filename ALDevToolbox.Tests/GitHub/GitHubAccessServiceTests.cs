@@ -432,6 +432,50 @@ public sealed class GitHubAccessServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_callers_refreshing_one_link_at_once_spend_the_refresh_token_once()
+    {
+        // The nightly next minor and next major checks start side by side as the same
+        // person, long after the access token lapsed. GitHub rotates the refresh token
+        // on use, so whichever refreshes second with the same token is refused, and that
+        // build had nothing to clone with.
+        await ConfigureDeploymentAsync();
+        var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-04T09:00:00Z"));
+        var spent = 0;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Post, "login/oauth/access_token", request =>
+            {
+                var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                if (!body.Contains("grant_type=refresh_token"))
+                {
+                    return (HttpStatusCode.OK, FakeGitHubApi.TokenJson("ghu_first", refreshToken: "ghr_first"));
+                }
+                return body.Contains("ghr_first") && Interlocked.Increment(ref spent) == 1
+                    ? (HttpStatusCode.OK, FakeGitHubApi.TokenJson("ghu_second", refreshToken: "ghr_second"))
+                    : (HttpStatusCode.BadRequest, "{\"error\":\"bad_refresh_token\"}");
+            })
+            .On(HttpMethod.Get, "/user", HttpStatusCode.OK, FakeGitHubApi.UserJson());
+        var (first, firstCtx) = NewService(api, clock);
+        await using var _ = firstCtx;
+        await first.LinkAsync("the-code");
+        var (second, secondCtx) = NewService(api, clock);
+        await using var __ = secondCtx;
+
+        clock.Advance(TimeSpan.FromHours(8));
+        // Hold the first refresh at GitHub until the second caller has had every chance
+        // to read the same expired row and send the same refresh token.
+        var gate = api.PauseUntilReleased(HttpMethod.Post, "login/oauth/access_token");
+        var firstToken = first.ResolveUserTokenAsync(UserId, TestContext.Current.CancellationToken);
+        await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+        var secondToken = second.ResolveUserTokenAsync(UserId, TestContext.Current.CancellationToken);
+        await Task.Delay(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+        gate.SetResult();
+
+        (await firstToken).Should().Be("ghu_second");
+        (await secondToken).Should().Be("ghu_second", "the second caller waits and uses the pair the first stored");
+        api.OAuthBodies.Count(b => b.Contains("grant_type=refresh_token")).Should().Be(1);
+    }
+
+    [Fact]
     public async Task A_token_still_inside_its_lifetime_is_not_refreshed()
     {
         await ConfigureDeploymentAsync();
