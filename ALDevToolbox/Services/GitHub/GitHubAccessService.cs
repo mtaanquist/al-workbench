@@ -109,6 +109,9 @@ public sealed class GitHubAccessService
     /// </summary>
     private static readonly TimeSpan RefreshBefore = TimeSpan.FromMinutes(5);
 
+    /// <summary>The advisory-lock namespace for refreshing one user's token pair, keyed per user id ("GHRT").</summary>
+    private const int TokenRefreshLockClass = 0x47_48_52_54;
+
     /// <summary>
     /// How long one answer about what a person may see is reused.
     ///
@@ -686,12 +689,48 @@ public sealed class GitHubAccessService
     private async Task<string?> ResolveTokenForAsync(UserExternalLogin row, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(row.AccessTokenEncrypted)) return null;
+        if (StillGood(row)) return Decrypt(_accessProtector, row.AccessTokenEncrypted, row.UserId, "access");
 
-        var expiresAt = row.AccessTokenExpiresAt;
-        var stillGood = expiresAt is null
-            || expiresAt.Value - _clock.GetUtcNow().UtcDateTime > RefreshBefore;
-        if (stillGood) return Decrypt(_accessProtector, row.AccessTokenEncrypted, row.UserId, "access");
+        // GitHub rotates the refresh token on every use, so two refreshes of one
+        // link at once spend the same token and the slower one is refused. That
+        // happens whenever two builds start as one person after the access token
+        // lapsed - the nightly next minor and next major checks do, side by side -
+        // and the loser then has nothing to clone with. So a refresh holds a lock
+        // on the person, and re-reads the row under it: whoever waited finds the
+        // pair the first one stored and uses that instead of refreshing again.
+        var ownTransaction = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        try
+        {
+            await _db.Database.ExecuteSqlAsync(
+                $"SELECT pg_advisory_xact_lock({TokenRefreshLockClass}, {row.UserId})", ct);
+            await _db.Entry(row).ReloadAsync(ct);
+            // Unlinked while this call waited.
+            if (_db.Entry(row).State == EntityState.Detached || string.IsNullOrEmpty(row.AccessTokenEncrypted)) return null;
+            if (StillGood(row)) return Decrypt(_accessProtector, row.AccessTokenEncrypted, row.UserId, "access");
 
+            var refreshed = await RefreshAsync(row, ct);
+            // GitHub has spent the old refresh token by now, so the new pair must be
+            // kept whatever the caller's token says. A caller that brought its own
+            // transaction has to commit it for the pair to stick.
+            if (ownTransaction is not null) await ownTransaction.CommitAsync(CancellationToken.None);
+            return refreshed;
+        }
+        finally
+        {
+            if (ownTransaction is not null) await ownTransaction.DisposeAsync();
+        }
+    }
+
+    /// <summary>Whether the stored access token is good for at least <see cref="RefreshBefore"/> more.</summary>
+    private bool StillGood(UserExternalLogin row) =>
+        row.AccessTokenExpiresAt is not { } expiresAt
+        || expiresAt - _clock.GetUtcNow().UtcDateTime > RefreshBefore;
+
+    /// <summary>Spends the stored refresh token and writes the new pair back; null when that is not possible.</summary>
+    private async Task<string?> RefreshAsync(UserExternalLogin row, CancellationToken ct)
+    {
         var refreshToken = string.IsNullOrEmpty(row.RefreshTokenEncrypted)
             ? null
             : Decrypt(_refreshProtector, row.RefreshTokenEncrypted, row.UserId, "refresh");
@@ -707,7 +746,9 @@ public sealed class GitHubAccessService
         {
             var refreshed = await _github.RefreshUserTokenAsync(refreshToken, ct);
             StoreTokens(row, refreshed);
-            await _db.SaveChangesAsync(ct);
+            // CancellationToken.None: the old refresh token is spent, so losing this
+            // write would leave the link unusable.
+            await _db.SaveChangesAsync(CancellationToken.None);
             _logger.LogInformation("Refreshed the GitHub access token for user {UserId}.", row.UserId);
             return refreshed.AccessToken;
         }
