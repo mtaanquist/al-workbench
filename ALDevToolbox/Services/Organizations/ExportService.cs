@@ -144,6 +144,13 @@ public class ExportService
                             .OrderBy(f => f.Ordering)
                             .Select(ToFolderSeed)
                             .ToList(),
+                        Source = module.SourceRepository is null ? null : new ModuleSourceSeed
+                        {
+                            Repository = module.SourceRepository,
+                            Ref = module.SourceRef,
+                            Path = module.SourcePath,
+                            Commit = module.SourceCommitSha,
+                        },
                     },
                 };
                 await WriteTextEntryAsync(

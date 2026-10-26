@@ -255,7 +255,11 @@ public sealed record ModuleSummary(
     string Name,
     [property: Description("The folder name and rendered AL extension name this module produces in a generated workspace.")]
     string ExtensionName,
-    bool Deprecated);
+    bool Deprecated,
+    [property: Description("For a module whose files are copied from a GitHub repository, that repository as owner/name; null when the files were written in AL Workbench.")]
+    string? SourceRepository = null,
+    [property: Description("The commit the module's current copy of the repository was made at; null when the files were written in AL Workbench.")]
+    string? SourceCommit = null);
 
 /// <summary>
 /// What <c>get_template</c> returns: everything the New Workspace form knows

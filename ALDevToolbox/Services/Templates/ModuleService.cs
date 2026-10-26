@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Templates;
@@ -106,6 +107,7 @@ public class ModuleService
                 .Select((f, i) => ModuleAuthoringMapper.BuildFolder(f, orgId, ordering: i))
                 .ToList(),
         };
+        ApplySource(module, input.Source);
 
         _db.Modules.Add(module);
         await _db.SaveChangesAsync(ct);
@@ -140,22 +142,30 @@ public class ModuleService
         existing.IdRangeSize = input.IdRangeSize;
         existing.Deprecated = input.Deprecated;
         existing.UpdatedAt = DateTime.UtcNow;
+        ApplySource(existing, input.Source);
 
         ReconcileDependencies(existing, input.Dependencies, existing.OrganizationId);
 
-        // Folder tree: clear-and-rebuild, mirroring TemplateService.UpdateAsync.
-        // The Module → folders relationship is keyed on module_id and covers
-        // every row in the tree (flat), so clearing the collection cascades the
-        // whole tree away; the cascade FKs on module_extension_files /
-        // self-referencing folders drop the rest. The denormalised module_id on
-        // nested rows is re-stamped at save time by AppDbContext.
+        // Folder tree: clear-and-rebuild, in two saves inside one transaction.
+        // The Module -> folders relationship is keyed on module_id and covers
+        // every row in the tree (flat), so clearing the collection deletes the
+        // whole tree, audited row by row. EF does not order those deletes ahead
+        // of the inserts under the filtered unique index on root folder names, so
+        // a single save of a tree that keeps a root folder's name (every
+        // repository refresh, #1415) collided with itself. The denormalised
+        // module_id on nested rows is re-stamped at save time by AppDbContext.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
         existing.ExtensionFolders.Clear();
+        await _db.SaveChangesAsync(ct);
+
         var freshFolders = input.Folders
             .Select((f, i) => ModuleAuthoringMapper.BuildFolder(f, existing.OrganizationId, ordering: i))
             .ToList();
         foreach (var folder in freshFolders) existing.ExtensionFolders.Add(folder);
-
         await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
 
         _logger.LogInformation(
             "Updated module '{Key}' (id={Id}); now has {DepCount} dependency(ies) and {FolderCount} top-level folder(s).",
@@ -269,6 +279,28 @@ public class ModuleService
             "Bulk {Action} on modules: {Ok}/{Total} succeeded.",
             actionLabel, succeeded.Count, ids.Count);
         return new BulkActionResult(ids.Count, succeeded, failures);
+    }
+
+    /// <summary>
+    /// Stamps (or, for null, clears) the repository source columns. A copy that
+    /// left nothing out and found no dependencies stores null rather than an empty
+    /// list, so a typed module and a repository module read the same when empty.
+    /// </summary>
+    private static void ApplySource(Module module, ModuleSourceState? source)
+    {
+        module.SourceRepository = source?.Repository;
+        module.SourceRef = source?.Ref;
+        module.SourcePath = source?.Path;
+        module.SourceCommitSha = source?.CommitSha;
+        module.SourceFetchedAt = source?.FetchedAt;
+        module.SourceCheckedAt = source?.FetchedAt;
+        module.SourceError = null;
+        module.SourceSkippedJson = source is { Skipped.Count: > 0 }
+            ? JsonSerializer.Serialize(source.Skipped, PersistenceJson.Options)
+            : null;
+        module.SourceDependenciesJson = source is { Dependencies.Count: > 0 }
+            ? JsonSerializer.Serialize(source.Dependencies, PersistenceJson.Options)
+            : null;
     }
 
     /// <summary>
@@ -421,7 +453,11 @@ public record ModuleInput(
     int? IdRangeSize,
     bool Deprecated,
     IReadOnlyList<ModuleDependencyInput> Dependencies,
-    IReadOnlyList<FolderAuthoring> Folders);
+    IReadOnlyList<FolderAuthoring> Folders,
+    // Set when Folders is a copy of a GitHub repository (#1415). Only
+    // ModuleSourceService fills it, after a successful copy; null saves a typed
+    // module and, on update, turns a repository module back into a typed one.
+    ModuleSourceState? Source = null);
 
 /// <summary>One dependency row submitted by the admin module editor.</summary>
 public record ModuleDependencyInput(

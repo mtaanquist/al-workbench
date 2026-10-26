@@ -360,6 +360,44 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_push_refreshes_a_module_copied_from_the_repository_even_with_no_solution_tracking_it()
+    {
+        // #1415: modules follow a branch through the same pushes the pipelines
+        // listen to, so a module's repository needs no solution of its own.
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        int moduleId;
+        await using (var ctx = _db.NewContext())
+        {
+            var module = new Module
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Key = "customer-app",
+                Name = "Customer App",
+                ExtensionName = "CustomerApp",
+                SourceRepository = "cronus-dk/customer-app",
+                SourceCommitSha = Templates.ModuleSourceTestKit.ShaA,
+                SourceFetchedAt = DateTime.UtcNow.AddDays(-1),
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.Modules.Add(module);
+            await ctx.SaveChangesAsync();
+            moduleId = module.Id;
+        }
+        var api = Templates.ModuleSourceTestKit.ServeTarball(
+            Templates.ModuleSourceTestKit.ResolveRef(
+                ApiAnswering(HttpStatusCode.NoContent), "cronus-dk/customer-app", "HEAD", GitHubWebhookPayloads.After),
+            "cronus-dk/customer-app", GitHubWebhookPayloads.After, Templates.ModuleSourceTestKit.SimpleExtension());
+
+        await NewWorker(api: api).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+
+        await using var verify = _db.NewContext();
+        (await verify.Modules.AsNoTracking().SingleAsync(m => m.Id == moduleId))
+            .SourceCommitSha.Should().Be(GitHubWebhookPayloads.After);
+    }
+
+    [Fact]
     public async Task Every_solution_tracking_the_repository_gets_its_own_head()
     {
         await ConfigureDeploymentAsync();

@@ -6,6 +6,8 @@ using ALDevToolbox.Services.Workers;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Operations;
 
+using ALDevToolbox.Services.Templates;
+
 namespace ALDevToolbox.Services.GitHub;
 
 /// <summary>
@@ -139,14 +141,46 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         if (matched == 0)
         {
             _logger.LogDebug(
-                "Dropped a delivery for {Repository}: no solution in organisation {OrganizationId} tracks it.",
-                job.RepositoryFullName, identity.OrganizationId);
-            return;
+                "No solution in organisation {OrganizationId} tracks {Repository}.",
+                identity.OrganizationId, job.RepositoryFullName);
         }
-
-        if (job is GitHubPushJob buildable && PushBuildService.IsBuildable(buildable))
+        else if (job is GitHubPushJob buildable && PushBuildService.IsBuildable(buildable))
         {
             await StartPushBuildsAsync(buildable, identity, scope, ct).ConfigureAwait(false);
+        }
+
+        // Modules copied from the pushed branch take the new commit (#1415). After
+        // the builds, which someone may be waiting on; and whether or not a
+        // solution tracks the repository, since a module's repository usually is
+        // not one. A forced push refreshes too: a module keeps no history to
+        // protect. A deleted branch leaves the copy and records why.
+        if (job is GitHubPushJob pushed)
+        {
+            await RefreshModulesAsync(pushed, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Refreshes the organisation's modules copied from the pushed branch, in a
+    /// scope of their own. A failure is logged and goes no further: the module
+    /// records its own error, and the daily pass tries again.
+    /// </summary>
+    private async Task RefreshModulesAsync(GitHubPushJob push, CancellationToken ct)
+    {
+        try
+        {
+            await using var scope = _services.CreateAsyncScope();
+            var sources = scope.ServiceProvider.GetRequiredService<ModuleSourceService>();
+            var updated = await sources.RefreshForPushAsync(push.RepositoryFullName, push.Branch, push.DefaultBranch, ct)
+                .ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _logger.LogInformation("Updated {Count} module(s) from the push {Job}.", updated, Describe(push));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not refresh the modules copied from {Job}.", Describe(push));
         }
     }
 

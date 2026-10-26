@@ -187,6 +187,45 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_module_copied_from_a_repository_adds_its_dependencies_and_records_where_it_came_from()
+    {
+        // #1415: the repository's own app.json dependencies follow the typed
+        // ones, a typed entry for the same app wins, and the workspace file
+        // notes the repository and commit for whoever opens it later.
+        var module = ModuleBuilder.Default("document-capture", "Document Capture")
+            .WithExtensionFolder("src", ("Doc.al", "codeunit 91000 \"{{affix}} Doc\" { }"));
+        module.Dependencies.Add(new ModuleDependency
+        {
+            OrganizationId = module.OrganizationId,
+            DepId = "4b915d7e-c02a-435f-85ab-649086c1e002",
+            DepName = "Continia Core",
+            DepPublisher = "Continia Software",
+            DepVersion = "2.0.0.0",
+            Ordering = 0,
+        });
+        module.SourceRepository = "contoso/document-capture";
+        module.SourceCommitSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        module.SourceDependenciesJson = JsonSerializer.Serialize(new[]
+        {
+            new ModuleDependencyInput("4b915d7e-c02a-435f-85ab-649086c1e002", "Continia Core", "Continia Software", "1.0.0.0"),
+            new ModuleDependencyInput("9c8a4b3e-0000-4000-8000-000000000001", "Continia Delivery Network", "Continia Software", "1.0.0.0"),
+        }, ALDevToolbox.Data.PersistenceJson.Options);
+        await SeedTemplateAsync(TemplateBuilder.Default(), module);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(selectedModules: new[] { "document-capture" }));
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/DocumentCapture/app.json")!));
+        var deps = appJson.RootElement.GetProperty("dependencies").EnumerateArray()
+            .ToDictionary(d => d.GetProperty("name").GetString()!, d => d.GetProperty("version").GetString());
+        deps.Should().ContainKey("ACME Core");
+        deps["Continia Core"].Should().Be("2.0.0.0", "the typed dependency wins over the repository's");
+        deps.Should().ContainKey("Continia Delivery Network");
+
+        var toml = ReadEntry(zip.GetEntry($"AcmeCustomer/{WorkspaceConfigService.FileName}")!);
+        toml.Should().Contain("contoso/document-capture").And.Contain(module.SourceCommitSha);
+    }
+
+    [Fact]
     public async Task Module_clone_does_not_depend_on_a_ticked_optional_extension()
     {
         // #1237: the implicit dependency is on required template extensions

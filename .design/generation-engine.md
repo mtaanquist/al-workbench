@@ -303,6 +303,8 @@ Validation: the resolved ranges must not overlap. `ValidateIdRanges` checks this
 - **`ref_module_key`** — catalogue reference. When the named module was also selected for this workspace, point at its cloned extension's GUID. Otherwise the dep is dropped: either the user didn't tick a real module, or the module was deleted after the template was saved. The template-save validator checks a key that is added or changed in that save and refuses it when it names no live module, so a typo never reaches generation; keys the template already had are not re-checked, so deleting a module never stops a template from being saved.
 - **`lit_id` + `lit_name` + `lit_publisher` + `lit_version`** — literal AL app coordinates. Emitted as-is.
 
+A module copied from a GitHub repository also carries the dependencies its repository's `app.json` declared. They follow the module's typed dependencies, and a typed entry for the same app id wins, so an Editor can pin a different version. See `templates-and-seeding.md`, "Modules from a GitHub repository".
+
 **Implicit deps.** Module-cloned extensions get an implicit dependency on every required template-declared extension (Core, Hotfix, etc.) prepended before their own declared deps. So a Document Capture module clone in a workspace with required Core and Hotfix extensions ships with `dependencies = [Core, Hotfix, ...module's own]` even when the module's own declarations don't mention them. This lets the AL compiler see them without the template author having to spell it out.
 
 Resolution is by stable identifier (`path` or `key`), never display name — display names get mustache-substituted and would drift between save time and generation time.

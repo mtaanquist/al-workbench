@@ -824,8 +824,10 @@ immediate, and a deployment whose App is not subscribed simply has no heads.
   organisation by installation id exactly as for a pull request - the same per-org ambient
   walk, **no `IgnoreQueryFilters()`** - then hands it to `GitHubBranchActivityService`.
   Repository matching is the same normalised clone URL, now shared by both paths
-  (`GitHubRepositoryMatch`). A push to a repository no solution tracks, or for an
-  installation nobody connected, is dropped with a Debug log.
+  (`GitHubRepositoryMatch`). A push for an installation nobody connected is dropped
+  with a Debug log. A push to a repository no solution tracks records nothing, but
+  still refreshes any template module copied from that branch (#1415; see
+  `templates-and-seeding.md`, "Modules from a GitHub repository").
 - **`oe_repository_branch_heads`**: one row per solution repository and branch
   (`project_repository_id`, `branch`, unique together), upserted per push: `head_sha`,
   `pushed_at`, `pusher_login`, `forced`, `commit_count` (what the last push listed),

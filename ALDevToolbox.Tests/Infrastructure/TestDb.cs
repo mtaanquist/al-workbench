@@ -425,6 +425,25 @@ public sealed class TestDb : IDisposable
     }
 
     /// <summary>
+    /// Modules copied from a GitHub repository (#1415), with
+    /// <paramref name="client"/> standing in for GitHub.
+    /// </summary>
+    public ALDevToolbox.Services.Templates.ModuleSourceService NewModuleSourceService(
+        AppDbContext ctx, ALDevToolbox.Services.GitHub.GitHubAppClient client, TimeProvider? clock = null)
+    {
+        var access = NewGitHubAccessService(ctx, client);
+        return new ALDevToolbox.Services.Templates.ModuleSourceService(
+            ctx,
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, OrgContext, new FolderTreeHydrator(ctx)),
+            client,
+            NewGitHubConnectionService(ctx, access),
+            access,
+            OrgContext,
+            clock ?? TimeProvider.System,
+            NullLogger<ALDevToolbox.Services.Templates.ModuleSourceService>.Instance);
+    }
+
+    /// <summary>
     /// A <see cref="SystemSettingsService"/> on this fixture's context and
     /// in-memory key ring. The singleton row is created on first write.
     /// </summary>
@@ -710,6 +729,11 @@ public sealed class TestDb : IDisposable
         services.AddScoped<ALDevToolbox.Services.GitHub.RepositoryDiscoveryService>();
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerLinks>();
         services.AddScoped<ALDevToolbox.Services.GitHub.DependencyDriftService>();
+        // A push refreshes the modules copied from the pushed branch (#1415).
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped<FolderTreeHydrator>();
+        services.TryAddScoped<ModuleService>();
+        services.TryAddScoped<ALDevToolbox.Services.Templates.ModuleSourceService>();
         // "Create repository" asks whether this organisation uses Solutions
         // before it registers one (#772), so the toggles have to resolve too.
         AddToolServices(services);

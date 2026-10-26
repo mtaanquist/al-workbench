@@ -152,7 +152,22 @@
                         @* The row's way in - the actions column is a kebab since
                            #574, so Edit would otherwise cost two clicks. *@
                         <td><a href="@($"/admin/modules/{Uri.EscapeDataString(m.Key)}")"><code class="code">@m.Key</code></a></td>
-                        <td>@m.Name</td>
+                        <td>
+                            <span class="u-row">
+                                <span>@m.Name</span>
+                                @if (m.SourceRepository is not null)
+                                {
+                                    @* Copied from a GitHub repository (#1415); a failed
+                                       update is flagged so it is seen without opening
+                                       every module. *@
+                                    <span class="tag" title="@($"Files copied from {m.SourceRepository}")">From GitHub</span>
+                                    @if (m.SourceError is not null)
+                                    {
+                                        <span class="tag ml-tag--warn" title="@m.SourceError">Update failed</span>
+                                    }
+                                }
+                            </span>
+                        </td>
                         <td class="data-table__num">@m.Dependencies.Count</td>
                         <td class="data-table__num">@(m.IdRangeSize?.ToString() ?? "—")</td>
                         <td><Timestamp Value="@m.UpdatedAt" Format="yyyy-MM-dd HH:mm:ss" /></td>
