@@ -20,6 +20,9 @@ public enum ModuleSourceRefreshOutcome
 
     /// <summary>The module is not copied from a repository (or no longer exists).</summary>
     NotARepositoryModule,
+
+    /// <summary>GitHub is limiting requests; the module was left as it is for the next try.</summary>
+    Postponed,
 }
 
 /// <summary>
@@ -113,7 +116,90 @@ public class ModuleSourceService
     /// repository problem: the callers are a button, a webhook and a nightly pass,
     /// and each reports the outcome its own way.
     /// </summary>
-    public async Task<ModuleSourceRefreshOutcome> RefreshAsync(int moduleId, CancellationToken ct = default)
+    public Task<ModuleSourceRefreshOutcome> RefreshAsync(int moduleId, CancellationToken ct = default) =>
+        RefreshAsync(moduleId, new RefreshPass(), ct);
+
+    /// <summary>
+    /// Refreshes every module in the current organisation that copies
+    /// <paramref name="repositoryFullName"/> at <paramref name="branch"/> - by name,
+    /// or by leaving the branch blank when <paramref name="branch"/> is the
+    /// repository's default. Called for each push the GitHub App is told about.
+    /// Modules already at <paramref name="headSha"/> are left alone, and the rest
+    /// share one look at the repository and one download, however many follow it.
+    /// Returns how many modules took a new copy.
+    /// </summary>
+    public async Task<int> RefreshForPushAsync(
+        string repositoryFullName, string branch, string defaultBranch, string? headSha = null, CancellationToken ct = default)
+    {
+        var candidates = await _db.Modules.AsNoTracking()
+            .Where(m => m.DeletedAt == null && m.SourceRepository != null)
+            .OrderBy(m => m.Id)
+            .Select(m => new { m.Id, m.SourceRepository, m.SourceRef, m.SourceCommitSha })
+            .ToListAsync(ct);
+        var due = candidates
+            .Where(m => string.Equals(m.SourceRepository, repositoryFullName, StringComparison.OrdinalIgnoreCase))
+            .Where(m => m.SourceRef is null
+                ? string.Equals(branch, defaultBranch, StringComparison.Ordinal)
+                : string.Equals(m.SourceRef, branch, StringComparison.Ordinal))
+            .Where(m => headSha is null || !string.Equals(m.SourceCommitSha, headSha, StringComparison.OrdinalIgnoreCase))
+            .Select(m => m.Id)
+            .ToList();
+
+        return await RefreshManyAsync(due, ct);
+    }
+
+    /// <summary>
+    /// The daily pass over the current organisation: refreshes every repository
+    /// module except those pinned to a full commit SHA, which cannot change.
+    /// Modules that follow the same repository and branch share one look and one
+    /// download. Returns how many modules took a new copy.
+    /// </summary>
+    public async Task<int> RefreshAllAsync(CancellationToken ct = default)
+    {
+        var modules = await _db.Modules.AsNoTracking()
+            .Where(m => m.DeletedAt == null && m.SourceRepository != null)
+            .OrderBy(m => m.SourceRepository).ThenBy(m => m.Id)
+            .Select(m => new { m.Id, m.SourceRef })
+            .ToListAsync(ct);
+
+        return await RefreshManyAsync(
+            modules.Where(m => !GitHubAppClient.IsCommitSha(m.SourceRef)).Select(m => m.Id).ToList(), ct);
+    }
+
+    /// <summary>
+    /// Refreshes <paramref name="moduleIds"/> in one pass. An unexpected failure on
+    /// one module (a database error, say) is logged and the pass moves on; GitHub
+    /// limiting the rate ends the pass, leaving the rest as they are rather than
+    /// marking each of them failed.
+    /// </summary>
+    private async Task<int> RefreshManyAsync(IReadOnlyList<int> moduleIds, CancellationToken ct)
+    {
+        var pass = new RefreshPass();
+        var updated = 0;
+        for (var i = 0; i < moduleIds.Count; i++)
+        {
+            var id = moduleIds[i];
+            if (pass.RateLimited)
+            {
+                _logger.LogWarning(
+                    "Stopped refreshing modules from GitHub: it is limiting requests. {Remaining} module(s) wait for the next pass.",
+                    moduleIds.Count - i);
+                break;
+            }
+            try
+            {
+                if (await RefreshAsync(id, pass, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _db.ChangeTracker.Clear();
+                _logger.LogError(ex, "Could not refresh module {ModuleId} from its repository.", id);
+            }
+        }
+        return updated;
+    }
+
+    private async Task<ModuleSourceRefreshOutcome> RefreshAsync(int moduleId, RefreshPass pass, CancellationToken ct)
     {
         var module = await _db.Modules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.DeletedAt == null)
@@ -125,33 +211,37 @@ public class ModuleSourceService
 
         try
         {
-            // The repository is read again each time, not just its branch: a
+            // The repository is read again each pass, not just its branch: a
             // renamed repository answers with a redirect the commit and archive
             // calls do not follow, and one made private outside the connected
             // organisation may no longer be copied at all.
-            var token = await InstallationTokenAsync(ct);
-            var (owner, repo) = Split(repository);
-            var summary = await _github.GetRepositorySummaryAsync(token, owner, repo, ct);
-            var status = await _connection.GetStatusAsync(ct);
+            var token = await pass.TokenAsync(this, ct);
+            var summary = await pass.RepositoryAsync(repository, () =>
+            {
+                var (owner, repo) = Split(repository);
+                return _github.GetRepositorySummaryAsync(token, owner, repo, ct);
+            });
+            var status = await pass.StatusAsync(_connection, ct);
             if (summary is null || (summary.IsPrivate && !IsInConnectedOrganisation(summary.FullName, status)))
             {
-                return await RecordFailureAsync(module.Id,
+                return await RecordFailureAsync(module.Id, repository, copiedCommit,
                     $"The repository {repository} could not be read. It may have been deleted or made private, or the GitHub App may no longer have access to it.", ct);
             }
             var current = string.IsNullOrEmpty(summary.FullName) ? repository : summary.FullName;
-            (owner, repo) = Split(current);
+            var (currentOwner, currentRepo) = Split(current);
 
-            var commit = await _github.ResolveCommitAsync(token, owner, repo, module.SourceRef, ct);
+            var commit = await pass.CommitAsync(current, module.SourceRef,
+                () => _github.ResolveCommitAsync(token, currentOwner, currentRepo, module.SourceRef, ct));
             if (commit is null)
             {
-                return await RecordFailureAsync(module.Id,
+                return await RecordFailureAsync(module.Id, repository, copiedCommit,
                     $"There is no branch, tag or commit called '{module.SourceRef ?? summary.DefaultBranch}' in {current} any more.", ct);
             }
 
             var now = _clock.GetUtcNow().UtcDateTime;
             if (string.Equals(commit, copiedCommit, StringComparison.OrdinalIgnoreCase))
             {
-                await _db.Modules.Where(m => m.Id == module.Id && m.SourceCommitSha == copiedCommit)
+                await _db.Modules.Where(m => m.Id == module.Id && m.SourceRepository == repository && m.SourceCommitSha == copiedCommit)
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(m => m.SourceRepository, current)
                         .SetProperty(m => m.SourceCheckedAt, now)
@@ -159,7 +249,8 @@ public class ModuleSourceService
                 return ModuleSourceRefreshOutcome.Unchanged;
             }
 
-            var snapshot = await DownloadAsync(token, owner, repo, commit, module.SourcePath, ct);
+            var archive = await pass.ArchiveAsync(current, commit, () => DownloadArchiveAsync(token, currentOwner, currentRepo, commit, ct));
+            var snapshot = await ModuleSourceArchiveReader.ReadAsync(new MemoryStream(archive, writable: false), module.SourcePath, ct);
             var expected = new ModuleSourceState(repository, module.SourceRef, module.SourcePath, copiedCommit, now, [], []);
             var fresh = new ModuleSourceState(current, module.SourceRef, module.SourcePath, commit, now, snapshot.Skipped, snapshot.Dependencies);
             if (!await _modules.ReplaceSourceCopyAsync(module.Id, expected, snapshot.Folders, fresh, ct))
@@ -177,93 +268,85 @@ public class ModuleSourceService
         }
         catch (ModuleSourceException ex)
         {
-            return await RecordFailureAsync(module.Id, ex.Message, ct);
+            return await RecordFailureAsync(module.Id, repository, copiedCommit, ex.Message, ct);
+        }
+        catch (GitHubApiException ex) when (ex.IsRateLimited)
+        {
+            pass.RateLimited = true;
+            _logger.LogWarning("Left module '{Key}' as it is: GitHub is limiting requests ({Message}).", module.Key, ex.Message);
+            return ModuleSourceRefreshOutcome.Postponed;
         }
         catch (GitHubApiException ex)
         {
-            return await RecordFailureAsync(module.Id, $"GitHub did not answer: {ex.Message}", ct);
+            return await RecordFailureAsync(module.Id, repository, copiedCommit, $"GitHub did not answer: {ex.Message}", ct);
         }
         catch (Exception ex) when (IsUnreachable(ex, ct))
         {
             _logger.LogWarning(ex, "Could not refresh module '{Key}' from {Repository}: GitHub could not be reached.",
                 module.Key, repository);
-            return await RecordFailureAsync(module.Id, "GitHub could not be reached. The copy will be tried again later.", ct);
-        }
-        catch (PlanValidationException ex)
-        {
-            return await RecordFailureAsync(module.Id,
-                $"The new files could not be saved: {string.Join(" ", ex.Errors.Values.Distinct())}", ct);
+            return await RecordFailureAsync(module.Id, repository, copiedCommit,
+                "GitHub could not be reached. The copy will be tried again later.", ct);
         }
     }
 
     /// <summary>
-    /// Refreshes every module in the current organisation that copies
-    /// <paramref name="repositoryFullName"/> at <paramref name="branch"/> - by name,
-    /// or by leaving the branch blank when <paramref name="branch"/> is the
-    /// repository's default. Called for each push the GitHub App is told about.
-    /// Returns how many modules took a new copy.
+    /// What one pass over several modules has already learned from GitHub: each
+    /// repository is looked at once, each branch resolved once, and the archive
+    /// of the commit last downloaded is kept for the next module that needs it,
+    /// so modules sharing a repository cost one download (and stay well inside
+    /// GitHub's 60 an hour for anonymous reads). Only the latest archive is
+    /// kept; the daily pass orders modules by repository so that is enough.
     /// </summary>
-    public async Task<int> RefreshForPushAsync(
-        string repositoryFullName, string branch, string defaultBranch, CancellationToken ct = default)
+    private sealed class RefreshPass
     {
-        var candidates = await _db.Modules.AsNoTracking()
-            .Where(m => m.DeletedAt == null && m.SourceRepository != null)
-            .Select(m => new { m.Id, m.SourceRepository, m.SourceRef })
-            .ToListAsync(ct);
-        var due = candidates
-            .Where(m => string.Equals(m.SourceRepository, repositoryFullName, StringComparison.OrdinalIgnoreCase))
-            .Where(m => m.SourceRef is null
-                ? string.Equals(branch, defaultBranch, StringComparison.Ordinal)
-                : string.Equals(m.SourceRef, branch, StringComparison.Ordinal))
-            .Select(m => m.Id)
-            .ToList();
+        private bool _tokenRead;
+        private string? _token;
+        private GitHubConnectionStatus? _status;
+        private readonly Dictionary<string, GitHubRepositoryFacts?> _repositories = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string?> _commits = new(StringComparer.OrdinalIgnoreCase);
+        private (string Key, byte[] Bytes)? _archive;
 
-        var updated = 0;
-        foreach (var id in due)
+        public bool RateLimited { get; set; }
+
+        public async Task<string?> TokenAsync(ModuleSourceService service, CancellationToken ct)
         {
-            if (await RefreshIsolatedAsync(id, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
+            if (!_tokenRead)
+            {
+                _token = await service.InstallationTokenAsync(ct);
+                _tokenRead = true;
+            }
+            return _token;
         }
-        return updated;
-    }
 
-    /// <summary>
-    /// The daily pass over the current organisation: refreshes every repository
-    /// module except those pinned to a full commit SHA, which cannot change. A tag
-    /// costs one small call to confirm it still names the same commit. Returns how
-    /// many modules took a new copy.
-    /// </summary>
-    public async Task<int> RefreshAllAsync(CancellationToken ct = default)
-    {
-        var modules = await _db.Modules.AsNoTracking()
-            .Where(m => m.DeletedAt == null && m.SourceRepository != null)
-            .OrderBy(m => m.Id)
-            .Select(m => new { m.Id, m.SourceRef })
-            .ToListAsync(ct);
+        public async Task<GitHubConnectionStatus> StatusAsync(GitHubConnectionService connection, CancellationToken ct) =>
+            _status ??= await connection.GetStatusAsync(ct);
 
-        var updated = 0;
-        foreach (var module in modules.Where(m => !GitHubAppClient.IsCommitSha(m.SourceRef)))
+        public async Task<GitHubRepositoryFacts?> RepositoryAsync(string fullName, Func<Task<GitHubRepositoryFacts?>> read)
         {
-            if (await RefreshIsolatedAsync(module.Id, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
+            if (!_repositories.TryGetValue(fullName, out var facts))
+            {
+                _repositories[fullName] = facts = await read();
+            }
+            return facts;
         }
-        return updated;
-    }
 
-    /// <summary>
-    /// <see cref="RefreshAsync"/> for one module of a pass over many: an unexpected
-    /// failure (a database error, say) is logged and the pass moves on, rather than
-    /// leaving the rest of the organisation's modules unrefreshed.
-    /// </summary>
-    private async Task<ModuleSourceRefreshOutcome> RefreshIsolatedAsync(int moduleId, CancellationToken ct)
-    {
-        try
+        public async Task<string?> CommitAsync(string fullName, string? gitRef, Func<Task<string?>> resolve)
         {
-            return await RefreshAsync(moduleId, ct);
+            var key = $"{fullName}\n{gitRef}";
+            if (!_commits.TryGetValue(key, out var sha))
+            {
+                _commits[key] = sha = await resolve();
+            }
+            return sha;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+
+        public async Task<byte[]> ArchiveAsync(string fullName, string commit, Func<Task<byte[]>> download)
         {
-            _db.ChangeTracker.Clear();
-            _logger.LogError(ex, "Could not refresh module {ModuleId} from its repository.", moduleId);
-            return ModuleSourceRefreshOutcome.Failed;
+            var key = $"{fullName}@{commit}";
+            if (_archive is { } kept && string.Equals(kept.Key, key, StringComparison.OrdinalIgnoreCase)) return kept.Bytes;
+            var bytes = await download();
+            _archive = (key, bytes);
+            return bytes;
         }
     }
 
@@ -372,6 +455,30 @@ public class ModuleSourceService
     }
 
     /// <summary>
+    /// The archive of <paramref name="commit"/>, in memory, for a refresh pass to
+    /// read once per module. The download cap bounds what is held.
+    /// </summary>
+    private async Task<byte[]> DownloadArchiveAsync(string? token, string owner, string repo, string commit, CancellationToken ct)
+    {
+        try
+        {
+            return await _github.ReadTarballAsync(
+                token, owner, repo, commit, ModuleSourceLimits.MaxDownloadBytes,
+                async (stream, readCt) =>
+                {
+                    using var buffer = new MemoryStream();
+                    await stream.CopyToAsync(buffer, readCt);
+                    return buffer.ToArray();
+                }, ct);
+        }
+        catch (ArchiveTooLargeException)
+        {
+            throw new ModuleSourceException(
+                $"The repository is too large to copy (more than {ModuleSourceLimits.MaxDownloadBytes / (1024 * 1024)} MB to download).");
+        }
+    }
+
+    /// <summary>
     /// This organisation's installation token, or null when it has no connection
     /// (or the deployment has no App), in which case public repositories are read
     /// anonymously. A connected installation GitHub refuses a token for is a
@@ -392,13 +499,16 @@ public class ModuleSourceService
         }
     }
 
-    private async Task<ModuleSourceRefreshOutcome> RecordFailureAsync(int moduleId, string reason, CancellationToken ct)
+    /// <summary>
+    /// Records why a refresh failed, on the module as it was when the refresh
+    /// read it: one saved since with another address keeps no stale error.
+    /// </summary>
+    private async Task<ModuleSourceRefreshOutcome> RecordFailureAsync(
+        int moduleId, string repository, string copiedCommit, string reason, CancellationToken ct)
     {
-        // A failed UpdateAsync may have left tracked changes behind; none of them
-        // may reach the database with the error.
         _db.ChangeTracker.Clear();
         var now = _clock.GetUtcNow().UtcDateTime;
-        await _db.Modules.Where(m => m.Id == moduleId)
+        await _db.Modules.Where(m => m.Id == moduleId && m.SourceRepository == repository && m.SourceCommitSha == copiedCommit)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(m => m.SourceCheckedAt, now)
                 .SetProperty(m => m.SourceError, reason), ct);

@@ -122,8 +122,12 @@ public class ModuleService
     /// Updates an existing module's fields and reconciles its dependency list.
     /// The <see cref="Module.Key"/> is immutable after creation; the
     /// caller-supplied key on <paramref name="input"/> is ignored.
+    /// <paramref name="keepSourceCopy"/> saves only the module's own fields and
+    /// dependencies, leaving a repository module's copied files and source columns
+    /// exactly as they are (#1415): renaming a module is not a reason to download
+    /// its repository again.
     /// </summary>
-    public async Task UpdateAsync(int id, ModuleInput input, CancellationToken ct = default)
+    public async Task UpdateAsync(int id, ModuleInput input, CancellationToken ct = default, bool keepSourceCopy = false)
     {
         // One transaction for the whole save, with the row locked first, so a
         // repository refresh running at the same time (#1415) either finishes
@@ -132,6 +136,10 @@ public class ModuleService
             ? await _db.Database.BeginTransactionAsync(ct)
             : null;
         await LockAsync(id, ct);
+        // A page's context outlives one save and EF hands back the instances it
+        // already tracks without re-reading them, so forget them: what is read
+        // under the lock must be what is in the database now.
+        _db.ChangeTracker.Clear();
 
         var existing = await _db.Modules
             .Include(m => m.Dependencies)
@@ -150,9 +158,16 @@ public class ModuleService
         existing.IdRangeSize = input.IdRangeSize;
         existing.Deprecated = input.Deprecated;
         existing.UpdatedAt = DateTime.UtcNow;
-        ApplySource(existing, input.Source);
-
         ReconcileDependencies(existing, input.Dependencies, existing.OrganizationId);
+
+        if (keepSourceCopy)
+        {
+            await _db.SaveChangesAsync(ct);
+            if (tx is not null) await tx.CommitAsync(ct);
+            _logger.LogInformation("Updated module '{Key}' (id={Id}), keeping its copied files.", existing.Key, existing.Id);
+            return;
+        }
+        ApplySource(existing, input.Source);
 
         // Folder tree: clear-and-rebuild, in two saves inside the transaction.
         // The Module -> folders relationship is keyed on module_id and covers
@@ -196,9 +211,10 @@ public class ModuleService
             ? await _db.Database.BeginTransactionAsync(ct)
             : null;
         await LockAsync(id, ct);
+        _db.ChangeTracker.Clear();
 
         var existing = await _db.Modules
-            .Include(m => m.ExtensionFolders)
+            .Include(m => m.ExtensionFolders).ThenInclude(f => f.Files)
             .FirstOrDefaultAsync(m => m.Id == id && m.DeletedAt == null, ct);
         if (existing is null
             || !string.Equals(existing.SourceRepository, expected.Repository, StringComparison.OrdinalIgnoreCase)
@@ -211,6 +227,22 @@ public class ModuleService
 
         existing.UpdatedAt = DateTime.UtcNow;
         ApplySource(existing, fresh);
+
+        // A push that moved another folder of the same repository leaves this
+        // module's files as they were: record the new commit and stop, rather
+        // than rewriting (and auditing) every file for nothing.
+        var stored = existing.ExtensionFolders
+            .Where(f => f.ParentFolderId == null)
+            .OrderBy(f => f.Ordering)
+            .Select(ModuleAuthoringMapper.BuildFolderAuthoring)
+            .ToList();
+        if (Fingerprint(stored).SequenceEqual(Fingerprint(folders)))
+        {
+            await _db.SaveChangesAsync(ct);
+            if (tx is not null) await tx.CommitAsync(ct);
+            return true;
+        }
+
         existing.ExtensionFolders.Clear();
         await _db.SaveChangesAsync(ct);
 
@@ -221,6 +253,24 @@ public class ModuleService
         await _db.SaveChangesAsync(ct);
         if (tx is not null) await tx.CommitAsync(ct);
         return true;
+    }
+
+    /// <summary>
+    /// A folder tree as a flat, ordered list of its folders and files, for
+    /// telling whether a fresh copy differs from the stored one.
+    /// </summary>
+    private static IEnumerable<string> Fingerprint(IEnumerable<FolderAuthoring> folders, string prefix = "")
+    {
+        foreach (var folder in folders)
+        {
+            var path = prefix + folder.Path + "/";
+            yield return "D " + path;
+            foreach (var file in folder.Files)
+            {
+                yield return $"F {path}{file.Path}\0{file.IsExample}\0{file.Content}";
+            }
+            foreach (var entry in Fingerprint(folder.Folders, path)) yield return entry;
+        }
     }
 
     /// <summary>

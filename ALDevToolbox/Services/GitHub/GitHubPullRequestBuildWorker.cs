@@ -171,7 +171,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         {
             await using var scope = _services.CreateAsyncScope();
             var sources = scope.ServiceProvider.GetRequiredService<ModuleSourceService>();
-            var updated = await sources.RefreshForPushAsync(push.RepositoryFullName, push.Branch, push.DefaultBranch, ct)
+            var updated = await sources.RefreshForPushAsync(push.RepositoryFullName, push.Branch, push.DefaultBranch, push.HeadSha, ct)
                 .ConfigureAwait(false);
             if (updated > 0)
             {

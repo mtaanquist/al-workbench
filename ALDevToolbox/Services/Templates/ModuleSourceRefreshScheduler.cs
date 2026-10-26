@@ -74,6 +74,9 @@ public sealed class ModuleSourceRefreshScheduler : PolledScheduler
         var updated = 0;
         foreach (var (orgId, isSystem) in orgs)
         {
+            // Each organisation restarts the active clock: the ceiling bounds one
+            // organisation's pass, not the whole deployment's.
+            Heartbeat.BeginActive();
             try
             {
                 using var ambient = AmbientOrganizationScope.Enter(

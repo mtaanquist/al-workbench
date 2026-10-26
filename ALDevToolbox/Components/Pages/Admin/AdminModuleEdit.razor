@@ -391,11 +391,19 @@
                             @if (saved.Skipped.Count > 0)
                             {
                                 <details class="ms-skipped">
-                                    <summary>@saved.Skipped.Count file@(saved.Skipped.Count == 1 ? " was" : "s were") left out</summary>
+                                    @{ var leftOut = ModuleSourceSkippedFile.Total(saved.Skipped); }
+                                    <summary>@leftOut file@(leftOut == 1 ? " was" : "s were") left out</summary>
                                     <ul>
                                         @foreach (var skip in saved.Skipped)
                                         {
-                                            <li><code class="code">@skip.Path</code> - @skip.Reason</li>
+                                            @if (skip.More > 0)
+                                            {
+                                                <li>and @skip.More more, left out for the reasons above.</li>
+                                            }
+                                            else
+                                            {
+                                                <li><code class="code">@skip.Path</code> - @skip.Reason</li>
+                                            }
                                         }
                                     </ul>
                                 </details>
@@ -619,6 +627,7 @@
                 ModuleSourceRefreshOutcome.Updated => "Updated to the latest commit.",
                 ModuleSourceRefreshOutcome.Unchanged => "Already up to date.",
                 ModuleSourceRefreshOutcome.Failed => null,
+                ModuleSourceRefreshOutcome.Postponed => "GitHub is busy. Try again in a few minutes.",
                 _ => "Save the module first.",
             };
             if (await Modules.GetByKeyAsync(Key!) is { } reloaded)
@@ -736,15 +745,18 @@
         {
             if (IsEdit && _existingId is not null)
             {
-                if (source is null)
+                // Same repository, branch and folder as saved: keep the copy as it
+                // is rather than downloading it again for a renamed module.
+                var keepCopy = source is not null && _saved is not null && !SourceFieldsChanged;
+                if (source is null || keepCopy)
                 {
-                    await Modules.UpdateAsync(_existingId.Value, payload);
+                    await Modules.UpdateAsync(_existingId.Value, payload, keepSourceCopy: keepCopy);
                 }
                 else
                 {
                     await Sources.UpdateAsync(_existingId.Value, payload, source);
                 }
-                _saveSuccess = source is null ? "Saved." : "Saved. The repository's files were copied.";
+                _saveSuccess = source is null || keepCopy ? "Saved." : "Saved. The repository's files were copied.";
                 if (await Modules.GetByKeyAsync(Key!) is { } reloaded)
                 {
                     _form = FormState.From(reloaded);

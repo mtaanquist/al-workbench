@@ -28,8 +28,19 @@ public record ModuleSourceState(
     IReadOnlyList<ModuleSourceSkippedFile> Skipped,
     IReadOnlyList<ModuleDependencyInput> Dependencies);
 
-/// <summary>A file a copy left out, and why, in words for the module page.</summary>
-public record ModuleSourceSkippedFile(string Path, string Reason);
+/// <summary>
+/// A file a copy left out, and why, in words for the module page. When the list
+/// is cut short, its last entry stands for the rest and <see cref="More"/> says
+/// how many it stands for.
+/// </summary>
+public record ModuleSourceSkippedFile(string Path, string Reason, int More = 0)
+{
+    public const string MoreReason = "Left out for the reasons above.";
+
+    /// <summary>How many files <paramref name="skipped"/> stands for, counting a cut-short tail.</summary>
+    public static int Total(IReadOnlyList<ModuleSourceSkippedFile> skipped) =>
+        skipped.Sum(s => s.More > 0 ? s.More : 1);
+}
 
 /// <summary>
 /// What one copy of a repository produced: the folder tree to store, what was
@@ -179,6 +190,9 @@ public static partial class ModuleSourceAddress
         return true;
     }
 
+    /// <summary>The longest folder path stored (the column is 500).</summary>
+    public const int MaxPathLength = 500;
+
     /// <summary>
     /// Normalises the folder field: slashes trimmed, backslashes refused, no
     /// <c>.</c> or <c>..</c> segments. Null or blank means the repository root.
@@ -192,6 +206,11 @@ public static partial class ModuleSourceAddress
         if (text.Contains('\\'))
         {
             error = "Use '/' between folder names.";
+            return false;
+        }
+        if (text.Length > MaxPathLength)
+        {
+            error = $"Keep the folder path under {MaxPathLength} characters.";
             return false;
         }
         var segments = text.Split('/');

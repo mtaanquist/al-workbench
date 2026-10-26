@@ -288,7 +288,7 @@ public sealed class ModuleSourceServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var updated = await _db.NewModuleSourceService(ctx, _db.NewGitHubAppClient(ctx, api))
-            .RefreshForPushAsync(Public.ToUpperInvariant(), "main", "main");
+            .RefreshForPushAsync(Public.ToUpperInvariant(), "main", "main", ShaB);
 
         updated.Should().Be(2);
         var shas = await ctx.Modules.AsNoTracking().ToDictionaryAsync(m => m.Id, m => m.SourceCommitSha);
@@ -373,6 +373,116 @@ public sealed class ModuleSourceServiceTests : IDisposable
         var act = () => CreateAsync(api, new ModuleSourceInput(Public, gitRef, null));
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Source.Ref");
+        api.Calls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_page_that_saved_once_can_save_again_after_a_refresh_replaced_the_files()
+    {
+        // The edit page keeps one context for its whole visit, so a save after a
+        // background refresh must not act on the folder rows it tracked before.
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        await using var page = _db.NewContext();
+        await NewModuleService(page).UpdateAsync(module.Id, Input() with { Name = "Document Capture 2" }, keepSourceCopy: true);
+
+        var outcome = await RefreshAsync(PublicApi(ShaB, SimpleExtension("codeunit 91000 \"{{affix}} Doc v2\" { }")), module.Id);
+        outcome.Should().Be(ModuleSourceRefreshOutcome.Updated);
+
+        var written = new FolderAuthoring("src", [], [new FileAuthoring("Own.al", "codeunit 91001 Own { }", false)]);
+        await NewModuleService(page).UpdateAsync(module.Id, Input() with { Folders = [written] });
+
+        await using var verify = _db.NewContext();
+        (await verify.ModuleExtensionFiles.Where(f => f.Folder!.ModuleId == module.Id).Select(f => f.Path).ToListAsync())
+            .Should().Equal("Own.al");
+    }
+
+    [Fact]
+    public async Task Saving_without_changing_the_repository_keeps_the_copy_and_does_not_download()
+    {
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        int fileId;
+        await using (var ctx = _db.NewContext())
+        {
+            fileId = await ctx.ModuleExtensionFiles.Where(f => f.Folder!.ModuleId == module.Id).Select(f => f.Id).SingleAsync();
+            await NewModuleService(ctx).UpdateAsync(module.Id, Input() with { Name = "Renamed" }, keepSourceCopy: true);
+        }
+
+        await using var verify = _db.NewContext();
+        var saved = await verify.Modules.SingleAsync(m => m.Id == module.Id);
+        saved.Name.Should().Be("Renamed");
+        saved.SourceRepository.Should().Be(Public);
+        saved.SourceCommitSha.Should().Be(ShaA);
+        (await verify.ModuleExtensionFiles.Where(f => f.Folder!.ModuleId == module.Id).Select(f => f.Id).SingleAsync())
+            .Should().Be(fileId, "the copied files are left exactly as they were");
+    }
+
+    [Fact]
+    public async Task A_new_commit_that_did_not_touch_the_module_folder_only_moves_the_commit()
+    {
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        int fileId;
+        await using (var ctx = _db.NewContext())
+        {
+            fileId = await ctx.ModuleExtensionFiles.Where(f => f.Folder!.ModuleId == module.Id).Select(f => f.Id).SingleAsync();
+        }
+
+        (await RefreshAsync(PublicApi(ShaB, SimpleExtension()), module.Id)).Should().Be(ModuleSourceRefreshOutcome.Updated);
+
+        await using var verify = _db.NewContext();
+        (await verify.Modules.SingleAsync(m => m.Id == module.Id)).SourceCommitSha.Should().Be(ShaB);
+        (await verify.ModuleExtensionFiles.Where(f => f.Folder!.ModuleId == module.Id).Select(f => f.Id).SingleAsync())
+            .Should().Be(fileId, "identical files are not deleted and written again");
+    }
+
+    [Fact]
+    public async Task Modules_sharing_a_repository_cost_one_download_in_a_pass()
+    {
+        var both = Tarball([
+            Entry.Text("Capture/src/a.al", "codeunit 1 A { }"),
+            Entry.Text("Delivery/src/b.al", "codeunit 2 B { }"),
+        ]);
+        await CreateAsync(PublicApi(ShaA, both), new ModuleSourceInput(Public, null, "Capture"), "capture");
+        await CreateAsync(PublicApi(ShaA, both), new ModuleSourceInput(Public, null, "Delivery"), "delivery");
+        var api = PublicApi(ShaB, both);
+
+        await using var ctx = _db.NewContext();
+        var updated = await _db.NewModuleSourceService(ctx, _db.NewGitHubAppClient(ctx, api)).RefreshAllAsync();
+
+        updated.Should().Be(2);
+        api.Calls.Count(c => c.Contains("/tarball/")).Should().Be(1);
+        api.Calls.Count(c => c.EndsWith($"/repos/{Public}")).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task GitHub_limiting_requests_ends_the_pass_and_marks_nothing_failed()
+    {
+        await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null), "first");
+        await CreateAsync(
+            new FakeGitHubApi().Repository("contoso/other", isPrivate: false)
+                .ResolveRef("contoso/other", "main", ShaA).ServeTarball("contoso/other", ShaA, SimpleExtension()),
+            new ModuleSourceInput("contoso/other", "main", null), "second");
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, $"/repos/{Public}", HttpStatusCode.TooManyRequests, "{\"message\":\"API rate limit exceeded\"}");
+
+        await using var ctx = _db.NewContext();
+        var updated = await _db.NewModuleSourceService(ctx, _db.NewGitHubAppClient(ctx, api)).RefreshAllAsync();
+
+        updated.Should().Be(0);
+        api.Calls.Should().NotContain(c => c.Contains("contoso/other"), "the pass stops at the first refusal");
+        (await ctx.Modules.AsNoTracking().Select(m => m.SourceError).ToListAsync()).Should().OnlyContain(e => e == null);
+    }
+
+    [Fact]
+    public async Task A_push_leaves_a_module_already_at_the_pushed_commit_alone()
+    {
+        await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        var api = new FakeGitHubApi();
+
+        await using var ctx = _db.NewContext();
+        var updated = await _db.NewModuleSourceService(ctx, _db.NewGitHubAppClient(ctx, api))
+            .RefreshForPushAsync(Public, "main", "main", ShaA);
+
+        updated.Should().Be(0);
         api.Calls.Should().BeEmpty();
     }
 

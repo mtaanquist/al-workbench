@@ -206,7 +206,27 @@ public sealed class ModuleSourceArchiveReaderTests
         var snapshot = await ReadAsync(Tarball([Entry.Text("src/a.al", "codeunit 1 A { }"), .. images]), path: null);
 
         snapshot.Skipped.Should().HaveCount(ModuleSourceLimits.MaxListedSkipped + 1);
-        snapshot.Skipped[^1].Path.Should().Be("and 50 more");
+        snapshot.Skipped[^1].More.Should().Be(50);
+        ModuleSourceSkippedFile.Total(snapshot.Skipped).Should().Be(ModuleSourceLimits.MaxListedSkipped + 50);
+    }
+
+    [Fact]
+    public async Task Separate_id_ranges_add_up_rather_than_spanning_the_gap()
+    {
+        var snapshot = await ReadAsync(Tarball([
+            Entry.Text("app.json", """{ "idRanges": [ { "from": 50000, "to": 50099 }, { "from": 70000, "to": 70099 } ] }"""),
+            Entry.Text("src/a.al", "codeunit 50000 A { }"),
+        ]), path: null);
+
+        snapshot.IdRangeSize.Should().Be(200);
+    }
+
+    [Fact]
+    public void A_folder_path_longer_than_can_be_stored_is_refused()
+    {
+        ModuleSourceAddress.TryNormalisePath(string.Join('/', Enumerable.Repeat("folder", 80)), out _, out var error)
+            .Should().BeFalse();
+        error.Should().Contain("500");
     }
 
     [Fact]

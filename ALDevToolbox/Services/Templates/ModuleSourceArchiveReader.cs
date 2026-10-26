@@ -165,7 +165,7 @@ public static partial class ModuleSourceArchiveReader
         {
             var rest = skipped.Count - ModuleSourceLimits.MaxListedSkipped;
             skipped = [.. skipped.Take(ModuleSourceLimits.MaxListedSkipped),
-                new ModuleSourceSkippedFile($"and {rest} more", "Left out for the reasons above.")];
+                new ModuleSourceSkippedFile($"and {rest} more", ModuleSourceSkippedFile.MoreReason, rest)];
         }
 
         return new ModuleSourceSnapshot(root.BuildFolders(), skipped, dependencies, idRangeSize, fileCount, totalBytes);
@@ -258,8 +258,10 @@ public static partial class ModuleSourceArchiveReader
             }
             if (ranges.Count > 0)
             {
-                var size = ranges.Max(r => r.To) - ranges.Min(r => r.From) + 1;
-                if (size > 0) idRangeSize = size;
+                // The IDs the extension has room for: gaps between ranges are not
+                // its to use, so the sizes are added rather than spanned.
+                var size = ranges.Sum(r => (long)r.To - r.From + 1);
+                if (size is > 0 and <= int.MaxValue) idRangeSize = (int)size;
             }
         }
         catch (JsonException)
