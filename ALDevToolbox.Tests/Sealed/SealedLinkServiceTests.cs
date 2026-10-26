@@ -183,6 +183,29 @@ public sealed class SealedLinkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_burst_of_guesses_at_once_still_gets_only_five_and_the_last_view_closes_the_link()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input() with { PassphraseSalt = B64(16), PassphraseCheck = B64(32) };
+        var token = await CreateAsync(input);
+        SignOut();
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 20).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            return await new SealedLinkService(ctx, _db.OrgContext, _clock, NullLogger<SealedLinkService>.Instance)
+                .RevealAsync(token, input.LinkCheck, B64(32), null);
+        }));
+
+        results.Count(r => r.Status is SealedRevealStatus.WrongPassphrase or SealedRevealStatus.LockedOut)
+            .Should().Be(SealedLinkService.MaxPassphraseAttempts);
+        var link = await ReadLinkAsync();
+        link.FailedPassphraseAttempts.Should().Be(SealedLinkService.MaxPassphraseAttempts);
+        link.ClosedReason.Should().Be(SealedLinkClosedReason.LockedOut);
+        link.Ciphertext.Should().BeNull();
+    }
+
+    [Fact]
     public async Task A_wrong_passphrase_spends_no_view_and_five_lock_the_link()
     {
         await SignInAsync("alex@cronus.example");

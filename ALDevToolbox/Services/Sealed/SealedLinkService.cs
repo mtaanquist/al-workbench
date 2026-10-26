@@ -46,7 +46,7 @@ public sealed record SealedLinkRow(
     IReadOnlyList<SealedLinkEventRow> Events)
 {
     /// <summary>Still opens. A link past its expiry reads as closed before the sweep has caught up with it.</summary>
-    public bool IsOpenAt(DateTime now) => ClosedAt is null && ExpiresAt > now;
+    public bool IsOpenAt(DateTime now) => ClosedAt is null && ExpiresAt > now && ViewCount < MaxViews;
 }
 
 /// <summary>What the recipient page needs before anything is revealed.</summary>
@@ -284,7 +284,7 @@ public sealed class SealedLinkService
     public async Task RevokeAsync(int id, CancellationToken ct = default)
     {
         var userId = RequireUserId();
-        var link = await _db.SealedLinks.FirstOrDefaultAsync(l => l.Id == id, ct)
+        var link = await _db.SealedLinks.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Link"] = "That link no longer exists. Reload the page to see your links.",
@@ -299,9 +299,15 @@ public sealed class SealedLinkService
         if (link.ClosedAt is not null) return;
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        link.Ciphertext = null;
-        link.ClosedAt = now;
-        link.ClosedReason = SealedLinkClosedReason.Revoked;
+        // Conditional, so a reveal or the sweep that closed the link a moment ago keeps
+        // its own reason instead of being relabelled Revoked.
+        var revoked = await _db.SealedLinks
+            .Where(l => l.Id == id && l.ClosedAt == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Ciphertext, (byte[]?)null)
+                .SetProperty(l => l.ClosedAt, now)
+                .SetProperty(l => l.ClosedReason, SealedLinkClosedReason.Revoked), ct);
+        if (revoked == 0) return;
         _db.AuditLog.Add(new AuditLogEntry
         {
             Timestamp = now,
@@ -394,21 +400,29 @@ public sealed class SealedLinkService
             if (!right) return await RecordWrongPassphraseAsync(link.Id, link.OrganizationId, ipAddress, now, ct);
         }
 
+        // Taking the view and, on the last one, closing the link and dropping the
+        // ciphertext is one statement: a request aborted in between cannot leave a
+        // used-up link holding its secret. Postgres re-checks the WHERE under the row
+        // lock, so two reveals at once cannot both take the last view.
         // Fence category 1 (pre-auth, a Sealed link's recipient has no account): pinned to the id the token resolved to.
         var won = await _db.SealedLinks.IgnoreQueryFilters()
-            .Where(l => l.Id == link.Id && l.ClosedAt == null && l.ExpiresAt > now && l.ViewCount < l.MaxViews)
-            .ExecuteUpdateAsync(s => s.SetProperty(l => l.ViewCount, l => l.ViewCount + 1), ct);
+            .Where(l => l.Id == link.Id && l.ClosedAt == null && l.ExpiresAt > now
+                && l.ViewCount < l.MaxViews && l.FailedPassphraseAttempts < MaxPassphraseAttempts)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.ViewCount, l => l.ViewCount + 1)
+                .SetProperty(l => l.Ciphertext, l => l.ViewCount + 1 >= l.MaxViews ? null : l.Ciphertext)
+                .SetProperty(l => l.ClosedAt, l => l.ViewCount + 1 >= l.MaxViews ? now : l.ClosedAt)
+                .SetProperty(l => l.ClosedReason, l => l.ViewCount + 1 >= l.MaxViews ? SealedLinkClosedReason.UsedUp : l.ClosedReason),
+                CancellationToken.None);
         if (won == 0) return gone;
 
-        // Whoever took the last view closes the link; nobody else can, because no
-        // other reveal can get past the update above once the count is full.
+        // Read back after the update: another reveal may have taken a view meanwhile.
         // Fence category 1 (pre-auth, a Sealed link's recipient has no account): pinned to the id the token resolved to.
-        var closed = await _db.SealedLinks.IgnoreQueryFilters()
-            .Where(l => l.Id == link.Id && l.ClosedAt == null && l.ViewCount >= l.MaxViews)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(l => l.Ciphertext, (byte[]?)null)
-                .SetProperty(l => l.ClosedAt, now)
-                .SetProperty(l => l.ClosedReason, SealedLinkClosedReason.UsedUp), ct);
+        var after = await _db.SealedLinks.IgnoreQueryFilters().AsNoTracking()
+            .Where(l => l.Id == link.Id)
+            .Select(l => new { l.ViewCount, l.MaxViews })
+            .FirstAsync(CancellationToken.None);
+        var viewsLeft = Math.Max(0, after.MaxViews - after.ViewCount);
 
         _db.SealedLinkEvents.Add(new SealedLinkEvent
         {
@@ -418,23 +432,33 @@ public sealed class SealedLinkService
             OccurredAt = now,
             IpAddress = Truncate(ipAddress),
         });
-        await _db.SaveChangesAsync(ct);
+        // The view is spent: record it even if the recipient has already gone.
+        await _db.SaveChangesAsync(CancellationToken.None);
 
-        _logger.LogInformation("Sealed link {LinkId} opened ({Closed}).", link.Id, closed > 0 ? "now used up" : "views left");
+        _logger.LogInformation("Sealed link {LinkId} opened ({ViewsLeft} views left).", link.Id, viewsLeft);
         return new SealedRevealResult(
             SealedRevealStatus.Revealed,
             link.Ciphertext,
             link.Iv,
-            ViewsLeft: Math.Max(0, link.MaxViews - link.ViewCount - 1));
+            ViewsLeft: viewsLeft);
     }
 
     private async Task<SealedRevealResult> RecordWrongPassphraseAsync(
         int linkId, int organizationId, string? ipAddress, DateTime now, CancellationToken ct)
     {
+        // Counting the attempt and, on the last one, locking the link is one statement
+        // whose WHERE Postgres re-checks under the row lock: a burst of guesses sent at
+        // once still gets no more than MaxPassphraseAttempts between them.
         // Fence category 1 (pre-auth, a Sealed link's recipient has no account): pinned to the id the token resolved to.
         var counted = await _db.SealedLinks.IgnoreQueryFilters()
-            .Where(l => l.Id == linkId && l.ClosedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(l => l.FailedPassphraseAttempts, l => l.FailedPassphraseAttempts + 1), ct);
+            .Where(l => l.Id == linkId && l.ClosedAt == null && l.FailedPassphraseAttempts < MaxPassphraseAttempts)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.FailedPassphraseAttempts, l => l.FailedPassphraseAttempts + 1)
+                .SetProperty(l => l.Ciphertext, l => l.FailedPassphraseAttempts + 1 >= MaxPassphraseAttempts ? null : l.Ciphertext)
+                .SetProperty(l => l.ClosedAt, l => l.FailedPassphraseAttempts + 1 >= MaxPassphraseAttempts ? now : l.ClosedAt)
+                .SetProperty(l => l.ClosedReason, l => l.FailedPassphraseAttempts + 1 >= MaxPassphraseAttempts
+                    ? SealedLinkClosedReason.LockedOut : l.ClosedReason),
+                CancellationToken.None);
         if (counted == 0) return new SealedRevealResult(SealedRevealStatus.Gone);
 
         _db.SealedLinkEvents.Add(new SealedLinkEvent
@@ -445,27 +469,19 @@ public sealed class SealedLinkService
             OccurredAt = now,
             IpAddress = Truncate(ipAddress),
         });
-        await _db.SaveChangesAsync(ct);
-
-        // Fence category 1 (pre-auth, a Sealed link's recipient has no account): pinned to the id the token resolved to.
-        var locked = await _db.SealedLinks.IgnoreQueryFilters()
-            .Where(l => l.Id == linkId && l.ClosedAt == null && l.FailedPassphraseAttempts >= MaxPassphraseAttempts)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(l => l.Ciphertext, (byte[]?)null)
-                .SetProperty(l => l.ClosedAt, now)
-                .SetProperty(l => l.ClosedReason, SealedLinkClosedReason.LockedOut), ct);
-        if (locked > 0)
-        {
-            _logger.LogWarning("Sealed link {LinkId} locked after {Attempts} wrong passphrases.", linkId, MaxPassphraseAttempts);
-            return new SealedRevealResult(SealedRevealStatus.LockedOut);
-        }
+        await _db.SaveChangesAsync(CancellationToken.None);
 
         // Fence category 1 (pre-auth, a Sealed link's recipient has no account): pinned to the id the token resolved to.
         var attempts = await _db.SealedLinks.IgnoreQueryFilters().AsNoTracking()
             .Where(l => l.Id == linkId)
             .Select(l => l.FailedPassphraseAttempts)
             .FirstOrDefaultAsync(ct);
-        return new SealedRevealResult(SealedRevealStatus.WrongPassphrase, AttemptsLeft: Math.Max(1, MaxPassphraseAttempts - attempts));
+        if (attempts >= MaxPassphraseAttempts)
+        {
+            _logger.LogWarning("Sealed link {LinkId} locked after {Attempts} wrong passphrases.", linkId, MaxPassphraseAttempts);
+            return new SealedRevealResult(SealedRevealStatus.LockedOut);
+        }
+        return new SealedRevealResult(SealedRevealStatus.WrongPassphrase, AttemptsLeft: MaxPassphraseAttempts - attempts);
     }
 
     /// <summary>True for a string shaped like a token, so junk never reaches the database.</summary>

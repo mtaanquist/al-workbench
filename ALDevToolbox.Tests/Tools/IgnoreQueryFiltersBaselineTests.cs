@@ -65,7 +65,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Services/Organizations/OrganizationAdminService.cs"] = 1,
         ["ALDevToolbox/Services/Organizations/OrganizationConfigService.cs"] = 3,
         ["ALDevToolbox/Services/Organizations/PlatformOrganizationFileSeeder.cs"] = 1,
-        ["ALDevToolbox/Services/Sealed/SealedLinkService.cs"] = 7,
+        ["ALDevToolbox/Services/Sealed/SealedLinkService.cs"] = 6,
         ["ALDevToolbox/Services/SingleTenant/SingleTenantSeeder.cs"] = 2,
         ["ALDevToolbox/Services/Templates/FolderTreeHydrator.cs"] = 4,
         ["ALDevToolbox/Services/Templates/TemplateImportService.cs"] = 7,

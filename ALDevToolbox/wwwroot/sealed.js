@@ -102,7 +102,11 @@
         if (bytes.length > maxBytes) {
             return { error: "That is too long to send. Keep it under " + Math.floor(maxBytes / 1024) + " KB." };
         }
-        const passphrase = normalisePassphrase(passphraseEl ? passphraseEl.value : "");
+        const rawPassphrase = passphraseEl ? passphraseEl.value : "";
+        const passphrase = normalisePassphrase(rawPassphrase);
+        if (rawPassphrase && !passphrase) {
+            return { error: "The passphrase is only spaces. Type a passphrase, or clear the box to send without one." };
+        }
 
         const key = crypto.getRandomValues(new Uint8Array(32));
         const salt = passphrase ? crypto.getRandomValues(new Uint8Array(16)) : null;

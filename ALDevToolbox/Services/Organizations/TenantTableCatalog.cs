@@ -174,7 +174,7 @@ internal static class TenantTableCatalog
             ["notification_digest_items"] = "Notifications waiting for someone's next daily or weekly digest. Restoring them would send old news again in the next digest, and they are deleted as soon as that digest goes out (or after 30 days). A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
             ["sealed_links"] = "Sealed secret links. Restoring one would bring back an encrypted secret its sender revoked, or a link that was already used up, expired or locked. Links close within a week and are deleted 30 days later anyway, and they are tied to users (which are not restored). See .design/sealed.md.",
             ["sealed_link_events"] = "The opens and wrong passphrases of a sealed link, deleted with it. Excluded with sealed_links, for the same reasons. See .design/sealed.md.",
-            ["user_notifications"] ="The in-app list of notifications. Restoring it would bring back old news as unread, it is tied to users (which are not restored), and rows are deleted after 30 days anyway. A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
+            ["user_notifications"] = "The in-app list of notifications. Restoring it would bring back old news as unread, it is tied to users (which are not restored), and rows are deleted after 30 days anyway. A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
         };
 
     /// <summary>All tables that carry an <c>organization_id</c>.</summary>

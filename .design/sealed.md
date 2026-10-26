@@ -19,8 +19,9 @@ project thread "One-time secret sharing links".
   address, and whether it is still open. Admins can switch to everyone's links in the
   organisation and revoke any of them. Closed links disappear from the list 30 days after
   they closed.
-- The sender is notified (category "Sealed links you send") each time a link is opened,
-  and when one locks after wrong passphrases.
+- The sender is notified (category "Sealed links you send") when a link is opened (opens
+  within the same minute arrive as one notification), and when one locks after wrong
+  passphrases.
 
 ## Security model
 
@@ -46,8 +47,10 @@ The server never sees the secret or the key.
    presses Show secret, so mail scanners that fetch every link in an email (Outlook Safe
    Links and the like) cannot use a link up.
 6. Views are counted in one conditional `UPDATE` (`view_count < max_views`, still open,
-   not expired), so two reveals at once cannot both take the last view. Whoever takes the
-   last one closes the link and clears the ciphertext.
+   not expired), so two reveals at once cannot both take the last view. The same statement
+   closes the link and clears the ciphertext when it takes the last view, so an aborted
+   request cannot leave a used-up link holding its secret. Wrong passphrases are counted
+   and the link locked the same way, so a burst of guesses sent at once still gets five.
 7. The reveal endpoint is anonymous, rate limited to 20 requests per address per 10
    minutes, takes a body of at most 1 KB and answers `Cache-Control: no-store`. The
    recipient page sets `noindex` and `no-referrer`.
