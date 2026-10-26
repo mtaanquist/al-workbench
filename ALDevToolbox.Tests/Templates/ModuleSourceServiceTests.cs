@@ -215,7 +215,7 @@ public sealed class ModuleSourceServiceTests : IDisposable
     public async Task A_refresh_at_the_same_commit_only_notes_that_it_checked()
     {
         var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
-        var api = new FakeGitHubApi().ResolveRef(Public, "HEAD", ShaA);
+        var api = new FakeGitHubApi().Repository(Public, isPrivate: false).ResolveRef(Public, "HEAD", ShaA);
 
         var outcome = await RefreshAsync(api, module.Id);
 
@@ -247,6 +247,7 @@ public sealed class ModuleSourceServiceTests : IDisposable
     {
         var module = await CreateAsync(PublicApi(ShaA, SimpleExtension(), "main"), new ModuleSourceInput(Public, "main", null));
         var api = new FakeGitHubApi()
+            .Repository(Public, isPrivate: false)
             .On(HttpMethod.Get, $"/repos/{Public}/commits/main", HttpStatusCode.NotFound, "{\"message\":\"No commit found\"}");
 
         var outcome = await RefreshAsync(api, module.Id);
@@ -259,7 +260,7 @@ public sealed class ModuleSourceServiceTests : IDisposable
         (await ctx.ModuleExtensionFiles.CountAsync(f => f.Folder!.ModuleId == module.Id)).Should().Be(1);
 
         // The next good refresh clears it.
-        await RefreshAsync(new FakeGitHubApi().ResolveRef(Public, "main", ShaA), module.Id);
+        await RefreshAsync(new FakeGitHubApi().Repository(Public, isPrivate: false).ResolveRef(Public, "main", ShaA), module.Id);
         await using var after = _db.NewContext();
         (await after.Modules.SingleAsync(m => m.Id == module.Id)).SourceError.Should().BeNull();
     }
@@ -310,6 +311,69 @@ public sealed class ModuleSourceServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains($"/commits/{ShaA}"));
         (await ctx.Modules.AsNoTracking().SingleAsync(m => m.Id == following.Id)).SourceCommitSha.Should().Be(ShaB);
         (await ctx.Modules.AsNoTracking().SingleAsync(m => m.Id == pinned.Id)).SourceCommitSha.Should().Be(ShaA);
+    }
+
+    [Fact]
+    public async Task A_renamed_repository_is_followed_and_the_new_name_stored()
+    {
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        const string Renamed = "contoso/doc-capture";
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, $"/repos/{Public}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Renamed, isPrivate: false))
+            .ResolveRef(Renamed, "HEAD", ShaB)
+            .ServeTarball(Renamed, ShaB, SimpleExtension());
+
+        (await RefreshAsync(api, module.Id)).Should().Be(ModuleSourceRefreshOutcome.Updated);
+
+        await using var ctx = _db.NewContext();
+        var saved = await ctx.Modules.SingleAsync(m => m.Id == module.Id);
+        saved.SourceRepository.Should().Be(Renamed);
+        saved.SourceCommitSha.Should().Be(ShaB);
+    }
+
+    [Fact]
+    public async Task A_repository_made_private_outside_the_connected_organisation_stops_refreshing()
+    {
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        var api = new FakeGitHubApi().Repository(Public, isPrivate: true).ResolveRef(Public, "HEAD", ShaB);
+
+        (await RefreshAsync(api, module.Id)).Should().Be(ModuleSourceRefreshOutcome.Failed);
+
+        api.Calls.Should().NotContain(c => c.Contains("/commits/"));
+        await using var ctx = _db.NewContext();
+        (await ctx.Modules.SingleAsync(m => m.Id == module.Id)).SourceCommitSha.Should().Be(ShaA);
+    }
+
+    [Fact]
+    public async Task A_copy_is_not_replaced_when_the_module_changed_while_it_downloaded()
+    {
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+        var now = DateTime.UtcNow;
+        var stale = new ModuleSourceState(Public, "main", null, ShaA, now, [], []);
+        var fresh = new ModuleSourceState(Public, "main", null, ShaB, now, [], []);
+
+        await using var ctx = _db.NewContext();
+        var replaced = await NewModuleService(ctx).ReplaceSourceCopyAsync(module.Id, stale, [], fresh);
+
+        replaced.Should().BeFalse("the module follows the default branch, not 'main'");
+        await using var verify = _db.NewContext();
+        (await verify.Modules.SingleAsync(m => m.Id == module.Id)).SourceCommitSha.Should().Be(ShaA);
+        (await verify.ModuleExtensionFiles.CountAsync(f => f.Folder!.ModuleId == module.Id)).Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData("../../orgs/cronus-dk")]
+    [InlineData("main branch")]
+    [InlineData("feature/")]
+    [InlineData("v1~2")]
+    public async Task A_branch_that_is_not_a_ref_name_is_refused_before_GitHub_is_asked(string gitRef)
+    {
+        var api = new FakeGitHubApi();
+
+        var act = () => CreateAsync(api, new ModuleSourceInput(Public, gitRef, null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Source.Ref");
+        api.Calls.Should().BeEmpty();
     }
 
     [Fact]

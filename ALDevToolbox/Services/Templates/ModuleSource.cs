@@ -67,6 +67,12 @@ public static class ModuleSourceLimits
 
     /// <summary>The largest single file copied; larger ones are left out and listed.</summary>
     public const int MaxFileBytes = 512 * 1024;
+
+    /// <summary>The most left-out files listed by name; the rest are counted.</summary>
+    public const int MaxListedSkipped = 100;
+
+    /// <summary>The longest branch, tag or commit name accepted.</summary>
+    public const int MaxRefLength = 255;
 }
 
 /// <summary>
@@ -195,6 +201,33 @@ public static partial class ModuleSourceAddress
             return false;
         }
         normalised = string.Join('/', segments);
+        return true;
+    }
+
+    /// <summary>
+    /// Checks the branch, tag or commit field against git's own rules for a ref
+    /// name, so it can only ever name a ref: no <c>..</c>, no spaces or control
+    /// characters, none of <c>~ ^ : ? * [ \</c>, no leading or trailing slash.
+    /// Null or blank means the default branch.
+    /// </summary>
+    public static bool TryNormaliseRef(string? gitRef, out string? normalised, out string error)
+    {
+        normalised = null;
+        error = string.Empty;
+        var text = gitRef?.Trim() ?? string.Empty;
+        if (text.Length == 0) return true;
+        if (text.Length > ModuleSourceLimits.MaxRefLength
+            || text.Contains("..", StringComparison.Ordinal)
+            || text.Contains("//", StringComparison.Ordinal)
+            || text.Contains("@{", StringComparison.Ordinal)
+            || text.StartsWith('/') || text.EndsWith('/') || text.EndsWith('.')
+            || text.EndsWith(".lock", StringComparison.Ordinal)
+            || text.Any(c => char.IsControl(c) || char.IsWhiteSpace(c) || "~^:?*[\\".Contains(c)))
+        {
+            error = "That isn't a branch, tag or commit name. Check it on GitHub, for example main or v1.2.0.";
+            return false;
+        }
+        normalised = text;
         return true;
     }
 

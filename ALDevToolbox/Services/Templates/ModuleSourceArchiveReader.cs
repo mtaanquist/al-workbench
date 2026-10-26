@@ -143,7 +143,7 @@ public static partial class ModuleSourceArchiveReader
                 }
             }
         }
-        catch (ArchiveTooLargeException)
+        catch (ArchiveTooLargeException ex) when (ex.LimitBytes == ModuleSourceLimits.MaxUnpackedBytes)
         {
             throw new ModuleSourceException(
                 $"The repository is too large to copy (more than {ModuleSourceLimits.MaxUnpackedBytes / (1024 * 1024)} MB unpacked).");
@@ -157,6 +157,15 @@ public static partial class ModuleSourceArchiveReader
         {
             throw new ModuleSourceException(
                 $"The folder '{sourcePath}' is not in the repository at that branch, tag or commit.", isAboutFolder: true);
+        }
+
+        // A folder of images could otherwise list thousands; the module page shows
+        // the first few and a count of the rest.
+        if (skipped.Count > ModuleSourceLimits.MaxListedSkipped)
+        {
+            var rest = skipped.Count - ModuleSourceLimits.MaxListedSkipped;
+            skipped = [.. skipped.Take(ModuleSourceLimits.MaxListedSkipped),
+                new ModuleSourceSkippedFile($"and {rest} more", "Left out for the reasons above.")];
         }
 
         return new ModuleSourceSnapshot(root.BuildFolders(), skipped, dependencies, idRangeSize, fileCount, totalBytes);

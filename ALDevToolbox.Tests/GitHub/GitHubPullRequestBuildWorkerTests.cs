@@ -387,7 +387,8 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         }
         var api = Templates.ModuleSourceTestKit.ServeTarball(
             Templates.ModuleSourceTestKit.ResolveRef(
-                ApiAnswering(HttpStatusCode.NoContent), "cronus-dk/customer-app", "HEAD", GitHubWebhookPayloads.After),
+                Templates.ModuleSourceTestKit.Repository(ApiAnswering(HttpStatusCode.NoContent), "cronus-dk/customer-app", isPrivate: true),
+                "cronus-dk/customer-app", "HEAD", GitHubWebhookPayloads.After),
             "cronus-dk/customer-app", GitHubWebhookPayloads.After, Templates.ModuleSourceTestKit.SimpleExtension());
 
         await NewWorker(api: api).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);

@@ -35,7 +35,7 @@
     <Actions>
         <button type="button" class="btn btn--sm btn--primary"
                 @onclick="SaveAsync"
-                disabled="@(_saving || _form is null || _loadFailed)">
+                disabled="@(_saving || _updating || _form is null || _loadFailed)">
             <Icon Name="save" Width="14" Height="14" />
             <span>@(_saving ? "Saving..." : (IsEdit ? "Save changes" : "Create module"))</span>
         </button>
@@ -313,6 +313,7 @@
                             <div class="field">
                                 <label class="field__label" for="mod-src-ref">Branch, tag or commit</label>
                                 <input class="input" id="mod-src-ref" type="text"
+                                       maxlength="@ModuleSourceLimits.MaxRefLength" pattern="[^\s~\^:?*\[\\]*"
                                        @bind="_form!.SourceRef" @bind:event="oninput"
                                        placeholder="e.g. main" />
                                 <span class="field__hint">
@@ -711,7 +712,7 @@
 
     private async Task SaveAsync()
     {
-        if (_form is null || _saving) return;
+        if (_form is null || _saving || _updating) return;
         _saving = true;
         _saveError = null;
         _saveSuccess = null;

@@ -117,51 +117,62 @@ public class ModuleSourceService
     {
         var module = await _db.Modules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.DeletedAt == null)
-            .Include(m => m.Dependencies.OrderBy(d => d.Ordering))
             .FirstOrDefaultAsync(ct);
-        if (module?.SourceRepository is not { } repository) return ModuleSourceRefreshOutcome.NotARepositoryModule;
+        if (module?.SourceRepository is not { } repository || module.SourceCommitSha is not { } copiedCommit)
+        {
+            return ModuleSourceRefreshOutcome.NotARepositoryModule;
+        }
 
-        var (owner, repo) = Split(repository);
         try
         {
+            // The repository is read again each time, not just its branch: a
+            // renamed repository answers with a redirect the commit and archive
+            // calls do not follow, and one made private outside the connected
+            // organisation may no longer be copied at all.
             var token = await InstallationTokenAsync(ct);
+            var (owner, repo) = Split(repository);
+            var summary = await _github.GetRepositorySummaryAsync(token, owner, repo, ct);
+            var status = await _connection.GetStatusAsync(ct);
+            if (summary is null || (summary.IsPrivate && !IsInConnectedOrganisation(summary.FullName, status)))
+            {
+                return await RecordFailureAsync(module.Id,
+                    $"The repository {repository} could not be read. It may have been deleted or made private, or the GitHub App may no longer have access to it.", ct);
+            }
+            var current = string.IsNullOrEmpty(summary.FullName) ? repository : summary.FullName;
+            (owner, repo) = Split(current);
+
             var commit = await _github.ResolveCommitAsync(token, owner, repo, module.SourceRef, ct);
             if (commit is null)
             {
                 return await RecordFailureAsync(module.Id,
-                    module.SourceRef is null
-                        ? $"The repository {repository} could not be read. It may have been deleted, renamed or made private, or the GitHub App may no longer have access to it."
-                        : $"There is no branch, tag or commit called '{module.SourceRef}' in {repository} any more.", ct);
+                    $"There is no branch, tag or commit called '{module.SourceRef ?? summary.DefaultBranch}' in {current} any more.", ct);
             }
 
             var now = _clock.GetUtcNow().UtcDateTime;
-            if (string.Equals(commit, module.SourceCommitSha, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(commit, copiedCommit, StringComparison.OrdinalIgnoreCase))
             {
-                await _db.Modules.Where(m => m.Id == module.Id)
+                await _db.Modules.Where(m => m.Id == module.Id && m.SourceCommitSha == copiedCommit)
                     .ExecuteUpdateAsync(s => s
+                        .SetProperty(m => m.SourceRepository, current)
                         .SetProperty(m => m.SourceCheckedAt, now)
                         .SetProperty(m => m.SourceError, (string?)null), ct);
                 return ModuleSourceRefreshOutcome.Unchanged;
             }
 
             var snapshot = await DownloadAsync(token, owner, repo, commit, module.SourcePath, ct);
-            var input = new ModuleInput(
-                module.Key,
-                module.Name,
-                module.ExtensionName,
-                module.IdRangeSize,
-                module.Deprecated,
-                module.Dependencies
-                    .OrderBy(d => d.Ordering)
-                    .Select(d => new ModuleDependencyInput(d.DepId, d.DepName, d.DepPublisher, d.DepVersion))
-                    .ToList(),
-                snapshot.Folders,
-                new ModuleSourceState(repository, module.SourceRef, module.SourcePath, commit, now, snapshot.Skipped, snapshot.Dependencies));
-            await _modules.UpdateAsync(module.Id, input, ct);
+            var expected = new ModuleSourceState(repository, module.SourceRef, module.SourcePath, copiedCommit, now, [], []);
+            var fresh = new ModuleSourceState(current, module.SourceRef, module.SourcePath, commit, now, snapshot.Skipped, snapshot.Dependencies);
+            if (!await _modules.ReplaceSourceCopyAsync(module.Id, expected, snapshot.Folders, fresh, ct))
+            {
+                _logger.LogInformation(
+                    "Dropped a refresh of module '{Key}' from {Repository}: the module changed while the copy was downloading.",
+                    module.Key, current);
+                return ModuleSourceRefreshOutcome.Unchanged;
+            }
 
             _logger.LogInformation(
                 "Updated module '{Key}' from {Repository}: {OldCommit} to {NewCommit} ({FileCount} files).",
-                module.Key, repository, ShortSha(module.SourceCommitSha), ShortSha(commit), snapshot.FileCount);
+                module.Key, current, ShortSha(copiedCommit), ShortSha(commit), snapshot.FileCount);
             return ModuleSourceRefreshOutcome.Updated;
         }
         catch (ModuleSourceException ex)
@@ -210,7 +221,7 @@ public class ModuleSourceService
         var updated = 0;
         foreach (var id in due)
         {
-            if (await RefreshAsync(id, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
+            if (await RefreshIsolatedAsync(id, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
         }
         return updated;
     }
@@ -232,9 +243,28 @@ public class ModuleSourceService
         var updated = 0;
         foreach (var module in modules.Where(m => !GitHubAppClient.IsCommitSha(m.SourceRef)))
         {
-            if (await RefreshAsync(module.Id, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
+            if (await RefreshIsolatedAsync(module.Id, ct) == ModuleSourceRefreshOutcome.Updated) updated++;
         }
         return updated;
+    }
+
+    /// <summary>
+    /// <see cref="RefreshAsync"/> for one module of a pass over many: an unexpected
+    /// failure (a database error, say) is logged and the pass moves on, rather than
+    /// leaving the rest of the organisation's modules unrefreshed.
+    /// </summary>
+    private async Task<ModuleSourceRefreshOutcome> RefreshIsolatedAsync(int moduleId, CancellationToken ct)
+    {
+        try
+        {
+            return await RefreshAsync(moduleId, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _db.ChangeTracker.Clear();
+            _logger.LogError(ex, "Could not refresh module {ModuleId} from its repository.", moduleId);
+            return ModuleSourceRefreshOutcome.Failed;
+        }
     }
 
     // ===== Copying for a save =====
@@ -246,7 +276,11 @@ public class ModuleSourceService
         {
             throw Refuse("Source.Address", addressError);
         }
-        var gitRef = string.IsNullOrWhiteSpace(source.Ref) ? refFromLink : source.Ref.Trim();
+        if (!ModuleSourceAddress.TryNormaliseRef(string.IsNullOrWhiteSpace(source.Ref) ? refFromLink : source.Ref,
+                out var gitRef, out var refError))
+        {
+            throw Refuse("Source.Ref", refError);
+        }
         if (!ModuleSourceAddress.TryNormalisePath(string.IsNullOrWhiteSpace(source.Path) ? pathFromLink : source.Path,
                 out var path, out var pathError))
         {
@@ -371,6 +405,10 @@ public class ModuleSourceService
         _logger.LogWarning("Could not refresh module {ModuleId} from its repository: {Reason}", moduleId, reason);
         return ModuleSourceRefreshOutcome.Failed;
     }
+
+    private static bool IsInConnectedOrganisation(string fullName, GitHubConnectionStatus status) =>
+        status.OrgLogin is { } login
+        && fullName.StartsWith(login + "/", StringComparison.OrdinalIgnoreCase);
 
     private static (string Owner, string Repo) Split(string fullName)
     {

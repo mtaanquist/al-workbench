@@ -125,6 +125,14 @@ public class ModuleService
     /// </summary>
     public async Task UpdateAsync(int id, ModuleInput input, CancellationToken ct = default)
     {
+        // One transaction for the whole save, with the row locked first, so a
+        // repository refresh running at the same time (#1415) either finishes
+        // before this reads the module or sees what this saved.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        await LockAsync(id, ct);
+
         var existing = await _db.Modules
             .Include(m => m.Dependencies)
             .Include(m => m.ExtensionFolders)
@@ -146,7 +154,7 @@ public class ModuleService
 
         ReconcileDependencies(existing, input.Dependencies, existing.OrganizationId);
 
-        // Folder tree: clear-and-rebuild, in two saves inside one transaction.
+        // Folder tree: clear-and-rebuild, in two saves inside the transaction.
         // The Module -> folders relationship is keyed on module_id and covers
         // every row in the tree (flat), so clearing the collection deletes the
         // whole tree, audited row by row. EF does not order those deletes ahead
@@ -154,9 +162,6 @@ public class ModuleService
         // a single save of a tree that keeps a root folder's name (every
         // repository refresh, #1415) collided with itself. The denormalised
         // module_id on nested rows is re-stamped at save time by AppDbContext.
-        await using var tx = _db.Database.CurrentTransaction is null
-            ? await _db.Database.BeginTransactionAsync(ct)
-            : null;
         existing.ExtensionFolders.Clear();
         await _db.SaveChangesAsync(ct);
 
@@ -170,6 +175,63 @@ public class ModuleService
         _logger.LogInformation(
             "Updated module '{Key}' (id={Id}); now has {DepCount} dependency(ies) and {FolderCount} top-level folder(s).",
             existing.Key, existing.Id, existing.Dependencies.Count, existing.ExtensionFolders.Count);
+    }
+
+    /// <summary>
+    /// Replaces a repository module's copy with a fresh one (#1415), touching
+    /// only the files and the source columns. Returns false, changing nothing,
+    /// when the module no longer follows <paramref name="expected"/> - someone
+    /// saved it, switched it to written-here, or another refresh got there
+    /// first while this one was downloading. The row is locked for the check
+    /// and the write, so two refreshes, or a refresh and a save, never interleave.
+    /// </summary>
+    public async Task<bool> ReplaceSourceCopyAsync(
+        int id,
+        ModuleSourceState expected,
+        IReadOnlyList<FolderAuthoring> folders,
+        ModuleSourceState fresh,
+        CancellationToken ct = default)
+    {
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        await LockAsync(id, ct);
+
+        var existing = await _db.Modules
+            .Include(m => m.ExtensionFolders)
+            .FirstOrDefaultAsync(m => m.Id == id && m.DeletedAt == null, ct);
+        if (existing is null
+            || !string.Equals(existing.SourceRepository, expected.Repository, StringComparison.OrdinalIgnoreCase)
+            || existing.SourceRef != expected.Ref
+            || existing.SourcePath != expected.Path
+            || existing.SourceCommitSha != expected.CommitSha)
+        {
+            return false;
+        }
+
+        existing.UpdatedAt = DateTime.UtcNow;
+        ApplySource(existing, fresh);
+        existing.ExtensionFolders.Clear();
+        await _db.SaveChangesAsync(ct);
+
+        foreach (var folder in folders.Select((f, i) => ModuleAuthoringMapper.BuildFolder(f, existing.OrganizationId, ordering: i)))
+        {
+            existing.ExtensionFolders.Add(folder);
+        }
+        await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Takes the module row's lock for the rest of the current transaction. Raw
+    /// SQL skips the query filter, so the statement names the organisation itself.
+    /// </summary>
+    private Task LockAsync(int id, CancellationToken ct)
+    {
+        var orgId = RequireOrganizationId();
+        return _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM modules WHERE id = {id} AND organization_id = {orgId} FOR UPDATE", ct);
     }
 
     /// <summary>

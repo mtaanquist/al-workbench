@@ -198,6 +198,18 @@ public sealed class ModuleSourceArchiveReaderTests
     }
 
     [Fact]
+    public async Task A_long_list_of_left_out_files_is_cut_short_with_a_count()
+    {
+        var images = Enumerable.Range(0, ModuleSourceLimits.MaxListedSkipped + 50)
+            .Select(i => Entry.Bytes($"src/Images/{i}.png", [0x89, 0x50, 0x00]));
+
+        var snapshot = await ReadAsync(Tarball([Entry.Text("src/a.al", "codeunit 1 A { }"), .. images]), path: null);
+
+        snapshot.Skipped.Should().HaveCount(ModuleSourceLimits.MaxListedSkipped + 1);
+        snapshot.Skipped[^1].Path.Should().Be("and 50 more");
+    }
+
+    [Fact]
     public async Task A_byte_order_mark_is_dropped()
     {
         var bom = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes("codeunit 1 A { }")).ToArray();
