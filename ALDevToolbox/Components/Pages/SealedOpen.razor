@@ -1,0 +1,138 @@
+@page "/s/{Token}"
+@layout ALDevToolbox.Components.Layout.AuthLayout
+@attribute [AllowAnonymous]
+@using ALDevToolbox.Domain.Tools
+@using ALDevToolbox.Services.Sealed
+@using ALDevToolbox.Services.Tools
+@inject SealedLinkService SealedLinks
+@inject IToolAvailability Tools
+
+@*
+    The recipient's half of Sealed (.design/sealed.md): the page someone outside the
+    workbench lands on from an email. On the shell-less auth layout, as Mads asked: a
+    centred box with the sending organisation, what to do, and the button.
+
+    Static and anonymous, with no circuit. Loading it shows nothing and spends nothing,
+    so a mail scanner that fetches every link in an email cannot use one up; the secret
+    only comes back when a person presses Show secret, which wwwroot/sealed.js turns into
+    a POST to /api/sealed/{token}/reveal and decrypts with the key in the address bar.
+
+    Every state the script can reach is drawn here and hidden, so the copy lives in one
+    place; data-sealed-state names them and the script shows one at a time.
+*@
+
+<PageTitle>A secret for you · AL Workbench</PageTitle>
+<HeadContent>
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+</HeadContent>
+
+@if (_summary is null)
+{
+    <AuthCard Title="This link no longer works">
+        <Sub>
+            It has already been opened as many times as allowed, it has expired, it locked after
+            too many wrong passphrases, or the sender revoked it. Ask the person who sent it for a new link.
+        </Sub>
+    </AuthCard>
+}
+else
+{
+    <AuthCard>
+        <ChildContent>
+            <div class="sealed-open" data-sealed-open data-token="@Token" data-salt="@(_summary.PassphraseSalt ?? string.Empty)">
+                <div data-sealed-state="ready">
+                    <div class="auth__head">
+                        <h1 class="auth__title">@_summary.SenderName at @_summary.OrganizationName sent you a secret</h1>
+                        <p class="auth__sub">
+                            Press Show secret when you are ready to copy it.
+                            @(_summary.ViewsLeft == 1
+                                ? "It can only be shown once, so copy it somewhere safe before you leave this page."
+                                : $"It can be shown {_summary.ViewsLeft} times.")
+                            The link expires <span data-sealed-local-time="@_summary.ExpiresAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)"><Timestamp Value="@_summary.ExpiresAt" Format="d MMM yyyy 'at' HH:mm" /></span>.
+                        </p>
+                    </div>
+                    <div class="auth__fields">
+                        @if (_summary.PassphraseSalt is not null)
+                        {
+                            <div class="field">
+                                <label class="field__label" for="sealed-passphrase">Passphrase</label>
+                                <input class="input" id="sealed-passphrase" type="text" autocomplete="off" autocapitalize="off"
+                                       autocorrect="off" spellcheck="false" data-sealed-passphrase />
+                                <span class="field__hint">The sender should have given you this separately, for example by phone. Capital letters count.</span>
+                            </div>
+                        }
+                        <div data-sealed-error hidden>
+                            <FieldError><span data-sealed-error-text></span></FieldError>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn--primary sealed-open__button" data-sealed-reveal>
+                        <Icon Name="eye" Width="16" Height="16" />
+                        <span>Show secret</span>
+                    </button>
+                </div>
+
+                <div data-sealed-state="revealed" hidden>
+                    <div class="auth__head">
+                        <h1 class="auth__title">Your secret from @_summary.OrganizationName</h1>
+                        <p class="auth__sub" data-sealed-left></p>
+                    </div>
+                    <textarea class="textarea textarea--code" rows="4" readonly spellcheck="false"
+                              aria-label="The secret" data-sealed-secret></textarea>
+                    <button type="button" class="btn btn--primary sealed-open__button" data-sealed-copy>
+                        <Icon Name="copy" Width="16" Height="16" />
+                        <span data-copy-label>Copy secret</span>
+                    </button>
+                </div>
+
+                <div data-sealed-state="incomplete" hidden>
+                    <div class="auth__head">
+                        <h1 class="auth__title">This link is incomplete</h1>
+                        <p class="auth__sub">
+                            Part of the link is missing, so the secret can't be opened. Copy the whole link from
+                            the email, including everything after the # sign, and open it again.
+                        </p>
+                    </div>
+                </div>
+
+                <div data-sealed-state="gone" hidden>
+                    <div class="auth__head">
+                        <h1 class="auth__title">This link no longer works</h1>
+                        <p class="auth__sub">
+                            It has already been opened as many times as allowed, it has expired, it locked after
+                            too many wrong passphrases, or the sender revoked it. Ask the person who sent it for a new link.
+                        </p>
+                    </div>
+                </div>
+
+                <div data-sealed-state="locked" hidden>
+                    <div class="auth__head">
+                        <h1 class="auth__title">This link is locked</h1>
+                        <p class="auth__sub">
+                            The passphrase was typed wrong too many times, so the secret can no longer be shown.
+                            Ask the person who sent it for a new link.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </ChildContent>
+        <Legal>The secret stays encrypted until it reaches your browser, so nobody can read it on the way.</Legal>
+    </AuthCard>
+}
+
+@code {
+    [Parameter] public string Token { get; set; } = string.Empty;
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private SealedLinkSummary? _summary;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Never kept by the browser or a proxy: a revealed secret must not come back
+        // from the page cache when someone presses Back.
+        if (HttpContext is { } http) http.Response.Headers.CacheControl = "no-store";
+        // A per-organisation switch can't apply to someone with no account; the site-wide one does.
+        if (!Tools.IsSiteEnabled(ToolKey.Sealed)) return;
+        _summary = await SealedLinks.GetForRecipientAsync(Token);
+    }
+}

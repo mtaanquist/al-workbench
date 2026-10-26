@@ -73,6 +73,9 @@ public static class BackgroundWorkerRegistration
         // Sends the daily and weekly notification digests, and drops items that
         // waited too long. See .design/notifications.md.
         services.AddHostedService<ALDevToolbox.Services.Notifications.NotificationDigestScheduler>();
+        // Closes expired Sealed links, tells senders theirs were opened, and deletes
+        // closed ones after a month. See .design/sealed.md.
+        services.AddHostedService<ALDevToolbox.Services.Sealed.SealedLinkScheduler>();
         // Adds each newly shipped Business Central release wave to every org's
         // application-version catalogue, read daily off the Microsoft symbol feed.
         services.AddHostedService<ALDevToolbox.Services.Templates.ApplicationVersionSyncScheduler>();

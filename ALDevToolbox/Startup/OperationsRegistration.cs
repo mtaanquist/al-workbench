@@ -136,6 +136,21 @@ public static class OperationsRegistration
                         Window = TimeSpan.FromMinutes(1),
                         QueueLimit = 0,
                     }));
+
+            // A Sealed link's reveal is anonymous. A person presses Show secret a
+            // handful of times at most (a wrong passphrase or two, a link that opens
+            // more than once), so 20 in ten minutes per address never stands in their
+            // way, while a script holding a link cannot hammer its passphrase faster
+            // than the link locks anyway (SealedLinkService.MaxPassphraseAttempts).
+            options.AddPolicy(SealedEndpoints.RevealRateLimitPolicy, httpContext =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 20,
+                        Window = TimeSpan.FromMinutes(10),
+                        QueueLimit = 0,
+                    }));
         });
         return services;
     }

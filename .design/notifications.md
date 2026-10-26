@@ -30,6 +30,7 @@ Agreed with the maintainer on 2026-10-03:
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 | Upgrades | A change someone scheduled on an environment ran, failed or could not be confirmed; an environment someone is to check on a planned upgrade reached the target version (ready to check) | #1046, #1047 |
 | Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
+| Sealed links you send | A Sealed link you created was opened, or locked after too many wrong passphrases (see `sealed.md`) | |
 
 ## How it works
 

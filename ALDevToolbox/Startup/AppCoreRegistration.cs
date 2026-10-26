@@ -61,6 +61,8 @@ public static class AppCoreRegistration
         services.AddScoped<UpgradeCheckNotifier>();
         services.AddScoped<EnvironmentUpdateNotifier>();
         services.AddScoped<NotificationDigestService>();
+        services.AddScoped<ALDevToolbox.Services.Sealed.SealedLinkService>();
+        services.AddScoped<ALDevToolbox.Services.Sealed.SealedLinkSweepService>();
         return services;
     }
 
