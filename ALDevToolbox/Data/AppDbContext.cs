@@ -151,6 +151,10 @@ public class AppDbContext : DbContext
     public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
     public DbSet<UserExternalLogin> UserExternalLogins => Set<UserExternalLogin>();
 
+    // Sealed links - see .design/sealed.md.
+    public DbSet<SealedLink> SealedLinks => Set<SealedLink>();
+    public DbSet<SealedLinkEvent> SealedLinkEvents => Set<SealedLinkEvent>();
+
     // Teams and their membership — see .design/teams-and-visibility.md.
     public DbSet<Team> Teams => Set<Team>();
     public DbSet<TeamMember> TeamMembers => Set<TeamMember>();
@@ -405,6 +409,8 @@ public class AppDbContext : DbContext
         ScopeToOrganization<NotificationDigestItem>(modelBuilder);
         ScopeToOrganization<UserNotification>(modelBuilder);
         ScopeToOrganization<OAuthConsent>(modelBuilder);
+        ScopeToOrganization<SealedLink>(modelBuilder);
+        ScopeToOrganization<SealedLinkEvent>(modelBuilder);
         // AuditLogEntry carries a *nullable* organization_id: startup seed and
         // bootstrap-admin inserts happen before any org context exists. The
         // filter therefore admits null-org rows alongside the current org's,

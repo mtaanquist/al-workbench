@@ -1,0 +1,22 @@
+/* The recipient's box on the auth layout. Each state is a column with the
+   same rhythm as the card itself, so swapping one for another doesn't jump. */
+.sealed-open > div {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.sealed-open > div[hidden],
+.sealed-open [data-sealed-error][hidden] {
+    display: none;
+}
+
+.sealed-open__button {
+    width: 100%;
+    justify-content: center;
+    height: var(--control-h-lg);
+}
+
+.sealed-open textarea {
+    width: 100%;
+    resize: vertical;
+}

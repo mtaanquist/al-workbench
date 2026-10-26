@@ -145,6 +145,7 @@ app.MapAdminUserEndpoints();
 app.MapObjectExplorerEndpoints();
 app.MapCookbookEndpoints();
 app.MapCompareEndpoints();
+app.MapSealedEndpoints();
 app.MapPaletteEndpoints();
 app.MapLegacyRedirects();
 app.MapSiteAdminEndpoints();

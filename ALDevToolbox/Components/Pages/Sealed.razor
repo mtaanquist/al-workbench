@@ -1,0 +1,481 @@
+@page "/sealed"
+@rendermode InteractiveServer
+@attribute [Authorize]
+@using ALDevToolbox.Domain.Entities
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.Sealed
+@inject SealedLinkService SealedLinks
+@inject IJSRuntime JS
+@inject TimeProvider Clock
+@inject ILogger<Sealed> Logger
+
+@*
+    The sender's half of Sealed (.design/sealed.md). The secret and the passphrase
+    boxes are deliberately unbound: a bound input would send what is typed over the
+    circuit, and the point of the tool is that the server never sees it. wwwroot/sealed.js
+    reads them, encrypts in the browser, and hands back only ciphertext and two one-way
+    proofs; the key stays in the browser and goes straight into the link box, which is
+    unbound for the same reason.
+*@
+
+<PageTitle>Sealed · AL Workbench</PageTitle>
+
+<div class="page sealed-page">
+    <PageHead Title="Sealed"
+              Subtitle="Send a secret, such as a client secret or a password, as a link instead of pasting it into an email. It is encrypted on this computer, so AL Workbench never sees it." />
+
+    @if (_link is null)
+    {
+        <section class="card">
+            <div class="card__head">
+                <div>
+                    <h2 class="card__title">Send a secret</h2>
+                    <p class="card__sub">The person you send it to doesn't need an account.</p>
+                </div>
+            </div>
+            <div class="card__body sealed-form">
+                <label class="field">
+                    <span class="field__label">Secret</span>
+                    <textarea class="textarea textarea--code" rows="4" @ref="_secretRef" id="sealed-secret"
+                              spellcheck="false" autocomplete="off" aria-describedby="sealed-secret-hint"
+                              placeholder="Paste the secret here"></textarea>
+                    <span class="field__hint" id="sealed-secret-hint">Up to @(SealedLinkService.MaxSecretBytes / 1024) KB of text.</span>
+                    <FieldError Field="Secret" Errors="_errors" />
+                </label>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field__label">Expires</span>
+                        <SelectBox>
+                            <select class="select" @bind="_expiresInHours">
+                                @foreach (var hours in SealedLinkService.ExpiryChoices)
+                                {
+                                    <option value="@hours">@ExpiryLabel(hours)</option>
+                                }
+                            </select>
+                        </SelectBox>
+                        <span class="field__hint">After that the link stops working, even if nobody opened it.</span>
+                        <FieldError Field="ExpiresInHours" Errors="_errors" />
+                    </label>
+                    <label class="field">
+                        <span class="field__label">Can be opened</span>
+                        <SelectBox>
+                            <select class="select" @bind="_maxViews">
+                                @for (var views = 1; views <= SealedLinkService.MaxViewsLimit; views++)
+                                {
+                                    <option value="@views">@TimesLabel(views)</option>
+                                }
+                            </select>
+                        </SelectBox>
+                        <span class="field__hint">More than once if several people need it.</span>
+                        <FieldError Field="MaxViews" Errors="_errors" />
+                    </label>
+                    <label class="field">
+                        <span class="field__label">Passphrase (optional)</span>
+                        <input class="input" type="text" @ref="_passphraseRef" autocomplete="off" spellcheck="false"
+                               placeholder="e.g. three words you can say on the phone" />
+                        <span class="field__hint">Tell it to them another way, such as by phone. Then the email alone can't open the secret. Capital letters count.</span>
+                        <FieldError Field="Passphrase" Errors="_errors" />
+                    </label>
+                    <label class="field">
+                        <span class="field__label">Note for yourself (optional)</span>
+                        <input class="input" type="text" @bind="_label" maxlength="@SealedLinkService.MaxLabelLength"
+                               placeholder="e.g. Entra secret for CRONUS" />
+                        <span class="field__hint">Shown only in your organisation's list of links below, never to the person you send it to. Don't put the secret here.</span>
+                        <FieldError Field="Label" Errors="_errors" />
+                    </label>
+                </div>
+                <FieldError Message="@_error" />
+            </div>
+            <div class="card__foot">
+                <button type="button" class="btn btn--primary" disabled="@_creating" @onclick="CreateAsync">
+                    @if (_creating)
+                    {
+                        <span class="spinner"></span>
+                        <span>Creating link...</span>
+                    }
+                    else
+                    {
+                        <Icon Name="lock" Width="16" Height="16" />
+                        <span>Create link</span>
+                    }
+                </button>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="card">
+            <div class="card__head">
+                <div>
+                    <h2 class="card__title">Your link is ready</h2>
+                    <p class="card__sub">Copy it into your email now. It is shown only once: AL Workbench keeps no copy of the part that unlocks the secret.</p>
+                </div>
+            </div>
+            <div class="card__body sealed-form">
+                <div class="sealed-linkrow">
+                    <input class="input sealed-linkrow__input" type="text" readonly @ref="_linkRef"
+                           aria-label="Link to send" spellcheck="false" />
+                    <button type="button" class="btn" @onclick="CopyLinkAsync">
+                        <Icon Name="@(_copied ? "check" : "copy")" Width="14" Height="14" />
+                        <span>@(_copied ? "Copied" : _copyFailed ? "Press Ctrl+C to copy" : "Copy link")</span>
+                    </button>
+                </div>
+                <p class="sealed-summary">
+                    @_link.Summary
+                    @if (_link.HasPassphrase)
+                    {
+                        <strong> Remember to give them the passphrase another way, not in the same email.</strong>
+                    }
+                </p>
+            </div>
+            <div class="card__foot">
+                <button type="button" class="btn" @onclick="StartAnother">
+                    <Icon Name="plus" Width="14" Height="14" />
+                    <span>Send another secret</span>
+                </button>
+            </div>
+        </section>
+    }
+
+    <section class="card">
+        <div class="card__head">
+            <div>
+                <h2 class="card__title">@(_everyone ? "Everyone's links" : "Your links")</h2>
+                <p class="card__sub">See whether a link was opened, and revoke one that should no longer work. Links that have stopped working are removed from this list after @((int)SealedLinkService.RetentionAfterClose.TotalDays) days.</p>
+            </div>
+            <div class="sealed-list-actions">
+                @if (_canSeeEveryone)
+                {
+                    <label class="check">
+                        <input type="checkbox" checked="@_everyone" @onchange="ToggleEveryoneAsync" />
+                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>Show everyone's links
+                    </label>
+                }
+                <button type="button" class="btn btn--sm" @onclick="RefreshAsync" disabled="@(_rows is null)">
+                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                    <span>Refresh</span>
+                </button>
+            </div>
+        </div>
+        <FieldError Message="@_listError" Class="sealed-list-error" />
+
+        @if (_rows is null)
+        {
+            <LoadingBlock Text="Loading links..." />
+        }
+        else if (_rows.Count == 0)
+        {
+            <EmptyState Icon="lock" Quiet="true">
+                <Text>
+                    @(_everyone ? "Nobody in your organisation has sent a link yet." : "Links you send will appear here, so you can see when they are opened.")
+                </Text>
+                <Action>
+                    @if (_link is not null)
+                    {
+                        <button type="button" class="btn" @onclick="StartAnother">Start a new link</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn" @onclick="FocusSecretAsync">Start a new link</button>
+                    }
+                </Action>
+            </EmptyState>
+        }
+        else
+        {
+            var now = Clock.GetUtcNow().UtcDateTime;
+            <div class="sealed-table">
+                <table class="data-table data-table--edge">
+                    <thead>
+                        <tr>
+                            <th>Note</th>
+                            @if (_everyone)
+                            {
+                                <th>Sent by</th>
+                            }
+                            <th>Created</th>
+                            <th>Opened</th>
+                            <th>Status</th>
+                            <th class="data-table__actions"><span class="u-sr-only">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var row in _rows)
+                    {
+                        var open = row.IsOpenAt(now);
+                        <tr>
+                            <td>
+                                @if (string.IsNullOrWhiteSpace(row.Label))
+                                {
+                                    <span class="u-muted">No note</span>
+                                }
+                                else
+                                {
+                                    @row.Label
+                                }
+                                @if (row.HasPassphrase)
+                                {
+                                    <div class="u-muted">With a passphrase</div>
+                                }
+                            </td>
+                            @if (_everyone)
+                            {
+                                <td>@row.CreatedBy</td>
+                            }
+                            <td class="u-muted"><Timestamp Value="@row.CreatedAt" Format="d MMM yyyy, HH:mm" /></td>
+                            <td>
+                                @if (row.Events.Count == 0)
+                                {
+                                    <span>@row.ViewCount of @row.MaxViews</span>
+                                }
+                                else
+                                {
+                                    <details class="sealed-events">
+                                        <summary>@row.ViewCount of @row.MaxViews</summary>
+                                        <ul>
+                                            @foreach (var e in row.Events)
+                                            {
+                                                <li>
+                                                    @(e.Kind == SealedLinkEventKind.Opened ? "Opened" : "Wrong passphrase")
+                                                    <Timestamp Value="@e.OccurredAt" Format="d MMM, HH:mm" />
+                                                    @if (!string.IsNullOrEmpty(e.IpAddress))
+                                                    {
+                                                        <span class="u-muted"> from @e.IpAddress</span>
+                                                    }
+                                                </li>
+                                            }
+                                        </ul>
+                                    </details>
+                                }
+                            </td>
+                            <td>
+                                <StatusPill Tone="@StatusTone(row, open)">@StatusText(row, open)</StatusPill>
+                                @if (open)
+                                {
+                                    <div class="u-muted">Expires <Timestamp Value="@row.ExpiresAt" Format="d MMM, HH:mm" /></div>
+                                }
+                            </td>
+                            <td class="data-table__actions">
+                                @if (open && (row.CreatedByUserId == _userId || _canSeeEveryone))
+                                {
+                                    <button type="button" class="btn btn--sm" @onclick="() => RevokeAsync(row)">
+                                        <Icon Name="x" Width="14" Height="14" />
+                                        <span>Revoke</span>
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+</div>
+
+<ConfirmDialog @ref="_confirmRevoke" />
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private ElementReference _secretRef;
+    private ElementReference _passphraseRef;
+    private ElementReference _linkRef;
+    private ConfirmDialog? _confirmRevoke;
+
+    private int _expiresInHours = SealedLinkService.DefaultExpiryHours;
+    private int _maxViews = 1;
+    private string? _label;
+    private Dictionary<string, string>? _errors;
+    private string? _error;
+    private string? _listError;
+    private bool _creating;
+    private bool _copied;
+    private bool _copyFailed;
+
+    private CreatedLink? _link;
+    private bool _linkPending;
+
+    private List<SealedLinkRow>? _rows;
+    private bool _canSeeEveryone;
+    private bool _everyone;
+    private int? _userId;
+
+    /// <summary>The link just made: the handle sealed.js holds its key under, and the server's token.</summary>
+    private sealed record CreatedLink(string Handle, string Token, string Summary, bool HasPassphrase);
+
+    /// <summary>What sealed.js returns from seal(): an error to show, or the sealed parts.</summary>
+    private sealed record SealResult(
+        string? Error, string? Handle, string? Ciphertext, string? Iv, string? LinkCheck,
+        string? PassphraseSalt, string? PassphraseCheck);
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is not null)
+        {
+            var user = (await AuthState).User;
+            if (int.TryParse(user.FindFirst(HttpOrganizationContext.UserIdClaim)?.Value, out var id)) _userId = id;
+        }
+        _canSeeEveryone = await SealedLinks.CanSeeEveryoneAsync();
+        await LoadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_linkPending || _link is null) return;
+        _linkPending = false;
+        // The link box has just been drawn: put the link in it, from the key the
+        // browser kept back. The key never comes through here.
+        await JS.InvokeAsync<bool>("aldtSealed.finish", _link.Handle, _link.Token, _linkRef, _secretRef, _passphraseRef);
+    }
+
+    private async Task RefreshAsync()
+    {
+        _listError = null;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _rows = await SealedLinks.ListAsync(_everyone);
+    }
+
+    private async Task ToggleEveryoneAsync(ChangeEventArgs e)
+    {
+        _everyone = e.Value is true;
+        _rows = null;
+        await LoadAsync();
+    }
+
+    private async Task CreateAsync()
+    {
+        if (_creating) return;
+        _creating = true;
+        _errors = null;
+        _error = null;
+        string? handle = null;
+        try
+        {
+            var sealedParts = await JS.InvokeAsync<SealResult>(
+                "aldtSealed.seal", _secretRef, _passphraseRef, SealedLinkService.MaxSecretBytes);
+            if (sealedParts.Error is { } refusal)
+            {
+                _errors = new() { ["Secret"] = refusal };
+                return;
+            }
+            handle = sealedParts.Handle;
+            var token = await SealedLinks.CreateAsync(new SealedLinkInput(
+                sealedParts.Ciphertext ?? string.Empty,
+                sealedParts.Iv ?? string.Empty,
+                sealedParts.LinkCheck ?? string.Empty,
+                sealedParts.PassphraseSalt,
+                sealedParts.PassphraseCheck,
+                _expiresInHours,
+                _maxViews,
+                _label));
+
+            var hasPassphrase = sealedParts.PassphraseSalt is not null;
+            _link = new CreatedLink(handle!, token, Summary(_maxViews, _expiresInHours), hasPassphrase);
+            _linkPending = true;
+            _copied = false;
+            _label = null;
+            handle = null;
+            await LoadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _errors = ex.Errors.ToDictionary(e => e.Key, e => e.Value);
+        }
+        catch (JSException ex)
+        {
+            Logger.LogWarning(ex, "Sealing a secret failed in the browser.");
+            _error = "Your browser could not encrypt the secret. Reload the page and try again.";
+        }
+        finally
+        {
+            if (handle is not null)
+            {
+                try { await JS.InvokeVoidAsync("aldtSealed.discard", handle); }
+                catch (JSException) { }
+            }
+            _creating = false;
+        }
+    }
+
+    private async Task CopyLinkAsync()
+    {
+        _copied = await JS.InvokeAsync<bool>("aldtSealed.copy", _linkRef);
+        _copyFailed = !_copied;
+    }
+
+    private async Task StartAnother()
+    {
+        await LoadAsync();
+        _link = null;
+        _copied = false;
+        _errors = null;
+        _error = null;
+    }
+
+    private async Task FocusSecretAsync()
+    {
+        try { await _secretRef.FocusAsync(); }
+        catch (Exception) { /* not drawn - nothing to focus */ }
+    }
+
+    private async Task RevokeAsync(SealedLinkRow row)
+    {
+        if (_confirmRevoke is null) return;
+        var name = string.IsNullOrWhiteSpace(row.Label) ? "this link" : $"\"{row.Label}\"";
+        if (!await _confirmRevoke.OpenAsync(
+                "Revoke this link?",
+                $"Nobody will be able to open {name} after this, including the person you sent it to. This cannot be undone.",
+                "Revoke link"))
+        {
+            return;
+        }
+        _listError = null;
+        try
+        {
+            await SealedLinks.RevokeAsync(row.Id);
+        }
+        catch (PlanValidationException ex)
+        {
+            _listError = ex.Errors.Values.FirstOrDefault();
+        }
+        await LoadAsync();
+    }
+
+    private static string ExpiryLabel(int hours) => hours switch
+    {
+        1 => "In 1 hour",
+        24 => "In 1 day",
+        168 => "In 7 days",
+        _ => $"In {hours} hours",
+    };
+
+    private static string TimesLabel(int views) => views == 1 ? "Once" : $"{views} times";
+
+    private static string Summary(int views, int hours) =>
+        $"It can be opened {TimesLabel(views).ToLowerInvariant()} and expires {ExpiryLabel(hours).ToLowerInvariant()}.";
+
+    private static string StatusText(SealedLinkRow row, bool open) => open
+        ? (row.ViewCount == 0 ? "Not opened yet" : "Opened, still works")
+        : row.ClosedReason switch
+        {
+            SealedLinkClosedReason.UsedUp => "Used up",
+            SealedLinkClosedReason.Revoked => "Revoked",
+            SealedLinkClosedReason.LockedOut => "Locked (wrong passphrase)",
+            _ => "Expired",
+        };
+
+    private static string StatusTone(SealedLinkRow row, bool open) => open
+        ? "info"
+        : row.ClosedReason switch
+        {
+            SealedLinkClosedReason.UsedUp => "success",
+            SealedLinkClosedReason.LockedOut => "danger",
+            _ => "muted",
+        };
+}

@@ -1,0 +1,58 @@
+.sealed-form {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.sealed-form textarea {
+    width: 100%;
+    resize: vertical;
+}
+
+/* The link and its copy button on one line; the link wraps under the button on a phone. */
+.sealed-linkrow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+.sealed-linkrow__input {
+    flex: 1 1 280px;
+    min-width: 0;
+    font-family: var(--font-mono);
+}
+
+.sealed-summary {
+    margin: 0;
+    color: var(--ink-2);
+}
+
+.sealed-events summary {
+    cursor: pointer;
+}
+
+.sealed-events ul {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+    font-size: var(--text-xs);
+}
+
+/* The page is a column of cards; a card must be allowed to be narrower than the
+   table inside it, which scrolls on its own instead of widening the page. */
+.sealed-page > .card {
+    min-width: 0;
+}
+
+.sealed-table {
+    overflow-x: auto;
+}
+
+.sealed-list-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+::deep .sealed-list-error {
+    padding: var(--space-2) var(--space-4) 0;
+}

@@ -120,6 +120,12 @@
                                     <span class="nav-item__label">Piper</span>
                                 </NavLink>
                                 break;
+                            case (TextGroup, "sealed"):
+                                <NavLink class="nav-item" href="/sealed" Match="NavLinkMatch.All" ActiveClass="is-active">
+                                    <Icon Name="lock" Width="17" Height="17" Css="nav-item__icon" />
+                                    <span class="nav-item__label">Sealed</span>
+                                </NavLink>
+                                break;
 
                             case (DeliverGroup, "solutions"):
                                 <div class="nav-parent is-open">
@@ -477,7 +483,7 @@
     private static readonly (string Group, string[] Items)[] Shipped =
     [
         (BuildGroup, ["templates", "cookbook", "object-explorer"]),
-        (TextGroup, ["translator", "diff", "piper"]),
+        (TextGroup, ["translator", "diff", "piper", "sealed"]),
         (DeliverGroup, ["solutions", "upgrades", "teams", "pipelines"]),
         (AssistantGroup, ["mcp"]),
         (AdminGroup, ["dashboard", "templates", "modules", "customer-modules", "catalogue", "cookbook",
@@ -590,6 +596,7 @@
         (TextGroup, "translator") => ToolVisible(ToolKey.Translator),
         (TextGroup, "diff") => ToolVisible(ToolKey.Compare),
         (TextGroup, "piper") => ToolVisible(ToolKey.Piper),
+        (TextGroup, "sealed") => _isAuthenticated && ToolVisible(ToolKey.Sealed),
 
         (DeliverGroup, "solutions") => ToolVisible(ToolKey.Projects),
         // Only on its own when Solutions, which it otherwise nests under, is off.

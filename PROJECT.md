@@ -86,6 +86,7 @@ When you add a new file, match the folder. Resist creating top-level folders —
 - `saas-delivery.md` — publishing a build to a Business Central SaaS environment: the BC connection, deployment pipelines (the `OeReleasePipeline` entity), deployments (`OeProjectDelivery`), and the two update windows.
 - `environment-updates.md` — the Upgrades fleet page: the team-scoped grant, the mirrored next platform update, the two date writes, and the actions-and-history table behind them.
 - `ui-design.md` — page layout, copy, components to factor out.
+- `sealed.md` — Sealed, the one-time secret links: the browser-side encryption, what the server keeps, the recipient's anonymous half and its fence crossing.
 - `bcquality.md` — the mirrored BCQuality knowledge base: ingest, schema, refresh policy, and the two MCP tools over it.
 - `github-integration.md` — the GitHub App: which credential acts (installation vs the user's link), the schema, and the four features built on them.
 - `github-integration-phase2.md` — phase 2 of the GitHub integration (#626-#633): repository discovery, repository standards, recipe delivery, Releases, the pull-request compile gate, translation-memory ingest, dependency drift, and the MCP twins.
@@ -109,6 +110,7 @@ subsystem, start here rather than in `domain-model.md`:
 | Translations and the translation memory (`oe_module_translations`, memory tables) | `object-explorer.md` (the translations section)  |
 | Cookbook recipes                                                       | `cookbook.md`                                               |
 | BCQuality mirror                                                       | `bcquality.md`                                              |
+| Sealed links (`sealed_links`, `sealed_link_events`)                    | `sealed.md`                                                 |
 | MCP OAuth clients, tokens, grants                                      | `mcp-oauth.md`                                              |
 | System settings, backups, off-site storage                             | `deployment.md`                                             |
 | GitHub App installation, per-user account link, repository writes      | `github-integration.md`                                     |
