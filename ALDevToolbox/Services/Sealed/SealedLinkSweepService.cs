@@ -106,7 +106,10 @@ public sealed class SealedLinkSweepService
             if (link.ClosedReason == SealedLinkClosedReason.LockedOut && !link.LockoutNotified)
             {
                 await SendAsync(link.CreatedByUserId, link.Id, lockedOut: true, name,
-                    "Nobody saw the secret. Whoever tried had the whole link.", string.Empty, 0, ct);
+                    link.ViewCount == 0
+                        ? "Nobody saw the secret. Whoever tried had the whole link."
+                        : $"The secret had been shown {link.ViewCount} {(link.ViewCount == 1 ? "time" : "times")} before it locked. Whoever tried had the whole link.",
+                    string.Empty, 0, ct);
                 await _db.SealedLinks
                     .Where(l => l.Id == link.Id)
                     .ExecuteUpdateAsync(s => s.SetProperty(l => l.LockoutNotified, true), ct);

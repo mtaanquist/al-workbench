@@ -105,7 +105,7 @@
         const rawPassphrase = passphraseEl ? passphraseEl.value : "";
         const passphrase = normalisePassphrase(rawPassphrase);
         if (rawPassphrase && !passphrase) {
-            return { error: "The passphrase is only spaces. Type a passphrase, or clear the box to send without one." };
+            return { field: "Passphrase", error: "The passphrase is only spaces. Type a passphrase, or clear the box to send without one." };
         }
 
         const key = crypto.getRandomValues(new Uint8Array(32));
@@ -191,9 +191,11 @@
         });
     }
 
+    // Keyed by token: enhanced navigation can reuse the element for another link.
     function prepare(root) {
-        if (root._sealedReady) return;
-        root._sealedReady = true;
+        const token = root.getAttribute("data-token") || "";
+        if (root._sealedReady === token) return;
+        root._sealedReady = token;
         localTimes(root);
         if (!keyFromAddress()) show(root, "incomplete");
     }
@@ -309,9 +311,22 @@
     } else {
         prepareAll();
     }
+    document.addEventListener("enhancedload", prepareAll);
+
+    // Pasting the missing part of the link into the address bar fixes an incomplete
+    // one; a link already revealed, used up or locked stays as it is.
     window.addEventListener("hashchange", function () {
         document.querySelectorAll("[data-sealed-open]").forEach(function (root) {
+            const current = root.querySelector("[data-sealed-state]:not([hidden])");
+            const state = current ? current.getAttribute("data-sealed-state") : "ready";
+            if (state !== "ready" && state !== "incomplete") return;
             show(root, keyFromAddress() ? "ready" : "incomplete");
         });
+    });
+
+    // Leaving the page wipes the secret, so Back from another page cannot bring it
+    // back out of the browser's page cache.
+    window.addEventListener("pagehide", function () {
+        document.querySelectorAll("[data-sealed-secret]").forEach(function (el) { el.value = ""; });
     });
 })();

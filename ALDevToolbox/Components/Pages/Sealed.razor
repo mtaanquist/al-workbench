@@ -121,6 +121,10 @@
                         <span>@(_copied ? "Copied" : _copyFailed ? "Press Ctrl+C to copy" : "Copy link")</span>
                     </button>
                 </div>
+                @if (_linkLost)
+                {
+                    <FieldError Message="The link could not be shown, so it can't be sent. Revoke it in the list below and create a new one." />
+                }
                 <p class="sealed-summary">
                     @_link.Summary
                     @if (_link.HasPassphrase)
@@ -296,6 +300,7 @@
 
     private CreatedLink? _link;
     private bool _linkPending;
+    private bool _linkLost;
 
     private List<SealedLinkRow>? _rows;
     private bool _canSeeEveryone;
@@ -307,7 +312,7 @@
 
     /// <summary>What sealed.js returns from seal(): an error to show, or the sealed parts.</summary>
     private sealed record SealResult(
-        string? Error, string? Handle, string? Ciphertext, string? Iv, string? LinkCheck,
+        string? Error, string? Field, string? Handle, string? Ciphertext, string? Iv, string? LinkCheck,
         string? PassphraseSalt, string? PassphraseCheck);
 
     protected override async Task OnInitializedAsync()
@@ -327,7 +332,8 @@
         _linkPending = false;
         // The link box has just been drawn: put the link in it, from the key the
         // browser kept back. The key never comes through here.
-        await JS.InvokeAsync<bool>("aldtSealed.finish", _link.Handle, _link.Token, _linkRef, _secretRef, _passphraseRef);
+        _linkLost = !await JS.InvokeAsync<bool>("aldtSealed.finish", _link.Handle, _link.Token, _linkRef, _secretRef, _passphraseRef);
+        if (_linkLost) StateHasChanged();
     }
 
     private async Task RefreshAsync()
@@ -361,7 +367,7 @@
                 "aldtSealed.seal", _secretRef, _passphraseRef, SealedLinkService.MaxSecretBytes);
             if (sealedParts.Error is { } refusal)
             {
-                _errors = new() { ["Secret"] = refusal };
+                _errors = new() { [sealedParts.Field ?? "Secret"] = refusal };
                 return;
             }
             handle = sealedParts.Handle;
@@ -378,10 +384,21 @@
             var hasPassphrase = sealedParts.PassphraseSalt is not null;
             _link = new CreatedLink(handle!, token, Summary(_maxViews, _expiresInHours), hasPassphrase);
             _linkPending = true;
+            _linkLost = false;
             _copied = false;
             _label = null;
             handle = null;
-            await LoadAsync();
+            try
+            {
+                await LoadAsync();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // The link exists and its key is still waiting in the browser: show it
+                // anyway, and let Refresh fetch the list later.
+                Logger.LogWarning(ex, "Reloading Sealed links after creating one failed.");
+                _listError = "Your links could not be loaded. Press Refresh to try again.";
+            }
         }
         catch (PlanValidationException ex)
         {
@@ -391,6 +408,11 @@
         {
             Logger.LogWarning(ex, "Sealing a secret failed in the browser.");
             _error = "Your browser could not encrypt the secret. Reload the page and try again.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogError(ex, "Creating a Sealed link failed.");
+            _error = "The link could not be created. Try again in a moment.";
         }
         finally
         {

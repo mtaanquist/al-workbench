@@ -451,7 +451,8 @@ public sealed class SealedLinkService
         // once still gets no more than MaxPassphraseAttempts between them.
         // Fence category 1 (pre-auth, a Sealed link's recipient has no account): pinned to the id the token resolved to.
         var counted = await _db.SealedLinks.IgnoreQueryFilters()
-            .Where(l => l.Id == linkId && l.ClosedAt == null && l.FailedPassphraseAttempts < MaxPassphraseAttempts)
+            .Where(l => l.Id == linkId && l.ClosedAt == null && l.ExpiresAt > now
+                && l.FailedPassphraseAttempts < MaxPassphraseAttempts)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.FailedPassphraseAttempts, l => l.FailedPassphraseAttempts + 1)
                 .SetProperty(l => l.Ciphertext, l => l.FailedPassphraseAttempts + 1 >= MaxPassphraseAttempts ? null : l.Ciphertext)

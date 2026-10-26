@@ -4,9 +4,13 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Tools;
+using ALDevToolbox.Services.Mcp;
 using ALDevToolbox.Services.Sealed;
+using ALDevToolbox.Services.Tools;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
@@ -76,6 +80,35 @@ public sealed class SealedEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task The_recipient_page_is_never_cached_and_asks_for_a_passphrase_when_the_link_has_one()
+    {
+        var (token, _) = await CreateLinkAsync(withPassphrase: true);
+        using var client = _factory.CreateClient();
+
+        using var response = await client.GetAsync($"/s/{token}");
+        var html = await response.Content.ReadAsStringAsync();
+
+        response.Headers.CacheControl!.NoStore.Should().BeTrue("a revealed secret must not come back from the page cache");
+        html.Should().Contain("data-salt=\"").And.Contain("data-sealed-passphrase");
+    }
+
+    [Fact]
+    public async Task Switching_the_tool_off_site_wide_closes_every_link()
+    {
+        var (token, check) = await CreateLinkAsync();
+        var off = new ToolAvailabilityState(new McpOff());
+        off.Set([ToolKey.Sealed]);
+        using var factory = new EndpointFactory(_db, services => services.AddSingleton<IToolAvailability>(off));
+        using var client = factory.CreateClient();
+
+        var html = await client.GetStringAsync($"/s/{token}");
+        using var reveal = await client.PostAsJsonAsync($"/api/sealed/{token}/reveal", new { check });
+
+        html.Should().Contain("This link no longer works").And.NotContain("Show secret");
+        reveal.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
     public async Task The_senders_page_needs_a_sign_in()
     {
         using var client = _factory.CreateClient(handleCookies: false);
@@ -86,7 +119,12 @@ public sealed class SealedEndpointTests : IDisposable
         response.Headers.Location!.ToString().Should().Contain("login");
     }
 
-    private async Task<(string Token, string Check)> CreateLinkAsync()
+    private sealed class McpOff : IMcpAvailability
+    {
+        public bool IsEnabled => false;
+    }
+
+    private async Task<(string Token, string Check)> CreateLinkAsync(bool withPassphrase = false)
     {
         await using var ctx = _db.NewContext();
         var user = new User
@@ -103,7 +141,10 @@ public sealed class SealedEndpointTests : IDisposable
             .CreateAsync(new SealedLinkInput(
                 Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(48)),
                 Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(12)),
-                check, null, null, 24, 1, null));
+                check,
+                withPassphrase ? Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)) : null,
+                withPassphrase ? Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32)) : null,
+                24, 1, null));
         return (token, check);
     }
 }

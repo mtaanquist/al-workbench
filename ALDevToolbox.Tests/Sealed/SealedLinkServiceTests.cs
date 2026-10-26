@@ -322,6 +322,23 @@ public sealed class SealedLinkServiceTests : IDisposable
         (await Service().RevealAsync(token, input.LinkCheck, null, null)).Status.Should().Be(SealedRevealStatus.Gone);
     }
 
+    [Fact]
+    public async Task Revoking_a_link_that_has_already_closed_keeps_why_it_closed()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+        var id = (await Service().ListAsync()).Single().Id;
+        (await Service().RevealAsync(token, input.LinkCheck, null, null)).Status.Should().Be(SealedRevealStatus.Revealed);
+
+        await Service().RevokeAsync(id);
+
+        (await ReadLinkAsync()).ClosedReason.Should().Be(SealedLinkClosedReason.UsedUp);
+        await using var ctx = _db.NewContext();
+        (await ctx.AuditLog.CountAsync(a => a.EntityType == AuditEntityType.SealedLink && a.Action == AuditAction.Deleted))
+            .Should().Be(0, "nothing was revoked");
+    }
+
     // ---- sweep -------------------------------------------------------------
 
     [Fact]
@@ -372,8 +389,11 @@ public sealed class SealedLinkServiceTests : IDisposable
             "Sealed link locked: Entra secret for CRONUS");
         _email.Sent[0].Html.Should().Contain("203.0.113.4");
         await using var ctx = _db.NewContext();
-        (await ctx.UserNotifications.CountAsync(n => n.UserId == alex && n.Category == NotificationCategory.SealedLinks))
-            .Should().Be(2);
+        var told = await ctx.UserNotifications.AsNoTracking()
+            .Where(n => n.UserId == alex && n.Category == NotificationCategory.SealedLinks)
+            .OrderBy(n => n.Id).Select(n => n.Detail).ToListAsync();
+        told.Should().HaveCount(2);
+        told[1].Should().Contain("shown 1 time", "the secret was seen before the link locked, so the sender must not be told nobody saw it");
     }
 
     // ---- helpers -----------------------------------------------------------
