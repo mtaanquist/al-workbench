@@ -472,6 +472,10 @@ public sealed class UpgradesPageTests : IAsyncDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
         UpgradesPage.SearchDebounce = TimeSpan.FromMilliseconds(300);
+        // The wait runs on this clock, so the pause is one the test makes, not one the
+        // machine's load decides.
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
 
         var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
@@ -479,11 +483,14 @@ public sealed class UpgradesPageTests : IAsyncDisposable
         cut.Find(".cmdbar__search input").Input("f");
         cut.Find(".cmdbar__search input").Input("fa");
         cut.Find(".cmdbar__search input").Input("fab");
-        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
-
+        // The last keystroke has been handled, so its wait is set, once the box shows it.
         cut.WaitForAssertion(() =>
             cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab"));
+        clock.PendingTimers.Should().Be(1, "each keystroke drops the wait of the one before");
+        clock.Advance(TimeSpan.FromMilliseconds(299));
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");

@@ -12,6 +12,7 @@
 @inject ILogger<UpgradesPage> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using ALDevToolbox.Components.Shared
 @using static ALDevToolbox.Components.Shared.FleetRowState
 @using ALDevToolbox.Domain.ValueObjects
@@ -729,7 +730,7 @@
     public async ValueTask DisposeAsync()
     {
         StopPolling();
-        _searchDebounce.Dispose();
+        _searchDebounce?.Dispose();
         _watch.Dispose();
         // Cancels the reads on Gone too, and waits for a tick that had already fired, so
         // leaving the page means nothing of its is still on its way to the database.
@@ -811,12 +812,15 @@
     /// <summary>How long the search box waits for typing to stop before it filters. Tests set it to zero.</summary>
     internal static TimeSpan SearchDebounce { get; set; } = TimeSpan.FromMilliseconds(200);
 
-    private readonly Debouncer _searchDebounce = new(SearchDebounce);
+    // Made on the first keystroke rather than with the page, because the clock is
+    // injected after the fields are set; a test moves that clock instead of waiting.
+    private Debouncer? _searchDebounce;
+    private Debouncer SearchDebouncer => _searchDebounce ??= new(SearchDebounce, Clock);
 
     // The box is bound to _search as it is typed, untrimmed - trimming it here would
     // eat the space between two words. The table follows once typing pauses.
     private void OnSearchInput() =>
-        _searchDebounce.Trigger(() => InvokeAsync(() =>
+        SearchDebouncer.Trigger(() => InvokeAsync(() =>
         {
             ApplyFilters();
             StateHasChanged();
@@ -824,7 +828,7 @@
 
     private void OnSearchCommitted(ChangeEventArgs e)
     {
-        _searchDebounce.Cancel();
+        _searchDebounce?.Cancel();
         ApplyFilters();
         GoToFilters(_type, _onlyWaiting);
     }

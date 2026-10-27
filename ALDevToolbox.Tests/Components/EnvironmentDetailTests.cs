@@ -372,6 +372,48 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         alert.QuerySelector("button")!.TextContent.Should().Contain("Recover this environment");
     }
 
+    /// <summary>
+    /// How long is left counts calendar days to the deadline, and a deadline already
+    /// behind the page is said plainly rather than as a negative count (XC-12).
+    /// </summary>
+    [Theory]
+    [InlineData(-2, "It is gone for good on 04 Oct 2026 - 2 days left to bring it back.")]
+    [InlineData(-1, "It is gone for good on 04 Oct 2026 - 1 day left to bring it back.")]
+    [InlineData(0, "It is gone for good on 04 Oct 2026 - today is the last day to bring it back.")]
+    [InlineData(1, "It is gone for good on 04 Oct 2026 - that date has passed.")]
+    public async Task The_deleted_alert_says_how_long_is_left_to_bring_it_back(int daysFromDeadline, string expected)
+    {
+        var goneForGood = new DateTime(2026, 10, 4, 9, 0, 0, DateTimeKind.Utc);
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await SoftDeleteAsync(envId, goneForGood);
+        _clock.Inner = new ManualClock(new DateTimeOffset(goneForGood.AddDays(daysFromDeadline)));
+
+        var cut = Render(envId);
+
+        System.Text.RegularExpressions.Regex.Replace(cut.Find(".alert--danger").TextContent, @"\s+", " ")
+            .Should().Contain(expected);
+    }
+
+    /// <summary>
+    /// Days are calendar days, not whole days elapsed: two hours before a deadline that
+    /// falls just after midnight is still the day before it.
+    /// </summary>
+    [Fact]
+    public async Task The_deleted_alert_counts_calendar_days_not_hours()
+    {
+        var goneForGood = new DateTime(2026, 10, 4, 1, 0, 0, DateTimeKind.Utc);
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await SoftDeleteAsync(envId, goneForGood);
+        _clock.Inner = new ManualClock(new DateTimeOffset(2026, 10, 3, 23, 0, 0, TimeSpan.Zero));
+
+        var cut = Render(envId);
+
+        System.Text.RegularExpressions.Regex.Replace(cut.Find(".alert--danger").TextContent, @"\s+", " ")
+            .Should().Contain("- 1 day left to bring it back.");
+    }
+
     [Fact]
     public async Task A_deleted_environment_with_no_deadline_from_microsoft_says_how_long_it_normally_keeps_one()
     {

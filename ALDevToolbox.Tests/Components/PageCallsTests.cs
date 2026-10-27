@@ -33,7 +33,6 @@ public sealed class PageCallsTests
 
         var leaving = calls.LeaveAsync().AsTask();
         calls.IsGone.Should().BeTrue();
-        await Task.Delay(50);
         leaving.IsCompleted.Should().BeFalse("the call has not ended yet");
 
         letGo.SetResult();
@@ -64,7 +63,6 @@ public sealed class PageCallsTests
         }));
 
         var leaving = calls.LeaveAsync().AsTask();
-        await Task.Delay(50);
         leaving.IsCompleted.Should().BeFalse("the call is still running");
 
         fail.SetResult();
@@ -81,7 +79,7 @@ public sealed class PageCallsTests
         var secondEnded = false;
 
         // The shape of a poll tick that finishes by starting the next read.
-        _ = calls.Track(Task.Run(async () =>
+        var firstCall = calls.Track(Task.Run(async () =>
         {
             await first.Task;
             _ = calls.Track(Task.Run(async () =>
@@ -93,7 +91,9 @@ public sealed class PageCallsTests
 
         var leaving = calls.LeaveAsync().AsTask();
         first.SetResult();
-        await Task.Delay(50);
+        // Once the first call has ended, the second has been counted: it was tracked
+        // before the first let go. Only the second is left to hold leaving back.
+        await firstCall.WaitAsync(Wait, TestContext.Current.CancellationToken);
         leaving.IsCompleted.Should().BeFalse("the second call is still running");
 
         second.SetResult();

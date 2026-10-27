@@ -2,10 +2,17 @@ namespace ALDevToolbox.Tests.Infrastructure;
 
 /// <summary>
 /// A <see cref="TimeProvider"/> whose time only moves when a test calls
-/// <see cref="Advance"/>, timers included: a timer or a <c>Task.Delay</c> on it fires
-/// inside <see cref="Advance"/>, on the test's thread, once its time has come. For code
-/// that waits on the clock rather than reads it, where a real wait is either slow or
-/// races the machine's load (#1439). The other hand-rolled clocks in the suite only read.
+/// <see cref="Advance"/>, timers included. For code that waits on the clock rather than
+/// reads it, where a real wait is either slow or races the machine's load (#1439). The
+/// other hand-rolled clocks in the suite only read.
+///
+/// <para>
+/// Only a timer's own callback runs inside <see cref="Advance"/>, on the test's thread,
+/// once its time has come. A <c>Task.Delay</c> on this clock completes there, but the
+/// code awaiting it may resume on the thread pool after <see cref="Advance"/> has
+/// returned, so a test waits for that code's effect (a signal, <c>WaitForAssertion</c>)
+/// rather than reading it straight after the call.
+/// </para>
 ///
 /// <para>
 /// A timer due in zero time fires on the next <see cref="Advance"/>, even

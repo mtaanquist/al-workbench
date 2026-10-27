@@ -122,12 +122,19 @@ public sealed class EmailMfaServiceTests : IDisposable
         var userId = await SeedUserAsync(9132);
         await using var ctx = _db.NewContext();
         var svc = new EmailMfaService(ctx, _clock);
-        var first = (await svc.IssueChallengeAsync(userId))!;
-        var second = (await svc.IssueChallengeAsync(userId))!;
-        while (second == first) second = (await svc.IssueChallengeAsync(userId))!;
+        var first = await svc.IssueChallengeAsync(userId);
+        var second = await svc.IssueChallengeAsync(userId);
+        // Two random codes can be the same. Send again until they differ, but only within
+        // the send limit: past it a send returns null, which the loop must not run into.
+        for (var sent = 2; second == first && sent < EmailMfaService.MaxIssuesPerWindow; sent++)
+        {
+            second = await svc.IssueChallengeAsync(userId);
+        }
+        first.Should().NotBeNull();
+        second.Should().NotBeNull().And.NotBe(first, "a code the same as the first could not tell the two apart");
 
-        (await svc.VerifyAsync(userId, first)).Should().BeFalse("the later send retired the first code");
-        (await svc.VerifyAsync(userId, second)).Should().BeTrue();
+        (await svc.VerifyAsync(userId, first!)).Should().BeFalse("the later send retired the first code");
+        (await svc.VerifyAsync(userId, second!)).Should().BeTrue();
     }
 
     [Fact]
