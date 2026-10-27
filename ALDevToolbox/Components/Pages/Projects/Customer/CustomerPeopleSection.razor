@@ -45,17 +45,21 @@
                             </SelectBox>
                             <FieldError Field="UserId" Errors="_errors" />
                         </section>
-                        <section class="field">
-                            <label class="field__label" for="person-role">Role with this customer</label>
-                            <SelectBox>
-                                <select id="person-role" class="select" @bind="_role" disabled="@_saving">
-                                    @foreach (var option in Enum.GetValues<ProjectPersonRole>())
-                                    {
-                                        <option value="@option">@RoleText(option)</option>
-                                    }
-                                </select>
-                            </SelectBox>
-                        </section>
+                        <fieldset class="field cust-roles">
+                            <legend class="field__label cust-roles__legend">Roles with this customer</legend>
+                            <div class="cust-roles__options">
+                                @foreach (var option in Enum.GetValues<ProjectPersonRole>())
+                                {
+                                    <label class="check">
+                                        <input type="checkbox" checked="@_roles.Contains(option)" disabled="@_saving"
+                                               @onchange="e => ToggleRole(option, (bool)(e.Value ?? false))" />
+                                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                        <span>@RoleText(option)</span>
+                                    </label>
+                                }
+                            </div>
+                            <FieldError Field="Roles" Errors="_errors" />
+                        </fieldset>
                         <section class="field">
                             <label class="field__label" for="person-areas">What they know</label>
                             <input id="person-areas" type="text" class="input" maxlength="250"
@@ -104,7 +108,10 @@
                     <li class="cust-list__row" @key="row.Id">
                         <span class="cust-list__main">
                             <span class="cust-list__name">@row.Name</span>
-                            <span class="tag">@RoleText(row.Role)</span>
+                            @foreach (var role in row.Roles)
+                            {
+                                <span class="tag">@RoleText(role)</span>
+                            }
                         </span>
                         <span class="cust-list__detail">
                             @if (row.Areas is { } areas)
@@ -155,7 +162,7 @@
     }
 
     private string _userId = string.Empty;
-    private ProjectPersonRole _role = ProjectPersonRole.Consultant;
+    private HashSet<ProjectPersonRole> _roles = [ProjectPersonRole.Consultant];
     private string _areas = string.Empty;
 
     /// <summary>What the tab read for this section. The section re-reads for itself only after its own writes.</summary>
@@ -168,7 +175,7 @@
         if (_users.Count == 0) _users = await CustomerInfo.ListAssignableUsersAsync();
         _editingId = row?.Id;
         _userId = row?.UserId.ToString() ?? string.Empty;
-        _role = row?.Role ?? ProjectPersonRole.Consultant;
+        _roles = row is null ? [ProjectPersonRole.Consultant] : [.. row.Roles];
         _areas = row?.Areas ?? string.Empty;
         _errors = new();
         _error = null;
@@ -184,7 +191,7 @@
         try
         {
             await CustomerInfo.SavePersonAsync(Id, _editingId,
-                new CustomerPersonInput(int.TryParse(_userId, out var userId) ? userId : null, _role, _areas));
+                new CustomerPersonInput(int.TryParse(_userId, out var userId) ? userId : null, [.. _roles], _areas));
             _rows = await CustomerInfo.ListPeopleAsync(Id);
             if (another) await StartEditingAsync(null); else _editing = false;
         }
@@ -210,9 +217,17 @@
         catch (ProjectAccessDeniedException ex) { _error = ex.Message; }
     }
 
+    private void ToggleRole(ProjectPersonRole role, bool on)
+    {
+        if (on) _roles.Add(role); else _roles.Remove(role);
+    }
+
     internal static string RoleText(ProjectPersonRole role) => role switch
     {
         ProjectPersonRole.ProjectLeader => "Project leader",
         _ => role.ToString(),
     };
+
+    /// <summary>"Developer, Project leader": every role, in the list's order.</summary>
+    internal static string RolesText(IEnumerable<ProjectPersonRole> roles) => string.Join(", ", roles.Select(RoleText));
 }

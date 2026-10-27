@@ -391,7 +391,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "list_customer_knowledge", ReadOnly = true)]
-    [Description("Answers 'who here knows this customer?' or 'which customers does this colleague know?', from the Customer tab's list of colleagues who know a customer. Give exactly one of solution or person. With solution: each colleague's name, email, role ('Consultant', 'Developer', 'ProjectLeader', 'Architect') and the areas they know, plus the solution's free-text knowledge notes. With person (part of a name, or an exact email): every solution you can see that the matching colleague(s) are listed on, with their role and areas. Hand-kept by your colleagues.")]
+    [Description("Answers 'who here knows this customer?' or 'which customers does this colleague know?', from the Customer tab's list of colleagues who know a customer. Give exactly one of solution or person. With solution: each colleague's name, email, roles (one or more of 'Consultant', 'Developer', 'ProjectLeader', 'Architect') and the areas they know, plus the solution's free-text knowledge notes. With person (part of a name, or an exact email): every solution you can see that the matching colleague(s) are listed on, with their roles and areas. Hand-kept by your colleagues.")]
     public async Task<CustomerKnowledge> ListCustomerKnowledgeAsync(
         [Description("Solution name or numeric id - to list who knows this customer.")] string? solution = null,
         [Description("Colleague's name (or part of it) or exact email - to list which customers they know.")] string? person = null,
@@ -408,7 +408,7 @@ public sealed class DeliverTools
         {
             var known = await _customerInfo.ListCustomersKnownByAsync(person!, ct);
             return new CustomerKnowledge(
-                known.Select(k => new KnowledgeRow(k.ProjectId, k.ProjectName, k.Name, k.Email, k.Role.ToString(), k.Areas)).ToList(),
+                known.Select(k => new KnowledgeRow(k.ProjectId, k.ProjectName, k.Name, k.Email, Names(k.Roles), k.Areas)).ToList(),
                 null);
         }
 
@@ -416,7 +416,7 @@ public sealed class DeliverTools
         var people = await Guard(solution!, () => _customerInfo.ListPeopleAsync(id, ct));
         var notes = await Guard(solution!, () => _customerInfo.GetNotesAsync(id, ct));
         return new CustomerKnowledge(
-            people.Select(p => new KnowledgeRow(id, project.Name, p.Name, p.Email, p.Role.ToString(), p.Areas)).ToList(),
+            people.Select(p => new KnowledgeRow(id, project.Name, p.Name, p.Email, Names(p.Roles), p.Areas)).ToList(),
             notes?.KnowledgeNotes);
     }
 
@@ -574,6 +574,8 @@ public sealed class DeliverTools
     /// a Private solution is absent, not locked. Resolution has already applied the same
     /// fence, so this only matters if the solution's access changes between the two reads.
     /// </summary>
+    private static List<string> Names(IReadOnlyList<ProjectPersonRole> roles) => roles.Select(r => r.ToString()).ToList();
+
     private static async Task<T> Guard<T>(object what, Func<Task<T>> read)
     {
         try
@@ -818,7 +820,7 @@ public sealed record CustomerKnowledge(IReadOnlyList<KnowledgeRow> People, strin
 
 /// <summary>A colleague who knows a customer, and what about.</summary>
 public sealed record KnowledgeRow(
-    int SolutionId, string SolutionName, string PersonName, string PersonEmail, string Role, string? Areas);
+    int SolutionId, string SolutionName, string PersonName, string PersonEmail, IReadOnlyList<string> Roles, string? Areas);
 
 /// <summary>
 /// A catalogue module, and - when the question named a module or a solution - one

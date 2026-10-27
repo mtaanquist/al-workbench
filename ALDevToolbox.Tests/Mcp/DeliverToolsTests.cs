@@ -410,7 +410,7 @@ public sealed class DeliverToolsTests : IDisposable
         var tools = NewTools(ctx);
 
         var bySolution = await tools.ListCustomerKnowledgeAsync(solution: "CRONUS Denmark");
-        bySolution.People.Should().ContainSingle(p => p.PersonName == "Anne Hansen" && p.Role == "Consultant");
+        bySolution.People.Should().ContainSingle(p => p.PersonName == "Anne Hansen" && p.Roles.SequenceEqual(new[] { "Consultant" }));
         bySolution.Notes.Should().Be("Month-end is busy.");
 
         var byPerson = await tools.ListCustomerKnowledgeAsync(person: "anne");
@@ -624,9 +624,9 @@ public sealed class DeliverToolsTests : IDisposable
                 Name = "Hidden Person", Email = "hidden@cronus.example", CreatedAt = now,
             });
         ctx.OeProjectPeople.AddRange(
-            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = denmark.Id, UserId = AnneId, Role = ProjectPersonRole.Consultant, Areas = "finance", CreatedAt = now },
-            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = sweden.Id, UserId = AnneId, Role = ProjectPersonRole.Developer, CreatedAt = now },
-            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = secret.Id, UserId = AnneId, Role = ProjectPersonRole.Architect, CreatedAt = now });
+            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = denmark.Id, UserId = AnneId, Roles = [ProjectPersonRole.Consultant], Areas = "finance", CreatedAt = now },
+            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = sweden.Id, UserId = AnneId, Roles = [ProjectPersonRole.Developer], CreatedAt = now },
+            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = secret.Id, UserId = AnneId, Roles = [ProjectPersonRole.Architect], CreatedAt = now });
         ctx.OeProjectIntegrations.Add(new OeProjectIntegration
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = denmark.Id, Name = "Webshop",
