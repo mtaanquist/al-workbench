@@ -666,7 +666,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             return;
         }
         (await act.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
-            .Should().Be("Only the project owner or an organisation admin can do this.");
+            .Should().Be("You don't have permission to change this solution. Ask its owner, a member of its team or an administrator.");
         (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(0);
         (await read.OeReleases.CountAsync()).Should().Be(0, "a refused build leaves no release behind either");
         queue.Reader.TryRead(out _).Should().BeFalse();
