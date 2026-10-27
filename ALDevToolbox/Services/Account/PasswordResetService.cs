@@ -18,6 +18,17 @@ public sealed class PasswordResetService
     public static readonly TimeSpan ResetTokenLifetime = TimeSpan.FromHours(1);
     public static readonly TimeSpan MagicLinkTokenLifetime = TimeSpan.FromMinutes(15);
 
+    /// <summary>Shown when a reset link is spent, expired, or no longer belongs to an active account.</summary>
+    public const string InvalidLinkMessage = "This reset link is no longer valid. Request a new one.";
+
+    /// <summary>
+    /// Shown when the organisation signs in with Microsoft only. The reset page
+    /// matches on it to offer sign-in rather than a new link, since a new link
+    /// would be refused the same way.
+    /// </summary>
+    public const string MicrosoftOnlyMessage =
+        "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page.";
+
     private readonly AppDbContext _db;
     private readonly AuthService _auth;
     private readonly TimeProvider _clock;
@@ -141,22 +152,7 @@ public sealed class PasswordResetService
             .FirstOrDefaultAsync(ct);
         if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This reset link is no longer valid. Request a new one." });
-        }
-        if (row.User.Status != UserStatus.Active)
-        {
-            // Defensive, mirroring the magic-link consume: a token issued before
-            // the account was disabled (or a status change mid-flow) must not let
-            // a non-Active user complete a reset. Login already blocks Disabled,
-            // but the two consume paths should be consistent. #410
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This reset link is no longer valid. Request a new one." });
-        }
-        // The org may have gone Microsoft-only between issue and consume, as
-        // the magic-link consume also checks: a password set now would come
-        // back to life if the policy were relaxed later.
-        if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
-        {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = InvalidLinkMessage });
         }
         // Single use, claimed with a conditional update inside the transaction
         // that sets the password: of two submits of one link, one sets a
@@ -168,12 +164,31 @@ public sealed class PasswordResetService
         // Raw SQL pinned to the user id on the token row found by its hash.
         await _db.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT 1 FROM users WHERE id = {row.UserId} FOR UPDATE", ct);
+        // The account checks run on the row as it stands under the lock, not as
+        // it was read above: a disable or a policy change that lands between the
+        // two must still refuse the reset.
+        await _db.Entry(row.User).ReloadAsync(ct);
+        if (row.User.Status != UserStatus.Active)
+        {
+            // Defensive, mirroring the magic-link consume: a token issued before
+            // the account was disabled (or a status change mid-flow) must not let
+            // a non-Active user complete a reset. Login already blocks Disabled,
+            // but the two consume paths should be consistent. #410
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = InvalidLinkMessage });
+        }
+        // The org may have gone Microsoft-only between issue and consume, as
+        // the magic-link consume also checks: a password set now would come
+        // back to life if the policy were relaxed later.
+        if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MicrosoftOnlyMessage });
+        }
         var claimed = await tokenRows
             .Where(t => t.Id == row.Id && t.ConsumedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
         if (claimed == 0)
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This reset link is no longer valid. Request a new one." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = InvalidLinkMessage });
         }
         row.ConsumedAt = now;
         row.User.PasswordHash = _auth.HashPassword(newPassword);

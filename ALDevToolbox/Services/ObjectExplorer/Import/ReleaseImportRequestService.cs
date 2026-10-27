@@ -106,6 +106,7 @@ public sealed class ReleaseImportRequestService
     private readonly PersistedImportJobs _persistedJobs;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectBuildImporter _projectBuilds;
+    private readonly ProjectAccess _access;
 
     public ReleaseImportRequestService(
         ReleaseImportService importer,
@@ -114,7 +115,8 @@ public sealed class ReleaseImportRequestService
         ReleaseImportQueue queue,
         PersistedImportJobs persistedJobs,
         IOrganizationContext orgContext,
-        ProjectBuildImporter projectBuilds)
+        ProjectBuildImporter projectBuilds,
+        ProjectAccess access)
     {
         _importer = importer;
         _management = management;
@@ -123,6 +125,7 @@ public sealed class ReleaseImportRequestService
         _persistedJobs = persistedJobs;
         _orgContext = orgContext;
         _projectBuilds = projectBuilds;
+        _access = access;
     }
 
     /// <summary>
@@ -305,7 +308,13 @@ public sealed class ReleaseImportRequestService
     public async Task<ReleaseImportOutcome> RetryAsync(
         int releaseId, ReleaseRetrySubmission submission, CancellationToken ct = default)
     {
-        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        // A release the solution-visibility fence hides is answered exactly as an
+        // unknown id: no saved source to reuse, and not found where the reopen
+        // would have run. Asked first and always, so the two take the same path.
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var origin = visible
+            ? await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false)
+            : null;
 
         // Project builds re-run from the project id alone — no URL, no
         // re-upload. Reopen the release, wipe the previous attempt's modules,
@@ -384,6 +393,7 @@ public sealed class ReleaseImportRequestService
         // half-written module on the idempotency check. Wiping can take a while, and
         // the job is queued only after it: until then nothing else says the release
         // is being worked on, so a build polling it would take it for abandoned (#1180).
+        if (!visible) throw ReleaseImportService.RetryNotFound(releaseId);
         using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
         await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);

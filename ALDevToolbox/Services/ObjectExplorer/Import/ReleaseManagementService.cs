@@ -51,14 +51,18 @@ public class ReleaseManagementService
     /// visibility check runs first and always, so the two take the same queries too.
     /// </summary>
     private async Task<OeRelease> LoadVisibleAsync(int releaseId, CancellationToken ct) =>
-        await FindVisibleAsync(releaseId, ct).ConfigureAwait(false) ?? throw NotFound(releaseId);
+        await FindVisibleAsync(releaseId, tracked: true, ct).ConfigureAwait(false) ?? throw NotFound(releaseId);
 
-    /// <summary>The release behind <see cref="LoadVisibleAsync"/>, or null where that throws.</summary>
-    private async Task<OeRelease?> FindVisibleAsync(int releaseId, CancellationToken ct)
+    /// <summary>
+    /// The release behind <see cref="LoadVisibleAsync"/>, or null where that throws.
+    /// Tracked for the writes; a read-only caller passes <paramref name="tracked"/> false.
+    /// </summary>
+    private async Task<OeRelease?> FindVisibleAsync(int releaseId, bool tracked, CancellationToken ct)
     {
         RequireOrganizationId();
         var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
-        var release = await _db.OeReleases
+        var releases = tracked ? _db.OeReleases : _db.OeReleases.AsNoTracking();
+        var release = await releases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
         return visible ? release : null;
     }
@@ -73,7 +77,7 @@ public class ReleaseManagementService
     /// </summary>
     public async Task<bool> EnsureBackfillableAsync(int releaseId, CancellationToken ct = default)
     {
-        var release = await FindVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var release = await FindVisibleAsync(releaseId, tracked: false, ct).ConfigureAwait(false);
         if (release is null) return false;
         if (release.Status != "ready" || release.DeletedAt is not null)
         {

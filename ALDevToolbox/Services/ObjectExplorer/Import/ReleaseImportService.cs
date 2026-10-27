@@ -767,7 +767,7 @@ public class ReleaseImportService
         RequireOrganizationId();
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw RetryError($"Release {releaseId} not found in this organisation.");
+            ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
         {
@@ -809,7 +809,7 @@ public class ReleaseImportService
         RequireOrganizationId();
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw RetryError($"Release {releaseId} not found in this organisation.");
+            ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
         {
@@ -834,6 +834,14 @@ public class ReleaseImportService
 
     private static PlanValidationException RetryError(string message) =>
         new(new Dictionary<string, string> { ["Retry"] = message });
+
+    /// <summary>
+    /// The retry path's answer for a release that is not there. Shared with
+    /// <see cref="ReleaseImportRequestService.RetryAsync"/>, which gives it to a
+    /// release the caller may not see, so hidden and absent read the same.
+    /// </summary>
+    internal static PlanValidationException RetryNotFound(int releaseId) =>
+        RetryError($"Release {releaseId} not found in this organisation.");
 
     /// <summary>
     /// Refuses a dedup key that's already in use by another active Release in the

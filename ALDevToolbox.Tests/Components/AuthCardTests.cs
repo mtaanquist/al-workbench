@@ -250,7 +250,25 @@ public sealed class AuthCardTests : IDisposable
             cut.FindAll("form").Should().BeEmpty("the link can't be submitted again");
             cut.Find(".auth__title").TextContent.Trim().Should().Be("This link can't be used");
             cut.Markup.Should().Contain("This reset link is no longer valid. Request a new one.");
+            // The message asks for a new link, so the button gets one; sign-in
+            // stays in the foot, as on the missing-token card.
+            cut.Find("a.btn--primary").GetAttribute("href").Should().Be("/forgot-password");
+            cut.Find(".auth__foot a").GetAttribute("href").Should().Be("/login");
+        });
+    }
+
+    [Fact]
+    public void A_reset_link_refused_for_a_Microsoft_only_organisation_offers_sign_in()
+    {
+        // A new link would be refused the same way, so sign-in is the action.
+        Navigate("/reset-password?token=live&err=Token&msg=" + Uri.EscapeDataString(PasswordResetService.MicrosoftOnlyMessage));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("form").Should().BeEmpty();
             cut.Find("a.btn--primary").GetAttribute("href").Should().Be("/login");
+            cut.FindAll("a[href='/forgot-password']").Should().BeEmpty();
         });
     }
 

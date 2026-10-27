@@ -368,6 +368,10 @@ unknown one run the same queries:
   release.
 - `TranslationImportService` — `ImportSingleAsync` and `ImportZipAsync`, the two
   translation uploads.
+- `ReleaseImportRequestService.RetryAsync` — the manage page's Retry. A hidden
+  release is treated as unknown: no saved source is reused, and it gets the
+  not-found error where the reopen would have run. A retry of a pipeline build is
+  additionally held to the solution manage check, as pressing Build is.
 - `ReleaseManagementService.ListBackfillableReleaseIdsAsync` — the bulk "backfill
   every release" action queues only the releases `VisibleReleasePredicate` lets the
   caller see, so the count it reports leaves the hidden ones out too.
@@ -382,8 +386,8 @@ builds one without the fence.
 Not gated here: the importer's own soft-delete (`SupersedeAsync`, which
 `ArtifactReleaseImporter` uses to replace or retire a Microsoft artifact release),
 under the worker rule below, since no project owns such a release and the sweep runs
-with nobody signed in. Retry and manual-symbols recovery were already behind the
-project manage check.
+with nobody signed in. Manual-symbols recovery was already behind the project
+manage check.
 
 **MCP** (`Services/Mcp/Tools/`, per the parity guide in `PROJECT.md`), gated as of
 slice 3. Each tool class has exactly one id-resolution choke point, which is where

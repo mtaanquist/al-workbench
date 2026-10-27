@@ -273,7 +273,7 @@ else
         // Codes last ten minutes and this lockout up to fifteen, so the code
         // already sent will have run out by the time the wait is over.
         "too-many-attempts" when _method == "email" =>
-            "Too many incorrect codes. Wait 15 minutes, then email yourself a new code.",
+            $"Too many incorrect codes. Wait {(int)ALDevToolbox.Services.Account.AuthService.LockoutWindow.TotalMinutes} minutes, then email yourself a new code.",
         "too-many-attempts" => "Too many incorrect attempts. Wait a few minutes and try again.",
         // Deliberately not one string: an account whose only second factor is
         // email has no authenticator app and no recovery codes, so telling it
