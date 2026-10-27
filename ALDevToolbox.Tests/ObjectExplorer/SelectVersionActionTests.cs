@@ -61,6 +61,29 @@ public sealed class SelectVersionActionTests : IDisposable
         (await verify.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(0);
     }
 
+    /// <summary>
+    /// The other side of the length rule: 32 characters is the longest version the column
+    /// holds, and it is taken. Booked for later, so Business Central is not asked whether
+    /// it offers it and only the rule decides.
+    /// </summary>
+    [Fact]
+    public async Task A_version_of_exactly_32_characters_is_taken()
+    {
+        const string version = "28.0.123456789012345678901234.56";
+        version.Length.Should().Be(32);
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            actionId = (await _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, envId, UpgradeActionKind.SelectVersion,
+                _f.Clock.GetUtcNow().AddHours(4), targetVersion: version)).Id;
+        }
+
+        (await _f.ReadActionAsync(actionId)).TargetVersion.Should().Be(version);
+    }
+
     [Theory]
     [InlineData(UpgradeActionKind.PushDateToLatest)]
     [InlineData(UpgradeActionKind.RunNow)]

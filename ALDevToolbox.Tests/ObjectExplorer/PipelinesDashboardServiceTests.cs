@@ -389,7 +389,9 @@ public sealed class PipelinesDashboardServiceTests : IDisposable
 
         seen.BuildPipelineCount.Should().Be(2, "the deployment pipeline brings a build pipeline of its own");
         seen.DeploymentPipelineCount.Should().Be(1);
-        seen.Activity.Should().NotBeEmpty();
+        var failed = seen.Activity.Should().ContainSingle().Which;
+        failed.Kind.Should().Be(PipelinesActivityKind.BuildFailed);
+        failed.ProjectId.Should().Be(hidden);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

@@ -858,7 +858,8 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         {
             var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
                 projectId, envId, UpgradeActionKind.RunNow, _f.Clock.GetUtcNow().AddHours(4), upgradeId: id);
-            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Upgrade");
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Upgrade"].Should().Be(
+                "This environment isn't on that upgrade any more, or the upgrade has been marked done. Reload the upgrade and try again.");
         }
 
         await using var verify = _f.Db.NewContext();

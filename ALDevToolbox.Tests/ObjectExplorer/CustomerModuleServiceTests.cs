@@ -260,23 +260,41 @@ public sealed class CustomerModuleServiceTests : IDisposable
     [Fact]
     public async Task A_private_solutions_modules_are_closed_to_someone_outside_its_team()
     {
+        const string writeRefusal = "Only this solution's teams, its owner and your administrators can change it.";
         var capture = await AddToCatalogAsync("Continia Document Capture", null, CaptureAppId);
+        var fornav = await AddToCatalogAsync("ForNAV", "ForNAV");
         var id = await SeedSolutionAsync("CRONUS Norway", ProjectHostingType.OurCloud);
+        await using (var owner = _db.NewContext())
+        {
+            await Svc(owner).SaveSolutionModuleAsync(id, null, new SolutionModuleInput(capture, "1.0", null));
+        }
         await RestrictAsync(id, ProjectVisibility.Private);
+        int rowId;
+        await using (var lookup = _db.NewContext())
+        {
+            rowId = await lookup.OeProjectModules.Where(m => m.ProjectId == id).Select(m => m.Id).SingleAsync();
+        }
 
         _db.OrgContext.CurrentUserId = OtherUserId;
         await using (var ctx = _db.NewContext())
         {
             var read = () => Svc(ctx).GetSolutionModulesAsync(id);
-            var add = () => Svc(ctx).SaveSolutionModuleAsync(id, null, new SolutionModuleInput(capture, "1.0", null));
+            var change = () => Svc(ctx).SaveSolutionModuleAsync(id, rowId, new SolutionModuleInput(capture, "2.0", "upgraded"));
+            var add = () => Svc(ctx).SaveSolutionModuleAsync(id, null, new SolutionModuleInput(fornav, "8.1", null));
+            var remove = () => Svc(ctx).DeleteSolutionModuleAsync(id, rowId);
 
-            await read.Should().ThrowAsync<ProjectAccessDeniedException>();
-            (await add.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
-                .Should().Be("Only this solution's teams, its owner and your administrators can change it.");
+            (await read.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
+                .Should().Be("This solution is private. Ask its owner or a member of its team for access.");
+            (await change.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message.Should().Be(writeRefusal);
+            (await add.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message.Should().Be(writeRefusal);
+            (await remove.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message.Should().Be(writeRefusal);
         }
 
         await using var verify = _db.NewContext();
-        (await verify.OeProjectModules.AnyAsync(m => m.ProjectId == id)).Should().BeFalse();
+        var rows = await verify.OeProjectModules.AsNoTracking().Where(m => m.ProjectId == id).ToListAsync();
+        rows.Should().ContainSingle();
+        rows[0].Version.Should().Be("1.0");
+        rows[0].Note.Should().BeNull();
     }
 
     [Fact]

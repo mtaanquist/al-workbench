@@ -648,10 +648,14 @@ public sealed class ProjectBuildImporterTests : IDisposable
         }
         _db.OrgContext.IsSiteAdmin = false;
         _db.OrgContext.CurrentUserId = personId;
-        await NewTokens(_db.NewContext()).SaveTokenAsync(RepositoryProvider.GitHub, "ghp_pat", clear: false);
+        await using (var tokens = _db.NewContext())
+        {
+            await NewTokens(tokens).SaveTokenAsync(RepositoryProvider.GitHub, "ghp_pat", clear: false);
+        }
         var queue = new ProjectBuildQueue();
 
-        var act = () => NewImporter(_db.NewContext(), queue).StartBuildAsync(pipelineId);
+        await using var build = _db.NewContext();
+        var act = () => NewImporter(build, queue).StartBuildAsync(pipelineId);
 
         await using var read = _db.NewContext();
         if (onTheTeam)
@@ -661,7 +665,8 @@ public sealed class ProjectBuildImporterTests : IDisposable
             queue.Reader.TryRead(out _).Should().BeTrue();
             return;
         }
-        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await act.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
+            .Should().Be("Only the project owner or an organisation admin can do this.");
         (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(0);
         (await read.OeReleases.CountAsync()).Should().Be(0, "a refused build leaves no release behind either");
         queue.Reader.TryRead(out _).Should().BeFalse();
