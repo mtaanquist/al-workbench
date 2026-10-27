@@ -100,6 +100,15 @@ public sealed class ProjectBuildQueue
         get { lock (_lock) return _runningByRelease.Count; }
     }
 
+    /// <summary>
+    /// Builds that stood aside, finished their wait, and are waiting for a place again.
+    /// For tests, which need to know a build is on its way back before they act.
+    /// </summary>
+    internal int RejoiningCount
+    {
+        get { lock (_lock) return _rejoining; }
+    }
+
     /// <summary>The limit that applies when no site admin value is saved.</summary>
     public int DefaultLimit { get; }
 

@@ -318,11 +318,20 @@ public sealed class FakeGitHubApi : HttpMessageHandler
     public TaskCompletionSource PauseUntilReleased(HttpMethod method, string path)
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _gates.Add((method.Method, Normalise(path), gate.Task));
+        _gates.Add((method.Method, Normalise(path), gate.Task,
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)));
         return gate;
     }
 
-    private readonly List<(string Method, string Path, Task Gate)> _gates = new();
+    /// <summary>
+    /// Completes once the first request is being held by the gate
+    /// <see cref="PauseUntilReleased"/> set on <paramref name="path"/>: the signal that the
+    /// call under test has got that far, which a sleep only hopes for.
+    /// </summary>
+    public Task HeldAt(HttpMethod method, string path) =>
+        _gates.Single(g => g.Method == method.Method && g.Path == Normalise(path)).Arrived.Task;
+
+    private readonly List<(string Method, string Path, Task Gate, TaskCompletionSource Arrived)> _gates = new();
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
@@ -331,6 +340,7 @@ public sealed class FakeGitHubApi : HttpMessageHandler
             && request.RequestUri!.AbsolutePath.StartsWith(g.Path, StringComparison.Ordinal));
         if (gate.Gate is not null)
         {
+            gate.Arrived.TrySetResult();
             await gate.Gate.WaitAsync(cancellationToken);
         }
 

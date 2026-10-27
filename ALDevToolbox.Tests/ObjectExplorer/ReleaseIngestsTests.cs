@@ -33,9 +33,10 @@ public sealed class ReleaseIngestsTests
         var first = await ingests.EnterHeavyAsync(timeout.Token);
 
         ingests.TryEnterHeavy().Should().BeNull("another import holds the gate");
+        // The gate is taken or queued for before EnterHeavyAsync returns, so no sleep is
+        // needed: a gate that let it in would have handed back a finished task.
         var second = ingests.EnterHeavyAsync(timeout.Token);
-        await Task.Delay(50);
-        second.IsCompleted.Should().BeFalse();
+        second.IsCompleted.Should().BeFalse("the first import still holds the gate");
 
         first.Dispose();
         first.Dispose();

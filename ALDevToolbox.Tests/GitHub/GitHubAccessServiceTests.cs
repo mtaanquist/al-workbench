@@ -461,18 +461,46 @@ public sealed class GitHubAccessServiceTests : IDisposable
         await using var __ = secondCtx;
 
         clock.Advance(TimeSpan.FromHours(8));
-        // Hold the first refresh at GitHub until the second caller has had every chance
-        // to read the same expired row and send the same refresh token.
+        // Hold the first refresh at GitHub, and let it go only once the second caller has
+        // read the same expired row and is queued behind the first. Waiting for those two
+        // facts rather than for a while (#1439): a second caller that came late would read
+        // the refreshed row and pass without any lock at all.
         var gate = api.PauseUntilReleased(HttpMethod.Post, "login/oauth/access_token");
         var firstToken = first.ResolveUserTokenAsync(UserId, TestContext.Current.CancellationToken);
-        await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+        await api.HeldAt(HttpMethod.Post, "login/oauth/access_token")
+            .WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var secondToken = second.ResolveUserTokenAsync(UserId, TestContext.Current.CancellationToken);
-        await Task.Delay(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+        await UntilSomeoneWaitsForTheRefreshLockAsync();
         gate.SetResult();
 
         (await firstToken).Should().Be("ghu_second");
         (await secondToken).Should().Be("ghu_second", "the second caller waits and uses the pair the first stored");
         api.OAuthBodies.Count(b => b.Contains("grant_type=refresh_token")).Should().Be(1);
+    }
+
+    /// <summary>
+    /// Polls Postgres until a session in this test's database is queued for the per-user
+    /// refresh lock: the advisory lock the service takes is two keys, the namespace "GHRT"
+    /// and the user id.
+    /// </summary>
+    private async Task UntilSomeoneWaitsForTheRefreshLockAsync()
+    {
+        const long refreshLockClass = 0x47_48_52_54;
+        const long userId = UserId;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            await using var ctx = _db.NewContext();
+            var waiting = await ctx.Database.SqlQuery<int>($"""
+                SELECT count(*)::int AS "Value" FROM pg_locks
+                WHERE locktype = 'advisory' AND NOT granted AND objsubid = 2
+                  AND classid::bigint = {refreshLockClass} AND objid::bigint = {userId}
+                  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                """).SingleAsync(TestContext.Current.CancellationToken);
+            if (waiting > 0) return;
+            DateTime.UtcNow.Should().BeBefore(deadline, "the second caller has to queue for the lock the first one holds");
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]

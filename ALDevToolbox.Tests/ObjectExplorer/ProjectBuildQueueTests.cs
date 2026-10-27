@@ -75,8 +75,9 @@ public sealed class ProjectBuildQueueTests
         queue.Enqueue(Build(2, pipelineId: 7, ProjectBuildTrigger.Push));
         queue.Reader.TryRead(out _).Should().BeTrue();
 
+        // The wait decides under the queue's lock before it returns, so there is nothing
+        // to sleep for: a build that could start would have completed it already.
         var waiting = queue.Reader.WaitToReadAsync().AsTask();
-        await Task.Delay(50);
         waiting.IsCompleted.Should().BeFalse("the only waiting build belongs to a pipeline that is building");
 
         queue.Complete(first);
@@ -177,7 +178,6 @@ public sealed class ProjectBuildQueueTests
         queue.Reader.TryRead(out _).Should().BeTrue();
 
         var waiting = queue.Reader.WaitToReadAsync().AsTask();
-        await Task.Delay(50);
         waiting.IsCompleted.Should().BeFalse("one build is running and the limit is one");
 
         queue.SetLimit(2);
@@ -272,7 +272,8 @@ public sealed class ProjectBuildQueueTests
         second.ReleaseId.Should().Be(2);
 
         wait.SetResult("parent ready");
-        await Task.Delay(50);
+        // Either it has come back already, which is wrong, or it is waiting for a place.
+        Eventually(() => aside.IsCompleted || queue.RejoiningCount > 0);
         aside.IsCompleted.Should().BeFalse("the build waits for a place before it carries on");
 
         queue.Complete(second);
@@ -299,7 +300,7 @@ public sealed class ProjectBuildQueueTests
         var second = Take(queue);
 
         wait.SetResult(7);
-        await Task.Delay(50);
+        Eventually(() => queue.RejoiningCount > 0);
         queue.Complete(second);
 
         (await aside.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(7);
@@ -335,7 +336,7 @@ public sealed class ProjectBuildQueueTests
         Take(queue);
 
         wait.SetResult(released);
-        await Task.Delay(50);
+        Eventually(() => queue.RejoiningCount > 0);
         await cts.CancelAsync();
 
         var act = () => aside.WaitAsync(TimeSpan.FromSeconds(5));
@@ -372,6 +373,9 @@ public sealed class ProjectBuildQueueTests
         (await queue.StepAsideAsync(99, () => Task.FromResult(5), CancellationToken.None)).Should().Be(5);
         TakeAll(queue).Should().BeEmpty("nothing stood aside, so the limit still holds");
     }
+
+    private static void Eventually(Func<bool> condition) =>
+        SpinWait.SpinUntil(condition, TimeSpan.FromSeconds(10)).Should().BeTrue();
 
     private sealed class Released : IDisposable
     {
