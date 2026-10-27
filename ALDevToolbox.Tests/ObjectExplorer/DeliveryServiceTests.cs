@@ -759,6 +759,7 @@ public sealed class DeliveryServiceTests : IDisposable
         var movedLocal = TimeZoneInfo.ConvertTimeFromUtc(delivery.ScheduledFor, tz);
         new TimeOnly(movedLocal.Hour, movedLocal.Minute).Should().Be(start, "it moves to the window's opening in the solution's own time");
         delivery.DiagnosticsLog.Should().Contain($"at {UpdateWindow.Clock(start)} (Europe/Copenhagen)");
+        delivery.DiagnosticsLog.Should().Contain("10:00:00  ", "the log is stamped on the same clock as the row");
     }
 
     [Fact]

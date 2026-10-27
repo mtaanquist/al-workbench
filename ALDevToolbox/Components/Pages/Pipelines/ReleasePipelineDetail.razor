@@ -12,6 +12,7 @@
 @inject ILogger<ReleasePipelineDetail> Log
 @inject IServiceScopeFactory ScopeFactory
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@* Named Time, not Clock as elsewhere: this page already has a Clock(DateTime) formatting helper. *@
 @inject TimeProvider Time
 @using System.Globalization
 @using System.Text.RegularExpressions

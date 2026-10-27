@@ -729,7 +729,7 @@
     // few minutes rather than leaving a stale table with no way forward.
     private static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan PollFor = TimeSpan.FromMinutes(3);
-    private System.Threading.Timer? _poll;
+    private ITimer? _poll;
     private DateTime _pollUntilUtc;
 
     /// <summary>Whether the re-read timer is running, for the tests of leaving the page.</summary>
@@ -742,7 +742,7 @@
         if (_calls.IsGone) return;
         _poll?.Dispose();
         _pollUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
+        _poll = Clock.CreateTimer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
     /// <summary>One re-read. Internal so a test can drive it without waiting on the timer.</summary>
@@ -802,7 +802,7 @@
 
     private bool _autoRefresh;
     private bool _autoFromAddressDone;
-    private System.Threading.Timer? _autoTimer;
+    private ITimer? _autoTimer;
     private DateTime _autoUntilUtc;
 
     // After a render rather than in OnInitializedAsync: a prerender must never start a
@@ -839,7 +839,7 @@
         _autoTimer?.Dispose();
         _autoRefresh = true;
         _autoUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(AutoRefreshFor);
-        _autoTimer = new System.Threading.Timer(
+        _autoTimer = Clock.CreateTimer(
             _ => _ = _calls.Track(InvokeAsync(async () =>
             {
                 if (_calls.IsGone)

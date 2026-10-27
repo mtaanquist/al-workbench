@@ -2718,11 +2718,11 @@ public sealed class DeliveryService
     internal const string InterruptedAppMessage =
         "Not confirmed: the deployment stopped while this app was on its way, and Business Central may still have installed it. Check the environment's installed apps.";
 
-    private static void Append(StringBuilder log, string line) => log.Append(LogLine(line));
+    private void Append(StringBuilder log, string line) => log.Append(LogLine(line));
 
     /// <summary>One line of a delivery's log as the run writes it: <c>HH:mm:ss  message</c>, UTC.</summary>
-    private static string LogLine(string line) =>
-        DateTime.UtcNow.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
+    private string LogLine(string line) =>
+        _clock.GetUtcNow().UtcDateTime.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
 
     /// <summary>The acting person's name for a history line, or "someone" once there is none to read.</summary>
     private async Task<string> CurrentUserNameAsync(CancellationToken ct)
