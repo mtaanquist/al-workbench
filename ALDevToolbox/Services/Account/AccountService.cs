@@ -410,8 +410,8 @@ public sealed class AccountService
 
     /// <summary>
     /// The signed-in person's own account row, their organisation, and whether
-    /// that organisation offers Microsoft sign-in — what the Account page opens
-    /// with.
+    /// that organisation offers Microsoft sign-in or requires it — what the
+    /// Account page opens with.
     /// </summary>
     /// <remarks>
     /// Runs inside the organisation query filter. The page used to read these
@@ -426,10 +426,16 @@ public sealed class AccountService
 
         var organization = await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == user.OrganizationId, ct);
-        var entraEnabled = await _db.OrganizationSettings.AsNoTracking()
-            .AnyAsync(s => s.OrganizationId == user.OrganizationId && s.EntraEnabled, ct);
+        var settings = await _db.OrganizationSettings.AsNoTracking()
+            .Where(s => s.OrganizationId == user.OrganizationId)
+            .Select(s => new { s.EntraEnabled, s.LocalLoginPolicy })
+            .FirstOrDefaultAsync(ct);
+        // The same rule as AuthService.IsLocalLoginDisabledAsync, read inside
+        // the filter: a SiteAdmin keeps their password as break-glass.
+        var passwordSignInDisabled = !user.IsSiteAdmin
+            && settings?.LocalLoginPolicy == Domain.ValueObjects.LocalLoginPolicy.EntraOnly;
 
-        return new AccountOverview(user, organization, entraEnabled);
+        return new AccountOverview(user, organization, settings?.EntraEnabled == true, passwordSignInDisabled);
     }
 
     /// <summary>
@@ -642,5 +648,10 @@ public sealed class AccountService
     }
 }
 
-/// <summary>What the Account page needs about the signed-in person up front.</summary>
-public sealed record AccountOverview(User User, Organization? Organization, bool OrganizationEntraEnabled);
+/// <summary>
+/// What the Account page needs about the signed-in person up front.
+/// <c>PasswordSignInDisabled</c> is true when their organisation only allows
+/// Microsoft sign-in and they are not a SiteAdmin, so there is no password to change.
+/// </summary>
+public sealed record AccountOverview(
+    User User, Organization? Organization, bool OrganizationEntraEnabled, bool PasswordSignInDisabled);

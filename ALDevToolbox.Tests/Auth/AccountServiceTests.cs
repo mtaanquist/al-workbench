@@ -629,6 +629,43 @@ public sealed class AccountServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_reset_requests_at_once_leave_exactly_one_live_link()
+    {
+        // Each request retires what is live and adds its own; without the lock
+        // on the user row both retire nothing and both links stay live.
+        await SeedResettableUserAsync("burst@example.com");
+
+        var tokens = await Task.WhenAll(Enumerable.Range(0, 4).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            return await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("burst@example.com", "10.0.0.1");
+        }));
+
+        tokens.Should().AllSatisfy(t => t.Should().NotBeNull());
+        await using var read = _db.NewContext();
+        (await read.PasswordResetTokens.IgnoreQueryFilters()
+                .CountAsync(t => t.User!.Email == "burst@example.com" && t.ConsumedAt == null))
+            .Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Requesting_a_reset_email_leaves_another_users_link_working()
+    {
+        await SeedResettableUserAsync("first@example.com");
+        await SeedResettableUserAsync("second@example.com");
+        await using var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var othersLink = await svc.CreatePasswordResetTokenAsync("second@example.com", "10.0.0.1");
+
+        await svc.CreatePasswordResetTokenAsync("first@example.com", "10.0.0.1");
+
+        await svc.ConsumePasswordResetTokenAsync(othersLink!, "second-users-new-password");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "second@example.com");
+        NewAuth(read).VerifyPassword("second-users-new-password", user.PasswordHash).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Requesting_a_new_reset_email_retires_the_earlier_link()
     {
         // The reset page promises this (#1455).

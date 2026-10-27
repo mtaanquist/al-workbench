@@ -93,20 +93,30 @@ public sealed class PasswordResetService
 
         // A new reset email retires the links sent before it, as the reset page
         // tells the user (#1455): only the newest one can set a password.
-        await ResetTokens()
-            .Where(t => t.UserId == user.Id && t.ConsumedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
-
+        // Retire and insert commit together under a lock on the user row, so
+        // two requests at once leave exactly one live link and a failed insert
+        // leaves the old one working.
         var (raw, hash) = TokenIssuer.Issue();
-        _db.PasswordResetTokens.Add(new PasswordResetToken
+        await using (var tx = await _db.Database.BeginTransactionAsync(ct))
         {
-            UserId = user.Id,
-            TokenHash = hash,
-            Purpose = TokenPurpose.PasswordReset,
-            CreatedAt = now,
-            ExpiresAt = now + ResetTokenLifetime,
-        });
-        await _db.SaveChangesAsync(ct);
+            // Raw SQL, like ClaimEmailChangeTokenAsync: a row lock pinned to the
+            // id the typed email resolved to, with no query filter to bypass.
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT 1 FROM users WHERE id = {user.Id} FOR UPDATE", ct);
+            await ResetTokens()
+                .Where(t => t.UserId == user.Id && t.ConsumedAt == null)
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
+            _db.PasswordResetTokens.Add(new PasswordResetToken
+            {
+                UserId = user.Id,
+                TokenHash = hash,
+                Purpose = TokenPurpose.PasswordReset,
+                CreatedAt = now,
+                ExpiresAt = now + ResetTokenLifetime,
+            });
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
         await _auth.RecordAttemptAsync(normalised, ip, succeeded: true, now, ct);
         return raw;
     }
@@ -153,6 +163,11 @@ public sealed class PasswordResetService
         // password and the other is told the link is spent (#1455, as #1208
         // did for magic links). A failed save rolls the claim back with it.
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        // The same user-row lock as issuing a link takes, first, so the two
+        // queue on each other instead of deadlocking on the token and user rows.
+        // Raw SQL pinned to the user id on the token row found by its hash.
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM users WHERE id = {row.UserId} FOR UPDATE", ct);
         var claimed = await tokenRows
             .Where(t => t.Id == row.Id && t.ConsumedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);

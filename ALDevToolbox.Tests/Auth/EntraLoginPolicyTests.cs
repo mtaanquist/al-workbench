@@ -233,6 +233,25 @@ public sealed class EntraLoginPolicyTests : IDisposable
     }
 
     [Fact]
+    public async Task The_account_page_knows_password_sign_in_is_off_for_members_but_not_site_admins()
+    {
+        // What decides whether the Account page shows the password form; the
+        // same rule as the refusal above.
+        var memberId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        var operatorId = await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com", siteAdmin: true);
+        await using (var before = _db.NewContext())
+        {
+            (await NewAccounts(before).GetAccountOverviewAsync(memberId))!.PasswordSignInDisabled.Should().BeFalse();
+        }
+
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
+
+        await using var ctx = _db.NewContext();
+        (await NewAccounts(ctx).GetAccountOverviewAsync(memberId))!.PasswordSignInDisabled.Should().BeTrue();
+        (await NewAccounts(ctx).GetAccountOverviewAsync(operatorId))!.PasswordSignInDisabled.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_site_admin_in_an_entra_only_org_can_still_change_their_password()
     {
         var userId = await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com", siteAdmin: true);
