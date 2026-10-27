@@ -298,11 +298,40 @@ public sealed class BcArtifactIndexTests
     }
 
     [Theory]
+    // A preview URL on an operator's insider mirror stays there, though the
+    // mirror's name doesn't start with "bcinsider" and sits under a shared suffix.
+    [InlineData("https://insider-mirror.azurefd.net/sandbox/29.0.55190.0/platform",
+                "https://insider-mirror.azurefd.net/sandbox/29.0.55190.0/platform")]
+    [InlineData("https://Insider-Mirror.AzureFD.net/sandbox/29.0.55190.0/platform",
+                "https://Insider-Mirror.AzureFD.net/sandbox/29.0.55190.0/platform")]
+    // The insider blob host still moves onto the mirror, not the public host.
+    [InlineData("https://bcinsider.blob.core.windows.net/sandbox/29.0.55190.0/platform",
+                "https://insider-mirror.azurefd.net/sandbox/29.0.55190.0/platform")]
+    // Public URLs still land on the public host.
+    [InlineData("https://bcartifacts.blob.core.windows.net/onprem/28.2.50931.51727/platform",
+                "https://public-mirror.azurefd.net/onprem/28.2.50931.51727/platform")]
+    public void ToCdnUrl_keeps_a_url_on_an_overridden_front_door_host(string input, string expected)
+    {
+        BcArtifactIndex.ToCdnUrl(input, "public-mirror.azurefd.net", "insider-mirror.azurefd.net")
+            .Should().Be(expected);
+    }
+
+    [Theory]
     [InlineData("bcartifacts.blob.core.windows.net", true)]
     [InlineData("bcartifacts-exdbf9fwegejdqak.b02.azurefd.net", true)]
     [InlineData("bcinsider.blob.core.windows.net", true)]
     [InlineData("bcinsider-fvh2ekdjecfjd6gk.b02.azurefd.net", true)]
+    [InlineData("BCArtifacts.Blob.Core.Windows.Net", true)]
+    [InlineData("BCARTIFACTS-EXDBF9FWEGEJDQAK.B02.AZUREFD.NET", true)]
     [InlineData("evil.example.com", false)]
+    // Anyone can create a storage account or a Front Door endpoint under
+    // Microsoft's shared suffixes, so a suffix match would trust them (#1428).
+    [InlineData("attacker.blob.core.windows.net", false)]
+    [InlineData("someone-else.azurefd.net", false)]
+    [InlineData("bcartifacts-stalehash.b02.azurefd.net", false)]
+    [InlineData("bcartifacts.azureedge.net", false)]
+    [InlineData("bcartifacts.azureedge.net.evil.com", false)]
+    [InlineData("bcartifacts.blob.core.windows.net.evil.com", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
     public void IsTrustedArtifactHost_only_allows_microsoft_artifact_hosts(string? host, bool expected)
