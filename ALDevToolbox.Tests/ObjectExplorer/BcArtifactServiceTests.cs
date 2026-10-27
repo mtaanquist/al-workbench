@@ -180,13 +180,36 @@ public sealed class BcArtifactServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task DownloadArtifactSetAsync_refuses_an_application_url_on_a_foreign_host()
+    public async Task DownloadArtifactSetAsync_keeps_a_preview_on_the_insider_host()
     {
         await using var ctx = _db.NewContext();
         var factory = new ZipHttpClientFactory(manifestJson: null);
 
-        var act = () => NewService(factory, ctx).DownloadArtifactSetAsync(
-            "https://bcartifacts.azureedge.net.evil.com/onprem/28.2.50931.51727/dk");
+        var download = await NewService(factory, ctx).DownloadArtifactSetAsync(
+            $"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.0.55190.0/dk");
+        try
+        {
+            factory.Requests.Should().Equal(
+                $"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.0.55190.0/dk",
+                $"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.0.55190.0/platform");
+        }
+        finally
+        {
+            File.Delete(download.ApplicationZipPath);
+            if (download.PlatformZipPath is not null) File.Delete(download.PlatformZipPath);
+        }
+    }
+
+    [Theory]
+    [InlineData("https://bcartifacts.azureedge.net.evil.com/onprem/28.2.50931.51727/dk")]
+    // Userinfo, not host: the request would go to evil.com.
+    [InlineData("https://bcartifacts.blob.core.windows.net@evil.com/onprem/28.2.50931.51727/dk")]
+    public async Task DownloadArtifactSetAsync_refuses_an_application_url_on_a_foreign_host(string applicationUrl)
+    {
+        await using var ctx = _db.NewContext();
+        var factory = new ZipHttpClientFactory(manifestJson: null);
+
+        var act = () => NewService(factory, ctx).DownloadArtifactSetAsync(applicationUrl);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Artifacts");
         factory.Requests.Should().BeEmpty();

@@ -303,7 +303,13 @@ public static class BcArtifactIndex
     /// <c>ReplaceCDN</c>. URLs on a non-Microsoft artifact host (or already on
     /// the right Front Door host) are returned unchanged.
     /// </summary>
-    public static string ToCdnUrl(string url)
+    public static string ToCdnUrl(string url) => ToCdnUrl(url, CdnHost, InsiderCdnHost);
+
+    /// <summary>
+    /// <see cref="ToCdnUrl(string)"/> against explicit hosts, so a test can stand
+    /// in for an operator's <c>BC_INSIDER_CDN_HOST</c> override.
+    /// </summary>
+    internal static string ToCdnUrl(string url, string cdnHost, string insiderCdnHost)
     {
         if (string.IsNullOrWhiteSpace(url)
             || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
@@ -311,8 +317,17 @@ public static class BcArtifactIndex
             return url;
         }
         var host = uri.Host.ToLowerInvariant();
-        var target = host.StartsWith("bcinsider", StringComparison.Ordinal) ? InsiderCdnHost : CdnHost;
-        if (host == target.ToLowerInvariant()) return url;
+
+        // An overridden host (an operator's mirror) needn't start with
+        // "bcinsider" and may sit under a shared suffix, so name-match the two
+        // active hosts before guessing the channel from the host's prefix;
+        // otherwise a preview URL on the mirror is moved onto the public host.
+        if (string.Equals(host, cdnHost, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(host, insiderCdnHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return url;
+        }
+        var target = host.StartsWith("bcinsider", StringComparison.Ordinal) ? insiderCdnHost : cdnHost;
 
         // Only rewrite recognised Microsoft artifact hosts; anything else is left
         // alone (and would be refused by IsTrustedArtifactHost on download).
