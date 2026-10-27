@@ -1504,7 +1504,8 @@
 
     private void StartPoll()
     {
-        if (_poll is not null) return;
+        // A load that comes back after the page has gone must not start a timer.
+        if (_poll is not null || _calls.IsGone) return;
         _pollCts = new CancellationTokenSource();
         _poll = new PeriodicTimer(PollInterval);
         _ = _calls.Track(PollLoopAsync(_poll, _pollCts.Token));

@@ -602,13 +602,17 @@
         try
         {
             var rows = ownScope
-                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true))
-                : await Fleet.ListFleetAsync(includeSoftDeleted: true);
+                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true, _calls.Token))
+                : await Fleet.ListFleetAsync(includeSoftDeleted: true, _calls.Token);
             if (load != _loads) return;
             _rows = rows;
             _error = null;
             _loadFailed = false;
             _selection.Prune(Selectable(_rows).Select(r => r.EnvironmentId));
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            // The page was left mid-read; nobody is left to show the rows to.
         }
         catch (Exception ex)
         {
@@ -651,7 +655,7 @@
             var projectIds = _rows.Select(r => r.ProjectId).Distinct().ToList();
             // On a scope of its own: the auto-refresh timer comes through here too, and
             // its tick can land while a click is still awaiting the circuit's context.
-            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force));
+            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force, _calls.Token));
             // Skipped rows are solutions this person may see but not act on. Saying
             // "asking about 3 customers" when 3 were asked and 5 were skipped is the
             // honest count, and it explains a table that only partly moves.
@@ -664,6 +668,10 @@
                 return;
             }
             StartPolling();
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            // The page was left while the request was on its way.
         }
         catch (Exception ex)
         {
@@ -719,8 +727,13 @@
     private DateTime _pollUntilUtc;
     private readonly PageCalls _calls = new();
 
+    /// <summary>Whether the re-read timer is running, for the tests of leaving the page.</summary>
+    internal bool IsPolling => _poll is not null;
+
     private void StartPolling()
     {
+        // A request that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         _poll?.Dispose();
         _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
         _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
@@ -734,7 +747,13 @@
         {
             // A re-read waits for the next tick rather than moving the rows under the
             // dialog while it works.
-            if (_calls.IsGone || _bulkWindowDialog?.IsWorking == true) return;
+            if (_calls.IsGone)
+            {
+                _poll?.Dispose();
+                _poll = null;
+                return;
+            }
+            if (_bulkWindowDialog?.IsWorking == true) return;
             await LoadAsync(ownScope: true);
             if (DateTime.UtcNow >= _pollUntilUtc)
             {
@@ -809,13 +828,18 @@
 
     private void StartAutoRefresh()
     {
+        if (_calls.IsGone) return;
         _autoTimer?.Dispose();
         _autoRefresh = true;
         _autoUntilUtc = DateTime.UtcNow.Add(AutoRefreshFor);
         _autoTimer = new System.Threading.Timer(
             _ => _ = _calls.Track(InvokeAsync(async () =>
             {
-                if (_calls.IsGone) return;
+                if (_calls.IsGone)
+                {
+                    StopAutoRefresh();
+                    return;
+                }
                 await AutoRefreshTickAsync();
                 StateHasChanged();
             })),

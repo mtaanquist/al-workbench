@@ -854,6 +854,36 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
         _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeTrue();
     }
 
+    /// <summary>
+    /// A refresh that comes back after the page has gone used to start the re-read
+    /// timer on a page nobody had open, and with leaving now skipping its ticks
+    /// nothing would ever stop it (#1437). Leaving cancels the request, and a request
+    /// that lands anyway starts nothing.
+    /// </summary>
+    [Fact]
+    public async Task An_auto_refresh_that_lands_after_the_page_has_gone_starts_no_timer()
+    {
+        await MakeOwnerAnAdminAsync();
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-10));
+
+        // From the address, so the auto-refresh is on without a first round of its own.
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().NavigateTo("/environments?auto=1");
+        var cut = _ctx.Render<EnvironmentsList>();
+        cut.WaitForAssertion(() => AutoBox(cut).HasAttribute("checked").Should().BeTrue());
+
+        var page = cut.Instance;
+
+        await _ctx.Renderer.DisposeAsync();
+        await _ctx.Renderer.Dispatcher.InvokeAsync(() => page.AutoRefreshTickAsync());
+
+        page.IsPolling.Should().BeFalse();
+        _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeFalse(
+            "the request was cancelled with the page");
+    }
+
     [Fact]
     public async Task A_tick_leaves_a_freshly_read_solution_alone_and_says_so()
     {

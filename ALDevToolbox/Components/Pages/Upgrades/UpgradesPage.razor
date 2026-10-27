@@ -1084,6 +1084,8 @@
     private void StartPolling()
     {
         StopPolling();
+        // A load that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         // "Refresh restarts it": a watch that gave up may join again on the reload.
         _watch.ForgetStopped();
         _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
@@ -1102,7 +1104,7 @@
 
     private async Task PollTickAsync()
     {
-        if (DateTime.UtcNow > _pollUntilUtc)
+        if (_calls.IsGone || DateTime.UtcNow > _pollUntilUtc)
         {
             StopPolling();
             return;
@@ -1112,7 +1114,7 @@
         {
             await InvokeAsync(async () =>
             {
-                if (Gone.IsCancellationRequested || PollPaused) return;
+                if (_calls.IsGone || PollPaused) return;
                 await LoadOnOwnScopeAsync();
                 StateHasChanged();
             });

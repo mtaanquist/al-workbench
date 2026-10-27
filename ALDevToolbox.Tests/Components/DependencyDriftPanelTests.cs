@@ -93,14 +93,14 @@ public sealed class DependencyDriftPanelTests : IDisposable
     }
 
     [Fact]
-    public void An_organisation_with_no_github_connection_sees_nothing_at_all()
+    public async Task An_organisation_with_no_github_connection_sees_nothing_at_all()
     {
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
         var cut = _ctx.Render<DependencyDriftPanel>();
-        // The panel draws nothing while it loads too, so wait for the render that
-        // follows its load before reading the absence.
-        cut.WaitForState(() => cut.RenderCount >= 2, WaitTimeout);
+        // The panel draws nothing while it loads too, so wait for it to have drawn
+        // what its load decided before reading the absence.
+        await cut.Instance.Settled.WaitAsync(WaitTimeout);
 
         cut.Markup.Trim().Should().BeEmpty("someone who cannot use this must not be shown machinery explaining it");
     }
@@ -112,9 +112,8 @@ public sealed class DependencyDriftPanelTests : IDisposable
         _db.AddGitHubServices(_ctx.Services, WritableApi());
 
         var cut = _ctx.Render<DependencyDriftPanel>();
-        // Empty while it loads as well: the third render is the one after the drift
-        // has been read (the loading render, the one after the access check, then it).
-        cut.WaitForState(() => cut.RenderCount >= 3, WaitTimeout);
+        // Empty while it loads as well, so wait for the drift to have been read.
+        await cut.Instance.Settled.WaitAsync(WaitTimeout);
 
         cut.Markup.Trim().Should().BeEmpty();
     }

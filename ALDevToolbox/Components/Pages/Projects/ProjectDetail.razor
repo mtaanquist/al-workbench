@@ -418,17 +418,20 @@
         }
     }
 
+    /// <summary>
+    /// The load the address sets off, which chains several reads on the circuit's
+    /// context: leaving cancels it and waits for the read under way, so the scope does
+    /// not go from under it.
+    /// </summary>
+    private readonly PageCalls _calls = new();
+
     public async ValueTask DisposeAsync()
     {
-        // The load chains several reads on the circuit's context; leaving waits for
-        // the one under way, so the scope does not go from under it.
         await _calls.LeaveAsync();
         if (_tabsModule is null) return;
         try { await _tabsModule.DisposeAsync(); }
         catch (JSDisconnectedException) { }
     }
-
-    private readonly PageCalls _calls = new();
 
     /// <summary>
     /// The label beside the solution name, or null for Public. Read off the loaded
@@ -522,8 +525,8 @@
 
     private async Task LoadAccessAsync()
     {
-        _allTeams = await Teams.ListTeamsAsync();
-        _accessBaseline = await Projects.GetAccessAsync(Id!.Value);
+        _allTeams = await Teams.ListTeamsAsync(_calls.Token);
+        _accessBaseline = await Projects.GetAccessAsync(Id!.Value, _calls.Token);
     }
 
     /// <summary>
@@ -651,7 +654,7 @@
 
         if (Slug is not null)
         {
-            Id = await Projects.FindIdBySlugAsync(Slug);
+            Id = await Projects.FindIdBySlugAsync(Slug, _calls.Token);
             if (Id is not null) return true;
             // Not "loaded": a later /solutions/new has Id null too, and must not be
             // mistaken for this page again.
@@ -671,7 +674,7 @@
             Nav.NavigateTo(SolutionLinks.Solution(known, shown, SegmentFor(SectionFor(TabName ?? OpenTab))), replace: true);
             return false;
         }
-        if (Id is { } id && await Projects.FindVisibleSlugAsync(id) is { } slug)
+        if (Id is { } id && await Projects.FindVisibleSlugAsync(id, _calls.Token) is { } slug)
         {
             Nav.NavigateTo(SolutionLinks.Solution(slug, id, SegmentFor(SectionFor(TabName ?? OpenTab))), replace: true);
             return false;
@@ -731,7 +734,7 @@
         _newAccess = new(ProjectVisibility.Public, Array.Empty<int>());
 
         _section = SectionFor(Id is null ? OpenTab : TabName);
-        _providers = (await Config.GetAllowedProvidersAsync()).ToList();
+        _providers = (await Config.GetAllowedProvidersAsync(_calls.Token)).ToList();
 
         if (Id is null)
         {
@@ -743,16 +746,16 @@
             _edit = new EditModel();
             // The Access tab needs the org's teams to offer them, and there is no
             // solution to read a baseline from yet.
-            _allTeams = await Teams.ListTeamsAsync();
+            _allTeams = await Teams.ListTeamsAsync(_calls.Token);
         }
         else
         {
             await LoadAsync();
             if (!_notFound)
             {
-                _canManage = await Projects.CanManageAsync(Id.Value);
-                _canChangeAccess = await Projects.CanChangeAccessAsync(Id.Value);
-                _following = await Follows.IsFollowingAsync(Id.Value);
+                _canManage = await Projects.CanManageAsync(Id.Value, _calls.Token);
+                _canChangeAccess = await Projects.CanChangeAccessAsync(Id.Value, _calls.Token);
+                _following = await Follows.IsFollowingAsync(Id.Value, _calls.Token);
                 HydrateEdit();
                 if (_canChangeAccess)
                 {
@@ -775,9 +778,9 @@
         if (!_canManage || _notFound || !_providers.Contains(RepositoryProvider.GitHub)) return;
         try
         {
-            _canPickFromGitHub = (await GitHubRepos.GetAccessAsync()).IsReady;
+            _canPickFromGitHub = (await GitHubRepos.GetAccessAsync(_calls.Token)).IsReady;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!_calls.IsGone)
         {
             Log.LogWarning(ex, "Could not tell whether solution {ProjectId} can pick repositories from GitHub.", Id);
         }
@@ -787,11 +790,11 @@
     {
         try
         {
-            var solution = await Projects.GetProjectAsync(Id!.Value);
+            var solution = await Projects.GetProjectAsync(Id!.Value, _calls.Token);
             if (solution is null) { _notFound = true; return; }
-            _header = await Artifacts.GetProjectHeaderAsync(Id.Value);
-            _pipelines = await PipelinesSvc.ListPipelinesAsync(Id.Value);
-            _waitingForApproval = await ReleasePipelinesSvc.ListWaitingForApprovalAsync(Id.Value);
+            _header = await Artifacts.GetProjectHeaderAsync(Id.Value, _calls.Token);
+            _pipelines = await PipelinesSvc.ListPipelinesAsync(Id.Value, _calls.Token);
+            _waitingForApproval = await ReleasePipelinesSvc.ListWaitingForApprovalAsync(Id.Value, _calls.Token);
             _loadedProject = solution;
         }
         catch (ProjectAccessDeniedException)

@@ -1007,7 +1007,8 @@
 
     private void EnsurePolling()
     {
-        if (_poll is not null) return;
+        // A load that comes back after the page has gone must not start a timer.
+        if (_poll is not null || _calls.IsGone) return;
         if (_rows is null || !_rows.Any(r => r.LiveDelivery is not null)) return;
         _pollCts = new CancellationTokenSource();
         _poll = new PeriodicTimer(PollInterval);
