@@ -38,8 +38,9 @@ public sealed class FolderTreeOrgFilterCallerTests
             .ToList();
 
         offenders.Should().BeEmpty(
-            "passing ignoreOrgFilter to FolderTreeHydrator reads every organisation's folder tree; only the " +
-            "system-org fork in TemplateImportService may do it (CLAUDE.md, fence category 5)");
+            "passing ignoreOrgFilter to FolderTreeHydrator reads every organisation's folder tree. Route a " +
+            "system-org read through TemplateImportService (CLAUDE.md, fence category 5); anything else needs " +
+            "the maintainer's sign-off and an entry in AllowedCallers");
     }
 
     [Fact]
@@ -68,6 +69,42 @@ public sealed class FolderTreeOrgFilterCallerTests
         SetsFlag(["templates", "pathsOnly: true"], position).Should().BeFalse();
     }
 
+    /// <summary>
+    /// A declaration with any return type is not a call, and a char or string
+    /// argument holding a comma or parenthesis does not shift the positions.
+    /// </summary>
+    [Fact]
+    public void Declarations_are_skipped_and_literal_arguments_do_not_shift_positions()
+    {
+        string[] source =
+        [
+            "public sealed class Hydrator",
+            "{",
+            "    public async ValueTask<int> HydrateExtensionFolderTreeAsync(",
+            "        IEnumerable<RuntimeTemplate> templates, CancellationToken ct = default, bool ignoreOrgFilter = false)",
+            "    {",
+            "        return 0;",
+            "    }",
+            "",
+            "    private async Task SafeAsync(CancellationToken ct)",
+            "    {",
+            "        await _folderTree.HydrateExtensionFolderTreeAsync(Split(','), ct, pathsOnly: Has(\"),\"));",
+            "    }",
+            "",
+            "    private async Task UnsafeAsync(CancellationToken ct)",
+            "    {",
+            "        await _folderTree.HydrateExtensionFolderTreeAsync(Split(')'), ct, true);",
+            "    }",
+            "}",
+        ];
+
+        var calls = CallsIn("Hydrator.cs", FenceSourceScan.Read(source), FlagPositions()).ToList();
+
+        calls.Select(c => (c.Line, c.Member, c.SetsFlag)).Should().Equal(
+            (11, "SafeAsync", false),
+            (16, "UnsafeAsync", true));
+    }
+
     private sealed record Call(string Path, int Line, string Member, bool SetsFlag);
 
     /// <summary>The hydrator's methods that take the flag, with its parameter index.</summary>
@@ -91,57 +128,66 @@ public sealed class FolderTreeOrgFilterCallerTests
 
     private static readonly Regex NamedArgument = new(@"^\s*([A-Za-z_]\w*)\s*:(?!:)");
 
-    private static List<Call> Calls()
+    private static readonly Lazy<List<Call>> Scanned = new(() =>
     {
         var positions = FlagPositions();
-        var calls = new List<Call>();
-        foreach (var (relative, full) in FenceSourceScan.AppSourceFiles())
-        {
-            var lines = FenceSourceScan.Read(File.ReadAllLines(full));
-            for (var i = 0; i < lines.Length; i++)
-            {
-                foreach (var (name, position) in positions)
-                {
-                    var call = Regex.Match(lines[i].Code, @"\b" + name + @"\s*\(");
-                    // The declaration itself is not a call.
-                    if (!call.Success || Regex.IsMatch(lines[i].Code, @"\b(?:Task|void)\s+" + name + @"\s*\(")) continue;
-                    var arguments = ReadArguments(lines, i, call.Index + call.Length);
-                    calls.Add(new Call(relative, i + 1, FenceSourceScan.EnclosingMember(lines, i), SetsFlag(arguments, position)));
-                }
-            }
-        }
+        return FenceSourceScan.AppSources.SelectMany(f => CallsIn(f.Relative, f.Lines, positions)).ToList();
+    });
+
+    private static List<Call> Calls()
+    {
+        var calls = Scanned.Value;
         calls.Should().NotBeEmpty("the hydrator has callers; finding none means the scan is broken");
         return calls;
+    }
+
+    private static IEnumerable<Call> CallsIn(string path, FenceSourceScan.Line[] lines, Dictionary<string, int> positions)
+    {
+        for (var i = 0; i < lines.Length; i++)
+        {
+            foreach (var (name, position) in positions)
+            {
+                var call = Regex.Match(lines[i].Code, @"\b" + name + @"\s*\(");
+                // The declaration itself is not a call.
+                if (!call.Success || FenceSourceScan.IsMethodDeclaration(lines[i].Code, name)) continue;
+                var arguments = ReadArguments(lines, i, call.Index + call.Length);
+                yield return new Call(path, i + 1, FenceSourceScan.EnclosingMember(lines, i), SetsFlag(arguments, position));
+            }
+        }
     }
 
     /// <summary>
     /// The top-level arguments of the call whose parenthesis opens just before
     /// <paramref name="start"/> on line <paramref name="line"/>, read across
-    /// lines until it closes.
+    /// lines until it closes. String and char literals are copied whole, so a
+    /// comma or bracket inside one does not split an argument.
     /// </summary>
     private static List<string> ReadArguments(IReadOnlyList<FenceSourceScan.Line> lines, int line, int start)
     {
         var arguments = new List<string>();
         var current = new StringBuilder();
         var depth = 0;
-        var inString = false;
         for (var i = line; i < lines.Count && i < line + 20; i++)
         {
             var code = lines[i].Code;
             for (var j = i == line ? start : 0; j < code.Length; j++)
             {
                 var c = code[j];
-                if (inString)
+                if (c is '"' or '\'')
                 {
-                    if (c == '"') inString = false;
-                    current.Append(c);
+                    var end = j + 1;
+                    while (end < code.Length && code[end] != c)
+                    {
+                        if (code[end] == '\\') end++;
+                        end++;
+                    }
+                    end = Math.Min(end, code.Length - 1);
+                    current.Append(code, j, end - j + 1);
+                    j = end;
                     continue;
                 }
                 switch (c)
                 {
-                    case '"':
-                        inString = true;
-                        break;
                     case '(' or '[' or '{':
                         depth++;
                         break;
