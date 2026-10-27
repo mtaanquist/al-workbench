@@ -3,6 +3,10 @@ using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Startup;
 
+// Before anything formats a number or a date, including the host's own
+// startup logging: the server's LANG must not decide "5,000" vs "5.000".
+AppCulture.Apply();
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Legacy C/AL TXT exports are Windows-1252 / codepage 850, neither of which
