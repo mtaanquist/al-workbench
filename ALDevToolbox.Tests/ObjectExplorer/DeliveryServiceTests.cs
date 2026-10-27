@@ -2068,6 +2068,7 @@ public sealed class DeliveryServiceTests : IDisposable
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().Contain("choose to install it right away");
         delivery.FailureMessage.Should().Contain("CRONUS Core").And.Contain("isn't installed");
         _apps.UploadedOrder.Should().BeEmpty("the rule is checked before anything is uploaded");
     }
@@ -2172,6 +2173,43 @@ public sealed class DeliveryServiceTests : IDisposable
         // The log keeps the response whole, for support and for the page to read back.
         delivery.DiagnosticsLog.Should().Contain(
             $"FAILED CRONUS Core {app.AppVersion}: Business Central reported the install as failed (ExtensionChangeFailed). {raw}");
+    }
+
+    [Fact]
+    public async Task ScheduleDeliveryAsync_can_install_several_apps_right_away_on_a_deferred_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" },
+            deploymentSchedule: BcDeploymentSchedule.NextMajorUpdate);
+
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow,
+            installRightAway: true);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        delivery.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
+        delivery.ScheduledByDeliveryWindow.Should().BeFalse();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId))
+            .DeploymentSchedule.Should().Be(BcDeploymentSchedule.NextMajorUpdate, "the choice is for this deployment only");
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_installs_a_first_app_chosen_to_install_right_away_on_a_deferred_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" },
+            deploymentSchedule: BcDeploymentSchedule.NextMinorUpdate);
+        // Nothing installed: a deferred schedule would be refused for this app.
+
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow,
+            installRightAway: true);
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId))
+            .Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        _apps.UploadedOrder.Should().Equal("CRONUS Core");
+        _apps.LastSchedule.Should().Be(BcDeploymentSchedule.Immediate);
     }
 
     // ── Deferred pre-checks: the app id, and a version already waiting (#936, #937) ──

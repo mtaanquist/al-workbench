@@ -302,7 +302,7 @@
                                                 @* Right away is chosen per deployment, with Now in the Deploy dialog, not set
                                                    on the pipeline (#1471). One that already has it keeps it until changed. *@
                                                 var perDeploymentOnly = mode == BcDeploymentSchedule.Immediate && !KeepsRightAway;
-                                                <option value="@mode" disabled="@(unavailable || perDeploymentOnly)">@DeliveryModeDisplay.ScheduleChoice(mode, ChosenEnvironment?.Name)@(unavailable && ChosenEnvironment is not null ? " (none set yet)" : "")@(perDeploymentOnly ? " (choose Now when you deploy)" : "")</option>
+                                                <option value="@mode" disabled="@(unavailable || perDeploymentOnly)">@DeliveryModeDisplay.ScheduleChoice(mode, ChosenEnvironment?.Name)@(unavailable && ChosenEnvironment is not null ? " (none set yet)" : "")@(perDeploymentOnly ? " (choose it when you deploy)" : "")</option>
                                             }
                                         </select>
                                     </SelectBox>
@@ -624,9 +624,10 @@
             }
             return BcDeploymentSchedule.Normalize(_deploymentSchedule) switch
             {
-                BcDeploymentSchedule.NextMinorUpdate => "Hands the app to Business Central, which installs it with the environment's next minor update.",
-                BcDeploymentSchedule.NextMajorUpdate => "Hands the app to Business Central, which installs it with the environment's next major update.",
-                _ => "Installs as soon as the deployment is sent. New pipelines can't be set to this any more: choose Now when you deploy a build instead.",
+                BcDeploymentSchedule.NextMinorUpdate => "Hands the app to Business Central, which installs it with the environment's next minor update. The person deploying can still choose to install right away.",
+                BcDeploymentSchedule.NextMajorUpdate => "Hands the app to Business Central, which installs it with the environment's next major update. The person deploying can still choose to install right away.",
+                BcDeploymentSchedule.Immediate => "Installs as soon as the deployment is sent. New pipelines can't be set to this any more: choose to install right away when you deploy a build instead.",
+                _ => "Choose when deployments install.",
             };
         }
     }

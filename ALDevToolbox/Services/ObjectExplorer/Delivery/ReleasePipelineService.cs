@@ -711,7 +711,7 @@ public sealed class ReleasePipelineService
             // not a standing setting (#1471). A pipeline that already has it keeps it until
             // someone picks another time; nothing new is set to it.
             errors["DeploymentSchedule"] =
-                "Choose the delivery window or a Business Central update. To install one deployment right away, choose Now when you deploy it.";
+                "Choose the delivery window or a Business Central update. To install one deployment right away, choose that when you deploy it.";
         }
         else if (BcDeploymentSchedule.IsOurDeliveryWindow(deploymentSchedule)
                  && environment is not null

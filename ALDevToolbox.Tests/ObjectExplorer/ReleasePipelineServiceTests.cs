@@ -86,7 +86,7 @@ public sealed class ReleasePipelineServiceTests : IDisposable
             new ReleasePipelineInput(projectId, "Rel", buildId, envId, schedule, BcSyncMode.Add));
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["DeploymentSchedule"]
-            .Should().Contain("choose Now when you deploy it");
+            .Should().Contain("choose that when you deploy it");
         (await _db.NewContext().OeReleasePipelines.AnyAsync(r => r.ProjectId == projectId)).Should().BeFalse();
     }
 

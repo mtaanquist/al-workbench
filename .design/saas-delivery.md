@@ -789,9 +789,12 @@ onboarding copy so nobody discovers it by reading the code.
 `Immediate` installs as soon as BC accepts the upload. The other schedules hand the app to Business
 Central to install later, which changes what a delivery can promise.
 `Immediate` is not offered as a *pipeline's* schedule (#1471): installing right away is a choice for
-one deployment, made with **Now** in the Deploy dialog, so a new pipeline starts on the delivery window
-and the service refuses `Immediate` for a new pipeline or a change to it. Pipelines saved with it
-before that keep it until someone picks another time.
+one deployment, so a new pipeline starts on the delivery window and the service refuses `Immediate`
+for a new pipeline or a change to it. Pipelines saved with it before that keep it until someone picks
+another time. On a delivery-window pipeline, **Now** in the Deploy dialog is that choice. On a pipeline
+that waits for the next minor or major update, Now only moves the upload, so the dialog offers
+**Install right away instead of waiting for the update**: that deployment is sent as `Immediate` and
+the pipeline keeps its schedule. It is what a first install and a build with several apps need.
 
 The other schedules' effects on a delivery:
 

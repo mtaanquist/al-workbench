@@ -402,7 +402,38 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
             cut.Find("#rpe-schedule").GetAttribute("value").Should().Be(BcDeploymentSchedule.OurDeliveryWindow);
             var rightAway = cut.Find($"#rpe-schedule option[value='{BcDeploymentSchedule.Immediate}']");
             rightAway.HasAttribute("disabled").Should().BeTrue("installing right away is chosen when deploying, not on the pipeline");
-            rightAway.TextContent.Should().Be("Right away (choose Now when you deploy)");
+            rightAway.TextContent.Should().Be("Right away (choose it when you deploy)");
+        });
+    }
+
+    [Fact]
+    public async Task Editing_a_pipeline_already_set_to_right_away_keeps_the_choice_available()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+        var production = await EnvironmentIdAsync("Production");
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeReleasePipelines.Add(new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Go-live",
+                BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = production,
+                DeploymentSchedule = BcDeploymentSchedule.Immediate,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var row = (await _ctx.Services.GetRequiredService<ReleasePipelineService>()
+            .ListReleasePipelinesAsync(seed.ProjectId)).Single();
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, row.Id));
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#rpe-schedule").GetAttribute("value").Should().Be(BcDeploymentSchedule.Immediate);
+            var rightAway = cut.Find($"#rpe-schedule option[value='{BcDeploymentSchedule.Immediate}']");
+            rightAway.HasAttribute("disabled").Should().BeFalse("a pipeline saved with it keeps it until someone picks another time");
+            rightAway.TextContent.Should().Be("Right away");
         });
     }
 
