@@ -95,6 +95,33 @@ public sealed class MfaEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task A_right_email_code_gives_its_attempt_back()
+    {
+        const string email = "release-email@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+        var code = await IssueEmailCodeAsync(userId);
+        var wrong = code == "000000" ? "111111" : "000000";
+        for (var i = 0; i < AuthService.MaxMfaAttempts - 1; i++)
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", wrong));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        var failuresBefore = await CountFailedAttemptsAsync(email);
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
+        (await CountFailedAttemptsAsync(email)).Should().Be(failuresBefore, "a right code is not a failed attempt");
+    }
+
+    private async Task<int> CountFailedAttemptsAsync(string email)
+    {
+        await using var read = _db.NewContext();
+        return await read.LoginAttempts.IgnoreQueryFilters().CountAsync(a => a.Email == email && !a.Succeeded);
+    }
+
+    [Fact]
     public async Task A_microsoft_linked_account_with_a_fresh_second_step_turns_off_totp_without_a_password()
     {
         var (userId, _, recoveryCodes) = await SeedTotpUserAsync("entra-only@cronus.example", linkMicrosoft: true);
