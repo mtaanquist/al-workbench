@@ -52,26 +52,26 @@ internal static class DeliveryHost
         return services.BuildServiceProvider();
     }
 
-    public sealed record Seed(int ProjectId, int ReleasePipelineId, int BuildId, int PipelineCreatorId);
+    public sealed record Seed(int ProjectId, int ReleasePipelineId, int BuildId, int PipelineCreatorId, int OrganizationId = TestDb.DefaultOrgId);
 
     /// <summary>A solution with one Production environment, a deployment pipeline to it and a ready build.</summary>
-    public static async Task<Seed> SeedAsync(TestDb db, DateTime now)
+    public static async Task<Seed> SeedAsync(TestDb db, DateTime now, int organizationId = TestDb.DefaultOrgId)
     {
         await using var ctx = db.NewContext();
         var creator = new User
         {
-            OrganizationId = TestDb.DefaultOrgId, Email = $"u{Guid.NewGuid():N}@cronus.example", DisplayName = "Alex Hansen",
+            OrganizationId = organizationId, Email = $"u{Guid.NewGuid():N}@cronus.example", DisplayName = "Alex Hansen",
             PasswordHash = "x", Role = UserRole.User, Status = UserStatus.Active, CreatedAt = now,
         };
-        var project = new OeProject { OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Coffee", CreatedAt = now, UpdatedAt = now };
+        var project = new OeProject { OrganizationId = organizationId, Name = "CRONUS Coffee", CreatedAt = now, UpdatedAt = now };
         ctx.Users.Add(creator);
         ctx.OeProjects.Add(project);
         await ctx.SaveChangesAsync();
 
-        var pipeline = new OePipeline { OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "Build", CreatedAt = now, UpdatedAt = now };
+        var pipeline = new OePipeline { OrganizationId = organizationId, ProjectId = project.Id, Name = "Build", CreatedAt = now, UpdatedAt = now };
         var env = new OeProjectEnvironment
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "Production", Type = "Production", FetchedAt = now,
+            OrganizationId = organizationId, ProjectId = project.Id, Name = "Production", Type = "Production", FetchedAt = now,
         };
         ctx.OePipelines.Add(pipeline);
         ctx.OeProjectEnvironments.Add(env);
@@ -79,20 +79,20 @@ internal static class DeliveryHost
 
         var releasePipeline = new OeReleasePipeline
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "CRONUS Coffee → Production",
+            OrganizationId = organizationId, ProjectId = project.Id, Name = "CRONUS Coffee → Production",
             BuildPipelineId = pipeline.Id, ProjectEnvironmentId = env.Id, CreatedByUserId = creator.Id,
             DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
             CreatedAt = now, UpdatedAt = now,
         };
         var build = new OeProjectBuild
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, PipelineId = pipeline.Id,
+            OrganizationId = organizationId, ProjectId = project.Id, PipelineId = pipeline.Id,
             Status = ProjectBuildStatus.Ready, StartedAt = now,
         };
         ctx.OeReleasePipelines.Add(releasePipeline);
         ctx.OeProjectBuilds.Add(build);
         await ctx.SaveChangesAsync();
-        return new Seed(project.Id, releasePipeline.Id, build.Id, creator.Id);
+        return new Seed(project.Id, releasePipeline.Id, build.Id, creator.Id, organizationId);
     }
 
     /// <summary>A deployment of <paramref name="seed"/>'s build in <paramref name="status"/>, with one app still to send.</summary>
@@ -101,14 +101,14 @@ internal static class DeliveryHost
         await using var ctx = db.NewContext();
         var delivery = new OeProjectDelivery
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, ReleasePipelineId = seed.ReleasePipelineId,
+            OrganizationId = seed.OrganizationId, ProjectId = seed.ProjectId, ReleasePipelineId = seed.ReleasePipelineId,
             ProjectBuildId = seed.BuildId, EnvironmentName = "Production",
             DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
             ScheduledFor = at, ClaimedAt = claimedAt, Status = status, CreatedAt = at, UpdatedAt = at,
         };
         delivery.Results.Add(new OeProjectDeliveryResult
         {
-            OrganizationId = TestDb.DefaultOrgId, Ordering = 0, AppName = "CRONUS Coffee", AppVersion = "1.4.0.0",
+            OrganizationId = seed.OrganizationId, Ordering = 0, AppName = "CRONUS Coffee", AppVersion = "1.4.0.0",
             Status = ProjectDeliveryResultStatus.Pending, CreatedAt = at, UpdatedAt = at,
         });
         ctx.OeProjectDeliveries.Add(delivery);
@@ -119,6 +119,8 @@ internal static class DeliveryHost
     public static async Task<string> StatusAsync(TestDb db, int deliveryId)
     {
         await using var ctx = db.NewContext();
-        return await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId).Select(d => d.Status).SingleAsync();
+        // Read past the tenant filter: a test may seed a second organisation's deployments.
+        return await ctx.OeProjectDeliveries.IgnoreQueryFilters()
+            .Where(d => d.Id == deliveryId).Select(d => d.Status).SingleAsync();
     }
 }

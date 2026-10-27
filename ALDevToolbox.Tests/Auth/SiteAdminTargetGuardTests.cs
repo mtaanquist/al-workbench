@@ -205,6 +205,27 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
         (await ReadUserAsync(soloId)).Status.Should().Be(UserStatus.Active);
     }
 
+    [Fact]
+    public async Task Disable_refuses_the_last_active_site_admin_when_the_other_one_is_pending()
+    {
+        // A pending SiteAdmin can't sign in, so it is no one to hand over to.
+        await SeedUserAsync("org-admin@example.com", UserRole.Admin, siteAdmin: false);
+        var soloId = await SeedUserAsync("operator@example.com", UserRole.Admin, siteAdmin: true);
+        var pendingId = await SeedUserAsync("second-operator@example.com", UserRole.Admin, siteAdmin: true);
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.Users.SingleAsync(u => u.Id == pendingId)).Status = UserStatus.Pending;
+            await seed.SaveChangesAsync();
+        }
+        ActAs(soloId, siteAdmin: true);
+
+        await using var ctx = _db.NewContext();
+        Func<Task> act = () => NewUserAdmin(ctx).DisableUserAsync(soloId, OrgId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("LastSiteAdmin");
+        (await ReadUserAsync(soloId)).Status.Should().Be(UserStatus.Active);
+    }
+
     private UserAdministrationService NewUserAdmin(Data.AppDbContext ctx) =>
         _db.NewUserAdministrationService(ctx, _clock);
 

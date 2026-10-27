@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.WebUtilities;
@@ -30,6 +31,12 @@ public sealed class AuthenticationRequiredTests : IDisposable
         _db.Dispose();
     }
 
+    /// <summary>
+    /// The anonymous client sends a valid antiforgery token, so the token check
+    /// at the top of each handler would pass. That leaves the authorization
+    /// middleware as the only thing that can produce the redirect: drop
+    /// <c>RequireAuthorization()</c> and the handler runs instead (#1425).
+    /// </summary>
     [Theory]
     [InlineData("/generate/workspace")]
     [InlineData("/generate/extension")]
@@ -38,17 +45,15 @@ public sealed class AuthenticationRequiredTests : IDisposable
     public async Task Unauthenticated_post_to_a_protected_endpoint_redirects_to_login(string path)
     {
         using var client = _factory.CreateClient();
-        using var response = await client.PostAsync(path, new FormUrlEncodedContent(Array.Empty<KeyValuePair<string, string>>()));
+        var token = await AntiforgeryTokenFromAsync(client, "/login");
 
-        // Antiforgery runs first; without a token we expect a 400 instead of
-        // the auth redirect. But auth is *also* enforced — assert one of the
-        // two refusal shapes lands. A 200 with a generated ZIP would be the
-        // real regression.
-        response.StatusCode.Should().BeOneOf(HttpStatusCode.Redirect, HttpStatusCode.BadRequest);
-        if (response.StatusCode == HttpStatusCode.Redirect)
+        using var response = await client.PostAsync(path, new FormUrlEncodedContent(new[]
         {
-            AssertRedirectsToLogin(response, expectedReturn: path);
-        }
+            new KeyValuePair<string, string>("__RequestVerificationToken", token),
+        }));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        AssertRedirectsToLogin(response, expectedReturn: path);
     }
 
     [Fact]
@@ -84,6 +89,16 @@ public sealed class AuthenticationRequiredTests : IDisposable
         using var response = await client.GetAsync("/site-admin/users");
 
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    private static async Task<string> AntiforgeryTokenFromAsync(HttpClient client, string url)
+    {
+        using var page = await client.GetAsync(url);
+        page.StatusCode.Should().Be(HttpStatusCode.OK);
+        var match = Regex.Match(await page.Content.ReadAsStringAsync(),
+            """name="__RequestVerificationToken"[^>]*value="([^"]+)""");
+        match.Success.Should().BeTrue("the page must carry an antiforgery token");
+        return match.Groups[1].Value;
     }
 
     /// <summary>

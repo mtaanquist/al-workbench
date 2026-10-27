@@ -768,6 +768,10 @@ internal static class SiteAdminEndpoints
     /// plain-text body and disables status-code-pages re-execute for the same
     /// reason as <see cref="McpEndpoints"/>: a re-executed GET /not-found
     /// would mismatch the POST binding and surface a 400.
+    /// <para>The body goes back as the filter's result rather than being written
+    /// here: a filter that writes the response and returns <c>null</c> has that
+    /// <c>null</c> serialised as JSON after it, which throws once the response
+    /// has started, so every blocked request ended in a broken response.</para>
     /// </summary>
     private static async ValueTask<object?> BlockInSingleTenant(
         EndpointFilterInvocationContext ctx, EndpointFilterDelegate next)
@@ -775,13 +779,10 @@ internal static class SiteAdminEndpoints
         var single = ctx.HttpContext.RequestServices.GetRequiredService<ISingleTenantMode>();
         if (single.IsEnabled)
         {
-            var http = ctx.HttpContext;
-            var statusCodes = http.Features.Get<IStatusCodePagesFeature>();
+            var statusCodes = ctx.HttpContext.Features.Get<IStatusCodePagesFeature>();
             if (statusCodes is not null) statusCodes.Enabled = false;
-            http.Response.StatusCode = StatusCodes.Status404NotFound;
-            http.Response.ContentType = "text/plain; charset=utf-8";
-            await http.Response.WriteAsync("This feature is disabled on this deployment.");
-            return null;
+            return Results.Text("This feature is disabled on this deployment.",
+                "text/plain; charset=utf-8", statusCode: StatusCodes.Status404NotFound);
         }
         return await next(ctx);
     }

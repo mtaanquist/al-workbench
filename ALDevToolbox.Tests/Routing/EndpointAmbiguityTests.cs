@@ -3,6 +3,7 @@ using AwesomeAssertions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace ALDevToolbox.Tests.Routing;
@@ -67,7 +68,7 @@ public class EndpointAmbiguityTests : IClassFixture<TestDb>
                 .ToList();
 
             var conflicts = new List<string>();
-            foreach (var group in endpoints.GroupBy(e => e.RoutePattern.RawText))
+            foreach (var group in endpoints.GroupBy(e => MatchKey(e.RoutePattern)))
             {
                 if (group.Count() < 2) continue;
                 var entries = group.ToList();
@@ -96,6 +97,25 @@ public class EndpointAmbiguityTests : IClassFixture<TestDb>
             Environment.SetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER", previousScheduler);
         }
     }
+
+    // Routing matches literals case-insensitively and does not care what a
+    // parameter is called, so "{releaseId:int}/modules" on a MapPost and
+    // "{ReleaseId:int}/modules" on an @page are the same address. Grouping by
+    // RawText kept them apart and let exactly that collision through (#1450).
+    // The key keeps each parameter's constraints and optional/catch-all shape,
+    // which do change what a segment matches.
+    internal static string MatchKey(RoutePattern pattern) =>
+        "/" + string.Join("/", pattern.PathSegments.Select(segment =>
+            string.Concat(segment.Parts.Select(part => part switch
+            {
+                RoutePatternLiteralPart literal => literal.Content.ToLowerInvariant(),
+                RoutePatternSeparatorPart separator => separator.Content,
+                RoutePatternParameterPart parameter =>
+                    "{" + (parameter.IsCatchAll ? "*" : "")
+                    + string.Join(":", parameter.ParameterPolicies.Select(p => p.Content?.ToLowerInvariant()))
+                    + (parameter.IsOptional ? "?" : "") + "}",
+                _ => part.ToString(),
+            }))));
 
     // Endpoints without HttpMethodMetadata accept every verb — expand them to
     // the full set so the intersection check below catches conflicts between a
@@ -129,6 +149,20 @@ public class EndpointAmbiguityTests : IClassFixture<TestDb>
             }
         }
         return false;
+    }
+
+    [Theory]
+    [InlineData("/admin/release/{releaseId:int}/modules", "/Admin/Release/{ReleaseId:int}/Modules", true)]
+    [InlineData("/a/{id}", "/a/{slug}", true)]
+    [InlineData("/a/{id:int}", "/a/{id}", false)]
+    [InlineData("/a/{id?}", "/a/{id}", false)]
+    [InlineData("/a/{*rest}", "/a/{rest}", false)]
+    [InlineData("/a/b", "/a/c", false)]
+    public void Routes_that_differ_only_in_case_or_parameter_name_share_a_key(string left, string right, bool same)
+    {
+        var equal = MatchKey(RoutePatternFactory.Parse(left)) == MatchKey(RoutePatternFactory.Parse(right));
+
+        equal.Should().Be(same);
     }
 
     private static string LocateProjectFolder()

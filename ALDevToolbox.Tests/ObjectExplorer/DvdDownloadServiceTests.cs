@@ -8,15 +8,19 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Services.OAuth;
+using ALDevToolbox.Startup;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
 
 /// <summary>
 /// Validation tests for <see cref="DvdDownloadService"/>. These cover the
 /// user-correctable rejections that fire before any network call — blank URL,
-/// non-https scheme, and a host that isn't on the SiteAdmin allow-list. The
-/// happy download path needs a real server and the SSRF behaviour is covered
-/// by SsrfGuard's own tests, so neither is re-exercised here.
+/// non-https scheme, and a host that isn't on the SiteAdmin allow-list — and
+/// that an allow-listed host gets through. The happy download path needs a real
+/// server, so it isn't exercised; that the download client dials through the
+/// SSRF guard is pinned by <see cref="DvdDownloadClientWiringTests"/>.
 /// </summary>
 public sealed class DvdDownloadServiceTests : IDisposable
 {
@@ -49,6 +53,30 @@ public sealed class DvdDownloadServiceTests : IDisposable
         var svc = NewService();
         // No allow-list configured → no host permitted.
         var act = async () => await svc.DownloadToTempAsync("https://evil.example.com/x.zip");
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("DvdUrl");
+    }
+
+    [Fact]
+    public async Task Accepts_a_host_on_the_allowlist()
+    {
+        await SetAllowlistAsync("download.microsoft.com");
+        var svc = NewService();
+
+        await svc.ValidateUrlForQueueAsync("https://download.microsoft.com/x.zip");
+        // Past validation, the download asks for its client: the throwing factory proves it got there.
+        var act = async () => await svc.DownloadToTempAsync("https://download.microsoft.com/x.zip");
+        (await act.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("Validation should reject before any HTTP call.");
+    }
+
+    [Fact]
+    public async Task Rejects_a_host_that_only_contains_an_allowlisted_name()
+    {
+        await SetAllowlistAsync("download.microsoft.com");
+        var svc = NewService();
+
+        var act = async () => await svc.ValidateUrlForQueueAsync("https://download.microsoft.com.evil.example/x.zip");
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("DvdUrl");
     }
@@ -154,6 +182,33 @@ public sealed class DvdDownloadServiceCopyTests
         // dest stream's existing content (the 100 bytes from earlier
         // attempts already on disk).
         dst.ToArray().Should().Equal(5, 6, 7);
+    }
+
+    [Fact]
+    public async Task Copy_refuses_a_download_that_crosses_the_5_GB_cap()
+    {
+        // Measured cumulatively, so a resume that starts just under the cap still trips it.
+        using var src = new MemoryStream(new byte[100]);
+        using var dst = new MemoryStream();
+
+        var act = async () => await DvdDownloadService.CopyWithCapAsync(
+            src, dst, TimeSpan.FromSeconds(10), startingBytesWritten: DvdDownloadService.MaxDownloadBytes - 10, CancellationToken.None);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["DvdUrl"].Should().Contain("5 GB");
+        dst.Length.Should().Be(0, "the chunk that crosses the cap is never written");
+    }
+
+    [Fact]
+    public async Task Copy_accepts_a_download_that_ends_exactly_at_the_cap()
+    {
+        using var src = new MemoryStream(new byte[10]);
+        using var dst = new MemoryStream();
+
+        var total = await DvdDownloadService.CopyWithCapAsync(
+            src, dst, TimeSpan.FromSeconds(10), startingBytesWritten: DvdDownloadService.MaxDownloadBytes - 10, CancellationToken.None);
+
+        total.Should().Be(DvdDownloadService.MaxDownloadBytes);
     }
 
     /// <summary>
@@ -416,5 +471,35 @@ public sealed class DvdDownloadServiceRetryTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+}
+
+/// <summary>
+/// The pasted DVD URL's host is the only one the allow-list vets; every redirect
+/// hop after it is kept off internal addresses only by the SSRF guard the named
+/// client dials through. <see cref="BcArtifactService"/> reuses the same client.
+/// </summary>
+public sealed class DvdDownloadClientWiringTests
+{
+    [Fact]
+    public void The_download_client_dials_through_the_ssrf_guard_and_follows_redirects()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddObjectExplorer();
+        using var provider = services.BuildServiceProvider();
+
+        var handler = provider.GetRequiredService<IHttpMessageHandlerFactory>().CreateHandler(nameof(DvdDownloadService));
+
+        var primary = PrimaryHandler(handler).Should().BeOfType<SocketsHttpHandler>().Subject;
+        primary.ConnectCallback.Should().NotBeNull();
+        primary.ConnectCallback!.Method.Should().BeSameAs(typeof(SsrfGuard).GetMethod(nameof(SsrfGuard.ConnectAsync)));
+        primary.AllowAutoRedirect.Should().BeTrue();
+    }
+
+    private static HttpMessageHandler PrimaryHandler(HttpMessageHandler handler)
+    {
+        while (handler is DelegatingHandler delegating) handler = delegating.InnerHandler!;
+        return handler;
     }
 }
