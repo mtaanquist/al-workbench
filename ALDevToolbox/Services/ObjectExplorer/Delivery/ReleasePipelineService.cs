@@ -704,6 +704,15 @@ public sealed class ReleasePipelineService
         {
             errors["DeploymentSchedule"] = "Choose when installs should run.";
         }
+        else if (deploymentSchedule == BcDeploymentSchedule.Immediate
+                 && BcDeploymentSchedule.Normalize(existing?.DeploymentSchedule) != BcDeploymentSchedule.Immediate)
+        {
+            // "Right away" is a choice for one deployment, made with Now when deploying,
+            // not a standing setting (#1471). A pipeline that already has it keeps it until
+            // someone picks another time; nothing new is set to it.
+            errors["DeploymentSchedule"] =
+                "Choose the delivery window or a Business Central update. To install one deployment right away, choose Now when you deploy it.";
+        }
         else if (BcDeploymentSchedule.IsOurDeliveryWindow(deploymentSchedule)
                  && environment is not null
                  && !UpdateWindow.IsConfigured(environment.UpdateWindowStart, environment.UpdateWindowEnd))

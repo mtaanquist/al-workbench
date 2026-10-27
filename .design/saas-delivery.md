@@ -787,7 +787,13 @@ onboarding copy so nobody discovers it by reading the code.
 ### Deployment schedules, and the two rules around them
 
 `Immediate` installs as soon as BC accepts the upload. The other schedules hand the app to Business
-Central to install later, which changes what a delivery can promise:
+Central to install later, which changes what a delivery can promise.
+`Immediate` is not offered as a *pipeline's* schedule (#1471): installing right away is a choice for
+one deployment, made with **Now** in the Deploy dialog, so a new pipeline starts on the delivery window
+and the service refuses `Immediate` for a new pipeline or a change to it. Pipelines saved with it
+before that keep it until someone picks another time.
+
+The other schedules' effects on a delivery:
 
 - **`handed_off`** is a terminal delivery state meaning *BC accepted this and will install it on its
   own schedule*. It is not "succeeded" — we never saw the install happen — and it is not "still

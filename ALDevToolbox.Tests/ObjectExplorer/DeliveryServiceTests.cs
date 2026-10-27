@@ -535,7 +535,7 @@ public sealed class DeliveryServiceTests : IDisposable
             case "pipeline disabled":
                 // Only the earlier one's pipeline: give the later one a pipeline of its own.
                 var other = await NewReleasePipelineService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
-                    seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+                    seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
                 await ctx.OeProjectDeliveries.Where(d => d.Id == later)
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.ReleasePipelineId, other));
                 if (why == "pipeline deleted")

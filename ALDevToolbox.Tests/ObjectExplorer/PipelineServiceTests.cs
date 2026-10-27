@@ -148,9 +148,9 @@ public sealed class PipelineServiceTests : IDisposable
         var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
         var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
         var generated = await deployments.CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, null, buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+            new ReleasePipelineInput(projectId, null, buildId, prod, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
         var typed = await deployments.CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, "Hotfixes to Test", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+            new ReleasePipelineInput(projectId, "Hotfixes to Test", buildId, test, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
 
         await svc.UpdatePipelineAsync(buildId, new PipelineInput(projectId, null, null, Branch: "release/25.0"));
 
@@ -194,7 +194,7 @@ public sealed class PipelineServiceTests : IDisposable
         var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
         var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
         var deploymentId = await deployments.CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, null, buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+            new ReleasePipelineInput(projectId, null, buildId, prod, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
 
         await RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
 
@@ -288,7 +288,7 @@ public sealed class PipelineServiceTests : IDisposable
         var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
         var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
         var typed = await deployments.CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, "Sales hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+            new ReleasePipelineInput(projectId, "Sales hotfixes", buildId, prod, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
 
         await RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
 
@@ -308,7 +308,7 @@ public sealed class PipelineServiceTests : IDisposable
         var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
         var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
         var deploymentId = await deployments.CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, null, id, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+            new ReleasePipelineInput(projectId, null, id, prod, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
 
         await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "main - nightly", null, Branch: "release/26"));
 
