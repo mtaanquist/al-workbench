@@ -19,7 +19,7 @@
         <div>
             <h2 class="card__title">Notifications</h2>
             <p class="card__sub">
-                About builds, deployments and environment changes you started or set up, and updates to solutions you follow.
+                About work you started or set up, and about solutions you follow.
                 Choose whether each kind shows on your <a href="/notifications">Notifications page</a> and when it is emailed;
                 changes save as you make them. Digests arrive at @DigestTime UTC, the weekly one on Mondays.
             </p>
@@ -160,9 +160,9 @@
     private static string Hint(NotificationCategory category) => category switch
     {
         NotificationCategory.Builds =>
-            "When a build pipeline you started or set up first fails, and again when it works. Also covers the nightly check against upcoming Business Central versions.",
+            "When a build you started first fails, and again when it works; the same for every build and nightly check of a solution you follow, unless you are on its people list only as project leader or consultant.",
         NotificationCategory.Deployments =>
-            "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
+            "A deployment you started or approved finishes or fails; the same, and approval requests, for a solution you follow, unless you are on its people list only as developer or architect. Approval requests are emailed straight away even with a digest chosen.",
         NotificationCategory.Upgrades =>
             "A change you scheduled on an environment (an app install, a new update date) has run, failed or needs checking. Also when an environment you are assigned to check during a planned upgrade has been updated; if nobody is assigned, the person who planned the upgrade hears instead.",
         NotificationCategory.Solutions =>
