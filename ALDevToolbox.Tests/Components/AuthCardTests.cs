@@ -242,7 +242,7 @@ public sealed class AuthCardTests : IDisposable
     [Fact]
     public void A_refused_reset_link_offers_the_way_back_instead_of_the_form_again()
     {
-        Navigate("/reset-password?token=spent&err=Token&msg=" + Uri.EscapeDataString("This reset link is no longer valid. Request a new one."));
+        Navigate("/reset-password?token=spent&err=" + ResetPasswordReasons.InvalidLink);
         var cut = _ctx.Render<ResetPassword>();
 
         cut.WaitForAssertion(() =>
@@ -261,14 +261,31 @@ public sealed class AuthCardTests : IDisposable
     public void A_reset_link_refused_for_a_Microsoft_only_organisation_offers_sign_in()
     {
         // A new link would be refused the same way, so sign-in is the action.
-        Navigate("/reset-password?token=live&err=Token&msg=" + Uri.EscapeDataString(PasswordResetService.MicrosoftOnlyMessage));
+        Navigate("/reset-password?token=live&err=" + ResetPasswordReasons.MicrosoftOnly);
         var cut = _ctx.Render<ResetPassword>();
 
         cut.WaitForAssertion(() =>
         {
             cut.FindAll("form").Should().BeEmpty();
+            cut.Markup.Should().Contain("Your organisation signs in with Microsoft.");
             cut.Find("a.btn--primary").GetAttribute("href").Should().Be("/login");
             cut.FindAll("a[href='/forgot-password']").Should().BeEmpty();
+        });
+    }
+
+    [Theory]
+    [InlineData(ResetPasswordReasons.InvalidLink)]
+    [InlineData(ResetPasswordReasons.MicrosoftOnly)]
+    public void A_refused_reset_link_card_ignores_any_message_in_the_address(string reason)
+    {
+        // The card's copy is the page's own, so an edited link can't put words in it.
+        Navigate("/reset-password?token=spent&err=" + reason + "&msg=" + Uri.EscapeDataString("Call CRONUS support on +45 0000 0000"));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".auth__title").TextContent.Trim().Should().Be("This link can't be used");
+            cut.Markup.Should().NotContain("CRONUS support");
         });
     }
 

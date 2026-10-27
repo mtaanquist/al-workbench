@@ -22,9 +22,10 @@ public sealed class PasswordResetService
     public const string InvalidLinkMessage = "This reset link is no longer valid. Request a new one.";
 
     /// <summary>
-    /// Shown when the organisation signs in with Microsoft only. The reset page
-    /// matches on it to offer sign-in rather than a new link, since a new link
-    /// would be refused the same way.
+    /// Shown when the organisation signs in with Microsoft only. The reset
+    /// endpoint turns it into <see cref="ResetPasswordReasons.MicrosoftOnly"/>,
+    /// for which the page offers sign-in rather than a new link, since a new
+    /// link would be refused the same way.
     /// </summary>
     public const string MicrosoftOnlyMessage =
         "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page.";
@@ -165,8 +166,12 @@ public sealed class PasswordResetService
         await _db.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT 1 FROM users WHERE id = {row.UserId} FOR UPDATE", ct);
         // The account checks run on the row as it stands under the lock, not as
-        // it was read above: a disable or a policy change that lands between the
-        // two must still refuse the reset.
+        // it was read above, so a disable that lands between the two still
+        // refuses the reset. The lock does not cover the Microsoft-only policy,
+        // which lives on organization_settings: a policy change can still land
+        // after this check and before the commit.
+        // Fence category 1 (pre-auth routing): the reload reads past the org filter by
+        // primary key, pinned to the user on the token row found by its hash.
         await _db.Entry(row.User).ReloadAsync(ct);
         if (row.User.Status != UserStatus.Active)
         {
@@ -309,4 +314,17 @@ public sealed class PasswordResetService
         await _db.SaveChangesAsync(ct);
         return row.User;
     }
+}
+
+/// <summary>
+/// The <c>err</c> codes the reset endpoint sends back for a refused link. The
+/// page renders its own copy for each and ignores any message in the URL.
+/// </summary>
+public static class ResetPasswordReasons
+{
+    /// <summary>The link is spent, expired, or no longer belongs to an active account.</summary>
+    public const string InvalidLink = "Token";
+
+    /// <summary>The organisation signs in with Microsoft only.</summary>
+    public const string MicrosoftOnly = "TokenMicrosoftOnly";
 }

@@ -1021,21 +1021,39 @@ public sealed class ReleaseVisibilityTests : IDisposable
             importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds, Access(ctx));
     }
 
-    /// <summary>
-    /// A failed Private-solution release linked by its pipeline build, whose latest
-    /// import job is a Microsoft artifact import: the retry path that does not go
-    /// through the build's manage check.
-    /// </summary>
-    private async Task<SeededRelease> SeedFailedPrivateReleaseAsync()
+    /// <summary>How the release a retry acts on was last imported.</summary>
+    public enum RetryOrigin
     {
-        var seeded = await SeedPrivateReleaseAsync(ReleaseWrite.UpdateMetadata);
+        /// <summary>A Microsoft artifact import, retried with nothing to upload: the saved source is reused.</summary>
+        Artifact,
+
+        /// <summary>The same, retried with a C/AL file: the release is reopened and wiped.</summary>
+        ArtifactWithFile,
+
+        /// <summary>A solution's pipeline build, which a retry rebuilds.</summary>
+        ProjectBuild,
+    }
+
+    /// <summary>
+    /// A failed Private-solution release. For the artifact origins it is linked by
+    /// its pipeline build and its latest import job is a Microsoft artifact import:
+    /// the retry path that does not go through the build's manage check. For a
+    /// project build, its latest job is the build's own import job.
+    /// </summary>
+    private async Task<SeededRelease> SeedFailedPrivateReleaseAsync(RetryOrigin origin = RetryOrigin.Artifact)
+    {
+        var seeded = await SeedPrivateReleaseAsync(ReleaseWrite.UpdateMetadata,
+            origin == RetryOrigin.ProjectBuild ? Linkage.ImportJob : Linkage.Build);
         await using var ctx = _db.NewContext();
         var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
         release.Status = "failed";
         await ctx.SaveChangesAsync();
-        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
-            new ReleaseImportSource.BcArtifact(RetryArtifactUrl), storeSymbolReference: false);
+        if (origin != RetryOrigin.ProjectBuild)
+        {
+            await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.BcArtifact(RetryArtifactUrl), storeSymbolReference: false);
+        }
         return seeded;
     }
 
@@ -1055,18 +1073,27 @@ public sealed class ReleaseVisibilityTests : IDisposable
         {
             return (new Dictionary<string, string>(ex.Errors), null);
         }
+        catch (ProjectAccessDeniedException)
+        {
+            // What a rebuild answers someone who cannot manage the solution:
+            // an answer an unknown id never gets.
+            return (new Dictionary<string, string> { ["Access"] = "denied" }, null);
+        }
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Retry_answers_a_non_member_exactly_as_it_answers_an_unknown_id(bool calFile)
+    [InlineData(RetryOrigin.Artifact)]
+    [InlineData(RetryOrigin.ArtifactWithFile)]
+    [InlineData(RetryOrigin.ProjectBuild)]
+    public async Task Retry_answers_a_non_member_exactly_as_it_answers_an_unknown_id(RetryOrigin origin)
     {
         // Without a file the saved artifact source would be reused; with one the
-        // release would be reopened and wiped. Neither may happen for a release
-        // the caller cannot see.
-        var seeded = await SeedFailedPrivateReleaseAsync();
+        // release would be reopened and wiped; a build would be refused by the
+        // manage check, which says the release is there. None of that may happen
+        // for a release the caller cannot see.
+        var seeded = await SeedFailedPrivateReleaseAsync(origin);
         var queue = new ReleaseImportQueue();
+        var calFile = origin == RetryOrigin.ArtifactWithFile;
 
         ActAs(OutsiderUserId);
         var unknown = await RetryAsAsync(UnknownReleaseId, RetryWith(calFile), queue);
@@ -1098,6 +1125,27 @@ public sealed class ReleaseVisibilityTests : IDisposable
         queue.Reader.TryRead(out var job).Should().BeTrue();
         job!.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>()
             .Which.ApplicationUrl.Should().Be(RetryArtifactUrl);
+    }
+
+    // ── Manual-symbols recovery (#1484) ─────────────────────────────────
+
+    [Fact]
+    public async Task Symbol_recovery_answers_a_non_member_exactly_as_it_answers_an_unknown_id()
+    {
+        var seeded = await SeedFailedPrivateReleaseAsync(RetryOrigin.ProjectBuild);
+
+        async Task<int?> FindAsAsync(int userId, int releaseId)
+        {
+            ActAs(userId);
+            await using var ctx = _db.NewContext();
+            return await Retries(ctx, new ReleaseImportQueue()).FindSymbolRecoveryProjectAsync(releaseId);
+        }
+
+        (await FindAsAsync(OutsiderUserId, UnknownReleaseId)).Should().BeNull();
+        (await FindAsAsync(OutsiderUserId, seeded.ReleaseId))
+            .Should().BeNull("a hidden build reads as no solution build at all");
+        (await FindAsAsync(MemberUserId, seeded.ReleaseId)).Should().NotBeNull();
+        (await FindAsAsync(AdminUserId, seeded.ReleaseId)).Should().NotBeNull();
     }
 
     // A retry here re-runs a saved artifact address, which is only queued, never fetched.

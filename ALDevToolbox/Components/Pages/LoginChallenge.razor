@@ -270,10 +270,11 @@ else
             "That code wasn't valid. Use the code from the latest email, or email yourself a new one.",
         "invalid" => "That code wasn't valid. Try again.",
         "rate-limited" => "Too many codes requested. Wait a few minutes before asking for another.",
-        // Codes last ten minutes and this lockout up to fifteen, so the code
-        // already sent will have run out by the time the wait is over.
+        // The lockout lasts AuthService.LockoutWindow, longer than a code lives
+        // (EmailMfaService.Lifetime), so the code already sent will have run out
+        // by the time the wait is over.
         "too-many-attempts" when _method == "email" =>
-            $"Too many incorrect codes. Wait {(int)ALDevToolbox.Services.Account.AuthService.LockoutWindow.TotalMinutes} minutes, then email yourself a new code.",
+            $"Too many incorrect codes. Wait {Math.Ceiling(ALDevToolbox.Services.Account.AuthService.LockoutWindow.TotalMinutes)} minutes, then email yourself a new code.",
         "too-many-attempts" => "Too many incorrect attempts. Wait a few minutes and try again.",
         // Deliberately not one string: an account whose only second factor is
         // email has no authenticator app and no recovery codes, so telling it
