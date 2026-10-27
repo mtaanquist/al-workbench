@@ -9,8 +9,8 @@
 
 @*
     OAuth clients tab of the Administration surface. Read-only table with a
-    Revoke action per row - no global "Save changes" applies here; revokes
-    are immediate.
+    Revoke action per row - no global "Save changes" applies here. A revoke
+    asks first, as on the site-admin page (#1431), then applies at once.
 *@
 
 <PageTitle>OAuth clients · Administration · AL Workbench</PageTitle>
@@ -90,7 +90,7 @@
                             <td class="data-table__actions">
                                 @if (c.RevokedAt is null)
                                 {
-                                    <button type="button" class="btn btn--sm btn--danger" @onclick="() => RevokeAsync(c.ConsentId)">
+                                    <button type="button" class="btn btn--sm btn--danger" @onclick="() => RevokeAsync(c)">
                                         Revoke
                                     </button>
                                 }
@@ -104,10 +104,13 @@
     </Body>
 </AdministrationHeader>
 
+<ConfirmDialog @ref="_confirm" />
+
 @code {
     [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
 
     private IReadOnlyList<ConnectedClient>? _rows;
+    private ConfirmDialog? _confirm;
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
@@ -118,8 +121,15 @@
         _rows = await Clients.ListForOrganizationAsync(orgId.Value);
     }
 
-    private async Task RevokeAsync(int consentId)
+    private async Task RevokeAsync(ConnectedClient c)
     {
+        var ok = await _confirm!.OpenAsync(
+            $"Revoke {c.DisplayName}?",
+            $"{c.UserEmail} will be signed out of it, and it will ask them for permission again next time. "
+            + "Nobody else is affected.",
+            "Revoke");
+        if (!ok) return;
+
         // Org admin revokes consent without owning it; ignoreOrgScope=true so the
         // per-user ownership check doesn't bounce us. Authorisation is enforced by
         // the [Authorize(Roles="Admin")] attribute on the page. Passing our own org
@@ -128,7 +138,7 @@
         // consent. See #488 and #1337.
         var orgId = Org.CurrentOrganizationId;
         if (orgId is null) return;
-        await Clients.RevokeConsentAsync(consentId, actorUserId: 0, ignoreOrgScope: true, expectedOrganizationId: orgId.Value);
+        await Clients.RevokeConsentAsync(c.ConsentId, actorUserId: 0, ignoreOrgScope: true, expectedOrganizationId: orgId.Value);
         await LoadAsync();
         Ok = "revoked";
     }
