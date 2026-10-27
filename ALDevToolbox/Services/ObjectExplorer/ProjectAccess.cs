@@ -306,10 +306,9 @@ public sealed class ProjectAccess
     }
 
     /// <summary>
-    /// True when the current user may delete a build or deployment pipeline: an org
-    /// Admin or a SiteAdmin. Stricter than deleting the solution itself, because a
-    /// deleted deployment pipeline takes its waiting deployments with it; everyone who
-    /// may manage the solution can disable a pipeline instead (#1131).
+    /// True when the current user may delete a build pipeline: an org Admin or a
+    /// SiteAdmin. Everyone who may manage the solution can disable a pipeline instead
+    /// (#1131). Deployment pipelines are archived rather than deleted (#1466).
     /// </summary>
     public Task<bool> CanDeletePipelinesAsync(CancellationToken ct = default) => IsOrganizationAdminAsync(ct);
 

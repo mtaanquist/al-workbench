@@ -168,12 +168,17 @@ public sealed class DeliveryQueueTests
         using var db = new TestDb();
         var seed = await DeliveryHost.SeedAsync(db, DateTime.UtcNow);
         var deliveryId = await DeliveryHost.AddDeliveryAsync(db, seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddMinutes(-1));
+        await using (var owner = db.NewContext())
+        {
+            await owner.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.CreatedByUserId, seed.PipelineCreatorId));
+        }
         var tokens = new TokensUntilShutdown();
         var queue = new DeliveryQueue();
         await using var services = DeliveryHost.Build(db, TimeProvider.System, () => tokens, queue);
         var worker = new DeliveryWorker(1, queue, services, new RecordingLogger(), new WorkerHeartbeatRegistry());
         // Queued by the scheduler: nobody started it, so it runs as nobody and is
-        // announced to the pipeline's creator.
+        // announced to the solution's followers, here only its owner (#1463).
         queue.TryEnqueue(new DeliveryJob(deliveryId,
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false))).Should().BeTrue();
 
@@ -199,6 +204,11 @@ public sealed class DeliveryQueueTests
         using var db = new TestDb();
         var seed = await DeliveryHost.SeedAsync(db, DateTime.UtcNow);
         var deliveryId = await DeliveryHost.AddDeliveryAsync(db, seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddMinutes(-1));
+        await using (var owner = db.NewContext())
+        {
+            await owner.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.CreatedByUserId, seed.PipelineCreatorId));
+        }
         var tokens = new TokensUntilShutdown();
         var queue = new DeliveryQueue();
         await using var services = DeliveryHost.Build(db, TimeProvider.System, () => tokens, queue);

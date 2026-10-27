@@ -599,11 +599,26 @@ public sealed class TranslationMemoryService
                 || EF.Functions.ILike(e.TargetText, needle, "\\"));
         }
 
-        int? total = q.CountTotal ? await query.CountAsync(ct).ConfigureAwait(false) : null;
+        // Counted only up to a limit. An exact COUNT over an organisation's whole
+        // memory reads every row (about 1.7M in production, most of the page's
+        // load time), and nobody pages to the end of that: "more than 10,000" is
+        // all the number is for once it gets that big.
+        int? total = q.CountTotal
+            ? await query.Take(MemorySearchQuery.CountLimit + 1).CountAsync(ct).ConfigureAwait(false)
+            : null;
+        var totalIsCapped = total > MemorySearchQuery.CountLimit;
+        if (totalIsCapped) total = MemorySearchQuery.CountLimit;
+
+        // Id last so the order is total: without it, rows that tie on everything
+        // else can swap between pages. The full key matches ix_translation_memory_rank,
+        // so a page is read straight off the index instead of sorting the match set.
+        // One row past the page says whether there is a next one, which a capped
+        // total can no longer answer.
         var take = Math.Clamp(q.Take, 1, 200);
         var rows = await query
             .OrderByDescending(e => e.Score).ThenByDescending(e => e.HitCount).ThenByDescending(e => e.LastSeenAt)
-            .Skip(Math.Max(0, q.Skip)).Take(take)
+            .ThenByDescending(e => e.Id)
+            .Skip(Math.Max(0, q.Skip)).Take(take + 1)
             .Select(e => new
             {
                 e.Id, e.SourceLanguage, e.TargetLanguage, e.SourceText, e.TargetText,
@@ -611,6 +626,9 @@ public sealed class TranslationMemoryService
                 e.HitCount, e.Score, e.CreatedAt, e.LastSeenAt, e.DeletedAt,
             })
             .ToListAsync(ct).ConfigureAwait(false);
+
+        var hasMore = rows.Count > take;
+        if (hasMore) rows.RemoveAt(take);
 
         var myVotes = new Dictionary<long, int>();
         if (userId is not null && rows.Count > 0)
@@ -627,7 +645,7 @@ public sealed class TranslationMemoryService
             r.Id, r.SourceLanguage, r.TargetLanguage, r.SourceText, r.TargetText, r.Kind, r.Origin,
             r.HitCount, r.Score, myVotes.GetValueOrDefault(r.Id), r.CreatedAt, r.LastSeenAt, r.DeletedAt != null,
             r.SourceRepository, r.SourcePath)).ToList();
-        return new MemorySearchResult(items, total);
+        return new MemorySearchResult(items, total, totalIsCapped, hasMore);
     }
 
     // ── Solution visibility ────────────────────────────────────────────────
@@ -797,9 +815,16 @@ public sealed record MemorySearchQuery(
     bool IncludeDeleted = false,
     int Skip = 0,
     int Take = 50,
-    // The management page pages by the total; the MCP search returns one page
-    // and never reads it, so it skips a COUNT over the whole match set.
-    bool CountTotal = true);
+    // The management page shows the total; the MCP search returns one page
+    // and never reads it, so it skips the COUNT altogether.
+    bool CountTotal = true)
+{
+    /// <summary>
+    /// The most matches <see cref="TranslationMemoryService.SearchAsync"/> counts
+    /// before it stops and reports "more than this" (<see cref="MemorySearchResult.TotalIsCapped"/>).
+    /// </summary>
+    public const int CountLimit = 10_000;
+}
 
 /// <summary>
 /// One memory entry as shown in the management list.
@@ -826,5 +851,12 @@ public sealed record MemoryEntryView(
 /// <summary>
 /// A page of <see cref="MemoryEntryView"/> plus the total match count - null
 /// when the query asked not to count (<see cref="MemorySearchQuery.CountTotal"/>).
+/// The count stops at <see cref="MemorySearchQuery.CountLimit"/>: past it,
+/// <see cref="Total"/> is the limit and <see cref="TotalIsCapped"/> is true.
+/// <see cref="HasMore"/> says whether another page follows this one.
 /// </summary>
-public sealed record MemorySearchResult(IReadOnlyList<MemoryEntryView> Items, int? Total);
+public sealed record MemorySearchResult(
+    IReadOnlyList<MemoryEntryView> Items,
+    int? Total,
+    bool TotalIsCapped = false,
+    bool HasMore = false);

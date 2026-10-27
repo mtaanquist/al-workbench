@@ -2990,6 +2990,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(250)")
                         .HasColumnName("author");
 
+                    b.Property<string>("AuthorEmail")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("author_email");
+
                     b.Property<DateTime?>("CommittedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("committed_at");
@@ -3916,11 +3921,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
 
-                    b.Property<string>("Role")
+                    b.PrimitiveCollection<string[]>("Roles")
                         .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("role");
+                        .HasColumnType("character varying(30)[]")
+                        .HasColumnName("roles");
 
                     b.Property<int>("UserId")
                         .HasColumnType("integer")
@@ -4246,6 +4250,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("allowed_branch");
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("archived_at");
+
                     b.Property<string>("ArtifactSource")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -4351,7 +4359,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId")
                         .HasDatabaseName("ix_oe_release_pipelines_project");
 
-                    b.ToTable("oe_release_pipelines", (string)null);
+                    b.ToTable("oe_release_pipelines", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_oe_release_pipelines_archived_is_disabled", "archived_at IS NULL OR disabled_at IS NOT NULL");
+                        });
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeRepositoryBranchHead", b =>
@@ -6271,12 +6282,12 @@ namespace ALDevToolbox.Data.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("TargetText"), "gin");
                     NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("TargetText"), new[] { "gin_trgm_ops" });
 
-                    b.HasIndex("OrganizationId", "Score", "HitCount")
-                        .IsDescending(false, true, true)
-                        .HasDatabaseName("ix_translation_memory_rank");
-
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash")
                         .HasDatabaseName("ix_translation_memory_lookup");
+
+                    b.HasIndex("OrganizationId", "Score", "HitCount", "LastSeenAt", "Id")
+                        .IsDescending(false, true, true, true, true)
+                        .HasDatabaseName("ix_translation_memory_rank");
 
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash", "TargetHash")
                         .IsUnique()

@@ -16,8 +16,9 @@
     The Deployment pipelines landing: every deployment pipeline across the org's solutions, and what
     each one is shipping, shipped last and ships next. A deployment pipeline is a reusable
     "install this build pipeline's apps into this Business Central environment" target.
-    Create one here, or edit/remove an existing one; deploying a build happens on the
-    pipeline's own page. See .design/saas-delivery.md.
+    Create one here, or edit, disable or archive an existing one; deploying a build happens
+    on the pipeline's own page. Archived pipelines (#1466) are kept for their history and
+    only listed when "Show archived" is ticked. See .design/saas-delivery.md.
 
     Named user: a BC consultant looking after several customers' environments, who opens
     this page to see what is going out right now, what failed and what is queued for
@@ -136,6 +137,14 @@
                 <option value="sandbox">Sandbox only</option>
             </select>
         </SelectBox>
+        @if (_archivedCount > 0)
+        {
+            <label class="check @(_showArchived ? "is-checked" : "")">
+                <input type="checkbox" checked="@_showArchived" @onchange="ToggleArchived" />
+                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                <span>Show archived (@_archivedCount)</span>
+            </label>
+        }
     </Filters>
     <Trailing>
         @if (_rows is not null)
@@ -173,7 +182,27 @@
 
     <Empty>
         <div class="card">
-            @if (_projectOptions.Count > 0)
+            @if (_archivedCount > 0)
+            {
+                <EmptyState Icon="archive" Title="No active deployment pipelines">
+                    <Text>
+                        @(_archivedCount == 1 ? "1 deployment pipeline is" : $"{_archivedCount} deployment pipelines are")
+                        archived and kept for their history. Show them to look back at past
+                        deployments or restore one, or set up a new deployment pipeline.
+                    </Text>
+                    <Action>
+                        <a class="btn btn--primary" href="@NewPipelineHref">
+                            <Icon Name="plus" Width="15" Height="15" />
+                            <span>New deployment pipeline</span>
+                        </a>
+                        <button type="button" class="btn" @onclick="() => SetShowArchived(true)">
+                            <Icon Name="archive" Width="15" Height="15" />
+                            <span>Show archived</span>
+                        </button>
+                    </Action>
+                </EmptyState>
+            }
+            else if (_projectOptions.Count > 0)
             {
                 <EmptyState Icon="send" Title="No deployment pipelines yet">
                     <Text>
@@ -447,21 +476,26 @@
 
 <RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="_ => ReloadAsync()" />
 
-<ConfirmDialog @ref="_deleteConfirm" Title="Delete deployment pipeline?"
-               ConfirmLabel="Delete deployment pipeline" ConfirmButtonClass="btn--danger" ConfirmIcon="trash-2" />
+<ConfirmDialog @ref="_archiveConfirm" Title="Archive deployment pipeline?"
+               ConfirmLabel="Archive deployment pipeline" ConfirmButtonClass="btn--primary" ConfirmIcon="archive" />
 
 <ConfirmDialog @ref="_disableConfirm" Title="Disable deployment pipeline?"
                ConfirmLabel="Disable deployment pipeline" ConfirmButtonClass="btn--primary" ConfirmIcon="circle-pause" />
 
 @code {
+    // The rows the page works on: every active pipeline, plus the archived ones while
+    // "Show archived" is ticked. _all always holds the archived ones too, so the box can
+    // say how many there are and ticking it needs no round trip.
     private List<ReleasePipelineRow>? _rows;
+    private List<ReleasePipelineRow> _all = [];
+    private int _archivedCount;
+    private bool _showArchived;
     private List<PipelineProjectOption> _projectOptions = new();
-    private ConfirmDialog? _deleteConfirm;
+    private ConfirmDialog? _archiveConfirm;
     private ConfirmDialog? _disableConfirm;
     private string? _error;
-    // Only admins delete; everyone who manages a solution disables instead (#1131).
-    private bool _canDelete;
-    // The solutions this person manages: Disable and Enable are offered only on their rows.
+    // The solutions this person manages: Disable, Enable, Archive and Restore are offered
+    // only on their rows. Nobody deletes a deployment pipeline: its history stays (#1466).
     private HashSet<int> _manageable = [];
 
     // The filters. All of them work on the rows already loaded: the list is one
@@ -503,10 +537,27 @@
     {
         var projects = await Projects.ListProjectsAsync();
         _projectOptions = projects.Select(p => new PipelineProjectOption(p.Id, p.Name)).ToList();
-        _rows = await Releases.ListReleasePipelineOverviewAsync();
-        _canDelete = await Releases.CanDeleteAsync();
-        _manageable = await Releases.ListManageableProjectIdsAsync(_rows.Select(r => r.ProjectId).Distinct().ToList());
+        Apply(await Releases.ListReleasePipelineOverviewAsync(includeArchived: true));
+        _manageable = await Releases.ListManageableProjectIdsAsync(_all.Select(r => r.ProjectId).Distinct().ToList());
         EnsurePolling();
+    }
+
+    /// <summary>Takes a fresh read of every pipeline, archived included, and shows what the box asks for.</summary>
+    private void Apply(List<ReleasePipelineRow> all)
+    {
+        _all = all;
+        _archivedCount = all.Count(r => r.Archived);
+        // The box disappears with the last archived pipeline; don't leave it ticked unseen.
+        if (_archivedCount == 0) _showArchived = false;
+        _rows = _showArchived ? all : all.Where(r => !r.Archived).ToList();
+    }
+
+    private void ToggleArchived(ChangeEventArgs e) => SetShowArchived(e.Value is true);
+
+    private void SetShowArchived(bool show)
+    {
+        _showArchived = show;
+        Apply(_all);
     }
 
     // ── What the table shows ─────────────────────────────────────────────────
@@ -570,9 +621,9 @@
         _ => true,
     };
 
-    /// <summary>The fixed order: shipping now, needs attention, scheduled, the rest.</summary>
+    /// <summary>The fixed order: shipping now, needs attention, scheduled, the rest, then the archived ones.</summary>
     private static int Urgency(ReleasePipelineRow r) =>
-        r.LiveDelivery is not null ? 0 : NeedsAttention(r) ? 1 : IsScheduled(r) ? 2 : 3;
+        r.LiveDelivery is not null ? 0 : r.Archived ? 4 : NeedsAttention(r) ? 1 : IsScheduled(r) ? 2 : 3;
 
     /// <summary>
     /// The last deployment failed, or the environment can no longer take one - including
@@ -622,6 +673,7 @@
     private static RowState StateOf(ReleasePipelineRow r)
     {
         if (r.LiveDelivery is { } live) return new("is-running", "refresh-cw", "Shipping now: " + LiveText(live), Spin: true);
+        if (r.Archived) return new("rp-list__idle", "archive", "Archived, kept for its history");
         if (r.EnvironmentMissing) return new("is-failed", "circle-alert", "Environment missing, deployments cannot run");
         if (EnvironmentBroken(r)) return new("is-failed", "circle-alert", "Environment failed in Business Central, deployments cannot run");
         if (r.LastDelivery?.Status == ProjectDeliveryStatus.Failed) return new("is-failed", "circle-x", "Last deployment failed");
@@ -700,11 +752,12 @@
     /// <summary>The line the phone card adds for something wrong with the target or the settings.</summary>
     private static Toned? WarningOf(ReleasePipelineRow r)
     {
+        if (r.Archived) return new("Archived. Kept for its history.", "rp-list__none");
         if (r.Disabled) return new("Disabled. Nothing deploys through it.", "rp-list__none");
         if (r.EnvironmentMissing) return new("Environment missing. Reconnect it in solution settings.", "rp-tone--danger");
         if (EnvironmentBroken(r)) return new("Environment failed in Business Central.", "rp-tone--danger");
         if (EnvironmentDeleting(r)) return new("Environment is being deleted.", "rp-tone--warning");
-        if (!FromGitHub(r) && r.BuildPipelineDeleted) return new("Its build pipeline was deleted. Point it at another one, or delete it.", "rp-tone--danger");
+        if (!FromGitHub(r) && r.BuildPipelineDeleted) return new("Its build pipeline was deleted. Point it at another one, or disable and archive it.", "rp-tone--danger");
         if (r.ProposedDelivery is { } waiting && r.NextDelivery is null) return new($"Deployment of build #{waiting.BuildId} waiting for approval.", "rp-tone--warning");
         if (r.SchemaSyncMode == BcSyncMode.ForceSync) return new("Force sync: can drop columns and their data.", "rp-tone--warning");
         return null;
@@ -719,6 +772,7 @@
     /// </summary>
     private static NextRelease NextOf(ReleasePipelineRow r)
     {
+        if (r.Archived) return new("Archived", "rp-list__none rp-list__strong", "Kept for its history", Title: "Restore it from the pipeline's actions menu or its page");
         if (r.Disabled) return new("Disabled", "rp-list__none rp-list__strong", "Nothing deploys through it", Title: "Enable it from the pipeline's actions menu or its page");
         if (r.EnvironmentMissing) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment not found", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Reconnect it on the solution's Business Central tab");
         if (EnvironmentBroken(r)) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment failed in Business Central", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Sort it out in the Business Central admin center, or point this pipeline at another environment");
@@ -795,10 +849,13 @@
                         <span>Reschedule next deployment</span>
                     </button>
                 }
-                <a class="menu__item" href="@($"/pipelines/deployments/{r.Id}/edit?returnUrl={ListPath}")" role="menuitem">
-                    <Icon Name="pencil" Width="15" Height="15" />
-                    <span>Edit</span>
-                </a>
+                @if (!r.Archived)
+                {
+                    <a class="menu__item" href="@($"/pipelines/deployments/{r.Id}/edit?returnUrl={ListPath}")" role="menuitem">
+                        <Icon Name="pencil" Width="15" Height="15" />
+                        <span>Edit</span>
+                    </a>
+                }
                 <a class="menu__item" href="@($"/solutions/{r.ProjectId}")" role="menuitem">
                     <Icon Name="folder-git-2" Width="15" Height="15" />
                     <span>Solution settings</span>
@@ -806,11 +863,22 @@
                 <div class="menu__sep"></div>
                 @if (_manageable.Contains(r.ProjectId))
                 {
-                    @if (r.Disabled)
+                    @if (r.Archived)
+                    {
+                        <button type="button" class="menu__item" @onclick="() => SetArchivedAsync(r, false)" role="menuitem">
+                            <Icon Name="archive-restore" Width="15" Height="15" />
+                            <span>Restore</span>
+                        </button>
+                    }
+                    else if (r.Disabled)
                     {
                         <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, false)" role="menuitem">
                             <Icon Name="circle-play" Width="15" Height="15" />
                             <span>Enable</span>
+                        </button>
+                        <button type="button" class="menu__item" @onclick="() => SetArchivedAsync(r, true)" role="menuitem">
+                            <Icon Name="archive" Width="15" Height="15" />
+                            <span>Archive</span>
                         </button>
                     }
                     else
@@ -820,13 +888,6 @@
                             <span>Disable</span>
                         </button>
                     }
-                }
-                @if (_canDelete)
-                {
-                    <button type="button" class="menu__item menu__item--danger" @onclick="() => DeleteAsync(r)" role="menuitem">
-                        <Icon Name="trash-2" Width="15" Height="15" />
-                        <span>Delete</span>
-                    </button>
                 }
             </div>
         </span>;
@@ -877,43 +938,47 @@
         }
     }
 
-    private async Task DeleteAsync(ReleasePipelineRow row)
+    /// <summary>
+    /// Archives or restores a disabled deployment pipeline (#1466). Archiving asks first and
+    /// says where the pipeline goes; restoring just does it, and the pipeline comes back
+    /// still disabled.
+    /// </summary>
+    private async Task SetArchivedAsync(ReleasePipelineRow row, bool archived)
     {
-        if (_deleteConfirm is null) return;
-        WaitingDeploymentCounts waiting;
-        try
+        if (archived)
         {
-            waiting = await Releases.CountWaitingDeploymentsAsync(row.Id);
+            if (_archiveConfirm is null) return;
+            if (!await _archiveConfirm.OpenAsync("Archive deployment pipeline?", ArchiveMessage(row.Name), "Archive deployment pipeline"))
+            {
+                return;
+            }
         }
-        catch (Exception ex)
-        {
-            Log.LogError(ex, "Failed to count waiting deployments of deployment pipeline {ReleasePipelineId}.", row.Id);
-            waiting = new WaitingDeploymentCounts(0, 0);
-        }
-        var confirmed = await _deleteConfirm.OpenAsync(
-            "Delete deployment pipeline?",
-            DeleteMessage(row.Name, waiting),
-            "Delete deployment pipeline");
-        if (!confirmed) return;
 
         _error = null;
         try
         {
-            await Releases.SoftDeleteReleasePipelineAsync(row.Id);
+            await Releases.SetReleasePipelineArchivedAsync(row.Id, archived);
             await ReloadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = ex.Errors.Values.FirstOrDefault() ?? $"Couldn't {(archived ? "archive" : "restore")} \"{row.Name}\".";
         }
         catch (ProjectAccessDeniedException)
         {
-            _error = "Only an admin can delete a deployment pipeline. Disable it instead to stop it deploying.";
+            _error = $"You can't change \"{row.Name}\". Ask someone who manages {row.ProjectName}.";
         }
         catch (Exception ex)
         {
-            // Silently logging left the row on screen with no explanation - the person
-            // is entitled to know their delete did not happen.
-            Log.LogError(ex, "Failed to delete deployment pipeline {ReleasePipelineId}.", row.Id);
-            _error = $"Couldn't delete \"{row.Name}\". Try again, and if it keeps failing tell an administrator.";
+            Log.LogError(ex, "Failed to set deployment pipeline {ReleasePipelineId} archived={Archived}.", row.Id, archived);
+            _error = $"Couldn't {(archived ? "archive" : "restore")} \"{row.Name}\". Try again, and if it keeps failing tell an administrator.";
         }
     }
+
+    /// <summary>The archive confirmation: where the pipeline goes and that nothing of its history is lost.</summary>
+    internal static string ArchiveMessage(string name) =>
+        $"Archive \"{name}\"? It moves off the deployment pipelines list, and nothing can deploy through it. "
+        + "Its page and all past deployments are kept, and you can restore it at any time. Its name becomes free, so a new pipeline can use it.";
 
     /// <summary>
     /// Disables or enables a deployment pipeline (#1131). Disabling cancels the deployments
@@ -959,7 +1024,7 @@
 
     /// <summary>
     /// The disable confirmation: what stops, what is cancelled, and that enabling brings it back.
-    /// Deployments Business Central already holds still install, as with delete.
+    /// Deployments Business Central already holds still install.
     /// </summary>
     internal static string DisableMessage(string name, WaitingDeploymentCounts waiting)
     {
@@ -974,7 +1039,7 @@
         return text;
     }
 
-    /// <summary>What disabling or deleting does to the deployments still waiting.</summary>
+    /// <summary>What disabling does to the deployments still waiting.</summary>
     private static string WaitingSentences(WaitingDeploymentCounts waiting)
     {
         var text = string.Empty;
@@ -991,16 +1056,6 @@
                 : $" {waiting.HeldByBusinessCentral} deployments are already booked in Business Central and will still install; cancel them from the environment's page if you don't want them.";
         }
         return text;
-    }
-
-    /// <summary>
-    /// The delete confirmation, saying what happens to deployments still waiting: the
-    /// delete cancels them (#1108), except ones Business Central already holds.
-    /// </summary>
-    internal static string DeleteMessage(string name, WaitingDeploymentCounts waiting)
-    {
-        var text = $"Delete \"{name}\"? This removes the deployment target. Build pipelines and past builds are untouched.";
-        return text + WaitingSentences(waiting);
     }
 
     // ── Live polling while something ships ───────────────────────────────────
@@ -1028,11 +1083,11 @@
                 await using (var scope = ScopeFactory.CreateAsyncScope())
                 {
                     rows = await scope.ServiceProvider.GetRequiredService<ReleasePipelineService>()
-                        .ListReleasePipelineOverviewAsync(token);
+                        .ListReleasePipelineOverviewAsync(includeArchived: true, token);
                 }
 
                 if (token.IsCancellationRequested) break;
-                await InvokeAsync(() => { _rows = rows; StateHasChanged(); });
+                await InvokeAsync(() => { Apply(rows); StateHasChanged(); });
                 if (!rows.Any(r => r.LiveDelivery is not null)) break;
             }
         }

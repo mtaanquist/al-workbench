@@ -91,11 +91,11 @@ public sealed class ReleasePipelinesBrowserTests : IAsyncDisposable
     [InlineData(1, 0, "1 deployment is waiting to run and will be cancelled.", null)]
     [InlineData(3, 0, "3 deployments are waiting to run and will be cancelled.", null)]
     [InlineData(0, 2, null, "2 deployments are already booked in Business Central and will still install")]
-    public void The_delete_confirmation_says_what_happens_to_waiting_deployments(int waiting, int held, string? cancelText, string? heldText)
+    public void The_disable_confirmation_says_what_happens_to_waiting_deployments(int waiting, int held, string? cancelText, string? heldText)
     {
-        var text = ReleasePipelinesBrowser.DeleteMessage("main to Production", new WaitingDeploymentCounts(waiting, held));
+        var text = ReleasePipelinesBrowser.DisableMessage("main to Production", new WaitingDeploymentCounts(waiting, held));
 
-        text.Should().StartWith("Delete \"main to Production\"?");
+        text.Should().StartWith("Disable \"main to Production\"?");
         if (cancelText is null) text.Should().NotContain("cancelled"); else text.Should().Contain(cancelText);
         if (heldText is null) text.Should().NotContain("Business Central"); else text.Should().Contain(heldText);
     }
@@ -174,6 +174,92 @@ public sealed class ReleasePipelinesBrowserTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task An_archived_pipeline_is_listed_only_once_show_archived_is_ticked()
+    {
+        var s = await SeedFleetAsync();
+        await using (var db = _db.NewContext())
+        {
+            await db.OeReleasePipelines.Where(r => r.Id == s.Quiet)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow).SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']").Should().BeEmpty();
+            cut.Find("label.check").TextContent.Should().Contain("Show archived (1)");
+        });
+
+        cut.Find("label.check input").Change(true);
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
+            row.TextContent.Should().Contain("Archived");
+            var menu = row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).ToList();
+            menu.Should().Contain("Restore");
+            menu.Should().NotContain(new[] { "Edit", "Enable", "Delete" });
+        });
+    }
+
+    [Fact]
+    public async Task A_disabled_pipeline_offers_archive_and_no_pipeline_offers_delete()
+    {
+        var s = await SeedFleetAsync();
+        await using (var db = _db.NewContext())
+        {
+            await db.OeReleasePipelines.Where(r => r.Id == s.Quiet)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
+            row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).Should().Contain(new[] { "Enable", "Archive" });
+            cut.FindAll(".menu__item").Select(i => i.TextContent.Trim()).Should().NotContain("Delete",
+                "a deployment pipeline is archived rather than deleted, so its history stays");
+            cut.FindAll("label.check").Should().BeEmpty("there is nothing archived to show");
+        });
+    }
+
+    [Fact]
+    public async Task When_every_pipeline_is_archived_the_empty_state_says_so_and_offers_to_show_them()
+    {
+        var projectId = await SeedSolutionAsync("CRONUS International");
+        await using (var db = _db.NewContext())
+        {
+            var build = new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "main",
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            var env = Environment(projectId, "Production", "Production");
+            db.OePipelines.Add(build);
+            db.OeProjectEnvironments.Add(env);
+            await db.SaveChangesAsync();
+            var rp = Pipeline(projectId, "main to Production", build.Id, env.Id);
+            rp.DisabledAt = rp.ArchivedAt = DateTime.UtcNow;
+            db.OeReleasePipelines.Add(rp);
+            await db.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".card .empty-state__title").TextContent.Trim().Should().Be("No active deployment pipelines");
+            cut.Find(".empty-state__action a.btn--primary").TextContent.Should().Contain("New deployment pipeline");
+        });
+
+        cut.FindAll(".empty-state__action button").Single(b => b.TextContent.Contains("Show archived")).Click();
+
+        cut.WaitForAssertion(() => cut.FindAll("table.rp-list__wide tbody tr").Should().ContainSingle());
+    }
+
+    [Fact]
     public void The_disable_confirmation_says_what_stops_and_what_is_cancelled()
     {
         var text = ReleasePipelinesBrowser.DisableMessage("main to Production", new WaitingDeploymentCounts(2, 1));
@@ -201,7 +287,7 @@ public sealed class ReleasePipelinesBrowserTests : IAsyncDisposable
             var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
             row.TextContent.Should().Contain("Disabled").And.Contain("Nothing deploys through it");
             var items = row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).ToList();
-            items.Should().Contain("Enable").And.NotContain("Disable").And.Contain("Delete", "an admin can still delete it");
+            items.Should().Contain("Enable").And.Contain("Archive").And.NotContain("Disable").And.NotContain("Delete");
             cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Failed}']").QuerySelectorAll(".menu__item")
                 .Select(i => i.TextContent.Trim()).Should().Contain("Disable");
         });

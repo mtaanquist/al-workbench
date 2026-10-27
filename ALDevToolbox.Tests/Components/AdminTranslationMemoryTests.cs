@@ -181,6 +181,32 @@ public sealed class AdminTranslationMemoryTests : IDisposable
             .Should().BeFalse("a button whose only answer would be 'nothing is connected' is worse than none");
     }
 
+    [Fact]
+    public async Task A_memory_past_the_count_limit_says_more_than_and_still_pages()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var insert = $"""
+                INSERT INTO translation_memory (organization_id, source_language, target_language,
+                    source_text, target_text, source_hash, target_hash, kind, hit_count, score,
+                    created_at, updated_at, last_seen_at)
+                SELECT {TestDb.DefaultOrgId}, 'en-US', 'da-DK', 'Source ' || g, 'Kilde ' || g,
+                    md5('s' || g), md5('t' || g), 'caption', 1, 0, now(), now(), now()
+                FROM generate_series(1, {MemorySearchQuery.CountLimit + 1}) g
+                """;
+            await ctx.Database.ExecuteSqlRawAsync(insert);
+        }
+
+        var cut = _ctx.Render<AdminTranslationMemory>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".tr-mem-count").TextContent.Should().Contain($"More than {MemorySearchQuery.CountLimit:N0} entries");
+            cut.Find(".tr-mem-pager .pager__count").TextContent.Trim().Should().Be("Page 1");
+            cut.FindAll(".tr-mem-pager button").Last().HasAttribute("disabled").Should().BeFalse();
+        });
+    }
+
     // --- helpers ------------------------------------------------------------
 
     /// <summary>A GitHub that can mint an installation token and reports no files.</summary>

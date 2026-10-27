@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
@@ -19,20 +20,22 @@ public enum DeploymentOutcome
 
 /// <summary>
 /// Tells people about deployments (issue #1036): one waiting for approval goes
-/// to the solution's owner and the deployment pipeline's creator, straight
-/// away whatever their digest choice; a finished one goes to whoever started
-/// or approved it. See <c>.design/notifications.md</c>.
+/// to the solution's followers who look after its deployments, straight away
+/// whatever their digest choice; a finished one goes to them and to whoever
+/// started or approved it (#1463). See <c>.design/notifications.md</c>.
 /// </summary>
 public sealed class DeploymentNotifier
 {
     private readonly AppDbContext _db;
     private readonly NotificationService _notifications;
+    private readonly ProjectFollowService _follows;
     private readonly ILogger<DeploymentNotifier> _logger;
 
-    public DeploymentNotifier(AppDbContext db, NotificationService notifications, ILogger<DeploymentNotifier> logger)
+    public DeploymentNotifier(AppDbContext db, NotificationService notifications, ProjectFollowService follows, ILogger<DeploymentNotifier> logger)
     {
         _db = db;
         _notifications = notifications;
+        _follows = follows;
         _logger = logger;
     }
 
@@ -77,25 +80,28 @@ public sealed class DeploymentNotifier
                 d.EnvironmentName,
                 d.FailureMessage,
                 d.TriggeredByUserId,
+                d.DeployedWithoutApproval,
                 SolutionName = d.Project!.Name,
                 SolutionOwner = d.Project!.CreatedByUserId,
                 PipelineName = d.ReleasePipeline!.Name,
-                PipelineCreator = d.ReleasePipeline!.CreatedByUserId,
                 Apps = d.Results.OrderBy(r => r.Ordering).Select(r => r.AppName + " " + r.AppVersion).ToList(),
             })
             .FirstOrDefaultAsync(ct);
         if (delivery is null || OutcomeFor(delivery.Status) is not { } outcome) return;
 
         var waiting = outcome == DeploymentOutcome.WaitingForApproval;
-        // A finished deployment goes to the person it ran as. One that ran on a
-        // schedule with nobody behind it goes to the pipeline's creator instead. One
-        // refused because that person lost access also goes to the people who can deploy
-        // it again, since the person it ran as no longer hears about the solution (#1125).
+        // The followers who look after deployments hear about every one (#1463). A
+        // finished one also goes to the person who started, approved or rescheduled it.
+        // One deployed without approval runs as whoever turned that on, who did nothing
+        // this time (moving one Business Central holds writes a new, approved deployment
+        // for the person who moved it, so they still hear); nor does one that was waiting
+        // or was refused because the person it ran as lost access (#1125), since they no
+        // longer hear about the solution.
         var schedulerLostAccess = delivery.FailureMessage == DeliveryService.SchedulerLostAccess;
-        int?[] candidates = waiting || schedulerLostAccess
-            ? [delivery.SolutionOwner, delivery.PipelineCreator]
-            : [delivery.TriggeredByUserId ?? delivery.PipelineCreator];
-        var recipients = candidates.OfType<int>().Distinct().ToList();
+        var actor = waiting || schedulerLostAccess || delivery.DeployedWithoutApproval ? null : delivery.TriggeredByUserId;
+        var followers = await _follows.ListFollowerIdsAsync(delivery.ProjectId, NotificationAudience.Deployments, ct);
+        var recipients = await NotificationAudience.RecipientsAsync(
+            _db, delivery.ProjectId, [actor], followers, delivery.SolutionOwner, ct);
         if (recipients.Count == 0) return;
 
         var pipelinePath = $"/pipelines/deployments/{delivery.ReleasePipelineId}";

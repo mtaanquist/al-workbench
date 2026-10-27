@@ -264,21 +264,59 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_colleague_is_listed_once_and_their_role_is_edited_rather_than_stacked()
+    public async Task A_colleague_is_listed_once_and_their_roles_are_edited_rather_than_stacked()
     {
         var id = await SeedAsync();
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx);
-        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, ProjectPersonRole.Consultant, "finance"));
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], "finance"));
 
-        var again = () => svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, ProjectPersonRole.Developer, null));
+        var again = () => svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Developer], null));
         (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UserId");
 
         var row = (await svc.ListPeopleAsync(id)).Single();
-        await svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, ProjectPersonRole.Architect, "finance, warehouse"));
+        await svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Architect], "finance, warehouse"));
 
         (await svc.ListPeopleAsync(id)).Single().Should().BeEquivalentTo(
-            new { UserId = OtherUserId, Role = ProjectPersonRole.Architect, Areas = "finance, warehouse", Email = "other@example.com" });
+            new { UserId = OtherUserId, Roles = new[] { ProjectPersonRole.Architect }, Areas = "finance, warehouse", Email = "other@example.com" });
+    }
+
+    [Fact]
+    public async Task A_colleague_can_hold_several_roles_kept_in_the_lists_order_without_repeats()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId,
+            [ProjectPersonRole.ProjectLeader, ProjectPersonRole.Developer, ProjectPersonRole.ProjectLeader], null));
+
+        await using var read = _db.NewContext();
+        (await Svc(read).ListPeopleAsync(id)).Single().Roles.Should()
+            .Equal(ProjectPersonRole.Developer, ProjectPersonRole.ProjectLeader);
+    }
+
+    [Fact]
+    public async Task A_colleague_needs_at_least_one_role()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Roles");
+    }
+
+    [Fact]
+    public async Task A_role_the_tool_does_not_know_does_not_count_as_one()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null,
+            new CustomerPersonInput(OtherUserId, [(ProjectPersonRole)99], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Roles");
     }
 
     /// <summary>
@@ -301,7 +339,7 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
         var id = await SeedAsync();
         await using var ctx = _db.NewContext();
 
-        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(strangerId, ProjectPersonRole.Consultant, null));
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(strangerId, [ProjectPersonRole.Consultant], null));
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
             .Should().Be("Choose one of your colleagues.");
@@ -335,7 +373,7 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
 
         await svc.SaveNotesAsync(id, new CustomerNotes("VPN, then CRONUS-BC01", null, null));
         await svc.SaveContactAsync(id, null, new CustomerContactInput(ProjectContactType.Customer, "Annette Hill", null, "annette@cronus.example", null));
-        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OwnerUserId, ProjectPersonRole.Consultant, null));
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OwnerUserId, [ProjectPersonRole.Consultant], null));
         await svc.SaveIntegrationAsync(id, null, new CustomerIntegrationInput("Webshop", ProjectIntegrationDirection.Both));
 
         var all = await svc.GetAllAsync(id);

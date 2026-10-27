@@ -311,6 +311,8 @@ public sealed class GitHubReleaseDialogsTests : IAsyncDisposable
         {
             cut.Find("#rpe-build").Change(seed.PipelineId.ToString());
             cut.Find("#rpe-env").Change(production.ToString());
+            // An environment with no delivery window needs a Business Central update instead (#1471).
+            cut.Find("#rpe-schedule").Change(BcDeploymentSchedule.NextMinorUpdate);
             cut.Find("#rpe-generated-name").TextContent.Should().Be("Nightly to Production");
         });
         cut.Find(".page-head .btn--primary").Click();
@@ -378,6 +380,64 @@ public sealed class GitHubReleaseDialogsTests : IAsyncDisposable
             cut.Find("#rpe-env").GetAttribute("value").Should().Be(test.ToString());
         });
         cut.WaitForAssertion(() => cut.Find("#rpe-name").GetAttribute("value").Should().Be("Go-live"));
+    }
+
+    [Fact]
+    public async Task A_new_pipeline_starts_on_the_delivery_window_and_cannot_be_set_to_right_away()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+        var production = await EnvironmentIdAsync("Production");
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == production)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(e => e.UpdateWindowStart, new TimeOnly(22, 0))
+                    .SetProperty(e => e.UpdateWindowEnd, new TimeOnly(4, 0)));
+        }
+
+        var cut = RenderNewDeploymentPipeline(seed.ProjectId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#rpe-build").Change(seed.PipelineId.ToString());
+            cut.Find("#rpe-env").Change(production.ToString());
+            cut.Find("#rpe-schedule").GetAttribute("value").Should().Be(BcDeploymentSchedule.OurDeliveryWindow);
+            var rightAway = cut.Find($"#rpe-schedule option[value='{BcDeploymentSchedule.Immediate}']");
+            rightAway.HasAttribute("disabled").Should().BeTrue("installing right away is chosen when deploying, not on the pipeline");
+            rightAway.TextContent.Should().Be("Right away (choose it when you deploy)");
+        });
+    }
+
+    [Fact]
+    public async Task Editing_a_pipeline_already_set_to_right_away_keeps_the_choice_available()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+        var production = await EnvironmentIdAsync("Production");
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeReleasePipelines.Add(new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Go-live",
+                BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = production,
+                DeploymentSchedule = BcDeploymentSchedule.Immediate,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var row = (await _ctx.Services.GetRequiredService<ReleasePipelineService>()
+            .ListReleasePipelinesAsync(seed.ProjectId)).Single();
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, row.Id));
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#rpe-schedule").GetAttribute("value").Should().Be(BcDeploymentSchedule.Immediate);
+            var rightAway = cut.Find($"#rpe-schedule option[value='{BcDeploymentSchedule.Immediate}']");
+            rightAway.HasAttribute("disabled").Should().BeFalse("a pipeline saved with it keeps it until someone picks another time");
+            rightAway.TextContent.Should().Be("Right away");
+        });
     }
 
     [Fact]

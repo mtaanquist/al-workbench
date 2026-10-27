@@ -320,6 +320,8 @@ public sealed class PipelineBuildsReleaseTests : IAsyncDisposable
         // replaces the handlers a Find just read; a stale one throws before anything is
         // sent, so the pair is retried until it lands on the current render.
         editor.WaitForAssertion(() => editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString()));
+        // The sandbox has no delivery window, so a Business Central update is the choice (#1471).
+        editor.WaitForAssertion(() => editor.Find("#rpe-schedule").Change(BcDeploymentSchedule.NextMinorUpdate));
         editor.WaitForAssertion(() => editor.Find(".page-head .btn--primary").Click());
 
         // Saving carries on to deploying the build it was set up for.

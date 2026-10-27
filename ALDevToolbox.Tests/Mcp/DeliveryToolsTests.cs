@@ -70,6 +70,21 @@ public sealed class DeliveryToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task List_release_pipelines_leaves_out_archived_ones()
+    {
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow).SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+        }
+
+        await using var read = _db.NewContext();
+        (await NewTools(read).ListReleasePipelinesAsync()).Should().NotContain(r => r.Id == seed.ReleasePipelineId);
+    }
+
+    [Fact]
     public async Task Publish_build_queues_a_delivery_and_returns_its_id()
     {
         Seed seed;
