@@ -10,9 +10,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// which matters because the comparer also decides whether an app.json is
 /// behind (<c>DependencyDriftService</c>), and "27.0" against "27.0.0.0" is
 /// not drift. Callers that sort and need a fixed order between such twins
-/// break the tie themselves. Non-numeric segments are pushed to the bottom by treating their numeric
-/// value as -1, which keeps the sort total without throwing on the
-/// occasional non-conforming label.
+/// break the tie themselves. Non-numeric segments are pushed to the bottom
+/// by treating their numeric value as -1, which keeps the sort total
+/// without throwing on the occasional non-conforming label.
 /// </summary>
 internal sealed class BcVersionComparer : IComparer<string?>
 {
@@ -20,8 +20,8 @@ internal sealed class BcVersionComparer : IComparer<string?>
 
     public int Compare(string? x, string? y)
     {
-        // null sorts after non-null so "no version" rows fall to the bottom
-        // of a descending sort and to the top of an ascending one.
+        // null compares greater than any version, so "no version" rows sort
+        // last in an ascending sort and first in a descending one.
         if (x is null && y is null) return 0;
         if (x is null) return 1;
         if (y is null) return -1;
