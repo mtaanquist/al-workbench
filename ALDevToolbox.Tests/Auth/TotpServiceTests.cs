@@ -161,6 +161,89 @@ public sealed class TotpServiceTests : IDisposable
         (await NewTotp(ctx).VerifyAsync(userId, CodeAt(secret, _clock.GetUtcNow()))).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task Confirming_again_once_turned_on_is_refused_and_keeps_the_recovery_codes()
+    {
+        // #1422: a second confirm used to wipe the recovery codes and issue new ones
+        // with nothing but a code in its window - no password, unlike regenerating them.
+        var userId = await SeedUserAsync();
+        var secret = await EnrolAsync(userId);
+        List<string> before;
+        await using (var read = _db.NewContext())
+        {
+            before = await read.UserRecoveryCodes.IgnoreQueryFilters()
+                .Where(c => c.UserId == userId).Select(c => c.CodeHash).ToListAsync();
+        }
+        _clock.Advance(TimeSpan.FromSeconds(30));
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewTotp(ctx).ConfirmEnrollmentAsync(userId, CodeAt(secret, _clock.GetUtcNow()));
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Totp");
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.UserRecoveryCodes.IgnoreQueryFilters()
+            .Where(c => c.UserId == userId).Select(c => c.CodeHash).ToListAsync())
+            .Should().BeEquivalentTo(before, "the owner's codes must survive");
+    }
+
+    [Fact]
+    public async Task The_code_used_to_sign_in_cannot_confirm_setup_again()
+    {
+        var userId = await SeedUserAsync();
+        var secret = await EnrolAsync(userId);
+        _clock.Advance(TimeSpan.FromSeconds(30));
+        var code = CodeAt(secret, _clock.GetUtcNow());
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewTotp(ctx).VerifyAsync(userId, code)).Should().BeTrue();
+        }
+
+        await using var again = _db.NewContext();
+        var act = () => NewTotp(again).ConfirmEnrollmentAsync(userId, code);
+        await act.Should().ThrowAsync<PlanValidationException>();
+    }
+
+    [Fact]
+    public async Task Setting_up_again_once_turned_on_is_refused_and_keeps_the_secret()
+    {
+        var userId = await SeedUserAsync();
+        await EnrolAsync(userId);
+        string before;
+        await using (var read = _db.NewContext())
+        {
+            before = (await read.UserTotpSecrets.IgnoreQueryFilters().SingleAsync(s => s.UserId == userId)).SecretEncrypted;
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewTotp(ctx).BeginEnrollmentAsync(userId);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Totp"]
+                .Should().Contain("already turned on");
+        }
+
+        await using var verify = _db.NewContext();
+        var row = await verify.UserTotpSecrets.IgnoreQueryFilters().SingleAsync(s => s.UserId == userId);
+        row.SecretEncrypted.Should().Be(before, "a session must not rotate the factor silently");
+        row.ConfirmedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task A_setup_that_was_never_confirmed_does_not_count_at_sign_in()
+    {
+        var userId = await SeedUserAsync();
+        TotpEnrollment enrollment;
+        await using (var ctx = _db.NewContext())
+        {
+            enrollment = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        }
+
+        await using var verify = _db.NewContext();
+        (await NewTotp(verify).VerifyAsync(userId, CodeAt(enrollment.SecretBase32, _clock.GetUtcNow())))
+            .Should().BeFalse("a half-finished setup is not a second factor");
+    }
+
     private async Task<string> EnrolAsync(int userId)
     {
         await using var ctx = _db.NewContext();
