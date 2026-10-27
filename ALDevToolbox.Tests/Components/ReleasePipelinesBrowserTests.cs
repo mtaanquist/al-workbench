@@ -26,7 +26,7 @@ namespace ALDevToolbox.Tests.Components;
 /// <para>Named user: a BC consultant looking after several customers' environments,
 /// checking in on what is going out and what failed.</para>
 /// </summary>
-public sealed class ReleasePipelinesBrowserTests : IDisposable
+public sealed class ReleasePipelinesBrowserTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -76,12 +76,13 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         _db.OrgContext.IsSiteAdmin = true;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        // The page polls while a release is in flight; disposing it first stops the
-        // timer, so no tick starts a query after the database has gone.
-        _ctx.Dispose();
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 

@@ -156,9 +156,9 @@ public partial class UpgradesPage
         try
         {
             await using var scope = ScopeFactory.CreateAsyncScope();
-            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: _gone.Token);
+            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: Gone);
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
         {
             return; // the page went while the read was out
         }
