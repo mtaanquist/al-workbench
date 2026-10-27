@@ -113,7 +113,7 @@ public sealed class AdminAdministrationOAuthClientsTests : IDisposable
         });
 
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions").Should().BeEmpty());
-        RevokedAt(consentId).Should().BeNull("dismissing the question must not sign anyone out");
+        StillTrue.For(() => RevokedAt(consentId) is null, "dismissing the question must not sign anyone out");
     }
 
     [Fact]
@@ -141,5 +141,26 @@ public sealed class AdminAdministrationOAuthClientsTests : IDisposable
             cut.Markup.Should().Contain("alice@cronus.test", "the page has loaded its own organisation's row");
             cut.Markup.Should().NotContain("bob@other.test");
         });
+    }
+
+    /// <summary>
+    /// The page offers no way to name a consent it did not list, so this makes the call
+    /// its Revoke button makes, with the page's own services and organisation: another
+    /// organisation's consent id is refused and that assistant stays connected.
+    /// </summary>
+    [Fact]
+    public async Task Revoking_another_organisations_consent_by_id_is_refused()
+    {
+        var ownId = await SeedConsentAsync(MemberUserId, TestDb.DefaultOrgId);
+        var strangerId = await SeedConsentAsync(OtherOrgUserId, TestDb.OtherOrgId);
+        var clients = _ctx.Services.GetRequiredService<OAuthClientAdminService>();
+        var orgId = _ctx.Services.GetRequiredService<IOrganizationContext>().CurrentOrganizationId!.Value;
+        var ct = Xunit.TestContext.Current.CancellationToken;
+
+        await clients.RevokeConsentAsync(strangerId, actorUserId: 0, ignoreOrgScope: true, expectedOrganizationId: orgId, cancellationToken: ct);
+        await clients.RevokeConsentAsync(ownId, actorUserId: 0, ignoreOrgScope: true, expectedOrganizationId: orgId, cancellationToken: ct);
+
+        RevokedAt(ownId).Should().NotBeNull("the same call revokes a consent of the page's own organisation");
+        RevokedAt(strangerId).Should().BeNull("an org Admin never reaches another organisation's consent");
     }
 }

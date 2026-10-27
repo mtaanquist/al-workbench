@@ -1,6 +1,7 @@
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer.Import;
+using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -13,7 +14,7 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 public sealed class ProjectBuildQueueTests
 {
     private static readonly AmbientOrganizationScope.OrganizationIdentity Identity =
-        new(OrganizationId: 1, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
+        new(OrganizationId: TestDb.DefaultOrgId, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
 
     private static ReleaseImportJob Build(int releaseId, int? pipelineId, string trigger, string target = ProjectBuildTarget.Current) =>
         new(releaseId, Identity, new ReleaseImportSource.ProjectBuild(1),

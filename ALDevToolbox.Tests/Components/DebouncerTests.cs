@@ -52,9 +52,12 @@ public sealed class DebouncerTests
         var debouncer = new Debouncer(Delay, _clock);
         var ran = false;
         debouncer.Trigger(() => { ran = true; return Task.CompletedTask; });
+        _clock.PendingTimers.Should().Be(1, "the call is waiting");
 
         debouncer.Dispose();
+        _clock.PendingTimers.Should().Be(0, "disposing drops the wait that was set");
         debouncer.Trigger(() => { ran = true; return Task.CompletedTask; });
+        _clock.PendingTimers.Should().Be(0, "a disposed debouncer sets no new wait");
 
         await AdvancePastAsync();
         ran.Should().BeFalse();
@@ -66,8 +69,10 @@ public sealed class DebouncerTests
         using var debouncer = new Debouncer(Delay, _clock);
         var ran = false;
         debouncer.Trigger(() => { ran = true; return Task.CompletedTask; });
+        _clock.PendingTimers.Should().Be(1, "the call is waiting");
 
         debouncer.Cancel();
+        _clock.PendingTimers.Should().Be(0, "cancelling drops the wait straight away");
 
         await AdvancePastAsync();
         ran.Should().BeFalse();

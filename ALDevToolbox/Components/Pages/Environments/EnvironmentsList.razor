@@ -778,7 +778,7 @@
     public async ValueTask DisposeAsync()
     {
         _poll?.Dispose();
-        _searchDebounce.Dispose();
+        _searchDebounce?.Dispose();
         _autoTimer?.Dispose();
         // A tick that had already fired may still be reading; wait for it, so leaving
         // the page means nothing of its is still on its way to the database.
@@ -893,7 +893,10 @@
     /// <summary>How long the search box waits for typing to stop before it filters. Tests set it to zero.</summary>
     internal static TimeSpan SearchDebounce { get; set; } = TimeSpan.FromMilliseconds(200);
 
-    private readonly Debouncer _searchDebounce = new(SearchDebounce);
+    // Made on the first keystroke rather than with the page, because Clock is injected
+    // after the fields are set; a test moves that clock instead of waiting.
+    private Debouncer? _searchDebounce;
+    private Debouncer SearchDebouncer => _searchDebounce ??= new(SearchDebounce, Clock);
 
     // The box is bound to what is being typed; the table filters on _search, which
     // catches up once typing pauses (#981). Binding the box straight to _search would
@@ -901,7 +904,7 @@
     private string _searchInput = string.Empty;
 
     private void OnSearchInput() =>
-        _searchDebounce.Trigger(() => InvokeAsync(() =>
+        SearchDebouncer.Trigger(() => InvokeAsync(() =>
         {
             _search = _searchInput;
             StateHasChanged();
@@ -918,7 +921,7 @@
 
     private void ClearFilters()
     {
-        _searchDebounce.Cancel();
+        _searchDebounce?.Cancel();
         _search = _searchInput = string.Empty;
         _solutionFilter = string.Empty;
         _typeFilter = string.Empty;

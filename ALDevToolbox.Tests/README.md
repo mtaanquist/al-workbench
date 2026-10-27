@@ -56,7 +56,7 @@ should copy rather than reinvent.
 |-------------------|--------------------------------------------------------------------|
 | `Builders/`       | Small static builders that return entities pre-populated with sane |
 |                   | defaults. Tests override only the fields they care about.          |
-| `Infrastructure/` | Reusable test plumbing — currently just `TestDb`.                  |
+| `Infrastructure/` | Reusable test plumbing — `TestDb`, `ManualClock`, `StillTrue`.     |
 | `Generation/`     | `GenerationService` tests (ID-range allocation, mustache).         |
 | `Audit/`          | `AuditInterceptor` snapshot tests.                                 |
 | `Toml/`           | `TemplateTomlMapper` round-trip tests.                             |
@@ -171,6 +171,71 @@ Then `_db.WaitForQueriesToSettle()`, dispose the context's services, and only
 then `_db.Dispose()`. The settle (`InFlightCommandTracker`) is the second
 line, not the first: it covers a command a dying call is still disposing.
 
+The pages' `DisposeAsync` rests on `PageCalls` (`Components/Shared/`): a page
+tracks the calls it starts off its own handlers (a poll tick, a timer's
+re-read), and leaving cancels them and returns only once the last has ended.
+`PageCallsTests` pins that; a page that polls should track its ticks the same
+way rather than fire and forget them.
+
+### Waiting and time
+
+**Signal, not sleep.** A test never sleeps to let something happen. A sleep
+followed by an assertion either fails when the machine is busy or passes
+without the thing having happened. Wait for the event itself instead: a
+`TaskCompletionSource` (with `RunContinuationsAsynchronously`) the code under
+test completes, the task under test awaited with `WaitAsync`, bUnit's
+`WaitForAssertion`, or `SpinWait.SpinUntil` on a counter, with a timeout.
+
+**Clocks.** Pick by whether the code reads the time or waits on it:
+
+- `ManualClock` (`Infrastructure/`) when the code waits on the clock: a timer,
+  `Task.Delay(..., timeProvider)`, the search-box `Debouncer`, a page's poll.
+  Time moves only on `Advance`, which fires every timer that falls due on the
+  way; `PendingTimers` says whether a wait is set. Only a timer's own callback
+  runs inside `Advance`: code awaiting a delay may resume on the thread pool
+  after `Advance` returns, so wait for its effect rather than reading it
+  straight after the call.
+- `FakeTimeProvider` (`Auth/AccountServiceTests.cs`), and the per-class
+  `TestClock`, `MutableClock` and `FixedClock`, when the code only reads the
+  time (a token's expiry, a cache's lifetime). They move `GetUtcNow` and
+  nothing else: a timer made on one is a real timer on real time, so once the
+  code waits, switch to `ManualClock`.
+
+To give a page a clock, register it as the `TimeProvider` before the first
+render (`EnvironmentsListTests`), or swap it in behind a clock that delegates
+(`EnvironmentDetailTests`' `SwitchableClock`).
+
+**Nothing happens.** "Dismissing the dialog changes nothing" passes straight
+after the click whether or not the page ignored the answer, because a page
+that carried on writes a moment later. Check with `StillTrue.For` /
+`ForAsync`, which keeps checking for a while, so the late write is caught.
+
+**A positive marker before an absence check.** "Another organisation's row is
+not shown" also passes on a page that has not loaded yet. Assert something
+that proves the page got there, such as the acting organisation's own row, in
+the same `WaitForAssertion` as the absence.
+
+**Gates.** To show a call reached a `KeyedGate` the test holds, wait until
+`WaitingCount(key)` is 1. The gates are process-wide statics, shared by every
+test class running alongside, and every test database numbers its
+organisations 1 to 3 and its repositories from 1. So the key must be unique to
+the test: an organisation or repository seeded with an id no other class
+uses (`DependencyDriftServiceTests`, `GitHubReleaseServiceTests`). Counting
+"more than were already waiting" on a shared key lets another class's caller
+satisfy the wait.
+
+**Statics the pages read.** `UpgradesPage.SearchDebounce` and
+`EnvironmentsList.SearchDebounce` are statics a page reads when it first
+filters. Their test classes set them to zero in the constructor (the one test
+about the wait sets its own) and back to zero on dispose. The classes that
+render `UpgradesPage` share `[Collection("UpgradesPage.SearchDebounce")]` so
+that one class's setting never reaches another's page mid-test; a new class
+that renders it joins that collection.
+
+**Culture.** `CultureDefaults` is a module initializer that applies the app's
+own culture before any test runs, so numbers and dates format the way the app
+formats them whatever the machine's locale. Don't set a culture in a test.
+
 ### Builders
 
 Builders return entities ready for `_db.NewContext().Add(...)`. They set
@@ -209,6 +274,13 @@ Validation tests live in `Validation/`. They throw a
 field key — never assert against the message string. The form layer keys
 errors by field name to render them inline; that contract is what these
 tests guard.
+
+That rule is for field-keyed validation only. A refusal whose wording is
+itself the contract is asserted word for word on purpose: a permission
+refusal that has to read the same as the answer to an id that does not
+exist, so the message cannot tell a caller which ids are real, is pinned to
+the exact text (#1474). A loose match there ("any exception", a
+"permission" substring) is the bug.
 
 ## Bar for new code
 

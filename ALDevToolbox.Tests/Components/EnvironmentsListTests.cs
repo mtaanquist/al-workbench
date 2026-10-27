@@ -398,6 +398,33 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// The line under the date counts calendar days to the deadline, and a deadline
+    /// already behind the list is said plainly rather than as a negative count (XC-12).
+    /// </summary>
+    [Theory]
+    [InlineData(-2, "2 days left to bring it back")]
+    [InlineData(-1, "1 day left to bring it back")]
+    [InlineData(0, "Today is the last day to bring it back")]
+    [InlineData(1, "Past the date Business Central gave")]
+    public async Task The_deleted_view_says_how_long_is_left_to_bring_each_one_back(int daysFromDeadline, string expected)
+    {
+        var goneForGood = new DateTime(2026, 10, 4, 9, 0, 0, DateTimeKind.Utc);
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "JLE-260911110359", "Sandbox", "Active", now, now);
+        await SoftDeleteAsync("JLE-260911110359", goneForGood);
+        _ctx.Services.AddSingleton<TimeProvider>(new ManualClock(new DateTimeOffset(goneForGood.AddDays(daysFromDeadline))));
+
+        var cut = _ctx.Render<EnvironmentsList>();
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Trim().StartsWith("Deleted")).Click());
+        cut.WaitForAssertion(() =>
+            cut.FindAll(".data-table tbody tr").Should().ContainSingle().Subject
+                .QuerySelectorAll(".cell-stack__sub").Last().TextContent.Should().Be(expected));
+    }
+
+    /// <summary>
     /// Microsoft does not always give the date. An unknown one is said plainly rather
     /// than left as a dash the reader would have to take as "no deadline".
     /// </summary>
@@ -1044,18 +1071,26 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
         await SeedEnvironmentAsync(cronus, "Production", "Production", "Active", now, now);
         await SeedEnvironmentAsync(other, "Live", "Production", "Active", now, now);
         EnvironmentsList.SearchDebounce = TimeSpan.FromMilliseconds(300);
+        // The wait runs on the page's clock, so the pause is one the test makes, not one
+        // the machine's load decides.
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
 
         var cut = _ctx.Render<EnvironmentsList>();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
+        var waitingBefore = clock.PendingTimers;
 
         cut.Find("input[type=search]").Input("CRONUS");
         cut.Find("input[type=search]").Input("CRONUS ");
         cut.Find("input[type=search]").Input("CRONUS D");
-        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
-
+        // The last keystroke has been handled, so its wait is set, once the box shows it.
         cut.WaitForAssertion(() =>
             cut.Find("input[type=search]").GetAttribute("value").Should().Be("CRONUS D"));
+        clock.PendingTimers.Should().Be(waitingBefore + 1, "each keystroke drops the wait of the one before");
+        clock.Advance(TimeSpan.FromMilliseconds(299));
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");
