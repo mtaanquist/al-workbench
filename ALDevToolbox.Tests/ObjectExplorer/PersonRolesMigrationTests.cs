@@ -14,8 +14,8 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class PersonRolesMigrationTests : IDisposable
 {
-    private const string Previous = "20270202000000_AddModuleSource";
-    private const string Target = "20270203000000_PersonRoles";
+    private const string Previous = "20270220000000_WidenTranslationMemoryRankIndex";
+    private const string Target = "20270221000000_PersonRoles";
 
     private readonly TestDb _db = new();
 

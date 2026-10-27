@@ -81,7 +81,6 @@ public sealed class DeploymentNotifier
                 d.FailureMessage,
                 d.TriggeredByUserId,
                 d.DeployedWithoutApproval,
-                DeployWithoutApprovalBy = d.ReleasePipeline!.DeployWithoutApprovalByUserId,
                 SolutionName = d.Project!.Name,
                 SolutionOwner = d.Project!.CreatedByUserId,
                 PipelineName = d.ReleasePipeline!.Name,
@@ -94,12 +93,12 @@ public sealed class DeploymentNotifier
         // The followers who look after deployments hear about every one (#1463). A
         // finished one also goes to the person who started, approved or rescheduled it.
         // One deployed without approval runs as whoever turned that on, who did nothing
-        // this time, unless someone else has since rescheduled it and so runs it; nor does
-        // one that was waiting or was refused because the person it ran as lost access
-        // (#1125), since they no longer hear about the solution.
+        // this time (moving one Business Central holds writes a new, approved deployment
+        // for the person who moved it, so they still hear); nor does one that was waiting
+        // or was refused because the person it ran as lost access (#1125), since they no
+        // longer hear about the solution.
         var schedulerLostAccess = delivery.FailureMessage == DeliveryService.SchedulerLostAccess;
-        var automatic = delivery.DeployedWithoutApproval && delivery.TriggeredByUserId == delivery.DeployWithoutApprovalBy;
-        var actor = waiting || schedulerLostAccess || automatic ? null : delivery.TriggeredByUserId;
+        var actor = waiting || schedulerLostAccess || delivery.DeployedWithoutApproval ? null : delivery.TriggeredByUserId;
         var followers = await _follows.ListFollowerIdsAsync(delivery.ProjectId, NotificationAudience.Deployments, ct);
         var recipients = await NotificationAudience.RecipientsAsync(
             _db, delivery.ProjectId, [actor], followers, delivery.SolutionOwner, ct);

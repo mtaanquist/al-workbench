@@ -31,6 +31,7 @@ public sealed class DeploymentNotifierTests : IDisposable
     private int _owner;
     private int _leader;
     private int _approver;
+    private int _pipelineCreator;
     private int _projectId;
     private int _releasePipelineId;
     private int _buildId;
@@ -162,16 +163,17 @@ public sealed class DeploymentNotifierTests : IDisposable
     }
 
     [Fact]
-    public async Task Someone_who_rescheduled_a_deployment_without_approval_hears_how_it_went()
+    public async Task A_deployment_without_approval_stays_quiet_for_its_person_after_someone_else_saves_the_pipeline()
     {
         await SeedAsync();
+        // The approver turned it on and the deployment ran as them; the leader has since
+        // saved the pipeline, which makes the leader the one future runs go out as.
         await DeployWithoutApprovalAsAsync(_leader);
         var id = await AddDeliveryAsync(ProjectDeliveryStatus.Deployed, triggeredBy: _approver, withoutApproval: true);
 
         await Notifier().NotifyAsync(id);
 
-        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
-            ["approver@cronus.example", "owner@cronus.example", "leader@cronus.example"]);
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["owner@cronus.example", "leader@cronus.example"]);
     }
 
     [Fact]
@@ -286,6 +288,8 @@ public sealed class DeploymentNotifierTests : IDisposable
         _owner = await SeedUserAsync("owner@cronus.example");
         _leader = await SeedUserAsync("leader@cronus.example");
         _approver = await SeedUserAsync("approver@cronus.example");
+        // Set up the deployment pipeline but only looks after builds, so hears nothing here.
+        _pipelineCreator = await SeedUserAsync("creator@cronus.example");
         var now = DateTime.UtcNow;
         await using var ctx = _db.NewContext();
         var project = new OeProject
@@ -308,7 +312,7 @@ public sealed class DeploymentNotifierTests : IDisposable
         var releasePipeline = new OeReleasePipeline
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "Coffee to Production",
-            BuildPipelineId = pipeline.Id, ProjectEnvironmentId = env.Id, CreatedByUserId = _leader,
+            BuildPipelineId = pipeline.Id, ProjectEnvironmentId = env.Id, CreatedByUserId = _pipelineCreator,
             DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
             CreatedAt = now, UpdatedAt = now,
         };
@@ -324,6 +328,7 @@ public sealed class DeploymentNotifierTests : IDisposable
         _releasePipelineId = releasePipeline.Id;
         _buildId = build.Id;
         await AddPersonAsync(_leader, ProjectPersonRole.ProjectLeader);
+        await AddPersonAsync(_pipelineCreator, ProjectPersonRole.Developer);
     }
 
     private async Task DeployWithoutApprovalAsAsync(int userId)
