@@ -128,7 +128,9 @@ public sealed class WorkspaceZipBuilder
                 Folder: e.Path,
                 Publisher: e.Publisher,
                 IdRangeFrom: e.IdRangeFrom,
-                IdRangeTo: e.IdRangeTo)).ToList();
+                IdRangeTo: e.IdRangeTo,
+                SourceRepository: e.SourceRepository,
+                SourceCommit: e.SourceCommit)).ToList();
             WriteString(archive, $"{rootFolder}/{WorkspaceConfigService.FileName}", _config.BuildWorkspace(plan, identities));
             fileCount++;
         }

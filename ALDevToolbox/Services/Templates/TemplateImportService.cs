@@ -504,6 +504,18 @@ public sealed class TemplateImportService
             Deprecated = false,
             CreatedAt = now,
             UpdatedAt = now,
+            // A module copied from a repository keeps its source, so the copy
+            // goes on following it. The importing organisation reads it with its
+            // own installation: a private repository it cannot see keeps the
+            // copied files and shows the error on the module page (#1415).
+            SourceRepository = sourceModule.SourceRepository,
+            SourceRef = sourceModule.SourceRef,
+            SourcePath = sourceModule.SourcePath,
+            SourceCommitSha = sourceModule.SourceCommitSha,
+            SourceFetchedAt = sourceModule.SourceFetchedAt,
+            SourceCheckedAt = sourceModule.SourceCheckedAt,
+            SourceSkippedJson = sourceModule.SourceSkippedJson,
+            SourceDependenciesJson = sourceModule.SourceDependenciesJson,
             Dependencies = sourceModule.Dependencies.Select((d, i) => new ModuleDependency
             {
                 OrganizationId = actingOrgId,

@@ -15,6 +15,9 @@ public static class ContentRegistration
         services.AddScoped<FolderTreeHydrator>();
         services.AddScoped<TemplateService>();
         services.AddScoped<ModuleService>();
+        // Modules copied from a GitHub repository: the copy on save, and the
+        // refresh on push, on demand and daily (#1415).
+        services.AddScoped<ModuleSourceService>();
         services.AddScoped<CatalogService>();
         services.AddScoped<ApplicationVersionService>();
         services.AddScoped<TemplateImportService>();

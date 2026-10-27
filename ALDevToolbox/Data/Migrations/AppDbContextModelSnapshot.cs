@@ -884,6 +884,46 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
 
+                    b.Property<DateTime?>("SourceCheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("source_checked_at");
+
+                    b.Property<string>("SourceCommitSha")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("source_commit_sha");
+
+                    b.Property<string>("SourceDependenciesJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("source_dependencies_json");
+
+                    b.Property<string>("SourceError")
+                        .HasColumnType("text")
+                        .HasColumnName("source_error");
+
+                    b.Property<DateTime?>("SourceFetchedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("source_fetched_at");
+
+                    b.Property<string>("SourcePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("source_path");
+
+                    b.Property<string>("SourceRef")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("source_ref");
+
+                    b.Property<string>("SourceRepository")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("source_repository");
+
+                    b.Property<string>("SourceSkippedJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("source_skipped_json");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");

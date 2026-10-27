@@ -92,6 +92,8 @@ public class WorkspaceConfigService
                         Publisher = e.Publisher,
                         IdRangeFrom = e.IdRangeFrom,
                         IdRangeTo = e.IdRangeTo,
+                        SourceRepository = e.SourceRepository,
+                        SourceCommit = e.SourceCommit,
                     })
                     .ToList(),
             },
@@ -233,7 +235,9 @@ public class WorkspaceConfigService
                 Folder: row.Folder,
                 Publisher: row.Publisher,
                 IdRangeFrom: row.IdRangeFrom,
-                IdRangeTo: row.IdRangeTo));
+                IdRangeTo: row.IdRangeTo,
+                SourceRepository: string.IsNullOrEmpty(row.SourceRepository) ? null : row.SourceRepository,
+                SourceCommit: string.IsNullOrEmpty(row.SourceCommit) ? null : row.SourceCommit));
         }
         return result;
     }
@@ -445,6 +449,12 @@ public class WorkspaceConfigService
         public string Publisher { get; set; } = string.Empty;
         public int IdRangeFrom { get; set; }
         public int IdRangeTo { get; set; }
+
+        /// <summary>The repository a module's copy came from (#1415); absent for everything else.</summary>
+        public string? SourceRepository { get; set; }
+
+        /// <summary>The commit that copy was made at.</summary>
+        public string? SourceCommit { get; set; }
     }
 }
 
@@ -463,7 +473,12 @@ public record WorkspaceExtensionIdentity(
     string Folder,
     string Publisher,
     int IdRangeFrom,
-    int IdRangeTo)
+    int IdRangeTo,
+    // For a module copied from a GitHub repository (#1415): which repository and
+    // commit the workspace's copy came from. A record of where it started, not a
+    // link; nothing reads it to fetch again.
+    string? SourceRepository = null,
+    string? SourceCommit = null)
 {
     public const string CoreKind = "core";
     public const string ModuleKind = "module";

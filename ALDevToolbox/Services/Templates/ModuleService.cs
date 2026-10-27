@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Templates;
@@ -106,6 +107,7 @@ public class ModuleService
                 .Select((f, i) => ModuleAuthoringMapper.BuildFolder(f, orgId, ordering: i))
                 .ToList(),
         };
+        ApplySource(module, input.Source);
 
         _db.Modules.Add(module);
         await _db.SaveChangesAsync(ct);
@@ -120,9 +122,25 @@ public class ModuleService
     /// Updates an existing module's fields and reconciles its dependency list.
     /// The <see cref="Module.Key"/> is immutable after creation; the
     /// caller-supplied key on <paramref name="input"/> is ignored.
+    /// <paramref name="keepSourceCopy"/> saves only the module's own fields and
+    /// dependencies, leaving a repository module's copied files and source columns
+    /// exactly as they are (#1415): renaming a module is not a reason to download
+    /// its repository again.
     /// </summary>
-    public async Task UpdateAsync(int id, ModuleInput input, CancellationToken ct = default)
+    public async Task UpdateAsync(int id, ModuleInput input, CancellationToken ct = default, bool keepSourceCopy = false)
     {
+        // One transaction for the whole save, with the row locked first, so a
+        // repository refresh running at the same time (#1415) either finishes
+        // before this reads the module or sees what this saved.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        await LockAsync(id, ct);
+        // A page's context outlives one save and EF hands back the instances it
+        // already tracks without re-reading them, so forget them: what is read
+        // under the lock must be what is in the database now.
+        _db.ChangeTracker.Clear();
+
         var existing = await _db.Modules
             .Include(m => m.Dependencies)
             .Include(m => m.ExtensionFolders)
@@ -140,26 +158,130 @@ public class ModuleService
         existing.IdRangeSize = input.IdRangeSize;
         existing.Deprecated = input.Deprecated;
         existing.UpdatedAt = DateTime.UtcNow;
-
         ReconcileDependencies(existing, input.Dependencies, existing.OrganizationId);
 
-        // Folder tree: clear-and-rebuild, mirroring TemplateService.UpdateAsync.
-        // The Module → folders relationship is keyed on module_id and covers
-        // every row in the tree (flat), so clearing the collection cascades the
-        // whole tree away; the cascade FKs on module_extension_files /
-        // self-referencing folders drop the rest. The denormalised module_id on
-        // nested rows is re-stamped at save time by AppDbContext.
+        if (keepSourceCopy)
+        {
+            await _db.SaveChangesAsync(ct);
+            if (tx is not null) await tx.CommitAsync(ct);
+            _logger.LogInformation("Updated module '{Key}' (id={Id}), keeping its copied files.", existing.Key, existing.Id);
+            return;
+        }
+        ApplySource(existing, input.Source);
+
+        // Folder tree: clear-and-rebuild, in two saves inside the transaction.
+        // The Module -> folders relationship is keyed on module_id and covers
+        // every row in the tree (flat), so clearing the collection deletes the
+        // whole tree, audited row by row. EF does not order those deletes ahead
+        // of the inserts under the filtered unique index on root folder names, so
+        // a single save of a tree that keeps a root folder's name (every
+        // repository refresh, #1415) collided with itself. The denormalised
+        // module_id on nested rows is re-stamped at save time by AppDbContext.
         existing.ExtensionFolders.Clear();
+        await _db.SaveChangesAsync(ct);
+
         var freshFolders = input.Folders
             .Select((f, i) => ModuleAuthoringMapper.BuildFolder(f, existing.OrganizationId, ordering: i))
             .ToList();
         foreach (var folder in freshFolders) existing.ExtensionFolders.Add(folder);
-
         await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
 
         _logger.LogInformation(
             "Updated module '{Key}' (id={Id}); now has {DepCount} dependency(ies) and {FolderCount} top-level folder(s).",
             existing.Key, existing.Id, existing.Dependencies.Count, existing.ExtensionFolders.Count);
+    }
+
+    /// <summary>
+    /// Replaces a repository module's copy with a fresh one (#1415), touching
+    /// only the files and the source columns. Returns false, changing nothing,
+    /// when the module no longer follows <paramref name="expected"/> - someone
+    /// saved it, switched it to written-here, or another refresh got there
+    /// first while this one was downloading. The row is locked for the check
+    /// and the write, so two refreshes, or a refresh and a save, never interleave.
+    /// </summary>
+    public async Task<bool> ReplaceSourceCopyAsync(
+        int id,
+        ModuleSourceState expected,
+        IReadOnlyList<FolderAuthoring> folders,
+        ModuleSourceState fresh,
+        CancellationToken ct = default)
+    {
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        await LockAsync(id, ct);
+        _db.ChangeTracker.Clear();
+
+        var existing = await _db.Modules
+            .Include(m => m.ExtensionFolders).ThenInclude(f => f.Files)
+            .FirstOrDefaultAsync(m => m.Id == id && m.DeletedAt == null, ct);
+        if (existing is null
+            || !string.Equals(existing.SourceRepository, expected.Repository, StringComparison.OrdinalIgnoreCase)
+            || existing.SourceRef != expected.Ref
+            || existing.SourcePath != expected.Path
+            || existing.SourceCommitSha != expected.CommitSha)
+        {
+            return false;
+        }
+
+        existing.UpdatedAt = DateTime.UtcNow;
+        ApplySource(existing, fresh);
+
+        // A push that moved another folder of the same repository leaves this
+        // module's files as they were: record the new commit and stop, rather
+        // than rewriting (and auditing) every file for nothing.
+        var stored = existing.ExtensionFolders
+            .Where(f => f.ParentFolderId == null)
+            .OrderBy(f => f.Ordering)
+            .Select(ModuleAuthoringMapper.BuildFolderAuthoring)
+            .ToList();
+        if (Fingerprint(stored).SequenceEqual(Fingerprint(folders)))
+        {
+            await _db.SaveChangesAsync(ct);
+            if (tx is not null) await tx.CommitAsync(ct);
+            return true;
+        }
+
+        existing.ExtensionFolders.Clear();
+        await _db.SaveChangesAsync(ct);
+
+        foreach (var folder in folders.Select((f, i) => ModuleAuthoringMapper.BuildFolder(f, existing.OrganizationId, ordering: i)))
+        {
+            existing.ExtensionFolders.Add(folder);
+        }
+        await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// A folder tree as a flat, ordered list of its folders and files, for
+    /// telling whether a fresh copy differs from the stored one.
+    /// </summary>
+    private static IEnumerable<string> Fingerprint(IEnumerable<FolderAuthoring> folders, string prefix = "")
+    {
+        foreach (var folder in folders)
+        {
+            var path = prefix + folder.Path + "/";
+            yield return "D " + path;
+            foreach (var file in folder.Files)
+            {
+                yield return $"F {path}{file.Path}\0{file.IsExample}\0{file.Content}";
+            }
+            foreach (var entry in Fingerprint(folder.Folders, path)) yield return entry;
+        }
+    }
+
+    /// <summary>
+    /// Takes the module row's lock for the rest of the current transaction. Raw
+    /// SQL skips the query filter, so the statement names the organisation itself.
+    /// </summary>
+    private Task LockAsync(int id, CancellationToken ct)
+    {
+        var orgId = RequireOrganizationId();
+        return _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM modules WHERE id = {id} AND organization_id = {orgId} FOR UPDATE", ct);
     }
 
     /// <summary>
@@ -269,6 +391,28 @@ public class ModuleService
             "Bulk {Action} on modules: {Ok}/{Total} succeeded.",
             actionLabel, succeeded.Count, ids.Count);
         return new BulkActionResult(ids.Count, succeeded, failures);
+    }
+
+    /// <summary>
+    /// Stamps (or, for null, clears) the repository source columns. A copy that
+    /// left nothing out and found no dependencies stores null rather than an empty
+    /// list, so a typed module and a repository module read the same when empty.
+    /// </summary>
+    private static void ApplySource(Module module, ModuleSourceState? source)
+    {
+        module.SourceRepository = source?.Repository;
+        module.SourceRef = source?.Ref;
+        module.SourcePath = source?.Path;
+        module.SourceCommitSha = source?.CommitSha;
+        module.SourceFetchedAt = source?.FetchedAt;
+        module.SourceCheckedAt = source?.FetchedAt;
+        module.SourceError = null;
+        module.SourceSkippedJson = source is { Skipped.Count: > 0 }
+            ? JsonSerializer.Serialize(source.Skipped, PersistenceJson.Options)
+            : null;
+        module.SourceDependenciesJson = source is { Dependencies.Count: > 0 }
+            ? JsonSerializer.Serialize(source.Dependencies, PersistenceJson.Options)
+            : null;
     }
 
     /// <summary>
@@ -421,7 +565,11 @@ public record ModuleInput(
     int? IdRangeSize,
     bool Deprecated,
     IReadOnlyList<ModuleDependencyInput> Dependencies,
-    IReadOnlyList<FolderAuthoring> Folders);
+    IReadOnlyList<FolderAuthoring> Folders,
+    // Set when Folders is a copy of a GitHub repository (#1415). Only
+    // ModuleSourceService fills it, after a successful copy; null saves a typed
+    // module and, on update, turns a repository module back into a typed one.
+    ModuleSourceState? Source = null);
 
 /// <summary>One dependency row submitted by the admin module editor.</summary>
 public record ModuleDependencyInput(

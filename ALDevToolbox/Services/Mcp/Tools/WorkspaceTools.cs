@@ -88,7 +88,8 @@ public sealed class WorkspaceTools
             row.DefaultModules
                 .Where(d => d.Module is not null && d.Module.DeletedAt is null)
                 .Select(d => new ModuleSummary(
-                    d.Module!.Key, d.Module.Name, d.Module.ExtensionName, d.Module.Deprecated))
+                    d.Module!.Key, d.Module.Name, d.Module.ExtensionName, d.Module.Deprecated,
+                    d.Module.SourceRepository, d.Module.SourceCommitSha))
                 .ToList(),
             row.IncludedFiles
                 .Where(f => f.OrganizationFile is not null)
@@ -113,7 +114,8 @@ public sealed class WorkspaceTools
         {
             rows = rows.Where(m => !m.Deprecated).ToList();
         }
-        return rows.Select(m => new ModuleSummary(m.Key, m.Name, m.ExtensionName, m.Deprecated)).ToList();
+        return rows.Select(m => new ModuleSummary(
+            m.Key, m.Name, m.ExtensionName, m.Deprecated, m.SourceRepository, m.SourceCommitSha)).ToList();
     }
 
     [McpServerTool(Name = "list_well_known_dependencies", ReadOnly = true)]

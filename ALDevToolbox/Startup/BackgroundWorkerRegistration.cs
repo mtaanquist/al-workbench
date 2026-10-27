@@ -61,6 +61,9 @@ public static class BackgroundWorkerRegistration
         // repository against its solution's environment again, then opens the update
         // pull requests of the solutions that asked for that (#1104).
         services.AddHostedService<ALDevToolbox.Services.GitHub.DependencyDriftScheduler>();
+        // Daily refresh of the modules copied from a GitHub repository, for the
+        // repositories that send no pushes (#1415).
+        services.AddHostedService<ALDevToolbox.Services.Templates.ModuleSourceRefreshScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
