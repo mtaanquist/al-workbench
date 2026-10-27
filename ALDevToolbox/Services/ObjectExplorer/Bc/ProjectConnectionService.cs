@@ -235,7 +235,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             row.BcClientSecretEncrypted = _secretProtector.Protect(newSecret!);
             row.BcClientSecretExpiresAt = DateTime.SpecifyKind(input.SecretExpiresAt!.Value, DateTimeKind.Utc);
         }
-        row.UpdatedAt = DateTime.UtcNow;
+        row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
         var affected = await ResetSolutionsOnOrganizationRegistrationAsync(ct);
         await _db.SaveChangesAsync(ct);
@@ -262,7 +262,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         row.BcClientId = null;
         row.BcClientSecretEncrypted = null;
         row.BcClientSecretExpiresAt = null;
-        row.UpdatedAt = DateTime.UtcNow;
+        row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
         var affected = await ResetSolutionsOnOrganizationRegistrationAsync(ct);
         await _db.SaveChangesAsync(ct);
@@ -382,8 +382,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             project.BcClientSecretEncrypted = _secretProtector.Protect(newSecret!);
             project.BcClientSecretExpiresAt = DateTime.SpecifyKind(input.SecretExpiresAt!.Value, DateTimeKind.Utc);
         }
-        project.BcCredentialsUpdatedAt = DateTime.UtcNow;
-        project.UpdatedAt = DateTime.UtcNow;
+        project.BcCredentialsUpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        project.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         // Re-verification is required after a credential change; the previous verify no
         // longer reflects the live creds.
         project.BcConnectionVerifiedAt = null;
@@ -496,9 +496,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         await UpsertEnvironmentsAsync(project, environments, ct);
-        if (markVerified) project.BcConnectionVerifiedAt = DateTime.UtcNow;
-        project.BcEnvironmentsFetchedAt = DateTime.UtcNow; // the refresh freshness gate reads this
-        project.UpdatedAt = DateTime.UtcNow;
+        if (markVerified) project.BcConnectionVerifiedAt = _clock.GetUtcNow().UtcDateTime;
+        project.BcEnvironmentsFetchedAt = _clock.GetUtcNow().UtcDateTime; // the refresh freshness gate reads this
+        project.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct);
 
         // After the save, so newly-discovered environments already have rows to mirror
@@ -1452,7 +1452,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 $"The next update had become {next.TargetVersion}, not the {expectedVersion} that was booked.");
         }
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _clock.GetUtcNow();
         await WriteUpdateScheduleAsync(env, next, now, ignoreUpdateWindow: true, ct);
         await RecordUpdateActionAsync(
             projectId, env, next, "Started the update now, ignoring the environment's update window", ct);
@@ -1685,7 +1685,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         _db.AuditLog.Add(new AuditLogEntry
         {
-            Timestamp = DateTime.UtcNow,
+            Timestamp = _clock.GetUtcNow().UtcDateTime,
             ChangedBy = changedBy,
             ChangedByUserId = _orgContext.CurrentUserId,
             OrganizationId = _orgContext.CurrentOrganizationId,
@@ -2640,7 +2640,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             ?? throw new BcApiException(null,
                 "The Business Central connection isn't set up (or its secret can't be decrypted). Re-enter it on the solution's Business Central page.");
 
-        if (creds.ExpiresAt is { } expiry && expiry <= DateTime.UtcNow)
+        if (creds.ExpiresAt is { } expiry && expiry <= _clock.GetUtcNow().UtcDateTime)
         {
             // Never a quiet switch to the other registration: which one a customer has
             // authorised is theirs to know, and a fallback would hide it.
@@ -2676,7 +2676,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .Where(e => e.ProjectId == project.Id)
             .ToListAsync(ct);
         var byName = existing.ToDictionary(e => e.Name, StringComparer.OrdinalIgnoreCase);
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var fetchedNames = fetched.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         DefaultDeliveryWindows? defaults = null; // read at most once, and only if a row is born
@@ -2897,7 +2897,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 row.BcUpdateWindowEnd = settings?.EndTime;
                 row.BcUpdateWindowTimeZoneId = settings?.WindowsTimeZoneId;
                 row.BcUpdateWindowTimeZoneIana = BcUpdateWindow.ToIana(settings?.WindowsTimeZoneId);
-                row.BcUpdateWindowFetchedAt = DateTime.UtcNow;
+                row.BcUpdateWindowFetchedAt = _clock.GetUtcNow().UtcDateTime;
             }
             catch (BcApiException ex)
             {
@@ -2984,7 +2984,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <c>BcNextUpdateFetchedAt</c> is stamped: an empty list is a successful read that
     /// says "nothing is scheduled", which is a different fact from "we never asked".
     /// </summary>
-    private static void ApplyNextUpdate(OeProjectEnvironment row, IReadOnlyList<BcEnvironmentUpdate> updates)
+    private void ApplyNextUpdate(OeProjectEnvironment row, IReadOnlyList<BcEnvironmentUpdate> updates)
     {
         var update = PickNextUpdate(updates);
         row.BcNextUpdateVersion = update?.TargetVersion;
@@ -2994,7 +2994,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         row.BcNextUpdateLatestDate = update?.LatestSelectableDateTime?.UtcDateTime;
         row.BcNextUpdateIgnoresWindow = update is null ? null : update.IgnoreUpdateWindow;
         row.BcOfferedVersions = OfferedVersions(updates);
-        row.BcNextUpdateFetchedAt = DateTime.UtcNow;
+        row.BcNextUpdateFetchedAt = _clock.GetUtcNow().UtcDateTime;
     }
 
     /// <summary>

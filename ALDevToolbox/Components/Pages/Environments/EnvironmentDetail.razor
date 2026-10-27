@@ -14,6 +14,7 @@
 @inject NavigationManager Nav
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using System.Globalization
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
@@ -561,7 +562,7 @@
                                                            cancel would only be refused. *@
                                                         @if (booked.SentAt is null)
                                                         {
-                                                            @if (booked.ExecuteAfter > DateTime.UtcNow)
+                                                            @if (booked.ExecuteAfter > Clock.GetUtcNow().UtcDateTime)
                                                             {
                                                                 <button type="button" class="btn btn--sm" disabled="@_settingSaving"
                                                                         @onclick="() => InstallBookedNowAsync(booked)">@(booked.Kind == UpgradeActionKind.UpdateApp ? "Update now" : "Install now")</button>
@@ -1350,7 +1351,7 @@
         try
         {
             _operations = await Read(ct => Connection.ListEnvironmentOperationsAsync(Row.ProjectId, Id, ct));
-            _operationsFetchedAt = DateTime.UtcNow;
+            _operationsFetchedAt = Clock.GetUtcNow().UtcDateTime;
         }
         catch (PlanValidationException ex)
         {
@@ -1413,7 +1414,7 @@
         try
         {
             _sessions = await Read(ListSessionsOnOwnScopeAsync);
-            _sessionsFetchedAt = DateTime.UtcNow;
+            _sessionsFetchedAt = Clock.GetUtcNow().UtcDateTime;
             _sessionsError = null;
             _sessionsStaleNote = null;
         }
@@ -1495,7 +1496,7 @@
     // night - one request every thirty seconds against one tenant is fine, an unbounded
     // one is not.
 
-    private System.Threading.Timer? _sessionsLive;
+    private ITimer? _sessionsLive;
     private DateTime _sessionsLiveUntilUtc;
 
     private void StartSessionsLive()
@@ -1504,8 +1505,8 @@
         // A read that comes back after the page has gone must not leave a timer behind.
         if (_calls.IsGone) return;
         _sessionsLiveStopped = false;
-        _sessionsLiveUntilUtc = DateTime.UtcNow.Add(SessionsLiveFor);
-        _sessionsLive = new System.Threading.Timer(
+        _sessionsLiveUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(SessionsLiveFor);
+        _sessionsLive = Clock.CreateTimer(
             _ => _ = SessionsTickAsync(), null, SessionsLiveEvery, SessionsLiveEvery);
     }
 
@@ -1517,7 +1518,7 @@
 
     private async Task SessionsTickAsync()
     {
-        if (DateTime.UtcNow > _sessionsLiveUntilUtc)
+        if (Clock.GetUtcNow().UtcDateTime > _sessionsLiveUntilUtc)
         {
             StopSessionsLive();
             try
@@ -1774,7 +1775,7 @@
     private string FreshnessClass()
     {
         var classes = string.Empty;
-        if (Row.EnvironmentFetchedAt is { } at && DateTime.UtcNow - at > StaleAfter) classes += "freshness--stale";
+        if (Row.EnvironmentFetchedAt is { } at && Clock.GetUtcNow().UtcDateTime - at > StaleAfter) classes += "freshness--stale";
         if (_panelLoading) classes += " is-refreshing";
         return classes.Trim();
     }
@@ -1841,7 +1842,7 @@
             env.DeliveryWindowStart, env.DeliveryWindowEnd, UpdateWindow.ResolveTimeZone(Row.TimeZone),
             env.BcUpdateWindowStart, env.BcUpdateWindowEnd,
             BcUpdateWindow.ResolveDisplayZone(env.BcUpdateWindowTimeZoneIana, Row.TimeZone),
-            DateTime.UtcNow);
+            Clock.GetUtcNow().UtcDateTime);
     }
 
     /// <summary>Versions Microsoft has announced but not released, which the picker cannot offer.</summary>
@@ -2032,7 +2033,7 @@
     /// <summary>When a pipeline run booked here goes: Business Central's update, its slot, or "starting shortly" once that has come.</summary>
     private string PipelineWhen(WaitingDeployment booking) =>
         BcDeploymentSchedule.IsDeferred(booking.DeploymentSchedule) ? ScheduleWhen(booking.DeploymentSchedule)
-        : booking.ScheduledFor <= DateTime.UtcNow ? "Starting shortly"
+        : booking.ScheduledFor <= Clock.GetUtcNow().UtcDateTime ? "Starting shortly"
         : $"Booked for {BookedSlotText(booking.ScheduledFor)}";
 
     private RescheduleDeploymentDialog? _rescheduleDialog;
@@ -2100,7 +2101,7 @@
     /// <summary>When a booked row goes: its slot, "starting shortly" once that has come, or "installing now" while the worker has it.</summary>
     private string BookedWhen(UpgradeActionRow booked) =>
         booked.SentAt is not null ? (booked.Kind == UpgradeActionKind.UpdateApp ? "Updating now" : "Installing now")
-        : booked.ExecuteAfter <= DateTime.UtcNow ? "Starting shortly"
+        : booked.ExecuteAfter <= Clock.GetUtcNow().UtcDateTime ? "Starting shortly"
         : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
@@ -2322,8 +2323,8 @@
     /// date already past is not dressed up as urgency - the mirror may simply be older
     /// than the deadline it is repeating.
     /// </summary>
-    private static string RecoverWindowText(DateTime goneForGood) =>
-        (goneForGood.Date - DateTime.UtcNow.Date).Days switch
+    private string RecoverWindowText(DateTime goneForGood) =>
+        (goneForGood.Date - Clock.GetUtcNow().UtcDateTime.Date).Days switch
         {
             < 0 => "that date has passed",
             0 => "today is the last day to bring it back",
