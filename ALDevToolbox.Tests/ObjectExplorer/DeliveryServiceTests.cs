@@ -2371,7 +2371,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
-        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
         results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
         results[0].Message.Should().Be("Unchanged; Production already has the newer 1.0.10.0.");
@@ -2402,7 +2402,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
-        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.HandedOff);
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
         results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
         results[0].Message.Should().Be("Unchanged; this version is already waiting for the update.");
@@ -2505,8 +2505,15 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
-        if (accepted) await act.Should().NotThrowAsync();
-        else await act.Should().ThrowAsync<PlanValidationException>();
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"].Should()
+                .Contain($"Build #{seed.BuildId} was built from").And.Contain("this deployment pipeline only deploys builds from");
+        }
     }
 
     [Fact]
@@ -3579,8 +3586,8 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using (var run = _db.NewContext()) (await NewService(run).RunDeliveryAsync(id)).Should().BeTrue();
 
-        _apps.UploadedOrder.Should().NotBeEmpty();
-        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" });
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
     }
 
     [Fact]
@@ -3645,8 +3652,8 @@ public sealed class DeliveryServiceTests : IDisposable
         }
         else
         {
-            delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
-            _apps.UploadedOrder.Should().NotBeEmpty();
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+            _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" });
         }
     }
 

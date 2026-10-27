@@ -1,3 +1,4 @@
+using System.Reflection;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -11,6 +12,7 @@ using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
+using ModelContextProtocol.Server;
 
 namespace ALDevToolbox.Tests.Mcp;
 
@@ -102,9 +104,10 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
 
     /// <summary>
     /// Every release-keyed tool in <c>ObjectExplorerTools</c>, invoked with the
-    /// hidden release as its release argument. The list is the enumeration of
-    /// the class: a new release-keyed tool that forgets the choke point has to
-    /// be added here to compile the intent, and fails this test if it answers.
+    /// hidden release as its release argument. A name may carry a parenthesised
+    /// variant ("(by symbolId)"); the part before it is the MCP tool name, and
+    /// <see cref="Every_tool_that_takes_a_release_is_in_the_matrix"/> holds the
+    /// list to the class, so a new release-keyed tool cannot be left out of it.
     /// </summary>
     private static IEnumerable<(string Name, Func<ObjectExplorerTools, string, Fixture, Task> Invoke)> ReleaseKeyedTools()
     {
@@ -132,6 +135,43 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         yield return ("download_symbol_reference", (t, key, f) => t.DownloadSymbolReferenceAsync(key, f.ModuleName));
     }
 
+    /// <summary>
+    /// Tools that take no release, so there is nothing to fence. Each one needs a
+    /// reason; the test below also refuses an entry that does take a release.
+    /// </summary>
+    private static readonly HashSet<string> ToolsWithoutARelease = new(StringComparer.Ordinal)
+    {
+        // Lists the releases the caller may see; the list itself is fenced by the service.
+        "list_releases",
+    };
+
+    private static List<(string Name, MethodInfo Method)> RegisteredTools() =>
+        typeof(ObjectExplorerTools).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
+            .Select(m => (Attribute: m.GetCustomAttribute<McpServerToolAttribute>(), Method: m))
+            .Where(t => t.Attribute is not null)
+            .Select(t => (t.Attribute!.Name ?? t.Method.Name, t.Method))
+            .ToList();
+
+    private static string UnknownSymbol(long symbolId) =>
+        $"Symbol id {symbolId} doesn't exist. Call get_object_outline to see the current ids for an object.";
+
+    private static bool TakesARelease(MethodInfo method) =>
+        method.GetParameters().Any(p => p.Name!.Contains("release", StringComparison.OrdinalIgnoreCase));
+
+    [Fact]
+    public void Every_tool_that_takes_a_release_is_in_the_matrix()
+    {
+        var registered = RegisteredTools();
+        registered.Should().NotBeEmpty("the reflection must find the tools, or this test proves nothing");
+        var inMatrix = ReleaseKeyedTools().Select(t => t.Name.Split(" (")[0]).ToHashSet(StringComparer.Ordinal);
+
+        registered.Where(t => TakesARelease(t.Method)).Select(t => t.Name)
+            .Should().BeEquivalentTo(inMatrix, "a release-keyed tool missing here is never checked against the fence");
+        registered.Select(t => t.Name).Except(inMatrix)
+            .Should().BeEquivalentTo(ToolsWithoutARelease, "every other tool is listed with the reason it takes no release");
+        registered.Where(t => ToolsWithoutARelease.Contains(t.Name)).Should().OnlyContain(t => !TakesARelease(t.Method));
+    }
+
     [Fact]
     public async Task Every_release_keyed_tool_refuses_a_private_projects_release_for_a_non_member()
     {
@@ -146,8 +186,21 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
             {
                 await using var ctx = _db.NewContext();
                 var tools = NewTools(ctx);
-                await ((Func<Task>)(() => invoke(tools, key, fixture)))
-                    .Should().ThrowAsync<McpException>($"{name} must not answer a non-member (release key '{key}')");
+                // Word for word what a release that does not exist gets, so the refusal
+                // gives away nothing about the hidden one.
+                // The symbolId forms never resolve the release: the symbol check refuses
+                // them, with the wording an unknown symbol id gets.
+                var unknown = name switch
+                {
+                    "get_procedure_source (by symbolId)" => UnknownSymbol(fixture.ProcedureSymbolId),
+                    "list_procedure_calls (by symbolId)" => UnknownSymbol(fixture.CallingSymbolId),
+                    _ => int.TryParse(key, out var id)
+                        ? $"Release {id} does not exist."
+                        : $"Release '{key}' was not found. Call list_releases to see available labels.",
+                };
+                (await ((Func<Task>)(() => invoke(tools, key, fixture)))
+                    .Should().ThrowAsync<McpException>($"{name} must not answer a non-member (release key '{key}')"))
+                    .Which.Message.Should().Be(unknown, name);
             }
         }
     }
