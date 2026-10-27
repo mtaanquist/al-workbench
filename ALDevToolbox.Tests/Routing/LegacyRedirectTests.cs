@@ -68,6 +68,11 @@ public sealed class LegacyRedirectTests : IDisposable
     // Alias endpoints (LegacyRedirectEndpoints.cs).
     [InlineData("/projects/extension", "/templates/extension")]
     [InlineData("/projects/extension?template=demo", "/templates/extension?template=demo")]
+    // Projects became Solutions. /projects/extension above is the generator alias,
+    // which the int constraint on /projects/{id} has to leave alone.
+    [InlineData("/projects", "/solutions")]
+    [InlineData("/projects/new", "/solutions/new")]
+    [InlineData("/projects/12", "/solutions/12")]
     [InlineData("/snippets", "/cookbook")]
     [InlineData("/snippets/suggest", "/cookbook/suggest")]
     [InlineData("/snippets/12", "/cookbook/12")]
@@ -75,6 +80,7 @@ public sealed class LegacyRedirectTests : IDisposable
     [InlineData("/admin/snippets/new", "/admin/cookbook/new")]
     [InlineData("/admin/snippets/12", "/admin/cookbook/12")]
     [InlineData("/admin/snippets/suggestions", "/admin/cookbook/suggestions")]
+    [InlineData("/admin/snippets/suggestions?focus=5", "/admin/cookbook/suggestions?focus=5")]
     [InlineData("/api/snippets/12/download", "/api/cookbook/12/download")]
     [InlineData("/releases", "/pipelines/deployments")]
     [InlineData("/releases/12", "/pipelines/deployments/12")]
