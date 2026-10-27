@@ -1434,6 +1434,28 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Archiving_and_restoring_are_refused_without_manage_rights()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await NewReleasePipelineService(ctx).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
+        await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone else");
+
+        var archive = () => NewReleasePipelineService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.ReleasePipelineId, true);
+        await archive.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).ArchivedAt.Should().BeNull();
+
+        await _db.NewContext().OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+        var restore = () => NewReleasePipelineService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.ReleasePipelineId, false);
+        await restore.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).ArchivedAt.Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task CancelDeliveryAsync_is_refused_without_manage_rights()
     {
         await using var ctx = _db.NewContext();

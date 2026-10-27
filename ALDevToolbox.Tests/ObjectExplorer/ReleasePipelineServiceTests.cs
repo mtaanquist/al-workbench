@@ -503,6 +503,39 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Archiving_or_restoring_twice_changes_nothing()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
+        var archivedAt = (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt;
+
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, true);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().Be(archivedAt);
+
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_database_refuses_an_archived_pipeline_that_is_not_disabled()
+    {
+        // What keeps an archive and an enable racing each other from leaving a hidden
+        // pipeline that still deploys.
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+
+        var act = () => _db.NewContext().OeReleasePipelines.Where(r => r.Id == seed.Id)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+
+        (await act.Should().ThrowAsync<Npgsql.PostgresException>()).Which.ConstraintName
+            .Should().Be("ck_oe_release_pipelines_archived_is_disabled");
+    }
+
+    [Fact]
     public async Task Someone_who_manages_the_solution_can_archive_and_restore_without_being_an_admin()
     {
         await using var ctx = _db.NewContext();

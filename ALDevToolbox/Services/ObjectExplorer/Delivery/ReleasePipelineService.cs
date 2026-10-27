@@ -466,16 +466,29 @@ public sealed class ReleasePipelineService
         if (!archived && await NameTakenAsync(pipeline.ProjectId, pipeline.Id, pipeline.Name, ct))
         {
             throw Validation("ReleasePipeline",
-                $"Another deployment pipeline in this solution is called \"{pipeline.Name}\" now. Archive that one, or change its setup so it gets another name, before restoring this one.");
+                RestoreNameClash(pipeline.Name));
         }
 
         var now = DateTime.UtcNow;
         pipeline.ArchivedAt = archived ? now : null;
         pipeline.UpdatedAt = now;
-        await SaveTranslatingNameClashAsync(ct);
+        try
+        {
+            await SaveTranslatingNameClashAsync(ct);
+        }
+        catch (PlanValidationException ex) when (ex.Errors.ContainsKey("Name"))
+        {
+            // A pipeline took the name between the check above and this save. There is no
+            // name to type on Restore, so say it the way the check does.
+            throw Validation("ReleasePipeline",
+                RestoreNameClash(pipeline.Name));
+        }
         _logger.LogInformation("{Action} deployment pipeline {ReleasePipelineId} as user {UserId}.",
             archived ? "Archived" : "Restored", id, _orgContext.CurrentUserId);
     }
+
+    private static string RestoreNameClash(string name) =>
+        $"Another deployment pipeline in this solution is called \"{name}\" now. Archive that one, or change its setup so it gets another name, before restoring this one.";
 
     /// <summary>What changing an archived pipeline is refused with: it has to come back first.</summary>
     internal const string ArchivedRefusal = "This deployment pipeline is archived. Restore it first.";
@@ -588,9 +601,9 @@ public sealed class ReleasePipelineService
     internal const string DeletedSolutionReason = "The solution was deleted";
 
     /// <summary>
-    /// What deleting this deployment pipeline would affect: deployments waiting to run here
-    /// (scheduled or prepared), which the delete sets aside, and deployments already handed
-    /// to Business Central, which it can't reach. For the delete confirmation.
+    /// What disabling this deployment pipeline would affect: deployments waiting to run here
+    /// (scheduled or prepared), which disabling sets aside, and deployments already handed
+    /// to Business Central, which it can't reach. For the disable confirmation.
     /// </summary>
     public async Task<WaitingDeploymentCounts> CountWaitingDeploymentsAsync(int id, CancellationToken ct = default)
     {

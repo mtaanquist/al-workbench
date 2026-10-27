@@ -546,6 +546,8 @@
     {
         _all = all;
         _archivedCount = all.Count(r => r.Archived);
+        // The box disappears with the last archived pipeline; don't leave it ticked unseen.
+        if (_archivedCount == 0) _showArchived = false;
         _rows = _showArchived ? all : all.Where(r => !r.Archived).ToList();
     }
 
@@ -618,9 +620,9 @@
         _ => true,
     };
 
-    /// <summary>The fixed order: shipping now, needs attention, scheduled, the rest.</summary>
+    /// <summary>The fixed order: shipping now, needs attention, scheduled, the rest, then the archived ones.</summary>
     private static int Urgency(ReleasePipelineRow r) =>
-        r.LiveDelivery is not null ? 0 : NeedsAttention(r) ? 1 : IsScheduled(r) ? 2 : 3;
+        r.LiveDelivery is not null ? 0 : r.Archived ? 4 : NeedsAttention(r) ? 1 : IsScheduled(r) ? 2 : 3;
 
     /// <summary>
     /// The last deployment failed, or the environment can no longer take one - including
@@ -974,8 +976,8 @@
 
     /// <summary>The archive confirmation: where the pipeline goes and that nothing of its history is lost.</summary>
     internal static string ArchiveMessage(string name) =>
-        $"Archive \"{name}\"? It leaves the deployment pipelines list and its name becomes free for a new pipeline. "
-        + "Its page and every past deployment are kept: tick \"Show archived\" on the list to find it again, and restore it from there.";
+        $"Archive \"{name}\"? It moves off the deployment pipelines list, and nothing can deploy through it. "
+        + "Its page and all past deployments are kept, and you can restore it at any time. Its name becomes free, so a new pipeline can use it.";
 
     /// <summary>
     /// Disables or enables a deployment pipeline (#1131). Disabling cancels the deployments

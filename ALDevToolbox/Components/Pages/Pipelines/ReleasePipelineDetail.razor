@@ -68,7 +68,7 @@
         </StatusPill>
         @if (Archived)
         {
-            <StatusPill Tone="muted"><span>Archived</span></StatusPill>
+            <StatusPill Tone="muted" title="Archived, kept for its history"><span>Archived</span></StatusPill>
         }
         else if (Disabled)
         {
@@ -188,7 +188,13 @@
                 </span>
             </Alert>
         }
-        @if (_rp!.ProjectEnvironment!.MissingSince is not null)
+        @* An archived pipeline deploys nothing, so a gone or broken environment is no
+           longer something to fix here; often it is why the pipeline was archived. *@
+        @{ var targetMissing = _rp!.ProjectEnvironment!.MissingSince is not null; }
+        @if (Archived)
+        {
+        }
+        else if (targetMissing)
         {
             <Alert Tone="AlertTone.Danger">
                 <span>
@@ -384,7 +390,7 @@
             {
                 <div class="card">
                     <div class="card__head"><h2 class="card__title">Deployments</h2></div>
-                    <EmptyState Icon="send" Title="No deployments yet">
+                    <EmptyState Icon="send" Title="@(Archived ? "No deployments" : "No deployments yet")">
                         <Text>
                             @if (Archived)
                             {
@@ -1563,6 +1569,18 @@
         }
 
         var last = LastRelease;
+        if (Archived)
+        {
+            // Kept for its history: no verdict on its health, only what it last did.
+            if (last is null)
+            {
+                return new HealthView("none", "archive", "Archived", Plain("Kept for its history. Nothing was installed through it."));
+            }
+            var lastAt = LastWhen(last);
+            var outcome = DeliveryLook(last.Status).Word.ToLowerInvariant();
+            return new HealthView("none", "archive", "Archived",
+                @<text>Kept for its history. Its last deployment, number @last.Number, @outcome <Timestamp Value="@lastAt" Relative="true" />.</text>);
+        }
         if (last is { Status: ProjectDeliveryStatus.Failed })
         {
             var failedApp = last.Apps.FirstOrDefault(a => a.Status == ProjectDeliveryResultStatus.Failed);

@@ -4358,7 +4358,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId")
                         .HasDatabaseName("ix_oe_release_pipelines_project");
 
-                    b.ToTable("oe_release_pipelines", (string)null);
+                    b.ToTable("oe_release_pipelines", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_oe_release_pipelines_archived_is_disabled", "archived_at IS NULL OR disabled_at IS NOT NULL");
+                        });
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeRepositoryBranchHead", b =>
