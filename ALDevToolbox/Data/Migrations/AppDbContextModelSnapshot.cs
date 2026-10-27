@@ -6278,12 +6278,12 @@ namespace ALDevToolbox.Data.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("TargetText"), "gin");
                     NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("TargetText"), new[] { "gin_trgm_ops" });
 
-                    b.HasIndex("OrganizationId", "Score", "HitCount")
-                        .IsDescending(false, true, true)
-                        .HasDatabaseName("ix_translation_memory_rank");
-
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash")
                         .HasDatabaseName("ix_translation_memory_lookup");
+
+                    b.HasIndex("OrganizationId", "Score", "HitCount", "LastSeenAt", "Id")
+                        .IsDescending(false, true, true, true, true)
+                        .HasDatabaseName("ix_translation_memory_rank");
 
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash", "TargetHash")
                         .IsUnique()

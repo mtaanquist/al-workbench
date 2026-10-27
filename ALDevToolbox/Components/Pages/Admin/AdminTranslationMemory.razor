@@ -141,7 +141,7 @@
         </div>
     </NoMatches>
     <ChildContent>
-        <div class="tr-mem-count u-muted">@_result!.Total entr@(_result!.Total == 1 ? "y" : "ies") · showing @(_skip + 1)-@(_skip + _result!.Items.Count)</div>
+        <div class="tr-mem-count u-muted">@CountText · showing @(_skip + 1)-@(_skip + _result!.Items.Count)</div>
         <table class="data-table tr-mem-table">
             <thead>
                 <tr>
@@ -210,12 +210,12 @@
             </tbody>
         </table>
 
-        @if (_result!.Total > _pageSize)
+        @if (_skip > 0 || _result!.HasMore)
         {
             <div class="tr-mem-pager">
                 <button class="btn btn--sm" disabled="@(_skip == 0)" @onclick="() => PageAsync(-1)">Previous</button>
-                <span class="pager__count">Page @(_skip / _pageSize + 1) of @(((_result!.Total - 1) / _pageSize) + 1)</span>
-                <button class="btn btn--sm" disabled="@(_skip + _pageSize >= _result!.Total)" @onclick="() => PageAsync(1)">Next</button>
+                <span class="pager__count">@PageText</span>
+                <button class="btn btn--sm" disabled="@(!_result!.HasMore)" @onclick="() => PageAsync(1)">Next</button>
             </div>
         }
     </ChildContent>
@@ -343,6 +343,26 @@
     /// </summary>
     private static string FileUrl(string repository, string path) =>
         $"https://github.com/{repository}/blob/HEAD/{path}";
+
+    /// <summary>
+    /// The match count. The search stops counting at a limit (an exact count of
+    /// the whole memory was most of this page's load time), so past it the
+    /// count reads "More than 10,000" and the pager drops its "of N".
+    /// </summary>
+    private string CountText => _result!.TotalIsCapped
+        ? $"More than {_result.Total:N0} entries"
+        : $"{_result.Total:N0} entr{(_result.Total == 1 ? "y" : "ies")}";
+
+    private string PageText
+    {
+        get
+        {
+            var page = _skip / _pageSize + 1;
+            return _result!.TotalIsCapped || _result.Total is not { } total
+                ? $"Page {page:N0}"
+                : $"Page {page:N0} of {(total - 1) / _pageSize + 1:N0}";
+        }
+    }
 
     /// <summary>True when the list is narrowed, so an empty result is the search's doing.</summary>
     private bool HasFilters =>
