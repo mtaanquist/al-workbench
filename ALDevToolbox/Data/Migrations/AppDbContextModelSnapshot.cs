@@ -2990,6 +2990,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(250)")
                         .HasColumnName("author");
 
+                    b.Property<string>("AuthorEmail")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("author_email");
+
                     b.Property<DateTime?>("CommittedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("committed_at");

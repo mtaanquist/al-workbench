@@ -127,6 +127,14 @@ build is marked ready or failed.
   solution"). A build on push or a nightly check runs as whoever last saved the pipeline,
   who did not start it, so that person hears only if they follow it like anyone else. With
   nobody left (everyone with those roles unfollowed), the solution's owner is told.
+- **Commit authors** (#1464): the authors of the build's commits hear too, whatever their
+  role or follow choice. Those are the commits since the pipeline's last successful build,
+  so they include what broke it and, once it works again, what fixed it. An author is
+  matched by the email Git recorded: to an account with that address, or, for GitHub's
+  private `id+login@users.noreply.github.com` address, to whoever linked that GitHub
+  account. Nobody is guessed at by name; an author who matches no one is skipped. Nightly
+  checks leave them out: those fail because Business Central moved, not because of a
+  commit. Builds from before author emails were kept have none to match.
 - **Access is re-checked** on every notification (see "Who can see it" below).
 - The email shows the failed extensions (or the build's own message when it failed as a
   whole) and links to the build on the pipeline page; the digest entry carries the first

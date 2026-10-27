@@ -208,6 +208,40 @@ public sealed class BuildNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task The_authors_of_the_commits_in_a_failing_build_hear_about_it_and_about_the_fix()
+    {
+        await SeedAsync();
+        var author = await SeedUserAsync("author@cronus.example");
+        var linked = await SeedUserAsync("linked@cronus.example");
+        await LinkGitHubAsync(linked, "4242");
+        string[] commits = ["Author@Cronus.example", "4242+octocat@users.noreply.github.com", "stranger@elsewhere.example"];
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.Push, authorEmails: commits);
+
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
+            ["creator@cronus.example", "author@cronus.example", "linked@cronus.example"],
+            "the owner follows the solution; an address that matches nobody is skipped");
+        _email.Sent.Should().AllSatisfy(s => s.Html.Should().Contain("have commits in it"));
+
+        _email.Sent.Clear();
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.Push, authorEmails: commits);
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
+            ["creator@cronus.example", "author@cronus.example", "linked@cronus.example"]);
+    }
+
+    [Fact]
+    public async Task A_nightly_check_does_not_blame_the_commits_in_it()
+    {
+        await SeedAsync();
+        await SeedUserAsync("author@cronus.example");
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMajor, "27.0",
+            authorEmails: ["author@cronus.example"]);
+
+        _email.Sent.Select(s => s.To).Should().Equal(["creator@cronus.example"]);
+    }
+
+    [Fact]
     public async Task A_digest_choice_keeps_the_first_line_of_the_failure()
     {
         await SeedAsync();
@@ -378,7 +412,8 @@ public sealed class BuildNotifierTests : IDisposable
         string? bcVersion = "26.4",
         string? failure = null,
         string[]? failedApps = null,
-        int finishedAfterMinutes = 3)
+        int finishedAfterMinutes = 3,
+        string[]? authorEmails = null)
     {
         _clock = _clock.AddHours(1);
         int releaseId;
@@ -392,7 +427,7 @@ public sealed class BuildNotifierTests : IDisposable
             };
             ctx.OeReleases.Add(release);
             await ctx.SaveChangesAsync();
-            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            var build = new OeProjectBuild
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, PipelineId = _pipelineId,
                 ReleaseId = release.Id,
@@ -400,7 +435,19 @@ public sealed class BuildNotifierTests : IDisposable
                 Trigger = trigger, BcTarget = target, BcVersion = bcVersion, Status = status,
                 FailureMessage = failure ?? (status == ProjectBuildStatus.Failed ? "Compile failed." : null),
                 StartedAt = _clock, FinishedAt = _clock.AddMinutes(finishedAfterMinutes),
-            });
+            };
+            ctx.OeProjectBuilds.Add(build);
+            await ctx.SaveChangesAsync();
+            var ordering = 0;
+            foreach (var email in authorEmails ?? [])
+            {
+                ctx.OeProjectBuildCommits.Add(new OeProjectBuildCommit
+                {
+                    OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, ShortHash = $"c{ordering}",
+                    Message = "Change the brew", Author = "Someone", AuthorEmail = email, CommittedAt = _clock,
+                    Ordering = ordering++,
+                });
+            }
             foreach (var app in failedApps ?? [])
             {
                 ctx.OeProjectBuildResults.Add(new OeProjectBuildResult
@@ -423,6 +470,17 @@ public sealed class BuildNotifierTests : IDisposable
         var follows = new ProjectFollowService(
             work, _db.OrgContext, new ProjectAccess(work, _db.OrgContext), TimeProvider.System, NullLogger<ProjectFollowService>.Instance);
         await new BuildNotifier(work, notifications, follows, NullLogger<BuildNotifier>.Instance).BuildFinishedAsync(releaseId);
+    }
+
+    private async Task LinkGitHubAsync(int userId, string gitHubId)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId, Provider = "github", Issuer = "github.com", Subject = gitHubId, DisplayIdentity = "octocat",
+            CreatedAt = _clock,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     private async Task AddPersonAsync(int userId, params ProjectPersonRole[] roles)
