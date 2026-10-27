@@ -844,15 +844,19 @@ public sealed class ReleaseVisibilityTests : IDisposable
 
     /// <summary>
     /// A Private solution's release, linked by <paramref name="linkage"/>. Seeded
-    /// already soft-deleted for <see cref="ReleaseWrite.Restore"/> so each write has
-    /// something to change.
+    /// already soft-deleted for <see cref="ReleaseWrite.Restore"/> and
+    /// <see cref="ReleaseWrite.HardDelete"/>, which only act on a soft-deleted
+    /// release, so each write has something to change.
     /// </summary>
+    private static bool SeedsSoftDeleted(ReleaseWrite write) =>
+        write is ReleaseWrite.Restore or ReleaseWrite.HardDelete;
+
     private async Task<SeededRelease> SeedPrivateReleaseAsync(ReleaseWrite write, Linkage linkage = Linkage.Build)
     {
         var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
         var seeded = await SeedReleaseAsync(WriteLabel);
         await LinkAsync(linkage, projectId, seeded.ReleaseId);
-        if (write == ReleaseWrite.Restore)
+        if (SeedsSoftDeleted(write))
         {
             await using var ctx = _db.NewContext();
             var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
@@ -935,7 +939,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
         await using var read = _db.NewContext();
         var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
         release.Should().NotBeNull("a refused hard delete removes nothing");
-        (release!.DeletedAt is not null).Should().Be(write == ReleaseWrite.Restore, "the deleted flag is as seeded");
+        (release!.DeletedAt is not null).Should().Be(SeedsSoftDeleted(write), "the deleted flag is as seeded");
         release.Publisher.Should().BeNull("a refused metadata edit changes nothing");
         (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId))
             .Should().Be(1, "a refused amend adds no module");

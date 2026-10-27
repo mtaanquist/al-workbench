@@ -226,6 +226,17 @@ public class ReleaseManagementService
     {
         var release = await LoadVisibleAsync(releaseId, ct).ConfigureAwait(false);
 
+        // Soft delete first, always: the manage page only offers this once the
+        // release is soft-deleted, and the service holds the same order so a
+        // direct POST can't purge a live release in one step.
+        if (release.DeletedAt is null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Release"] = "Soft delete this release first. You can permanently delete it once it is soft-deleted.",
+            });
+        }
+
         if (!string.Equals(confirmLabel?.Trim(), release.Label, StringComparison.Ordinal))
         {
             throw new PlanValidationException(new Dictionary<string, string>

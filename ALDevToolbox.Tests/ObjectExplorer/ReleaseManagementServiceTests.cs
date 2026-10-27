@@ -194,7 +194,9 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "Cascade Test");
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(id);
+            await svc.HardDeleteAsync(id, confirmLabel: "Cascade Test");
         }
 
         await using var read = _db.NewContext();
@@ -212,10 +214,13 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var act = async () => await NewManagement(ctx).HardDeleteAsync(parentId, confirmLabel: "Parent");
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(parentId);
+            var act = async () => await svc.HardDeleteAsync(parentId, confirmLabel: "Parent");
 
             (await act.Should().ThrowAsync<PlanValidationException>())
-                .Which.Errors.Should().ContainKey("Release");
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("parent");
         }
 
         // The refusal happens before anything is removed: both rows, and the parent's modules, survive.
@@ -225,11 +230,36 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task HardDeleteAsync_refuses_a_release_that_is_not_soft_deleted()
+    {
+        // The manage page only offers a permanent delete after a soft delete; the
+        // service holds the same order for a POST that skips the page.
+        var id = await SeedReleaseAsync(label: "Still Live");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "Still Live");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().Equal(new Dictionary<string, string>
+                {
+                    ["Release"] = "Soft delete this release first. You can permanently delete it once it is soft-deleted.",
+                });
+        }
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == id);
+        release.DeletedAt.Should().BeNull("a refused hard delete leaves the release live");
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == id)).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task HardDeleteAsync_refuses_when_confirm_label_does_not_match()
     {
         var id = await SeedReleaseAsync(label: "Exactly This");
         await using var ctx = _db.NewContext();
-        var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "wrong");
+        var svc = NewManagement(ctx);
+        await svc.SoftDeleteAsync(id);
+        var act = async () => await svc.HardDeleteAsync(id, confirmLabel: "wrong");
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("ConfirmLabel");
 

@@ -149,6 +149,7 @@ public sealed class FileContentDeduplicationTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             var mgmt = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
+            await mgmt.SoftDeleteAsync(releaseId);
             await mgmt.HardDeleteAsync(releaseId, "to purge");
         }
 
@@ -168,6 +169,7 @@ public sealed class FileContentDeduplicationTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             var mgmt = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
+            await mgmt.SoftDeleteAsync(purge);
             await mgmt.HardDeleteAsync(purge, "purge");
         }
 
