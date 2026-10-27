@@ -176,7 +176,7 @@ public sealed class ArtifactReleaseImporter
                 (int replacementId, long jobRowId) begun;
                 await using (var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false))
                 {
-                    await _management.SoftDeleteAsync(existing.Id, ct).ConfigureAwait(false);
+                    await _management.SupersedeAsync(existing.Id, ct).ConfigureAwait(false);
                     begun = await BeginAsync(preview, ct).ConfigureAwait(false);
                     await tx.CommitAsync(ct).ConfigureAwait(false);
                 }
@@ -238,7 +238,7 @@ public sealed class ArtifactReleaseImporter
             var previewVersion = ParseMajorMinor(BcArtifactIndex.ParseDedupKey(preview.DedupKey));
             if (previewVersion is null || previewVersion > newestShipped) continue;
 
-            await _management.SoftDeleteAsync(preview.Id, ct).ConfigureAwait(false);
+            await _management.SupersedeAsync(preview.Id, ct).ConfigureAwait(false);
             retired++;
             _logger.LogInformation(
                 "Retired preview release {ReleaseId} ({Label}): {Shipped} has shipped for {Country}.",
@@ -269,7 +269,7 @@ public sealed class ArtifactReleaseImporter
             .ToListAsync(ct).ConfigureAwait(false);
         foreach (var other in others)
         {
-            await _management.SoftDeleteAsync(other.Id, ct).ConfigureAwait(false);
+            await _management.SupersedeAsync(other.Id, ct).ConfigureAwait(false);
             _logger.LogInformation(
                 "Retired preview release {ReleaseId} ({Label}): the insider channel now offers {MajorMinor} for major {Major}.",
                 other.Id, other.Label, preview.MajorMinor, major.Value);

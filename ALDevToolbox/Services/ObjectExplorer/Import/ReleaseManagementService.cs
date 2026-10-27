@@ -1,4 +1,5 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
@@ -14,28 +15,51 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// row via the FK relationships set up in PR 1; it's the path admins use
 /// when storage actually needs reclaiming.
 ///
-/// All operations require an Admin user in scope (gated at the endpoint
+/// All operations require an Admin or Editor in scope (gated at the endpoint
 /// layer) and are scoped to <see cref="IOrganizationContext.CurrentOrganizationId"/>
-/// via the query filter on <see cref="AppDbContext"/>.
+/// via the query filter on <see cref="AppDbContext"/>. The four admin writes also
+/// pass the release through <see cref="ProjectAccess.IsReleaseVisibleAsync"/>, so a
+/// Private solution's build releases answer "not found" to someone outside its
+/// teams, the same as the reads (<c>.design/teams-and-visibility.md</c>).
 /// </summary>
 public class ReleaseManagementService
 {
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
+    private readonly ProjectAccess _access;
     private readonly ILogger<ReleaseManagementService> _logger;
 
     public ReleaseManagementService(
         AppDbContext db,
         IOrganizationContext orgContext,
+        ProjectAccess access,
         ILogger<ReleaseManagementService> logger)
     {
         _db = db;
         _orgContext = orgContext;
+        _access = access;
         _logger = logger;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; ReleaseManagementService called outside an authenticated request.");
+
+    /// <summary>
+    /// The tracked release behind an admin write, or the not-found error when the
+    /// org filter or the solution-visibility fence hides it. Hidden answers exactly
+    /// like absent, so the error confirms nothing about another team's release.
+    /// </summary>
+    private async Task<OeRelease> LoadVisibleAsync(int releaseId, CancellationToken ct)
+    {
+        RequireOrganizationId();
+        var release = await _db.OeReleases
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
+        if (release is null || !await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false))
+        {
+            throw NotFound(releaseId);
+        }
+        return release;
+    }
 
     /// <summary>
     /// Sets <c>deleted_at</c> to now. Reversible via <see cref="RestoreAsync"/>.
@@ -44,11 +68,28 @@ public class ReleaseManagementService
     /// </summary>
     public async Task SoftDeleteAsync(int releaseId, CancellationToken ct = default)
     {
+        var release = await LoadVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        await SoftDeleteCoreAsync(release, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The importer's soft-delete, for a Microsoft artifact release it is replacing
+    /// or retiring. Skips the solution-visibility fence on purpose: no solution owns
+    /// such a release, and import work, which also runs in schedulers with nobody
+    /// signed in, is never held back by a view gate (<c>.design/teams-and-visibility.md</c>,
+    /// "Not gated").
+    /// </summary>
+    public async Task SupersedeAsync(int releaseId, CancellationToken ct = default)
+    {
         RequireOrganizationId();
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
             ?? throw NotFound(releaseId);
+        await SoftDeleteCoreAsync(release, ct).ConfigureAwait(false);
+    }
 
+    private async Task SoftDeleteCoreAsync(OeRelease release, CancellationToken ct)
+    {
         if (release.DeletedAt is not null)
         {
             // Idempotent: already soft-deleted is a no-op.
@@ -67,10 +108,7 @@ public class ReleaseManagementService
     /// </summary>
     public async Task RestoreAsync(int releaseId, CancellationToken ct = default)
     {
-        RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw NotFound(releaseId);
+        var release = await LoadVisibleAsync(releaseId, ct).ConfigureAwait(false);
 
         if (release.DeletedAt is null) return;
 
@@ -114,10 +152,7 @@ public class ReleaseManagementService
     public async Task UpdateMetadataAsync(
         int releaseId, string? publisher, string? projectName, CancellationToken ct = default)
     {
-        RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw NotFound(releaseId);
+        var release = await LoadVisibleAsync(releaseId, ct).ConfigureAwait(false);
 
         release.Publisher = NullIfBlank(publisher);
         if (release.Kind == "project")
@@ -147,10 +182,7 @@ public class ReleaseManagementService
     /// </summary>
     public async Task HardDeleteAsync(int releaseId, string confirmLabel, CancellationToken ct = default)
     {
-        RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw NotFound(releaseId);
+        var release = await LoadVisibleAsync(releaseId, ct).ConfigureAwait(false);
 
         if (!string.Equals(confirmLabel?.Trim(), release.Label, StringComparison.Ordinal))
         {

@@ -450,7 +450,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance, ingests: ingests);
         var management = new ReleaseManagementService(
-            ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+            ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
         var downloads = new DvdDownloadService(
             new ThrowingHttpClientFactory(),
             _db.NewSystemSettingsService(ctx),

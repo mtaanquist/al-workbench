@@ -1021,7 +1021,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
             _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance);
         return new ProjectBuildImporter(
-            importer, new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance),
+            importer, new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance),
             queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance);
     }

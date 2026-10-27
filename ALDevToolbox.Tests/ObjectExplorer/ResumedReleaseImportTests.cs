@@ -158,7 +158,9 @@ public sealed class ResumedReleaseImportTests : IDisposable
             services.AddScoped(sp => test.NewImporter(sp.GetRequiredService<Data.AppDbContext>()));
             services.AddScoped(sp => new PersistedImportJobs(sp.GetRequiredService<Data.AppDbContext>(), TimeProvider.System));
             services.AddScoped(sp => new ReleaseManagementService(
-                sp.GetRequiredService<Data.AppDbContext>(), test._db.OrgContext, NullLogger<ReleaseManagementService>.Instance));
+                sp.GetRequiredService<Data.AppDbContext>(), test._db.OrgContext,
+                new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(sp.GetRequiredService<Data.AppDbContext>(), test._db.OrgContext),
+                NullLogger<ReleaseManagementService>.Instance));
             return services.BuildServiceProvider();
         }
     }

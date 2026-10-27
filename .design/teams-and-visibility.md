@@ -357,6 +357,19 @@ all gated as of slice 3:
   gated in slice 2, so each handler catches `ProjectAccessDeniedException` and
   answers its existing 404 rather than letting a 500 escape.
 
+**Release-id writes** (#1430). `ReleaseManagementService`'s four admin writes —
+`SoftDeleteAsync`, `RestoreAsync`, `UpdateMetadataAsync`, `HardDeleteAsync`, behind
+the `/admin/object-explorer/{id}/…` endpoints — check `IsReleaseVisibleAsync` after
+the org-filtered load. Admin and Editor are the roles that reach them, so the rule is
+the read rule, not a stricter one: an org Admin and a SiteAdmin bypass it, the owner
+and the assigned teams' members pass, and anyone else gets the same "Release {id} not
+found in this organisation." an unknown id gets, so the refusal confirms nothing. The
+release manage page already reads through the gated `GetReleaseAsync`, so it shows
+nothing to act on in the first place. The importer's own soft-delete
+(`SupersedeAsync`, used by `ArtifactReleaseImporter` to replace or retire a Microsoft
+artifact release) is deliberately not gated, under the worker rule below: no project
+owns such a release, and the sweep runs with nobody signed in.
+
 **MCP** (`Services/Mcp/Tools/`, per the parity guide in `PROJECT.md`), gated as of
 slice 3. Each tool class has exactly one id-resolution choke point, which is where
 its gate lives:

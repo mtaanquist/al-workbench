@@ -58,7 +58,7 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance);
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
-        var management = new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+        var management = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
         return new ArtifactReleaseImporter(
             artifacts, importer, queue, persistedJobs, management, ctx, _db.OrgContext, _clock,
             NullLogger<ArtifactReleaseImporter>.Instance);

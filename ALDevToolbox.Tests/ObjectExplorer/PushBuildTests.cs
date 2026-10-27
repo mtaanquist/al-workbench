@@ -571,6 +571,7 @@ public sealed class PushBuildTests : IDisposable
         services.AddScoped<ProjectAccess>();
         services.AddScoped(sp => new ReleaseManagementService(
             sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>()),
             NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         services.AddScoped(sp => new UserRepositoryTokenService(

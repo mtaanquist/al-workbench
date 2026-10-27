@@ -32,7 +32,7 @@ public sealed class ReleaseManagementServiceTests : IDisposable
             NullLogger<ReleaseImportService>.Instance);
 
     private ReleaseManagementService NewManagement(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
 
     private async Task<int> SeedReleaseAsync(string label = "Test Release", int? parentId = null, string kind = "first_party")
     {
@@ -208,13 +208,20 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     public async Task HardDeleteAsync_refuses_when_another_release_has_this_one_as_parent()
     {
         var parentId = await SeedReleaseAsync(label: "Parent");
-        await SeedReleaseAsync(label: "Customer X", parentId: parentId, kind: "project");
+        var childId = await SeedReleaseAsync(label: "Customer X", parentId: parentId, kind: "project");
 
-        await using var ctx = _db.NewContext();
-        var act = async () => await NewManagement(ctx).HardDeleteAsync(parentId, confirmLabel: "Parent");
+        await using (var ctx = _db.NewContext())
+        {
+            var act = async () => await NewManagement(ctx).HardDeleteAsync(parentId, confirmLabel: "Parent");
 
-        (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors.Should().ContainKey("Release");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release");
+        }
+
+        // The refusal happens before anything is removed: both rows, and the parent's modules, survive.
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.Id == parentId || r.Id == childId)).Should().Be(2);
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == parentId)).Should().BeTrue();
     }
 
     [Fact]

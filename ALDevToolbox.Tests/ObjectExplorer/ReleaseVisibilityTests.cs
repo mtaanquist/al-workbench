@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -780,6 +781,110 @@ public sealed class ReleaseVisibilityTests : IDisposable
         session.Should().NotBeNull();
         sessions.Get(session!.Token, "user-b").Should().BeNull();
         sessions.Get(session.Token, "user-a").Should().NotBeNull();
+    }
+
+    // ── The admin writes (#1430) ────────────────────────────────────────
+
+    public enum ReleaseWrite { SoftDelete, Restore, UpdateMetadata, HardDelete }
+
+    public static TheoryData<ReleaseWrite> AllWrites => new()
+    {
+        ReleaseWrite.SoftDelete, ReleaseWrite.Restore, ReleaseWrite.UpdateMetadata, ReleaseWrite.HardDelete,
+    };
+
+    public static TheoryData<ReleaseWrite, int> AllWritesForAllowedUsers
+    {
+        get
+        {
+            var data = new TheoryData<ReleaseWrite, int>();
+            foreach (var write in Enum.GetValues<ReleaseWrite>())
+            {
+                data.Add(write, MemberUserId);
+                data.Add(write, AdminUserId);
+            }
+            return data;
+        }
+    }
+
+    private ReleaseManagementService Management(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, Access(ctx), NullLogger<ReleaseManagementService>.Instance);
+
+    /// <summary>
+    /// A Private solution's build release, linked the way a pipeline build links it.
+    /// Seeded already soft-deleted for <see cref="ReleaseWrite.Restore"/> so each
+    /// write has something to change.
+    /// </summary>
+    private async Task<int> SeedPrivateBuildReleaseAsync(ReleaseWrite write, string label)
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var seeded = await SeedReleaseAsync(label);
+        await LinkByBuildAsync(projectId, seeded.ReleaseId);
+        if (write == ReleaseWrite.Restore)
+        {
+            await using var ctx = _db.NewContext();
+            var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
+            release.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+        return seeded.ReleaseId;
+    }
+
+    private async Task RunWriteAsync(ReleaseWrite write, int releaseId, string label)
+    {
+        await using var ctx = _db.NewContext();
+        var management = Management(ctx);
+        switch (write)
+        {
+            case ReleaseWrite.SoftDelete: await management.SoftDeleteAsync(releaseId); break;
+            case ReleaseWrite.Restore: await management.RestoreAsync(releaseId); break;
+            case ReleaseWrite.UpdateMetadata: await management.UpdateMetadataAsync(releaseId, "Renamed A/S", "Renamed"); break;
+            case ReleaseWrite.HardDelete: await management.HardDeleteAsync(releaseId, label); break;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(AllWrites))]
+    public async Task Every_release_write_treats_a_private_projects_release_as_not_found_for_a_non_member(ReleaseWrite write)
+    {
+        const string label = "CRONUS on BC 26.0";
+        var releaseId = await SeedPrivateBuildReleaseAsync(write, label);
+
+        ActAs(OutsiderUserId);
+        var act = () => RunWriteAsync(write, releaseId, label);
+
+        // Word for word what an id that does not exist gets, so the refusal confirms nothing.
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string>
+            {
+                ["Release"] = $"Release {releaseId} not found in this organisation.",
+            });
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == releaseId);
+        release.Should().NotBeNull("a refused hard delete removes nothing");
+        (release!.DeletedAt is not null).Should().Be(write == ReleaseWrite.Restore, "the deleted flag is as seeded");
+        release.Publisher.Should().BeNull("a refused metadata edit changes nothing");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllWritesForAllowedUsers))]
+    public async Task Every_release_write_goes_through_for_a_team_member_and_an_org_Admin(ReleaseWrite write, int userId)
+    {
+        const string label = "CRONUS on BC 26.0";
+        var releaseId = await SeedPrivateBuildReleaseAsync(write, label);
+
+        ActAs(userId);
+        await RunWriteAsync(write, releaseId, label);
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == releaseId);
+        switch (write)
+        {
+            case ReleaseWrite.SoftDelete: release!.DeletedAt.Should().NotBeNull(); break;
+            case ReleaseWrite.Restore: release!.DeletedAt.Should().BeNull(); break;
+            case ReleaseWrite.UpdateMetadata: release!.Publisher.Should().Be("Renamed A/S"); break;
+            case ReleaseWrite.HardDelete: release.Should().BeNull(); break;
+        }
     }
 
     private ReferenceSessionService Sessions(AppDbContext ctx) =>

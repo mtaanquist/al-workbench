@@ -148,7 +148,7 @@ public sealed class FileContentDeduplicationTests : IDisposable
         _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
         await using (var ctx = _db.NewContext())
         {
-            var mgmt = new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+            var mgmt = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
             await mgmt.HardDeleteAsync(releaseId, "to purge");
         }
 
@@ -167,7 +167,7 @@ public sealed class FileContentDeduplicationTests : IDisposable
         _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
         await using (var ctx = _db.NewContext())
         {
-            var mgmt = new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+            var mgmt = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
             await mgmt.HardDeleteAsync(purge, "purge");
         }
 

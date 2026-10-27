@@ -576,6 +576,7 @@ public sealed class PreviewCheckTests : IDisposable
         services.AddScoped<PreviewCheckService>();
         services.AddScoped(sp => new ReleaseManagementService(
             sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>()),
             NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         // The importer's credential check, which a preview check never consults.
