@@ -1,13 +1,16 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -20,7 +23,9 @@ namespace ALDevToolbox.Tests.Mcp;
 /// here is that the filters actually ask them: a switched-off tool is missing from
 /// <c>tools/list</c> and refused by name on <c>tools/call</c>, a personal access
 /// token is refused for a writing tool whose area the organisation marked for
-/// step-up, and a tool nobody marked still reaches the tool.
+/// step-up, an assistant connected through the permission screen gets through
+/// only when that approval was made with a second factor, and a tool nobody
+/// marked still reaches the tool.
 /// </summary>
 [Collection(EndpointFactoryCollection.Name)]
 public sealed class McpRequestFilterTests : IDisposable
@@ -120,6 +125,52 @@ public sealed class McpRequestFilterTests : IDisposable
             .Should().BeFalse(doc.RootElement.GetRawText());
     }
 
+    [Fact]
+    public async Task An_assistant_approved_without_a_second_factor_is_refused_for_a_writing_tool_marked_for_step_up()
+    {
+        await EnableMcpAsync();
+        using var factory = new EndpointFactory(_db);
+        var (_, accessToken) = await ConnectAssistantAsync(factory);
+        // Marked after the approval, the case the check exists for: the assistant
+        // was approved before the organisation asked for a second factor.
+        await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
+        using var assistant = factory.CreateClient();
+
+        using var doc = await RpcAsync(assistant, accessToken, "tools/call",
+            new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
+
+        var refusal = Refusal(doc);
+        refusal.Should().Contain("Approve this assistant again");
+        refusal.Should().NotContain("personal access token", "an OAuth token is not a PAT");
+    }
+
+    [Fact]
+    public async Task An_assistant_approved_with_a_second_factor_reaches_a_writing_tool_marked_for_step_up()
+    {
+        await EnableMcpAsync();
+        using var factory = new EndpointFactory(_db);
+        var (clientId, accessToken) = await ConnectAssistantAsync(factory);
+        // Stands in for approving from a session with a recent second factor,
+        // which is what the authorize endpoint stamps on the consent.
+        await using (var ctx = _db.NewContext())
+        {
+            var consent = await ctx.OAuthConsents.IgnoreQueryFilters().SingleAsync(c => c.ClientId == clientId);
+            consent.StrongAuthAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+        await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
+        using var assistant = factory.CreateClient();
+
+        using var doc = await RpcAsync(assistant, accessToken, "tools/call",
+            new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
+
+        // The tool itself answers (no such build or pipeline); what matters is that
+        // the step-up filter did not refuse it first.
+        var reply = ReplyText(doc);
+        reply.Should().NotBeEmpty(doc.RootElement.GetRawText());
+        reply.Should().NotContain("confirm it's them");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     /// <summary>
@@ -127,14 +178,14 @@ public sealed class McpRequestFilterTests : IDisposable
     /// (<c>McpAcceptCompatibility</c>) hands back the SDK's reply unwrapped from
     /// its event stream.
     /// </summary>
-    private static async Task<JsonDocument> RpcAsync(HttpClient client, string pat, string method, object? parameters)
+    private static async Task<JsonDocument> RpcAsync(HttpClient client, string bearer, string method, object? parameters)
     {
         var payload = JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, method, @params = parameters ?? new { } });
         using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
         {
             Content = new StringContent(payload, Encoding.UTF8, "application/json"),
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", pat);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
         using var response = await client.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
@@ -227,4 +278,96 @@ public sealed class McpRequestFilterTests : IDisposable
         var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, NullLogger<PersonalAccessTokenService>.Instance);
         return (await svc.IssueAsync(user.Id, user.OrganizationId, "test", expiresAt: null)).Plaintext;
     }
+
+    private const string RedirectUri = "http://127.0.0.1:41999/callback";
+
+    /// <summary>
+    /// Connects an assistant the way a real one does: an admin signs in with a
+    /// password (no second factor), registers a client, approves it on the
+    /// permission screen and the client redeems the code. Returns the client id
+    /// and the access token. Run before anything is marked for step-up, or the
+    /// permission screen itself asks for a second factor.
+    /// </summary>
+    private async Task<(string ClientId, string AccessToken)> ConnectAssistantAsync(EndpointFactory factory)
+    {
+        const string password = "correct horse battery staple";
+        var email = $"mcp-oauth-{Guid.NewGuid():N}@cronus.example";
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(new Domain.Entities.User
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Email = email,
+                DisplayName = "MCP OAuth Tester",
+                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(password),
+                Role = Domain.Entities.UserRole.Admin,
+                Status = Domain.Entities.UserStatus.Active,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var browser = factory.CreateClient();
+        using var loginPage = await browser.GetAsync("/login");
+        using var login = await browser.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["Email"] = email,
+            ["Password"] = password,
+            ["__RequestVerificationToken"] = AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()),
+        }));
+        login.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        login.Headers.Location!.OriginalString.Should().NotContain("err=");
+
+        var registration = JsonSerializer.Serialize(new { redirect_uris = new[] { RedirectUri }, client_name = "CRONUS assistant" });
+        using var registered = await browser.PostAsync("/oauth/register",
+            new StringContent(registration, Encoding.UTF8, "application/json"));
+        registered.StatusCode.Should().Be(HttpStatusCode.Created);
+        using var registeredDoc = JsonDocument.Parse(await registered.Content.ReadAsStringAsync());
+        var clientId = registeredDoc.RootElement.GetProperty("client_id").GetString()!;
+
+        var verifier = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var authorize = new Dictionary<string, string?>
+        {
+            ["client_id"] = clientId,
+            ["redirect_uri"] = RedirectUri,
+            ["response_type"] = "code",
+            ["scope"] = "mcp",
+            ["code_challenge"] = Base64Url(SHA256.HashData(Encoding.ASCII.GetBytes(verifier))),
+            ["code_challenge_method"] = "S256",
+            ["state"] = "cronus",
+        };
+        using var consentRedirect = await browser.GetAsync(QueryHelpers.AddQueryString("/oauth/authorize", authorize));
+        consentRedirect.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        using var consentPage = await browser.GetAsync(consentRedirect.Headers.Location!);
+        consentPage.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var approval = new Dictionary<string, string>(authorize.Select(kv => KeyValuePair.Create(kv.Key, kv.Value!)))
+        {
+            ["decision"] = "allow",
+            ["__RequestVerificationToken"] = AntiforgeryToken(await consentPage.Content.ReadAsStringAsync()),
+        };
+        using var approved = await browser.PostAsync("/oauth/authorize", new FormUrlEncodedContent(approval));
+        approved.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        var code = QueryHelpers.ParseQuery(approved.Headers.Location!.Query)["code"].ToString();
+        code.Should().NotBeEmpty();
+
+        using var exchanged = await browser.PostAsync("/oauth/token", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "authorization_code",
+            ["code"] = code,
+            ["redirect_uri"] = RedirectUri,
+            ["client_id"] = clientId,
+            ["code_verifier"] = verifier,
+        }));
+        var exchangedBody = await exchanged.Content.ReadAsStringAsync();
+        exchanged.StatusCode.Should().Be(HttpStatusCode.OK, exchangedBody);
+        using var tokenDoc = JsonDocument.Parse(exchangedBody);
+        return (clientId, tokenDoc.RootElement.GetProperty("access_token").GetString()!);
+    }
+
+    private static string AntiforgeryToken(string html) =>
+        Regex.Match(html, """name="__RequestVerificationToken"[^>]*value="([^"]+)""").Groups[1].Value;
+
+    private static string Base64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
