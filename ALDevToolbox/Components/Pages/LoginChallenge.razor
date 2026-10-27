@@ -264,6 +264,10 @@ else
 
     private string ErrorText(string err) => err switch
     {
+        // After a few wrong tries an email code stops working, so "try again"
+        // alone would be a dead end; a new code is what gets the person in.
+        "invalid" when _method == "email" =>
+            "That code wasn't valid. Use the code from the latest email, or email yourself a new one.",
         "invalid" => "That code wasn't valid. Try again.",
         "rate-limited" => "Too many codes requested. Wait a few minutes before asking for another.",
         "too-many-attempts" => "Too many incorrect attempts. Wait a few minutes and try again.",
