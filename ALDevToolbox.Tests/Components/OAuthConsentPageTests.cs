@@ -40,6 +40,36 @@ public sealed class OAuthConsentPageTests : IDisposable
             .Select(s => s.TextContent).Should().Equal("Use AL Workbench tools", "Stay signed in");
     }
 
+    /// <summary>
+    /// The page has no wording for a scope it does not know and refuses to render one,
+    /// so a scope added to the allow-list without wording fails here rather than on the
+    /// page a person is about to approve.
+    /// </summary>
+    [Fact]
+    public async Task Every_scope_this_site_grants_has_wording_on_the_consent_page()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignedInAsync(factory);
+        var scopes = Uri.EscapeDataString(string.Join(' ', ALDevToolbox.Endpoints.OAuthEndpoints.SupportedScopes));
+
+        using var page = await client.GetAsync(
+            "/oauth/consent?client_id=claude&redirect_uri=http%3A%2F%2F127.0.0.1%3A41999%2Fcallback&scope=" + scopes,
+            TestContext.Current.CancellationToken);
+
+        page.StatusCode.Should().Be(HttpStatusCode.OK, "a scope without wording makes the page fail");
+        var html = await page.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+        var listed = new HtmlParser().ParseDocument(html).QuerySelectorAll(".check-list .check").ToList();
+        listed.Should().HaveCount(ALDevToolbox.Endpoints.OAuthEndpoints.SupportedScopes.Length);
+        foreach (var item in listed)
+        {
+            var name = item.QuerySelector("strong")!.TextContent;
+            name.Should().NotBeNullOrWhiteSpace();
+            ALDevToolbox.Endpoints.OAuthEndpoints.SupportedScopes.Should().NotContain(name,
+                "the protocol name means nothing to the person approving");
+            item.TextContent.Should().MatchRegex(@" - \S", "each permission says what it lets the assistant do");
+        }
+    }
+
     private static string TokenIn(string html)
     {
         var match = Regex.Match(html, """name="__RequestVerificationToken"[^>]*value="([^"]+)""");
