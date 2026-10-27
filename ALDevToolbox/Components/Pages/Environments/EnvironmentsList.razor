@@ -7,6 +7,7 @@
 @inject ILogger<EnvironmentsList> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
@@ -728,7 +729,7 @@
     // few minutes rather than leaving a stale table with no way forward.
     private static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan PollFor = TimeSpan.FromMinutes(3);
-    private System.Threading.Timer? _poll;
+    private ITimer? _poll;
     private DateTime _pollUntilUtc;
 
     /// <summary>Whether the re-read timer is running, for the tests of leaving the page.</summary>
@@ -740,8 +741,8 @@
         // A request that comes back after the page has gone must not leave a timer behind.
         if (_calls.IsGone) return;
         _poll?.Dispose();
-        _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
+        _pollUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(PollFor);
+        _poll = Clock.CreateTimer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
     /// <summary>One re-read. Internal so a test can drive it without waiting on the timer.</summary>
@@ -761,7 +762,7 @@
             }
             if (_bulkWindowDialog?.IsWorking == true) return;
             await LoadAsync(ownScope: true);
-            if (DateTime.UtcNow >= _pollUntilUtc)
+            if (Clock.GetUtcNow().UtcDateTime >= _pollUntilUtc)
             {
                 _poll?.Dispose();
                 _poll = null;
@@ -801,7 +802,7 @@
 
     private bool _autoRefresh;
     private bool _autoFromAddressDone;
-    private System.Threading.Timer? _autoTimer;
+    private ITimer? _autoTimer;
     private DateTime _autoUntilUtc;
 
     // After a render rather than in OnInitializedAsync: a prerender must never start a
@@ -837,8 +838,8 @@
         if (_calls.IsGone) return;
         _autoTimer?.Dispose();
         _autoRefresh = true;
-        _autoUntilUtc = DateTime.UtcNow.Add(AutoRefreshFor);
-        _autoTimer = new System.Threading.Timer(
+        _autoUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(AutoRefreshFor);
+        _autoTimer = Clock.CreateTimer(
             _ => _ = _calls.Track(InvokeAsync(async () =>
             {
                 if (_calls.IsGone)
@@ -867,7 +868,7 @@
     internal async Task AutoRefreshTickAsync()
     {
         if (!_autoRefresh) return;
-        if (DateTime.UtcNow >= _autoUntilUtc)
+        if (Clock.GetUtcNow().UtcDateTime >= _autoUntilUtc)
         {
             StopAutoRefresh();
             _refreshNote = "Stopped refreshing every 5 minutes after two hours. Tick the box again to carry on.";
@@ -1063,13 +1064,13 @@
     /// being recoverable is the bold line above; an unknown one is said plainly there
     /// rather than left as a dash the reader has to interpret as "no deadline".)
     /// </summary>
-    private static string RecoverWindow(UpgradeFleetRow row)
+    private string RecoverWindow(UpgradeFleetRow row)
     {
         if (row.HardDeletePendingOn is not { } gone)
         {
             return "Deleted";
         }
-        return (gone.Date - DateTime.UtcNow.Date).Days switch
+        return (gone.Date - Clock.GetUtcNow().UtcDateTime.Date).Days switch
         {
             < 0 => "Past the date Business Central gave",
             0 => "Today is the last day to bring it back",
@@ -1099,7 +1100,7 @@
         // the warning on for as long as one environment stays unreachable, and a
         // banner that never clears is one people stop seeing.
         var anyStale = rows.Any(r =>
-            r.EnvironmentFetchedAt is { } at && DateTime.UtcNow - at > StaleAfter);
+            r.EnvironmentFetchedAt is { } at && Clock.GetUtcNow().UtcDateTime - at > StaleAfter);
         if (anyStale) classes += "freshness--stale";
         if (_refreshing) classes += " is-refreshing";
         return classes.Trim();

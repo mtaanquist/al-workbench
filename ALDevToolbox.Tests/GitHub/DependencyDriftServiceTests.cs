@@ -186,8 +186,12 @@ public sealed class DependencyDriftServiceTests : IDisposable
         // Another import finishing at the same time (#1137): each replaces the whole set.
         using (await DependencyDriftService.ScanGate.EnterAsync(TestDb.DefaultOrgId, TestContext.Current.CancellationToken))
         {
+            // The gate is process-wide and every test database's organisation has this id,
+            // so count from whoever else is already queued for it.
+            var queued = DependencyDriftService.ScanGate.WaitingCount(TestDb.DefaultOrgId);
             scanning = service.ScanForReleaseAsync(releaseId, TestContext.Current.CancellationToken);
-            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            SpinWait.SpinUntil(() => DependencyDriftService.ScanGate.WaitingCount(TestDb.DefaultOrgId) > queued,
+                TimeSpan.FromSeconds(30)).Should().BeTrue("the scan has to reach the gate and wait there");
             scanning.IsCompleted.Should().BeFalse("the organisation's findings are being replaced");
             api.Calls.Should().BeEmpty("nothing is read until the other scan is done");
         }

@@ -37,6 +37,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
     private readonly BunitContext _ctx = new();
     private readonly BcPanelCache _panels = new(TimeProvider.System);
     private readonly SessionsAdminClient _admin = new();
+    private readonly SwitchableClock _clock = new();
     private const int OwnerUserId = 9870;
     private const int ColleagueUserId = 9871;
     private static readonly Guid TenantId = Guid.Parse("11111111-2222-3333-4444-555555555555");
@@ -63,7 +64,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             new TokenFactory(), NullLogger<BcTokenService>.Instance));
         _ctx.Services.AddSingleton(_db.DataProtectionProvider);
         _ctx.Services.AddSingleton(_panels);
-        _ctx.Services.AddSingleton(TimeProvider.System);
+        _ctx.Services.AddSingleton<TimeProvider>(_clock);
         _ctx.Services.AddSingleton(new EnvironmentRefreshQueue());
         // Scheduled installs lists the deployment pipelines' bookings too (#1097).
         _ctx.Services.AddScoped<IDeliveryTokenSource>(sp => sp.GetRequiredService<ProjectConnectionService>());
@@ -111,6 +112,20 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _db.WaitForQueriesToSettle();
         await _ctx.DisposeAsync();
         _db.Dispose();
+    }
+
+    /// <summary>
+    /// The real clock until a test puts one of its own in, which it can do after the
+    /// services have been built: the seeding helpers build them.
+    /// </summary>
+    private sealed class SwitchableClock : TimeProvider
+    {
+        public TimeProvider Inner { get; set; } = System;
+
+        public override DateTimeOffset GetUtcNow() => Inner.GetUtcNow();
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            Inner.CreateTimer(callback, state, dueTime, period);
     }
 
     /// <summary>
@@ -1250,11 +1265,28 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         [
             Session(47, "ola@cronus.example", running: TimeSpan.FromMinutes(62), currentObject: "Post Sales Documents"),
         ];
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _clock.Inner = clock;
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
             .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
+
+        // The control: with nothing asked, one tick of the test's clock reads again. So the
+        // live timer runs on that clock, and the frozen reads below are the confirm's doing.
+        cut.WaitForAssertion(() => cut.Find(".data-table__actions button"));
+        SpinWait.SpinUntil(() => clock.PendingTimers > 0, TimeSpan.FromSeconds(5)).Should().BeTrue("the list keeps itself current");
+        var readsBeforeTick = Volatile.Read(ref _admin.Reads);
+        var rendersBeforeTick = cut.RenderCount;
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        cut.WaitForAssertion(() =>
+        {
+            Volatile.Read(ref _admin.Reads).Should().Be(readsBeforeTick + 1);
+            // Drawn as it started and again once it finished, so the read is over before
+            // the confirm opens and cannot be what holds the later ticks back.
+            cut.RenderCount.Should().BeGreaterThanOrEqualTo(rendersBeforeTick + 2);
+        }, TimeSpan.FromSeconds(5));
 
         cut.WaitForAssertion(() => cut.Find(".data-table__actions button").Click());
 
@@ -1270,10 +1302,16 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         });
 
         // While the question is on screen the list is frozen: the row named in it must
-        // still be the row the button ends.
+        // still be the row the button ends. The ticks come from the test's clock, so five
+        // of them certainly fire (#1439), and each one has had its turn on the renderer
+        // once the dispatcher has nothing ahead of an empty call. A tick that read again
+        // would have redrawn the page on the way, before its read went out.
         var readsWhileAsking = _admin.Reads;
-        await Task.Delay(300);
-        _admin.Reads.Should().Be(readsWhileAsking, "a tick must not move the row somebody is about to end");
+        var rendersWhileAsking = cut.RenderCount;
+        for (var tick = 0; tick < 5; tick++) clock.Advance(TimeSpan.FromMilliseconds(60));
+        await cut.InvokeAsync(() => { });
+        cut.RenderCount.Should().Be(rendersWhileAsking, "a tick must not move the row somebody is about to end");
+        _admin.Reads.Should().Be(readsWhileAsking);
 
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions button")
             .Single(b => b.TextContent.Contains("End the session")).Click());

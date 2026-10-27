@@ -112,8 +112,12 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         // Another build of the same repository between finding the release and creating it (#1137).
         using (await GitHubReleaseService.PublishGate.EnterAsync(repositoryId, TestContext.Current.CancellationToken))
         {
+            // The gate is process-wide and every test database numbers its repositories
+            // from one, so count from whoever else is already queued for this id.
+            var queued = GitHubReleaseService.PublishGate.WaitingCount(repositoryId);
             publishing = NewService(ctx, api).PublishBuildAsync(seed.BuildId);
-            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            SpinWait.SpinUntil(() => GitHubReleaseService.PublishGate.WaitingCount(repositoryId) > queued,
+                TimeSpan.FromSeconds(30)).Should().BeTrue("the publish has to reach the gate and wait there");
             publishing.IsCompleted.Should().BeFalse("the repository is taken");
             api.Calls.Should().NotContain(c => c.Contains("/releases"), "nothing is read or written on GitHub until it is free");
         }

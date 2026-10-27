@@ -1,6 +1,7 @@
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Services.ObjectExplorer.Bc
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@inject TimeProvider Clock
 
 @*
     The Upgrades page's Open view, populated (UpgradesListBody.dc.html, view="open"):
@@ -175,7 +176,7 @@
     // ── The planned slot, in words ──────────────────────────────────────
 
     private UpgradesListWording.SlotDay Day(DateTime slot) =>
-        UpgradesListWording.DayOf(Zone.ToDisplay(slot), Zone.ToDisplay(DateTime.UtcNow));
+        UpgradesListWording.DayOf(Zone.ToDisplay(slot), Zone.ToDisplay(Clock.GetUtcNow().UtcDateTime));
 
     /// <summary>
     /// Tonight and last night are the two a morning-after reader is looking for, so they are
@@ -197,6 +198,6 @@
 
     /// <summary>Under a named day, the date; under a date, how far away it is.</summary>
     private RenderFragment SlotSub(DateTime slot) => Day(slot) == UpgradesListWording.SlotDay.Other
-        ? @<text>@UpgradesListWording.Distance(Zone.ToDisplay(slot), Zone.ToDisplay(DateTime.UtcNow))</text>
+        ? @<text>@UpgradesListWording.Distance(Zone.ToDisplay(slot), Zone.ToDisplay(Clock.GetUtcNow().UtcDateTime))</text>
         : @<Timestamp Value="@slot" Format="ddd d MMM" />;
 }

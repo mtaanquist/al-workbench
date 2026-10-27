@@ -12,6 +12,8 @@
 @inject ILogger<ReleasePipelineDetail> Log
 @inject IServiceScopeFactory ScopeFactory
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@* Named Time, not Clock as elsewhere: this page already has a Clock(DateTime) formatting helper. *@
+@inject TimeProvider Time
 @using System.Globalization
 @using System.Text.RegularExpressions
 @using Microsoft.Extensions.DependencyInjection
@@ -1148,7 +1150,7 @@
     {
         var env = _rp?.ProjectEnvironment;
         if (env is null || !UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd)) return null;
-        if (UpdateWindow.IsWithin(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays)) return null;
+        if (UpdateWindow.IsWithin(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, Time.GetUtcNow().UtcDateTime, env.UpdateWindowDays)) return null;
         return $"{EnvName}'s delivery window ({DeliveryWindow}) isn't open now. Deploying again installs outside the hours agreed with the customer, and the deployment history will record that.";
     }
 
@@ -1181,8 +1183,8 @@
         if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
             && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
         {
-            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays)
-                <= DateTime.UtcNow.AddMinutes(1);
+            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, Time.GetUtcNow().UtcDateTime, env.UpdateWindowDays)
+                <= Time.GetUtcNow().UtcDateTime.AddMinutes(1);
         }
         return !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_rp?.DeploymentSchedule));
     }
@@ -1194,8 +1196,8 @@
         if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
             && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
         {
-            var opening = UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays);
-            return opening <= DateTime.UtcNow.AddMinutes(1)
+            var opening = UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, Time.GetUtcNow().UtcDateTime, env.UpdateWindowDays);
+            return opening <= Time.GetUtcNow().UtcDateTime.AddMinutes(1)
                 ? "right away, while the delivery window is open"
                 : $"in the next delivery window ({WhenPhrase(opening)})";
         }
@@ -1693,10 +1695,10 @@
     private static DateTime? StartOf(DeliveryHistoryRow d) => d.ClaimedAt ?? d.StartedAt;
 
 
-    private static string? Took(DeliveryHistoryRow d) =>
+    private string? Took(DeliveryHistoryRow d) =>
         d.FinishedAt is { } end && (StartOf(d) ?? (d.Status is ProjectDeliveryStatus.Cancelled or ProjectDeliveryStatus.Dismissed ? null : d.CreatedAt)) is { } start
             ? Duration(end - start)
-            : d.IsActive && StartOf(d) is { } running ? Duration(DateTime.UtcNow - running) : null;
+            : d.IsActive && StartOf(d) is { } running ? Duration(Time.GetUtcNow().UtcDateTime - running) : null;
 
     private static string AppsSummary(DeliveryHistoryRow d)
     {
@@ -2028,7 +2030,7 @@
 
     /// <summary>Whole days between the instant and today, both counted in the display zone.</summary>
     private int DaysFromToday(DateTime utc) =>
-        (Zone.ToDisplay(utc).Date - Zone.ToDisplay(DateTime.UtcNow).Date).Days;
+        (Zone.ToDisplay(utc).Date - Zone.ToDisplay(Time.GetUtcNow().UtcDateTime).Date).Days;
 
     /// <summary>"Today 02:00", "Yesterday 15:02", "Tomorrow 22:00", else "20 Sep 11:40".</summary>
     private string When(DateTime utc, bool seconds = false)
