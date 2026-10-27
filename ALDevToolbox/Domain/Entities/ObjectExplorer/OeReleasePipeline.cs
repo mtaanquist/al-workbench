@@ -145,10 +145,24 @@ public class OeReleasePipeline
     /// pipeline keeps its settings and history but deploys nothing: no deployment can
     /// be made or approved, new builds are not prepared or deployed, and disabling it
     /// sets aside the deployments still waiting, as deleting does. Anyone who may
-    /// manage the solution can disable or enable it; deleting is for admins only (#1131).
+    /// manage the solution can disable or enable it (#1131).
     /// </summary>
     public DateTime? DisabledAt { get; set; }
 
-    /// <summary>Soft-delete marker. Hidden from lists unless restored.</summary>
+    /// <summary>
+    /// When the deployment pipeline was archived; null while it is not. Only a disabled
+    /// pipeline can be archived, and it stays disabled while archived, so every rule that
+    /// stops a disabled pipeline deploying covers it too. Archiving takes it off the active
+    /// lists, frees its name and stops it holding on to its build pipeline, while its page
+    /// and its deployment history stay reachable. It replaces deleting, which lost that
+    /// history (#1466). Restoring clears this and leaves the pipeline disabled.
+    /// </summary>
+    public DateTime? ArchivedAt { get; set; }
+
+    /// <summary>
+    /// Soft-delete marker. Deployment pipelines are archived rather than deleted now
+    /// (#1466); this is still set on ones deleted before that, and when their solution is
+    /// deleted.
+    /// </summary>
     public DateTime? DeletedAt { get; set; }
 }

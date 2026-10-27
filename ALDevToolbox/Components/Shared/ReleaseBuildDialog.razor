@@ -14,7 +14,8 @@
     (defaults to the latest), pick when (prefilled to the next opening of the target
     environment's delivery window, or now if it has none), confirm a Production target,
     and deploy. A pipeline set to install in the delivery window says so beside the
-    time, and "Now" is the explicit way out of it. "Deploy now" runs immediately; a
+    time, and "Now" is the explicit way out of it. A pipeline that waits for a Business
+    Central update offers "Install right away" for this one deployment instead (#1471). "Deploy now" runs immediately; a
     future time is enqueued by the DeliveryScheduler when due. Picking a time outside the window is allowed but
     recorded. The picker and the window are in the customer's time zone, and say so: the
     window is a time of day agreed with the customer, and booking against it in their
@@ -41,7 +42,7 @@
                 <p>
                     Uploads the build's apps to <b>@_envName</b> in <b>@_customerName</b>'s Business Central@(IsImmediate ? "" : " at the time below").
                     Business Central installs them
-                    <b>@DeliveryModeDisplay.Schedule(BcDeploymentSchedule.ToWire(_deploymentSchedule) ?? _deploymentSchedule).ToLowerInvariant()</b>@(_schemaSyncMode == BcSyncMode.ForceSync ? ", using Force sync (which can drop columns)" : "").
+                    <b>@DeliveryModeDisplay.Schedule(EffectiveSchedule).ToLowerInvariant()</b>@(_schemaSyncMode == BcSyncMode.ForceSync ? ", using Force sync (which can drop columns)" : "").
                 </p>
 
                 @if (_fromReleases && _releases.Count == 0)
@@ -114,6 +115,19 @@
                         <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />@secretWarn</span>
                     }
                 </div>
+
+                @if (PipelineDefers)
+                {
+                    <div class="field">
+                        <label class="@(_installRightAway ? "check is-checked" : "check")">
+                            <input id="rb-right-away" type="checkbox" checked="@_installRightAway" disabled="@_releasing"
+                                   @onchange="e => _installRightAway = (bool)(e.Value ?? false)" />
+                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                            <span>Install right away instead of waiting for the @PipelineScheduleName</span>
+                        </label>
+                        <small class="field__hint">@RightAwayHint</small>
+                    </div>
+                }
 
                 @if (_fromReleases && SelectedReleaseFiles.Count > 0)
                 {
@@ -222,7 +236,34 @@
     /// pipeline does not hand the install to Business Central's next update. Only then do
     /// the people signed in right now matter.
     /// </summary>
-    private bool InstallsNow => IsImmediate && !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_deploymentSchedule));
+    private bool InstallsNow => IsImmediate && !BcDeploymentSchedule.IsDeferred(EffectiveSchedule);
+
+    // Set per deployment: the pipeline waits for a Business Central update, and this one
+    // should install as soon as it arrives instead (#1471).
+    private bool _installRightAway;
+
+    /// <summary>True when the pipeline hands installs to Business Central's next update.</summary>
+    private bool PipelineDefers => BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_deploymentSchedule));
+
+    /// <summary>How this deployment installs: the pipeline's schedule, unless the person chose right away.</summary>
+    private string EffectiveSchedule => _installRightAway && PipelineDefers
+        ? BcDeploymentSchedule.Immediate
+        : BcDeploymentSchedule.ToWire(_deploymentSchedule) ?? _deploymentSchedule;
+
+    private int AppCount => _fromReleases ? SelectedReleaseFiles.Count : SelectedApps.Count;
+
+    /// <summary>"next minor update" or "next major update", for the right-away choice.</summary>
+    private string PipelineScheduleName => DeliveryModeDisplay.Schedule(BcDeploymentSchedule.ToWire(_deploymentSchedule)).ToLowerInvariant();
+
+    /// <summary>
+    /// The line under the right-away choice. Business Central refuses a first install that
+    /// waits for an update, and picks its own order for several apps that wait, so both
+    /// need it; a build with several apps says so while the choice is still off.
+    /// </summary>
+    private string RightAwayHint =>
+        !_installRightAway && AppCount > 1
+            ? $"This {(_fromReleases ? "release" : "build")} has {AppCount} apps. Business Central only installs several apps in the right order when they install right away, so choose this or deploy them one at a time."
+            : $"Needed the first time an app goes to {_envName}. The pipeline keeps waiting for the update for later deployments.";
 
     /// <summary>The "are you sure" about who is online, while it still applies.</summary>
     private string? SessionsQuestion => InstallsNow && SessionsCheckStillApplies ? _sessionsCheck!.Question : null;
@@ -388,6 +429,7 @@
         _isProduction = string.Equals(envType, "Production", StringComparison.OrdinalIgnoreCase);
         _envNameIsProduction = string.Equals(envName, "Production", StringComparison.OrdinalIgnoreCase);
         _deploymentSchedule = deploymentSchedule;
+        _installRightAway = false;
         _schemaSyncMode = schemaSyncMode;
         _builds = builds.ToList();
         _buildChosenForYou = selectedBuildId is { } chosen && _builds.Any(b => b.Id == chosen);
@@ -468,7 +510,8 @@
                 buildId = await GitHubReleases.StageReleaseAsync(_releasePipelineId, _tag);
                 _staging = false;
             }
-            var deliveryId = await Deliveries.ScheduleDeliveryAsync(_releasePipelineId, buildId, ScheduledUtc);
+            var deliveryId = await Deliveries.ScheduleDeliveryAsync(_releasePipelineId, buildId, ScheduledUtc,
+                installRightAway: _installRightAway && PipelineDefers);
             _open = false;
             await OnReleased.InvokeAsync(deliveryId);
         }

@@ -376,6 +376,7 @@ the naming suggested.
 | `schema_sync_mode` | `text` | App Management `syncMode`: `Add` (default, safe) or `ForceSync` (can drop columns — gate behind a confirm). Note the missing space: the retired API spelled it `Force Sync`, so stored values were migrated too. |
 | `prepare_release_on_new_build` | `bool` | #934. Off by default. When on, a new successful build of the source build pipeline **prepares** a release through this pipeline - a `proposed` delivery - and a person approves or dismisses it (see *Prepared releases* below). Nothing is ever approved on its own. Ignored (saved as false) for a pipeline that installs GitHub releases. |
 | `deploy_without_approval` / `deploy_without_approval_by_user_id` | `bool` / `int?` | #1096. Off by default. With the prepare setting on and a sandbox target, a new build is deployed without approval, as that user. See *Deploying to a sandbox without approval*. |
+| `disabled_at` / `archived_at` | `timestamptz?` | #1131 / #1466. A disabled pipeline deploys nothing and its waiting deployments are set aside. Only a disabled pipeline can be **archived**: it stays disabled, leaves the active lists (deployment pipelines list, dashboard, palette, `list_deployment_pipelines`), frees its name, and no longer blocks deleting its build pipeline, while its page and deployment history stay reachable ("Show archived" on the list). Restoring brings it back disabled, refused while another pipeline has its name. Anyone who manages the solution may do either. Archiving replaced deleting a deployment pipeline, which lost its history; `deleted_at` is still set on ones deleted before that and when the solution is deleted. |
 | `restrict_branch` / `allowed_branch` | `bool` / `text?` | Only deploy builds made from `allowed_branch` (null is the repositories' default branch). See *Which branch may reach an environment* below. Ignored (saved off) for a pipeline that installs GitHub releases. |
 | `default_publish_time` | `time?` | **Superseded by the target environment's update window** (§1 → *Update window*) as the schedule prefill, and likely droppable. Keep only as a per-pipeline override when one deployment pipeline must default to a different time than its environment's window. The execution model is unchanged: the real schedule is always a concrete date+time per delivery (`OeProjectDelivery.scheduled_for`, §4) — the window/`default_publish_time` only seed the picker. **As built (CRUD slice):** the column was *not* added — there is no scheduling in the CRUD slice to prefill, and the per-environment update window (phase 3) is the intended source. Add it back only if a per-pipeline override turns out to be needed. |
 
@@ -787,7 +788,16 @@ onboarding copy so nobody discovers it by reading the code.
 ### Deployment schedules, and the two rules around them
 
 `Immediate` installs as soon as BC accepts the upload. The other schedules hand the app to Business
-Central to install later, which changes what a delivery can promise:
+Central to install later, which changes what a delivery can promise.
+`Immediate` is not offered as a *pipeline's* schedule (#1471): installing right away is a choice for
+one deployment, so a new pipeline starts on the delivery window and the service refuses `Immediate`
+for a new pipeline or a change to it. Pipelines saved with it before that keep it until someone picks
+another time. On a delivery-window pipeline, **Now** in the Deploy dialog is that choice. On a pipeline
+that waits for the next minor or major update, Now only moves the upload, so the dialog offers
+**Install right away instead of waiting for the update**: that deployment is sent as `Immediate` and
+the pipeline keeps its schedule. It is what a first install and a build with several apps need.
+
+The other schedules' effects on a delivery:
 
 - **`handed_off`** is a terminal delivery state meaning *BC accepted this and will install it on its
   own schedule*. It is not "succeeded" — we never saw the install happen — and it is not "still

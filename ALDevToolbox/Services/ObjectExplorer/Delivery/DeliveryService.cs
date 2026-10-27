@@ -103,9 +103,16 @@ public sealed class DeliveryService
     /// enqueue when due. Returns the new delivery id. Throws
     /// <see cref="PlanValidationException"/> on a bad request,
     /// <see cref="ProjectAccessDeniedException"/> when not permitted.
+    /// <para>
+    /// <paramref name="installRightAway"/> is the per-deployment way out of a pipeline that
+    /// hands installs to Business Central's next update (#1471): the apps install as soon
+    /// as they arrive, which is also what a first install and a build with several apps
+    /// need. It changes nothing for a pipeline that already installs on arrival.
+    /// </para>
     /// </summary>
-    public Task<int> ScheduleDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, CancellationToken ct = default)
-        => CreateDeliveryAsync(releasePipelineId, projectBuildId, scheduledForUtc, forceSyncOnce: false, ct);
+    public Task<int> ScheduleDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, CancellationToken ct = default,
+        bool installRightAway = false)
+        => CreateDeliveryAsync(releasePipelineId, projectBuildId, scheduledForUtc, forceSyncOnce: false, ct, installRightAway: installRightAway);
 
     /// <summary>
     /// <see cref="ReleaseBuildNowAsync"/> for an agent (the <c>deploy_build</c> MCP tool).
@@ -262,7 +269,7 @@ public sealed class DeliveryService
     internal TimeSpan OpenSessionsTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
     private async Task<int> CreateDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, bool forceSyncOnce, CancellationToken ct,
-        string? parkedLog = null, bool forAgent = false)
+        string? parkedLog = null, bool forAgent = false, bool installRightAway = false)
     {
         var orgId = RequireOrganizationId();
         // Deploying spends the customer's Business Central credential, and it
@@ -272,7 +279,7 @@ public sealed class DeliveryService
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         scheduledForUtc = DateTime.SpecifyKind(scheduledForUtc, DateTimeKind.Utc);
 
-        var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
+        var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct, installRightAway: installRightAway);
         var sandbox = BcEnvironmentTypes.IsSandbox(plan.EnvType);
         if (forAgent && !sandbox
             && !await _db.OrganizationSettings.AsNoTracking()
@@ -366,7 +373,8 @@ public sealed class DeliveryService
     /// <see cref="PlanValidationException"/>; with <paramref name="checkAccess"/> also
     /// <see cref="ProjectAccessDeniedException"/>.
     /// </summary>
-    private async Task<ReleasePlan> ResolveReleaseAsync(int releasePipelineId, int projectBuildId, bool checkAccess, CancellationToken ct, bool checkEnvironmentStatus = true)
+    private async Task<ReleasePlan> ResolveReleaseAsync(int releasePipelineId, int projectBuildId, bool checkAccess, CancellationToken ct, bool checkEnvironmentStatus = true,
+        bool installRightAway = false)
     {
         var rp = await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.Id == releasePipelineId && r.DeletedAt == null)
@@ -517,6 +525,12 @@ public sealed class DeliveryService
             throw Validation("DeploymentSchedule",
                 "This deployment pipeline's install timing is no longer a valid option. Open the deployment pipeline, choose when installs should run, and save it.");
         }
+        // The person deploying chose to install this one right away rather than wait for
+        // the update the pipeline names; the pipeline itself is unchanged.
+        if (installRightAway && BcDeploymentSchedule.IsDeferred(wireSchedule))
+        {
+            wireSchedule = BcDeploymentSchedule.Immediate;
+        }
         if (!BcSyncMode.IsValid(rp.SchemaSyncMode))
         {
             throw Validation("SchemaSyncMode",
@@ -529,12 +543,12 @@ public sealed class DeliveryService
         {
             throw Validation("DeploymentSchedule",
                 $"This build has {artifacts.Count} apps, and Business Central chooses the order it installs them in when they wait for a later update. "
-                + "Set this deployment pipeline to install right away, or deploy the apps one at a time.");
+                + "Choose to install it right away when you deploy it, or deploy the apps one at a time.");
         }
 
         return new ReleasePlan(
             rp.Id, rp.ProjectId, rp.EnvName, rp.EnvType, wireSchedule,
-            BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule), rp.SchemaSyncMode,
+            BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule) && !installRightAway, rp.SchemaSyncMode,
             UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, rp.WindowDays, build.Id, artifacts);
     }
 
@@ -2058,7 +2072,7 @@ public sealed class DeliveryService
             {
                 await FailAsync(delivery, log,
                     $"{string.Join(", ", missing)} isn't installed on {delivery.EnvironmentName} yet, and Business Central only accepts "
-                    + "\"next minor update\" or \"next major update\" for an app that's already there. Install it right away first.", ct);
+                    + "\"next minor update\" or \"next major update\" for an app that's already there. Deploy it again and choose to install it right away.", ct);
                 return;
             }
         }

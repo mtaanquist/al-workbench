@@ -70,6 +70,16 @@ public sealed class ProjectBuildService
     /// </summary>
     private static readonly TimeSpan LocalGitTimeout = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// For a git call that only reads the clone: it carries no credential, so it must not
+    /// prompt or fetch a missing object, and fails with git's own reason instead.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> LocalGitEnv = new Dictionary<string, string>
+    {
+        ["GIT_TERMINAL_PROMPT"] = "0",
+        ["GIT_NO_LAZY_FETCH"] = "1",
+    };
+
     /// <summary><paramref name="raw"/> as a positive number of minutes, else <paramref name="defaultMinutes"/>.</summary>
     internal static TimeSpan MinutesOrDefault(string? raw, int defaultMinutes) =>
         int.TryParse(raw, out var m) && m > 0 ? TimeSpan.FromMinutes(m) : TimeSpan.FromMinutes(defaultMinutes);
@@ -713,6 +723,11 @@ public sealed class ProjectBuildService
                 lines.Add($"{name}: rebuilt, because build #{origin} did not publish it to a GitHub release.");
                 continue;
             }
+            if (app.Repo.CommitSha is null)
+            {
+                lines.Add($"{name}: changed (this build could not tell which commit it built).");
+                continue;
+            }
             if (app.Repo.RepositoryId is not { } repoId || app.Repo.CommitSha is not { } headSha
                 || !commits.TryGetValue((prior.ProjectBuildId, repoId), out var priorSha)
                 || !CommitShaRegex.IsMatch(priorSha) || !CommitShaRegex.IsMatch(headSha))
@@ -1325,29 +1340,44 @@ public sealed class ProjectBuildService
     /// something that shipped (#994), and a pull-request build is of a commit that
     /// isn't on the branch yet, so neither becomes the baseline - the same builds
     /// <c>FindUnchangedAppsAsync</c> leaves out.
+    /// <para>Per repository it is the newest such build that recorded a commit for it: a
+    /// build that could not say which commit it built would otherwise make the next one
+    /// read as the repository's first build (#1453). How far back it looks is capped at
+    /// <see cref="ChangelogBaselineLookback"/> builds.</para>
     /// </summary>
     internal static async Task<Dictionary<int, string>> FindChangelogBaselineAsync(AppDbContext db, OeProjectBuild build, CancellationToken ct)
     {
-        var prevBuildId = await db.OeProjectBuilds.AsNoTracking()
+        var candidates = await db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ProjectId == build.ProjectId && b.PipelineId == build.PipelineId && b.Branch == build.Branch
                         && b.Id != build.Id
                         && b.Status == ProjectBuildStatus.Ready
                         && b.BcTarget == ProjectBuildTarget.Current
                         && b.Trigger != ProjectBuildTrigger.PullRequest)
             .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
-            .Select(b => (int?)b.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .Select(b => b.Id)
+            .Take(ChangelogBaselineLookback)
+            .ToListAsync(ct).ConfigureAwait(false);
 
         var prevByRepo = new Dictionary<int, string>();
-        if (prevBuildId is null) return prevByRepo;
+        if (candidates.Count == 0) return prevByRepo;
 
-        var prevCommits = await db.OeProjectBuildRepoCommits.AsNoTracking()
-            .Where(c => c.ProjectBuildId == prevBuildId && c.ProjectRepositoryId != null && c.CommitHash != "")
-            .Select(c => new { RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
+        var rows = await db.OeProjectBuildRepoCommits.AsNoTracking()
+            .Where(c => candidates.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
+            .Select(c => new { c.Id, c.ProjectBuildId, RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
             .ToListAsync(ct).ConfigureAwait(false);
-        foreach (var c in prevCommits) prevByRepo[c.RepoId] = c.CommitHash;
+        var newestFirst = candidates.Select((id, rank) => (id, rank)).ToDictionary(x => x.id, x => x.rank);
+        // A build that recorded its commits more than once (a rerun) keeps its latest row.
+        foreach (var group in rows.GroupBy(c => c.RepoId))
+        {
+            prevByRepo[group.Key] = group
+                .OrderBy(c => newestFirst[c.ProjectBuildId]).ThenByDescending(c => c.Id)
+                .First().CommitHash;
+        }
         return prevByRepo;
     }
+
+    /// <summary>How many earlier builds the changelog looks back through for one that recorded its commit.</summary>
+    internal const int ChangelogBaselineLookback = 50;
 
     private static OeProjectBuildCommit SummaryNote(int orgId, int buildId, int? repoId, string text) => new()
     {
@@ -1583,6 +1613,9 @@ public sealed class ProjectBuildService
                 }
 
                 var (sha, date) = await CaptureCommitAsync(gitPath, dest, ct).ConfigureAwait(false);
+                // git checked out exactly this commit a moment ago, so when it can't name
+                // HEAD now, the commit it was asked for is the answer (#1453).
+                if (sha is null && commit is { Length: 40 }) sha = commit;
                 clones.Add(new ClonedRepo(dest, repo.Url, sha, date, repo.Id, repo.DisplayName, clonedBranch));
                 logs.Add(new PendingLog(repo.Id, repo.DisplayName,
                     $"Cloned {repo.Url} at {(sha is null ? "(unknown commit)" : sha)} using {used.Source}.{(cloneLog.Length > 0 ? "\n" + cloneLog : "")}"));
@@ -1799,13 +1832,32 @@ public sealed class ProjectBuildService
             // %H = full SHA, %cI = committer date (strict ISO-8601), tab-separated.
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
                 gitPath, new[] { "-C", cloneDir, "show", "-s", "--format=%H%x09%cI", "HEAD" }, cloneDir,
-                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
-            if (!r.Succeeded) return (null, null);
-            var parts = r.StdOut.Trim().Split('\t');
-            var sha = parts.Length > 0 && parts[0].Trim().Length > 0 ? parts[0].Trim() : null;
-            DateTime? date = parts.Length > 1 && DateTimeOffset.TryParse(parts[1].Trim(), out var dto)
-                ? dto.UtcDateTime : null;
-            return (sha, date);
+                LocalGitEnv, LocalGitTimeout), ct).ConfigureAwait(false);
+            var parts = r.Succeeded ? r.StdOut.Trim().Split('\t') : [];
+            var sha = parts.Length > 0 && CommitShaRegex.IsMatch(parts[0].Trim()) ? parts[0].Trim() : null;
+            if (sha is not null)
+            {
+                DateTime? date = parts.Length > 1 && DateTimeOffset.TryParse(parts[1].Trim(), out var dto)
+                    ? dto.UtcDateTime : null;
+                return (sha, date);
+            }
+
+            // A build that can't say which commit it built has nothing to compare the next
+            // one with, so every extension reads as changed and is published again (#1453).
+            // git's own words are the only clue to why, so they are logged, and the commit is
+            // asked for a second way that reads only the ref, not the commit object.
+            _logger.LogWarning(
+                "Could not read the commit for {CloneDir}: git show exited {ExitCode}: {StdErr}",
+                cloneDir, r.ExitCode, r.StdErr.Trim());
+            var parsed = await _processRunner.RunAsync(new ProcessRunRequest(
+                gitPath, new[] { "-C", cloneDir, "rev-parse", "--verify", "HEAD" }, cloneDir,
+                LocalGitEnv, LocalGitTimeout), ct).ConfigureAwait(false);
+            var fallback = parsed.StdOut.Trim();
+            if (parsed.Succeeded && CommitShaRegex.IsMatch(fallback)) return (fallback, null);
+            _logger.LogWarning(
+                "Could not read the commit for {CloneDir}: git rev-parse exited {ExitCode}: {StdErr}",
+                cloneDir, parsed.ExitCode, parsed.StdErr.Trim());
+            return (null, null);
         }
         catch (Exception ex)
         {
@@ -2711,7 +2763,7 @@ public sealed class ProjectBuildService
         // remote into a fast, non-zero failure instead of a forever-hang.
         ["GIT_TERMINAL_PROMPT"] = "0",
         ["GCM_INTERACTIVE"] = "never",
-        ["GIT_CONFIG_COUNT"] = "5",
+        ["GIT_CONFIG_COUNT"] = "7",
         ["GIT_CONFIG_KEY_0"] = "http.extraHeader",
         ["GIT_CONFIG_VALUE_0"] = BasicAuthHeaderValue(provider, pat),
         ["GIT_CONFIG_KEY_1"] = "credential.helper",
@@ -2722,6 +2774,12 @@ public sealed class ProjectBuildService
         ["GIT_CONFIG_VALUE_3"] = "60",
         ["GIT_CONFIG_KEY_4"] = "core.symlinks",
         ["GIT_CONFIG_VALUE_4"] = "false",
+        // A clone lives for one build, so it never needs tidying, and git's background
+        // repack could otherwise still be running while the build reads the clone (#1453).
+        ["GIT_CONFIG_KEY_5"] = "maintenance.auto",
+        ["GIT_CONFIG_VALUE_5"] = "false",
+        ["GIT_CONFIG_KEY_6"] = "gc.auto",
+        ["GIT_CONFIG_VALUE_6"] = "0",
     };
 
     /// <summary>

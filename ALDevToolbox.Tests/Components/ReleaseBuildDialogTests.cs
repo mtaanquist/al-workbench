@@ -351,6 +351,55 @@ public sealed class ReleaseBuildDialogTests : IDisposable
         });
     }
 
+    private IRenderedComponent<ReleaseBuildDialog> OpenedDeferredDialog(int appCount)
+    {
+        var cut = _ctx.Render<ReleaseBuildDialog>();
+        var apps = Enumerable.Range(1, appCount)
+            .Select(i => new ReleaseBuildDialog.ReleasableBuildApp($"CRONUS App {i}", "1.0.0.0")).ToList();
+        cut.InvokeAsync(() => cut.Instance.OpenAsync(
+            releasePipelineId: 1, customerName: "CRONUS A/S", envName: "Test", envType: "Sandbox",
+            deploymentSchedule: "NextMinorUpdate", schemaSyncMode: "Add",
+            builds: [new ReleaseBuildDialog.ReleasableBuildOption(412, "#412", apps)],
+            timeZone: "UTC", windowStart: null, windowEnd: null, windowDays: DeliveryDays.Every)).GetAwaiter().GetResult();
+        return cut;
+    }
+
+    [Fact]
+    public void A_deployment_handed_to_the_next_update_can_install_right_away_instead()
+    {
+        var cut = OpenedDeferredDialog(appCount: 1);
+
+        cut.Find("label:has(#rb-right-away)").TextContent.Should().Contain("Install right away instead of waiting for the next minor update");
+        cut.Find(".confirm-dialog__body p").TextContent.Should().Contain("next minor update");
+
+        cut.Find("#rb-right-away").Change(true);
+        cut.Find(".confirm-dialog__body b:last-of-type").TextContent.Should().Be("right away");
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+
+        cut.WaitForAssertion(() =>
+            cut.Find(".confirm-dialog__body [role=status]").TextContent.Should().Contain("Couldn't check who is signed in to Test",
+                "installing right away is when the people online matter"));
+    }
+
+    [Fact]
+    public void A_deferred_build_with_several_apps_says_it_has_to_install_right_away()
+    {
+        var cut = OpenedDeferredDialog(appCount: 2);
+
+        cut.Find("label:has(#rb-right-away) + .field__hint").TextContent.Should().Contain("This build has 2 apps");
+
+        cut.Find("#rb-right-away").Change(true);
+        cut.Find("label:has(#rb-right-away) + .field__hint").TextContent.Should().NotContain("2 apps");
+    }
+
+    [Fact]
+    public void A_pipeline_that_installs_on_arrival_offers_no_right_away_choice()
+    {
+        var cut = OpenedDialog("Production");
+
+        cut.FindAll("#rb-right-away").Should().BeEmpty();
+    }
+
     [Fact]
     public void Deploy_again_asks_who_is_online_and_turns_into_Deploy_anyway()
     {
