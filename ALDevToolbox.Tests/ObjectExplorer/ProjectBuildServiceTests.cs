@@ -155,6 +155,20 @@ public sealed class ProjectBuildServiceTests
         File.ReadAllText(entry.FullName).Should().Be("/");
     }
 
+    [Fact]
+    public void Build_git_calls_never_start_background_maintenance_in_the_clone()
+    {
+        // A background repack could still be running while the build reads the clone,
+        // and a build once read no commit at all (#1453).
+        if (!GitAvailable()) return;
+        using var temp = new TempDir();
+        Git(temp.Path, null, "init", "--quiet");
+        var env = ProjectBuildService.GitAuthEnv(RepositoryProvider.GitHub, "tok");
+
+        Git(temp.Path, env, "config", "--get", "maintenance.auto").Trim().Should().Be("false");
+        Git(temp.Path, env, "config", "--get", "gc.auto").Trim().Should().Be("0");
+    }
+
     private static bool GitAvailable()
     {
         try
@@ -173,7 +187,7 @@ public sealed class ProjectBuildServiceTests
         }
     }
 
-    private static void Git(string workDir, IReadOnlyDictionary<string, string>? env, params string[] args)
+    private static string Git(string workDir, IReadOnlyDictionary<string, string>? env, params string[] args)
     {
         var info = new System.Diagnostics.ProcessStartInfo("git")
         {
@@ -184,9 +198,11 @@ public sealed class ProjectBuildServiceTests
         foreach (var a in args) info.ArgumentList.Add(a);
         if (env is not null) foreach (var (k, v) in env) info.Environment[k] = v;
         using var p = System.Diagnostics.Process.Start(info)!;
+        var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
         p.ExitCode.Should().Be(0, stderr);
+        return stdout.Result;
     }
 
     [Theory]

@@ -1013,6 +1013,88 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().StartWith("First build of this repository");
     }
 
+    [Fact]
+    public async Task A_newer_build_that_recorded_no_commit_does_not_reset_the_changelog()
+    {
+        // A build whose git could not name its commit recorded an empty one; the next
+        // build read as the repository's first and published every extension (#1453).
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, sha: string.Empty);
+        _tools.Ancestors.Add(PriorSha);
+        _tools.LogOutput = "2222222\u001fCRONUS Developer\u001f2026-10-01T00:00:00+00:00\u001fAdd the sales report\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{PriorSha}..HEAD"]);
+        (await ChangelogAsync(buildId)).Should().Equal(["Add the sales report"]);
+    }
+
+    [Fact]
+    public async Task The_changelog_baseline_is_the_newest_build_that_recorded_a_commit()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, OtherSha, minutesAgo: 30);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, sha: string.Empty, minutesAgo: 10);
+        _tools.Ancestors.Add(OtherSha);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{OtherSha}..HEAD"]);
+    }
+
+    [Fact]
+    public async Task A_commit_git_show_cannot_read_is_read_another_way()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.ShowFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        (await PinnedCommitsAsync(buildId)).Should().Equal([HeadSha]);
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == priorId,
+            "with its commit known the build can tell nothing changed");
+    }
+
+    [Fact]
+    public async Task A_rerun_whose_git_cannot_name_its_commit_records_the_one_it_checked_out()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        await using (var seed = _db.NewContext())
+        {
+            var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            seed.OeProjectBuildRepoCommits.Add(Commit(buildId, repoId, HeadSha));
+            await seed.SaveChangesAsync();
+        }
+        _tools.ShowFails = true;
+        _tools.RevParseFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Checkouts.Should().Equal(HeadSha);
+        (await PinnedCommitsAsync(buildId)).Should().Equal([HeadSha]);
+    }
+
+    [Fact]
+    public async Task A_build_git_cannot_name_the_commit_of_records_none_and_publishes_everything()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.ShowFails = true;
+        _tools.RevParseFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        (await PinnedCommitsAsync(buildId)).Should().Equal([string.Empty]);
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+        (await LogAsync(buildId, "Changes")).Should().Contain("this build could not tell which commit it built");
+    }
+
+    private async Task<List<string>> PinnedCommitsAsync(int buildId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeProjectBuildRepoCommits.AsNoTracking()
+            .Where(c => c.ProjectBuildId == buildId).OrderBy(c => c.Id).Select(c => c.CommitHash).ToListAsync();
+    }
+
     private const string OtherSha = "3333333333333333333333333333333333333333";
 
     /// <summary>
@@ -1020,7 +1102,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     /// pipeline called <paramref name="pipelineName"/>, or of the seeded pipeline when null.
     /// </summary>
     private async Task SeedOtherBuildAsync(int projectId, string? pipelineName, string sha,
-        string target = ProjectBuildTarget.Current, string trigger = ProjectBuildTrigger.Manual)
+        string target = ProjectBuildTarget.Current, string trigger = ProjectBuildTrigger.Manual, int minutesAgo = 30)
     {
         await using var seed = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1036,7 +1118,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             await seed.SaveChangesAsync();
             pipelineId = other.Id;
         }
-        var build = PriorBuild(projectId, pipelineId, now.AddMinutes(-30), [], "1.0.600.0");
+        var build = PriorBuild(projectId, pipelineId, now.AddMinutes(-minutesAgo), [], "1.0.600.0");
         build.BcTarget = target;
         build.Trigger = trigger;
         seed.OeProjectBuilds.Add(build);
@@ -1671,6 +1753,12 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The commit every clone lands on; null makes <c>git show</c> fail, as before.</summary>
         public string? HeadSha { get; set; }
 
+        /// <summary>Makes <c>git show</c> fail even with a <see cref="HeadSha"/>, as it now and then does in production (#1453).</summary>
+        public bool ShowFails { get; set; }
+
+        /// <summary>Makes <c>git rev-parse</c> fail even with a <see cref="HeadSha"/>.</summary>
+        public bool RevParseFails { get; set; }
+
         /// <summary>What <c>git diff --name-only</c> prints per extension folder; a folder not named prints nothing.</summary>
         public Dictionary<string, string> Diffs { get; } = new(StringComparer.Ordinal);
 
@@ -1734,9 +1822,13 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 Checkouts.Add(request.Arguments[^1]);
                 return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
             }
-            if (request.Arguments.Contains("show") && HeadSha is not null)
+            if (request.Arguments.Contains("show") && HeadSha is not null && !ShowFails)
             {
                 return Task.FromResult(new ProcessRunResult(0, $"{HeadSha}\t2026-10-01T00:00:00+00:00\n", string.Empty));
+            }
+            if (request.Arguments.Contains("rev-parse") && HeadSha is not null && !RevParseFails)
+            {
+                return Task.FromResult(new ProcessRunResult(0, $"{HeadSha}\n", string.Empty));
             }
             if (request.Arguments.Contains("diff"))
             {
