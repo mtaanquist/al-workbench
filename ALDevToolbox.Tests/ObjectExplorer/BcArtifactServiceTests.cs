@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Net;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -20,7 +23,7 @@ public sealed class BcArtifactServiceTests : IDisposable
 
     public void Dispose() => _db.Dispose();
 
-    private BcArtifactService NewService(StubHttpClientFactory factory, Data.AppDbContext ctx) =>
+    private BcArtifactService NewService(IHttpClientFactory factory, Data.AppDbContext ctx) =>
         new(factory, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance);
 
     private static StubHttpClientFactory FactoryFor(string countryJson, string platformJson)
@@ -149,6 +152,97 @@ public sealed class BcArtifactServiceTests : IDisposable
             ["/onprem/indexes/platform.json"] = PlatformJson,
         });
         (await NewService(factory, ctx).ResolveTargetAsync("dk", BcBuildTarget.NextMajor)).Should().BeNull();
+    }
+
+    [Theory]
+    // A queued import resolved before Microsoft rotated the Front Door host.
+    [InlineData("https://bcartifacts-stalehash.b02.azurefd.net/onprem/28.2.50931.51727/dk")]
+    // Shared Azure suffixes are not Microsoft's to vouch for (#1428).
+    [InlineData("https://attacker.blob.core.windows.net/onprem/28.2.50931.51727/dk")]
+    [InlineData("https://someone-else.azurefd.net/onprem/28.2.50931.51727/dk")]
+    public async Task DownloadArtifactSetAsync_only_fetches_from_the_active_front_door_host(string applicationUrl)
+    {
+        await using var ctx = _db.NewContext();
+        var factory = new ZipHttpClientFactory(manifestJson: null);
+
+        var download = await NewService(factory, ctx).DownloadArtifactSetAsync(applicationUrl);
+        try
+        {
+            factory.Requests.Should().Equal(
+                $"https://{BcArtifactIndex.CdnHost}/onprem/28.2.50931.51727/dk",
+                $"https://{BcArtifactIndex.CdnHost}/onprem/28.2.50931.51727/platform");
+        }
+        finally
+        {
+            File.Delete(download.ApplicationZipPath);
+            if (download.PlatformZipPath is not null) File.Delete(download.PlatformZipPath);
+        }
+    }
+
+    [Fact]
+    public async Task DownloadArtifactSetAsync_refuses_an_application_url_on_a_foreign_host()
+    {
+        await using var ctx = _db.NewContext();
+        var factory = new ZipHttpClientFactory(manifestJson: null);
+
+        var act = () => NewService(factory, ctx).DownloadArtifactSetAsync(
+            "https://bcartifacts.azureedge.net.evil.com/onprem/28.2.50931.51727/dk");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Artifacts");
+        factory.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task DownloadArtifactSetAsync_skips_a_manifest_platform_url_on_a_foreign_host()
+    {
+        await using var ctx = _db.NewContext();
+        var factory = new ZipHttpClientFactory(
+            """{ "platformUrl": "https://bcartifacts.azureedge.net.evil.com/onprem/28.2.50931.51727/platform" }""");
+
+        var download = await NewService(factory, ctx).DownloadArtifactSetAsync(
+            $"https://{BcArtifactIndex.CdnHost}/onprem/28.2.50931.51727/dk");
+        try
+        {
+            download.PlatformZipPath.Should().BeNull();
+            factory.Requests.Should().ContainSingle();
+        }
+        finally
+        {
+            File.Delete(download.ApplicationZipPath);
+        }
+    }
+}
+
+/// <summary>Serves a small zip (with a <c>manifest.json</c>) for every request and records the URLs asked for.</summary>
+internal sealed class ZipHttpClientFactory : IHttpClientFactory
+{
+    private readonly byte[] _zip;
+
+    public ZipHttpClientFactory(string? manifestJson)
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            using var writer = new StreamWriter(archive.CreateEntry("manifest.json").Open());
+            writer.Write(manifestJson ?? "{}");
+        }
+        _zip = buffer.ToArray();
+    }
+
+    public ConcurrentQueue<string> Requests { get; } = new();
+
+    public HttpClient CreateClient(string name) => new(new Handler(this));
+
+    private sealed class Handler : HttpMessageHandler
+    {
+        private readonly ZipHttpClientFactory _owner;
+        public Handler(ZipHttpClientFactory owner) => _owner = owner;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            _owner.Requests.Enqueue(request.RequestUri!.ToString());
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(_owner._zip) });
+        }
     }
 }
 

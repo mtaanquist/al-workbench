@@ -349,17 +349,19 @@ public static class BcArtifactIndex
     /// manifest can't redirect the download elsewhere. The SSRF guard on the
     /// HttpClient is the second layer.
     /// </summary>
+    /// <remarks>
+    /// Exact names only, never a suffix: anyone can create a storage account
+    /// under <c>.blob.core.windows.net</c> or a Front Door endpoint under
+    /// <c>.azurefd.net</c>, so a suffix match would trust an attacker's host
+    /// (#1428). Stale or legacy Microsoft hosts don't need to be listed because
+    /// <see cref="ToCdnUrl"/> moves them onto the active Front Door host first.
+    /// </remarks>
     public static bool IsTrustedArtifactHost(string? host)
     {
         if (string.IsNullOrWhiteSpace(host)) return false;
-        host = host.Trim().ToLowerInvariant();
-        return string.Equals(host, BlobHost, StringComparison.Ordinal)
-            || string.Equals(host, InsiderBlobHost, StringComparison.Ordinal)
-            || string.Equals(host, CdnHost, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(host, InsiderCdnHost, StringComparison.OrdinalIgnoreCase)
-            || host.EndsWith(".azurefd.net", StringComparison.Ordinal)
-            || host.EndsWith(".azureedge.net", StringComparison.Ordinal)
-            || host.EndsWith(".blob.core.windows.net", StringComparison.Ordinal);
+        host = host.Trim();
+        string[] trusted = [BlobHost, InsiderBlobHost, CdnHost, InsiderCdnHost, DefaultCdnHost, DefaultInsiderCdnHost];
+        return trusted.Any(t => string.Equals(host, t, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Reads the <c>platformUrl</c> string out of an artifact's <c>manifest.json</c> body, or null when absent/unparseable.</summary>

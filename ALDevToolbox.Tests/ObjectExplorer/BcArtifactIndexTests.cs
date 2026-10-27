@@ -302,7 +302,17 @@ public sealed class BcArtifactIndexTests
     [InlineData("bcartifacts-exdbf9fwegejdqak.b02.azurefd.net", true)]
     [InlineData("bcinsider.blob.core.windows.net", true)]
     [InlineData("bcinsider-fvh2ekdjecfjd6gk.b02.azurefd.net", true)]
+    [InlineData("BCArtifacts.Blob.Core.Windows.Net", true)]
+    [InlineData("BCARTIFACTS-EXDBF9FWEGEJDQAK.B02.AZUREFD.NET", true)]
     [InlineData("evil.example.com", false)]
+    // Anyone can create a storage account or a Front Door endpoint under
+    // Microsoft's shared suffixes, so a suffix match would trust them (#1428).
+    [InlineData("attacker.blob.core.windows.net", false)]
+    [InlineData("someone-else.azurefd.net", false)]
+    [InlineData("bcartifacts-stalehash.b02.azurefd.net", false)]
+    [InlineData("bcartifacts.azureedge.net", false)]
+    [InlineData("bcartifacts.azureedge.net.evil.com", false)]
+    [InlineData("bcartifacts.blob.core.windows.net.evil.com", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
     public void IsTrustedArtifactHost_only_allows_microsoft_artifact_hosts(string? host, bool expected)
