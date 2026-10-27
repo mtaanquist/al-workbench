@@ -233,6 +233,10 @@ public sealed class ToolAccessGateTests : IDisposable
 
         (await client.GetAsync("/api/cookbook/1/download")).StatusCode.Should().NotBe(HttpStatusCode.NotFound,
             "signed out, the download sends you to sign in");
+        // The disabled test's 404 for this route only means something if the
+        // route exists: a renamed route would 404 there on routing alone.
+        (await client.GetAsync("/api/object-explorer/files/1/download")).StatusCode.Should().Be(HttpStatusCode.Redirect,
+            "signed out, the file download sends you to sign in");
         using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
         export.StatusCode.Should().Be(HttpStatusCode.Redirect, "signed out, the export sends you to sign in");
     }
