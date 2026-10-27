@@ -40,17 +40,20 @@ public sealed class SelectVersionActionTests : IDisposable
 
     // ── The version rule ─────────────────────────────────────────────────
 
-    [Fact]
-    public async Task A_version_change_without_a_version_is_refused_and_writes_nothing()
+    [Theory]
+    [InlineData("  ", "Choose the version to update to.")]
+    // 33 characters: one past the longest version the column holds.
+    [InlineData("28.0.123456789012345678901234.567", "That isn't a Business Central version.")]
+    public async Task A_version_change_without_a_usable_version_is_refused_and_writes_nothing(string version, string message)
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
 
         await using (var ctx = _f.Db.NewContext())
         {
             var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
-                projectId, envId, UpgradeActionKind.SelectVersion, executeAt: null, targetVersion: "  ");
+                projectId, envId, UpgradeActionKind.SelectVersion, executeAt: null, targetVersion: version);
             (await act.Should().ThrowAsync<PlanValidationException>())
-                .Which.Errors.Should().ContainKey("TargetVersion");
+                .Which.Errors["TargetVersion"].Should().Be(message);
         }
 
         _f.Admin.Writes.Should().Be(0);

@@ -339,12 +339,34 @@ public sealed class PipelinesDashboardServiceTests : IDisposable
         row.ActorName.Should().Be("K. Jensen");
     }
 
+    /// <summary>
+    /// Two signed-in colleagues, neither an admin: one on the Private solution's team,
+    /// one not. The member is the control - a dashboard that hid everything from
+    /// everyone but a SiteAdmin would pass the outsider's half on its own.
+    /// </summary>
     [Fact]
     public async Task A_private_solution_the_caller_cannot_see_contributes_nothing()
     {
+        const int memberId = 9811, outsiderId = 9812;
         var hidden = await SeedSolutionAsync("CRONUS");
         await using (var ctx = _db.NewContext())
         {
+            ctx.Users.AddRange(
+                new User
+                {
+                    Id = memberId, OrganizationId = TestDb.DefaultOrgId, Email = "mel@example.com", DisplayName = "Mel",
+                    PasswordHash = "x", Role = UserRole.User, Status = UserStatus.Active, CreatedAt = _now,
+                },
+                new User
+                {
+                    Id = outsiderId, OrganizationId = TestDb.DefaultOrgId, Email = "pat@example.com", DisplayName = "Pat",
+                    PasswordHash = "x", Role = UserRole.Editor, Status = UserStatus.Active, CreatedAt = _now,
+                });
+            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Nordics", CreatedAt = _now, UpdatedAt = _now };
+            ctx.Teams.Add(team);
+            await ctx.SaveChangesAsync();
+            ctx.TeamMembers.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, TeamId = team.Id, UserId = memberId, CreatedAt = _now });
+            ctx.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = hidden, TeamId = team.Id, CreatedAt = _now });
             var p = await ctx.OeProjects.SingleAsync(x => x.Id == hidden);
             p.Visibility = ProjectVisibility.Private;
             await ctx.SaveChangesAsync();
@@ -354,12 +376,20 @@ public sealed class PipelinesDashboardServiceTests : IDisposable
         await SeedDeploymentPipelineAsync(hidden);
         _db.OrgContext.IsSiteAdmin = false;
 
+        _db.OrgContext.CurrentUserId = outsiderId;
         var d = await GetAsync();
 
         d.BuildPipelineCount.Should().Be(0);
         d.DeploymentPipelineCount.Should().Be(0);
         d.Attention.Should().BeEmpty();
         d.Activity.Should().BeEmpty();
+
+        _db.OrgContext.CurrentUserId = memberId;
+        var seen = await GetAsync();
+
+        seen.BuildPipelineCount.Should().Be(2, "the deployment pipeline brings a build pipeline of its own");
+        seen.DeploymentPipelineCount.Should().Be(1);
+        seen.Activity.Should().NotBeEmpty();
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

@@ -211,13 +211,31 @@ public sealed class DeliveryToolsTests : IDisposable
             await narrow.SaveChangesAsync();
         }
 
+        // A real colleague with nothing granting them this solution: not an admin, not
+        // its owner, on no team.
+        const int colleagueId = 9620;
+        await using (var seedUser = _db.NewContext())
+        {
+            seedUser.Users.Add(new ALDevToolbox.Domain.Entities.User
+            {
+                Id = colleagueId, OrganizationId = TestDb.DefaultOrgId, Email = "pat@cronus.example", PasswordHash = "x",
+                DisplayName = "Pat", Role = ALDevToolbox.Domain.Entities.UserRole.Editor,
+                Status = ALDevToolbox.Domain.Entities.UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await seedUser.SaveChangesAsync();
+        }
         _db.OrgContext.IsSiteAdmin = false;
-        _db.OrgContext.CurrentUserId = 999;
+        _db.OrgContext.CurrentUserId = colleagueId;
 
         await using var read = _db.NewContext();
         var act = () => NewTools(read).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId);
 
-        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("permission");
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Be(
+            "You don't have permission to deploy this solution's builds — you must be someone who manages the solution.");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectDeliveries.AsNoTracking().AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId))
+            .Should().BeFalse("nothing is queued when the caller is refused");
+        _queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     [Fact]

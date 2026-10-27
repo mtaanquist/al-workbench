@@ -842,6 +842,31 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Upgrade");
     }
 
+    /// <summary>
+    /// A closed upgrade is the record of a finished wave: its environment is still on it,
+    /// but a new action credited to it would rewrite that record.
+    /// </summary>
+    [Fact]
+    public async Task An_action_cannot_claim_an_upgrade_that_has_been_marked_done()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        await CloseAsync(id);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, envId, UpgradeActionKind.RunNow, _f.Clock.GetUtcNow().AddHours(4), upgradeId: id);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Upgrade");
+        }
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeLines.AnyAsync(l => l.UpgradeId == id && l.EnvironmentId == envId))
+            .Should().BeTrue("the environment is still on the upgrade; only its being done refuses the booking");
+        (await verify.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(0);
+    }
+
     [Fact]
     public async Task A_booked_action_keeps_its_upgrade_when_the_worker_fires_it()
     {

@@ -184,6 +184,101 @@ public sealed class CustomerModuleServiceTests : IDisposable
         (await Svc(ctx).GetSolutionModulesAsync(id)).Modules.Should().ContainSingle().Which.Version.Should().Be("1.0");
     }
 
+    private const int TeamUserId = 9902;
+
+    private const string ReadOnlyRefusal =
+        "This solution is read-only for people outside its teams. Ask one of them, or its owner or an administrator, to make the change.";
+
+    /// <summary>
+    /// Puts <paramref name="projectId"/> at <paramref name="visibility"/> with one team
+    /// holding <see cref="TeamUserId"/>, straight in the tables the way the owner would
+    /// have set it.
+    /// </summary>
+    private async Task RestrictAsync(int projectId, ProjectVisibility visibility)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.Users.Add(NewUser(TeamUserId, "team@example.com"));
+        var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Nordics", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        ctx.Teams.Add(team);
+        await ctx.SaveChangesAsync();
+        ctx.TeamMembers.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, TeamId = team.Id, UserId = TeamUserId, CreatedAt = DateTime.UtcNow });
+        ctx.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, TeamId = team.Id, CreatedAt = DateTime.UtcNow });
+        (await ctx.OeProjects.SingleAsync(p => p.Id == projectId)).Visibility = visibility;
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Read-only narrows writing to the solution's teams: a colleague outside them may see
+    /// the typed modules but not add, change or remove one. A member of the team may.
+    /// </summary>
+    [Fact]
+    public async Task A_read_only_solutions_typed_modules_are_kept_by_its_team_not_by_everyone()
+    {
+        var capture = await AddToCatalogAsync("Continia Document Capture", null, CaptureAppId);
+        var fornav = await AddToCatalogAsync("ForNAV", "ForNAV");
+        var id = await SeedSolutionAsync("CRONUS Norway", ProjectHostingType.OurCloud);
+        await using (var owner = _db.NewContext())
+        {
+            await Svc(owner).SaveSolutionModuleAsync(id, null, new SolutionModuleInput(capture, "1.0", null));
+        }
+        await RestrictAsync(id, ProjectVisibility.ReadOnly);
+        int rowId;
+        await using (var read = _db.NewContext())
+        {
+            rowId = await read.OeProjectModules.Where(m => m.ProjectId == id).Select(m => m.Id).SingleAsync();
+        }
+
+        _db.OrgContext.CurrentUserId = OtherUserId;
+        await using (var ctx = _db.NewContext())
+        {
+            var change = () => Svc(ctx).SaveSolutionModuleAsync(id, rowId, new SolutionModuleInput(capture, "2.0", "upgraded"));
+            var add = () => Svc(ctx).SaveSolutionModuleAsync(id, null, new SolutionModuleInput(fornav, "8.1", null));
+            var remove = () => Svc(ctx).DeleteSolutionModuleAsync(id, rowId);
+
+            (await change.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message.Should().Be(ReadOnlyRefusal);
+            (await add.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message.Should().Be(ReadOnlyRefusal);
+            (await remove.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message.Should().Be(ReadOnlyRefusal);
+            (await Svc(ctx).GetSolutionModulesAsync(id)).Modules.Should().ContainSingle("Read-only still reads to everyone");
+        }
+
+        await using (var verify = _db.NewContext())
+        {
+            var rows = await verify.OeProjectModules.AsNoTracking().Where(m => m.ProjectId == id).ToListAsync();
+            rows.Should().ContainSingle();
+            rows[0].Version.Should().Be("1.0");
+            rows[0].Note.Should().BeNull();
+        }
+
+        _db.OrgContext.CurrentUserId = TeamUserId;
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx).SaveSolutionModuleAsync(id, rowId, new SolutionModuleInput(capture, "2.0", null));
+            (await Svc(ctx).GetSolutionModulesAsync(id)).Modules.Should().ContainSingle().Which.Version.Should().Be("2.0");
+        }
+    }
+
+    [Fact]
+    public async Task A_private_solutions_modules_are_closed_to_someone_outside_its_team()
+    {
+        var capture = await AddToCatalogAsync("Continia Document Capture", null, CaptureAppId);
+        var id = await SeedSolutionAsync("CRONUS Norway", ProjectHostingType.OurCloud);
+        await RestrictAsync(id, ProjectVisibility.Private);
+
+        _db.OrgContext.CurrentUserId = OtherUserId;
+        await using (var ctx = _db.NewContext())
+        {
+            var read = () => Svc(ctx).GetSolutionModulesAsync(id);
+            var add = () => Svc(ctx).SaveSolutionModuleAsync(id, null, new SolutionModuleInput(capture, "1.0", null));
+
+            await read.Should().ThrowAsync<ProjectAccessDeniedException>();
+            (await add.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
+                .Should().Be("Only this solution's teams, its owner and your administrators can change it.");
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectModules.AnyAsync(m => m.ProjectId == id)).Should().BeFalse();
+    }
+
     [Fact]
     public async Task Who_has_a_module_counts_both_the_typed_and_the_installed_and_the_catalogue_says_how_many()
     {
