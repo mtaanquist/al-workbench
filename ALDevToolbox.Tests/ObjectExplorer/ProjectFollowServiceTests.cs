@@ -236,7 +236,7 @@ public sealed class ProjectFollowServiceTests : IDisposable
             ctx.OeProjectPeople.Add(new OeProjectPerson
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, UserId = userId,
-                Role = ProjectPersonRole.Consultant, CreatedAt = DateTime.UtcNow,
+                Roles = [ProjectPersonRole.Consultant], CreatedAt = DateTime.UtcNow,
             });
         }
         await ctx.SaveChangesAsync();

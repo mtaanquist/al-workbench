@@ -3916,11 +3916,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
 
-                    b.Property<string>("Role")
+                    b.PrimitiveCollection<string[]>("Roles")
                         .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("role");
+                        .HasColumnType("character varying(30)[]")
+                        .HasColumnName("roles");
 
                     b.Property<int>("UserId")
                         .HasColumnType("integer")

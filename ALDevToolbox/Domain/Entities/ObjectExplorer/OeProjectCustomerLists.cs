@@ -59,7 +59,11 @@ public class OeProjectPerson
     public int UserId { get; set; }
     public User? User { get; set; }
 
-    public ProjectPersonRole Role { get; set; }
+    /// <summary>
+    /// What they are on this customer, at least one. Several when someone is, say, both
+    /// a developer and the project leader; notifications go by role (#1462, #1463).
+    /// </summary>
+    public List<ProjectPersonRole> Roles { get; set; } = new();
 
     /// <summary>Free text: "finance, warehouse".</summary>
     public string? Areas { get; set; }
