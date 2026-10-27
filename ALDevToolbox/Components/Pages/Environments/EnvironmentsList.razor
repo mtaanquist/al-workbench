@@ -1,7 +1,7 @@
 @page "/environments"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
 @rendermode InteractiveServer
-@implements IDisposable
+@implements IAsyncDisposable
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ILogger<EnvironmentsList> Log
@@ -587,7 +587,12 @@
         _ => "Every environment you can reach",
     };
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    /// <summary>The reads and ticks under way, so leaving the page can cancel them and wait.</summary>
+    private readonly PageCalls _calls = new();
+
+    // Tracked, like the click's refresh below: both read with the page's token, and a
+    // cancelled query still unwinding has to be waited for on the way out.
+    protected override Task OnInitializedAsync() => _calls.Track(LoadAsync());
 
     /// <summary>Counts the listings started, so an earlier one finishing late doesn't overwrite a later one.</summary>
     private int _loads;
@@ -602,13 +607,17 @@
         try
         {
             var rows = ownScope
-                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true))
-                : await Fleet.ListFleetAsync(includeSoftDeleted: true);
+                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true, _calls.Token))
+                : await Fleet.ListFleetAsync(includeSoftDeleted: true, _calls.Token);
             if (load != _loads) return;
             _rows = rows;
             _error = null;
             _loadFailed = false;
             _selection.Prune(Selectable(_rows).Select(r => r.EnvironmentId));
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            // The page was left mid-read; nobody is left to show the rows to.
         }
         catch (Exception ex)
         {
@@ -633,7 +642,7 @@
     /// reload - the same shape the Upgrades page uses. A pressed Refresh always asks:
     /// the person has decided the rows are too old, whatever the timestamps say.
     /// </summary>
-    private Task RefreshAsync() => RequestRefreshAsync(force: true);
+    private Task RefreshAsync() => _calls.Track(RequestRefreshAsync(force: true));
 
     /// <summary>
     /// The one path both Refresh and the auto-refresh tick take. Unforced, the service
@@ -651,7 +660,7 @@
             var projectIds = _rows.Select(r => r.ProjectId).Distinct().ToList();
             // On a scope of its own: the auto-refresh timer comes through here too, and
             // its tick can land while a click is still awaiting the circuit's context.
-            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force));
+            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force, _calls.Token));
             // Skipped rows are solutions this person may see but not act on. Saying
             // "asking about 3 customers" when 3 were asked and 5 were skipped is the
             // honest count, and it explains a table that only partly moves.
@@ -664,6 +673,10 @@
                 return;
             }
             StartPolling();
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            // The page was left while the request was on its way.
         }
         catch (Exception ex)
         {
@@ -718,14 +731,21 @@
     private System.Threading.Timer? _poll;
     private DateTime _pollUntilUtc;
 
-    private void StartPolling()
+    /// <summary>Whether the re-read timer is running, for the tests of leaving the page.</summary>
+    internal bool IsPolling => _poll is not null;
+
+    /// <summary>Internal so the tests of leaving the page can start it late; the page calls it after a refresh request.</summary>
+    internal void StartPolling()
     {
+        // A request that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         _poll?.Dispose();
         _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = PollTickAsync(), null, PollEvery, PollEvery);
+        _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
-    private async Task PollTickAsync()
+    /// <summary>One re-read. Internal so a test can drive it without waiting on the timer.</summary>
+    internal async Task PollTickAsync()
     {
         // On the renderer's context, so the rows land between a click's steps; the read
         // itself is on a scope of its own (see OnOwnScopeAsync).
@@ -733,6 +753,12 @@
         {
             // A re-read waits for the next tick rather than moving the rows under the
             // dialog while it works.
+            if (_calls.IsGone)
+            {
+                _poll?.Dispose();
+                _poll = null;
+                return;
+            }
             if (_bulkWindowDialog?.IsWorking == true) return;
             await LoadAsync(ownScope: true);
             if (DateTime.UtcNow >= _pollUntilUtc)
@@ -748,11 +774,14 @@
         });
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         _poll?.Dispose();
         _searchDebounce.Dispose();
         _autoTimer?.Dispose();
+        // A tick that had already fired may still be reading; wait for it, so leaving
+        // the page means nothing of its is still on its way to the database.
+        await _calls.LeaveAsync();
     }
 
     // ── Auto-refresh ─────────────────────────────────────────────────────
@@ -805,15 +834,21 @@
 
     private void StartAutoRefresh()
     {
+        if (_calls.IsGone) return;
         _autoTimer?.Dispose();
         _autoRefresh = true;
         _autoUntilUtc = DateTime.UtcNow.Add(AutoRefreshFor);
         _autoTimer = new System.Threading.Timer(
-            _ => _ = InvokeAsync(async () =>
+            _ => _ = _calls.Track(InvokeAsync(async () =>
             {
+                if (_calls.IsGone)
+                {
+                    StopAutoRefresh();
+                    return;
+                }
                 await AutoRefreshTickAsync();
                 StateHasChanged();
-            }),
+            })),
             null, AutoRefreshEvery, AutoRefreshEvery);
     }
 

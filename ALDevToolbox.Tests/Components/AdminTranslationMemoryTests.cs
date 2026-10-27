@@ -173,10 +173,12 @@ public sealed class AdminTranslationMemoryTests : IDisposable
     public void Refresh_from_repositories_is_not_offered_when_nothing_is_connected()
     {
         var cut = _ctx.Render<AdminTranslationMemory>();
+        // The empty memory first: the page draws it only once its whole load, the
+        // GitHub read included, has come back. Before that the button is absent anyway.
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("No translations learned yet"));
 
-        cut.WaitForAssertion(() =>
-            cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
-                .Should().BeFalse("a button whose only answer would be 'nothing is connected' is worse than none"));
+        cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
+            .Should().BeFalse("a button whose only answer would be 'nothing is connected' is worse than none");
     }
 
     // --- helpers ------------------------------------------------------------
