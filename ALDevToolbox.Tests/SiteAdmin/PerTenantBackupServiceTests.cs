@@ -180,16 +180,8 @@ public sealed class PerTenantBackupServiceTests : IDisposable
         await ExecuteAsync("UPDATE runtime_templates SET name = 'changed since' WHERE organization_id = @org", OrgA);
         var before = await FingerprintAsync(OrgA);
 
-        // Unpooled, so disposing it ends the session and with it the lock.
-        await using (var holder = new NpgsqlConnection(
-            new NpgsqlConnectionStringBuilder(_db.ConnectionString) { Pooling = false }.ConnectionString))
+        await using (await BackupLockHolder.AcquireAsync(_db.ConnectionString))
         {
-            await holder.OpenAsync();
-            await using var cmd = holder.CreateCommand();
-            cmd.CommandText = "SELECT pg_try_advisory_lock(@k)";
-            cmd.Parameters.AddWithValue("@k", BackupCoordination.BackupLockKey);
-            ((bool)(await cmd.ExecuteScalarAsync())!).Should().BeTrue();
-
             var act = () => RestoreAsync(backup.Id);
 
             await act.Should().ThrowAsync<InvalidOperationException>()

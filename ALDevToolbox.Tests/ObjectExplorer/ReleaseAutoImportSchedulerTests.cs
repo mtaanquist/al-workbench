@@ -100,6 +100,8 @@ public sealed class ReleaseAutoImportSchedulerTests : IDisposable
     /// <summary>
     /// Auto-import switched on with no country chosen has nothing to import, so
     /// the organisation is left out rather than swept for an empty country list.
+    /// Both cases are needed: EF keeps C#'s null semantics, so <c>!= ""</c> on its
+    /// own lets a null country through, and only the <c>!= null</c> check stops it.
     /// </summary>
     [Theory]
     [InlineData(null)]

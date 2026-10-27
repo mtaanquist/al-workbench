@@ -42,8 +42,10 @@ public sealed class HealthEndpointTests : IDisposable
     [Fact]
     public async Task An_unreachable_database_fails_the_liveness_probe()
     {
+        // One context for the test's few sequential requests, disposed with the test.
+        await using var unreachable = UnreachableContext();
         using var factory = new EndpointFactory(_db, services =>
-            services.AddScoped(_ => new DatabaseHealthCheck(UnreachableContext())));
+            services.AddScoped(_ => new DatabaseHealthCheck(unreachable)));
         using var client = factory.CreateClient();
 
         (await StatusAsync(client, "/healthz")).Should().Be(HttpStatusCode.ServiceUnavailable);

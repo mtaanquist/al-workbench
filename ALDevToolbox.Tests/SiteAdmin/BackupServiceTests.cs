@@ -8,7 +8,6 @@ using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Npgsql;
 
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Backups;
@@ -687,22 +686,7 @@ public sealed class BackupServiceTests : IDisposable
             .Should().BeTrue("nothing was dropped");
     }
 
-    /// <summary>
-    /// Takes the backup/restore lock from a session of its own, as a second app
-    /// instance or a concurrent request would. Unpooled, so disposing the
-    /// connection ends the session and with it the lock.
-    /// </summary>
-    private async Task<NpgsqlConnection> HoldBackupLockAsync()
-    {
-        var conn = new NpgsqlConnection(
-            new NpgsqlConnectionStringBuilder(_db.ConnectionString) { Pooling = false }.ConnectionString);
-        await conn.OpenAsync(TestContext.Current.CancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT pg_try_advisory_lock(@k)";
-        cmd.Parameters.AddWithValue("@k", BackupCoordination.BackupLockKey);
-        ((bool)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!).Should().BeTrue();
-        return conn;
-    }
+    private Task<BackupLockHolder> HoldBackupLockAsync() => BackupLockHolder.AcquireAsync(_db.ConnectionString);
 
     private string WriteFakeTool(string name, string body)
     {
