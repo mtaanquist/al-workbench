@@ -69,6 +69,59 @@ public sealed class MfaEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task Sending_new_email_codes_does_not_reset_the_shared_cap()
+    {
+        // Each new email code gets fresh guesses of its own (#1432); the shared
+        // second-factor counter is what keeps re-sends from adding up.
+        var userId = await SeedEmailMfaUserAsync("throttle-email@cronus.example");
+        var (client, token) = await PasswordLegAsync("throttle-email@cronus.example");
+
+        // Five wrong guesses spread over three codes (2 + 2 + 1), so no single
+        // code reaches its own cap and only the shared counter can refuse.
+        string code = "";
+        foreach (var guesses in new[] { 2, 2, 1 })
+        {
+            code = await IssueEmailCodeAsync(userId);
+            var wrong = code == "000000" ? "111111" : "000000";
+            for (var i = 0; i < guesses; i++)
+            {
+                using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", wrong));
+                guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+            }
+        }
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+        right.Headers.Location!.OriginalString.Should().Contain("err=too-many-attempts");
+    }
+
+    [Fact]
+    public async Task A_right_email_code_gives_its_attempt_back()
+    {
+        const string email = "release-email@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+        var code = await IssueEmailCodeAsync(userId);
+        var wrong = code == "000000" ? "111111" : "000000";
+        for (var i = 0; i < AuthService.MaxMfaAttempts - 1; i++)
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", wrong));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        var failuresBefore = await CountFailedAttemptsAsync(email);
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
+        (await CountFailedAttemptsAsync(email)).Should().Be(failuresBefore, "a right code is not a failed attempt");
+    }
+
+    private async Task<int> CountFailedAttemptsAsync(string email)
+    {
+        await using var read = _db.NewContext();
+        return await read.LoginAttempts.IgnoreQueryFilters().CountAsync(a => a.Email == email && !a.Succeeded);
+    }
+
+    [Fact]
     public async Task A_microsoft_linked_account_with_a_fresh_second_step_turns_off_totp_without_a_password()
     {
         var (userId, _, recoveryCodes) = await SeedTotpUserAsync("entra-only@cronus.example", linkMicrosoft: true);
@@ -210,6 +263,34 @@ public sealed class MfaEndpointTests : IDisposable
         var enrollment = await totp.BeginEnrollmentAsync(userId);
         var codes = await totp.ConfirmEnrollmentAsync(userId, CurrentCode(enrollment.SecretBase32));
         return (userId, enrollment.SecretBase32, codes);
+    }
+
+    private async Task<int> SeedEmailMfaUserAsync(string email)
+    {
+        await using var seed = _db.NewContext();
+        var user = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = email,
+            DisplayName = "Nils Consultant",
+            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            Role = UserRole.User,
+            Status = UserStatus.Active,
+            EmailMfaEnabled = true,
+            CreatedAt = DateTime.UtcNow,
+        };
+        seed.Users.Add(user);
+        await seed.SaveChangesAsync();
+        return user.Id;
+    }
+
+    /// <summary>Issues an email code through the app's own service, standing in for the email.</summary>
+    private async Task<string> IssueEmailCodeAsync(int userId)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var code = await scope.ServiceProvider.GetRequiredService<EmailMfaService>().IssueChallengeAsync(userId);
+        code.Should().NotBeNull();
+        return code!;
     }
 
     private static string CurrentCode(string secret) =>

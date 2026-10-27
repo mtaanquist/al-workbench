@@ -49,6 +49,9 @@ public sealed class RawSqlBaselineTests
         ["ALDevToolbox/Services/Account/AccountService.cs"] = new(
             "An advisory lock keyed on the typed signup address; reads and writes no rows.",
             new() { ["SignupAsync"] = 1 }),
+        ["ALDevToolbox/Services/Account/EmailMfaService.cs"] = new(
+            "A row lock on the users row pinned to the user id the code is being issued for (the half-authenticated login state or the signed-in user); reads and writes no rows.",
+            new() { ["IssueChallengeAsync"] = 1 }),
         ["ALDevToolbox/Services/Account/PasswordResetService.cs"] = new(
             "Row locks only: the user row by the id the typed email resolved to (issue), or by the id named on a reset token row looked up by its hash (consume); fence category 1.",
             new() { ["ConsumePasswordResetTokenAsync"] = 1, ["CreatePasswordResetTokenAsync"] = 1 }),
