@@ -8,6 +8,7 @@ using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Backups;
@@ -628,6 +629,79 @@ public sealed class BackupServiceTests : IDisposable
             // Without the fix the stand-in would outlive the test by five minutes.
             try { Process.GetProcessById(pid).Kill(); } catch { /* already gone */ }
         }
+    }
+
+    /// <summary>
+    /// One backup or restore at a time (#370, #371): while another session holds
+    /// the shared lock a backup is refused at once rather than queued behind it,
+    /// and the next one after the lock is released goes through.
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_dump.");
+        var tool = WriteFakeTool("fake-pg-dump", """
+            for a; do last="$a"; done
+            echo dump > "$last"
+            """);
+        var svc = NewService(_options with { PgDumpPath = tool });
+
+        await using (await HoldBackupLockAsync())
+        {
+            Func<Task> act = () => svc.CreateAsync(BackupKind.AdHoc);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+            Directory.GetFiles(_backupsDir, "*" + BackupService.BackupFileSuffix).Should().BeEmpty();
+        }
+
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+        File.Exists(Path.Combine(_backupsDir, backup.FileName)).Should().BeTrue("the lock is free again");
+    }
+
+    /// <summary>
+    /// A restore that finds the lock taken must refuse before it closes the site
+    /// or drops anything: the holder may be a backup reading the schema, or
+    /// another restore that has already dropped it.
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", "exit 0");
+        var backupId = await AddBackupRowWithFileAsync();
+        var svc = NewService(_options with { PgRestorePath = tool });
+
+        await using (await HoldBackupLockAsync())
+        {
+            Func<Task> act = () => svc.RestoreAsync(backupId);
+
+            (await act.Should().ThrowAsync<InvalidOperationException>()
+                    .WithMessage("Another backup or restore is already in progress*"))
+                .Which.Should().NotBeOfType<BackupRestoreFailedException>();
+        }
+
+        _maintenance.IsActive.Should().BeFalse("a refused restore never closes the site");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.AsNoTracking().AnyAsync(b => b.Id == backupId, TestContext.Current.CancellationToken))
+            .Should().BeTrue("nothing was dropped");
+    }
+
+    /// <summary>
+    /// Takes the backup/restore lock from a session of its own, as a second app
+    /// instance or a concurrent request would. Unpooled, so disposing the
+    /// connection ends the session and with it the lock.
+    /// </summary>
+    private async Task<NpgsqlConnection> HoldBackupLockAsync()
+    {
+        var conn = new NpgsqlConnection(
+            new NpgsqlConnectionStringBuilder(_db.ConnectionString) { Pooling = false }.ConnectionString);
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT pg_try_advisory_lock(@k)";
+        cmd.Parameters.AddWithValue("@k", BackupCoordination.BackupLockKey);
+        ((bool)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!).Should().BeTrue();
+        return conn;
     }
 
     private string WriteFakeTool(string name, string body)

@@ -73,7 +73,48 @@ public sealed class ReleaseAutoImportSchedulerTests : IDisposable
             .Which.IncludePreviews.Should().BeTrue("the sweep decides per org whether to hit the insider channel");
     }
 
-    private async Task EnableAutoImportAsync(int organizationId, string country, bool includePreviews = false)
+    /// <summary>
+    /// An organisation still waiting for approval is not swept: the import is
+    /// several gigabytes from Microsoft, counted against a quota nobody has
+    /// approved yet. The preview check has the same rule (PreviewCheckTests).
+    /// </summary>
+    [Fact]
+    public async Task An_organisation_still_pending_approval_is_not_a_target()
+    {
+        await EnableAutoImportAsync(TestDb.OtherOrgId, "dk");
+        await using (var ctx = _db.NewContext())
+        {
+            var org = await ctx.Organizations.FindAsync([TestDb.OtherOrgId], TestContext.Current.CancellationToken);
+            org!.IsPending = true;
+            await ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+
+        await using var read = _db.NewContext();
+        foreach (var includeSystemOrg in new[] { false, true })
+        {
+            var targets = await ReleaseAutoImportScheduler.ResolveTargetsAsync(read, includeSystemOrg, default);
+            targets.Should().NotContain(t => t.OrganizationId == TestDb.OtherOrgId);
+        }
+    }
+
+    /// <summary>
+    /// Auto-import switched on with no country chosen has nothing to import, so
+    /// the organisation is left out rather than swept for an empty country list.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task An_organisation_with_no_country_chosen_is_not_a_target(string? country)
+    {
+        await EnableAutoImportAsync(TestDb.OtherOrgId, country);
+
+        await using var ctx = _db.NewContext();
+        var targets = await ReleaseAutoImportScheduler.ResolveTargetsAsync(ctx, includeSystemOrg: true, default);
+
+        targets.Should().NotContain(t => t.OrganizationId == TestDb.OtherOrgId);
+    }
+
+    private async Task EnableAutoImportAsync(int organizationId, string? country, bool includePreviews = false)
     {
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new OrganizationSettings

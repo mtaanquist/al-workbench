@@ -130,6 +130,77 @@ public sealed class PerTenantBackupServiceTests : IDisposable
             .WithMessage("SiteAdmin context is required*");
     }
 
+    /// <summary>
+    /// <c>per_tenant_backups</c> carries no tenant filter on the strength of every
+    /// method checking for SiteAdmin first (see <c>TenantQueryFilterTests</c>), so
+    /// each of them is checked here, not only the restore. The row and its file
+    /// exist, so a method that skipped the check would succeed rather than throw.
+    /// </summary>
+    [Theory]
+    [InlineData("list")]
+    [InlineData("list-organisations")]
+    [InlineData("download")]
+    [InlineData("create")]
+    [InlineData("pin")]
+    [InlineData("delete")]
+    public async Task Every_method_refuses_a_non_site_admin_caller(string method)
+    {
+        await SeedOrgAsync(OrgA, "a");
+        var backup = await CreateAsync(OrgA);
+        _db.OrgContext.IsSiteAdmin = false;
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+
+        Func<Task> act = method switch
+        {
+            "list" => () => svc.ListAsync(),
+            "list-organisations" => () => svc.ListOrganizationNamesAsync(),
+            "download" => () => svc.OpenForDownloadAsync(backup.Id),
+            "create" => () => svc.CreateAsync(OrgA, BackupKind.AdHoc, CancellationToken.None),
+            "pin" => () => svc.SetPinnedAsync(backup.Id, pinned: true),
+            "delete" => () => svc.DeleteAsync(backup.Id),
+            _ => throw new ArgumentOutOfRangeException(nameof(method)),
+        };
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("SiteAdmin context is required*");
+        File.Exists(PathFor(backup)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A per-tenant restore takes the same lock as the whole-database backup and
+    /// restore (#370), so it cannot run while one of those is in flight, and
+    /// refuses before it deletes any of the organisation's rows.
+    /// </summary>
+    [Fact]
+    public async Task Restore_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        await SeedOrgAsync(OrgA, "a");
+        var backup = await CreateAsync(OrgA);
+        await ExecuteAsync("UPDATE runtime_templates SET name = 'changed since' WHERE organization_id = @org", OrgA);
+        var before = await FingerprintAsync(OrgA);
+
+        // Unpooled, so disposing it ends the session and with it the lock.
+        await using (var holder = new NpgsqlConnection(
+            new NpgsqlConnectionStringBuilder(_db.ConnectionString) { Pooling = false }.ConnectionString))
+        {
+            await holder.OpenAsync();
+            await using var cmd = holder.CreateCommand();
+            cmd.CommandText = "SELECT pg_try_advisory_lock(@k)";
+            cmd.Parameters.AddWithValue("@k", BackupCoordination.BackupLockKey);
+            ((bool)(await cmd.ExecuteScalarAsync())!).Should().BeTrue();
+
+            var act = () => RestoreAsync(backup.Id);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+            (await FingerprintAsync(OrgA)).Should().Be(before, "a refused restore changes nothing");
+        }
+
+        await RestoreAsync(backup.Id);
+        (await FingerprintAsync(OrgA)).Should().NotBe(before, "with the lock free the restore goes through");
+    }
+
     [Fact]
     public async Task Restore_refuses_a_snapshot_from_an_older_schema_version()
     {
