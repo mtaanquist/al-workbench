@@ -444,13 +444,13 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance, ingests: ingests);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), ingests: ingests);
         var management = new ReleaseManagementService(
-            ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+            ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
         var downloads = new DvdDownloadService(
             new ThrowingHttpClientFactory(),
             _db.NewSystemSettingsService(ctx),

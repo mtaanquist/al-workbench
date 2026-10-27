@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.Workers;
@@ -1232,9 +1233,9 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await using (var ctx = _f.Db.NewContext())
         {
             var act = () => _f.Svc(ctx).CancelUpgradeActionAsync(ids[0]);
-            await act.Should().ThrowAsync<Exception>();
+            await act.Should().ThrowAsync<ProjectAccessDeniedException>();
             var now = () => _f.Svc(ctx).RunBookedInstallNowAsync(ids[1]);
-            await now.Should().ThrowAsync<Exception>();
+            await now.Should().ThrowAsync<ProjectAccessDeniedException>();
         }
         (await _f.ReadActionAsync(ids[0])).Status.Should().Be(UpgradeActionStatus.Pending);
         (await _f.ReadActionAsync(ids[1])).ExecuteAfter.Should().BeAfter(_f.Clock.GetUtcNow().UtcDateTime);
