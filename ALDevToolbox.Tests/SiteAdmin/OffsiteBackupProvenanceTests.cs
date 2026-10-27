@@ -103,7 +103,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         PutDump("legacy-21", null, Now.AddDays(-21));
         PutDump("legacy-22", null, Now.AddDays(-22));
         PutDump("legacy-23", null, Now.AddDays(-23));
-        PutSnapshot("default", "legacy-snap", null, Now.AddDays(-40));
+        PutSnapshot(TestDb.DefaultOrgSlug, "legacy-snap", null, Now.AddDays(-40));
 
         await PruneAsync();
 
@@ -114,12 +114,12 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     public async Task Prune_deletes_expired_per_tenant_snapshots_per_organisation_and_keeps_each_ones_newest_three()
     {
         await ConfigureOffsiteAsync();
-        PutSnapshot("default", "d-1", _us, Now.AddDays(-1));
-        PutSnapshot("default", "d-20", _us, Now.AddDays(-20));
-        PutSnapshot("default", "d-21", _us, Now.AddDays(-21));
-        PutSnapshot("default", "d-22", _us, Now.AddDays(-22));
-        PutSnapshot("default", "d-legacy-30", null, Now.AddDays(-30));
-        PutSnapshot("default", "d-theirs-40", _neighbour, Now.AddDays(-40));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-1", _us, Now.AddDays(-1));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-20", _us, Now.AddDays(-20));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-21", _us, Now.AddDays(-21));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-22", _us, Now.AddDays(-22));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-legacy-30", null, Now.AddDays(-30));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-theirs-40", _neighbour, Now.AddDays(-40));
         PutSnapshot("other", "o-20", _us, Now.AddDays(-20));
         PutSnapshot("other", "o-21", _us, Now.AddDays(-21));
         // A dump keeps the prefix "ours alone" for the unstamped legacy snapshot.
@@ -128,8 +128,8 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         await PruneAsync();
 
         _store.Keys.Should().BeEquivalentTo(
-            SnapshotKey("default", "d-1"), SnapshotKey("default", "d-20"), SnapshotKey("default", "d-21"),
-            SnapshotKey("default", "d-theirs-40"),
+            SnapshotKey(TestDb.DefaultOrgSlug, "d-1"), SnapshotKey(TestDb.DefaultOrgSlug, "d-20"), SnapshotKey(TestDb.DefaultOrgSlug, "d-21"),
+            SnapshotKey(TestDb.DefaultOrgSlug, "d-theirs-40"),
             SnapshotKey("other", "o-20"), SnapshotKey("other", "o-21"),
             DumpKey("ours-1"));
     }
@@ -139,7 +139,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     {
         await ConfigureOffsiteAsync();
         PutDump("ours-1", _us, Now.AddDays(-1));
-        PutSnapshot("default", "d-1", _us, Now.AddDays(-1));
+        PutSnapshot(TestDb.DefaultOrgSlug, "d-1", _us, Now.AddDays(-1));
 
         await PruneAsync();
 
@@ -166,13 +166,13 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     public async Task Per_tenant_download_refuses_a_snapshot_stamped_by_another_deployment()
     {
         await ConfigureOffsiteAsync();
-        PutSnapshot("default", "theirs", _neighbour, Now.AddDays(-1));
+        PutSnapshot(TestDb.DefaultOrgSlug, "theirs", _neighbour, Now.AddDays(-1));
 
-        var act = () => NewOffsite(_us).DownloadPerTenantAsync(SnapshotKey("default", "theirs"), progress: null, default);
+        var act = () => NewOffsite(_us).DownloadPerTenantAsync(SnapshotKey(TestDb.DefaultOrgSlug, "theirs"), progress: null, default);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*different deployment*");
-        Directory.Exists(Path.Combine(_options.Directory, "tenants", "default")).Should().BeTrue();
-        Directory.GetFiles(Path.Combine(_options.Directory, "tenants", "default")).Should().BeEmpty();
+        Directory.Exists(Path.Combine(_options.Directory, "tenants", TestDb.DefaultOrgSlug)).Should().BeTrue();
+        Directory.GetFiles(Path.Combine(_options.Directory, "tenants", TestDb.DefaultOrgSlug)).Should().BeEmpty();
     }
 
     [Fact]
@@ -221,18 +221,18 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     public async Task Per_tenant_listing_flags_another_deployments_snapshots()
     {
         await ConfigureOffsiteAsync();
-        PutSnapshot("default", "ours", _us, Now.AddDays(-1));
-        PutSnapshot("default", "theirs", _neighbour, Now.AddDays(-2));
-        PutSnapshot("default", "legacy", null, Now.AddDays(-3));
+        PutSnapshot(TestDb.DefaultOrgSlug, "ours", _us, Now.AddDays(-1));
+        PutSnapshot(TestDb.DefaultOrgSlug, "theirs", _neighbour, Now.AddDays(-2));
+        PutSnapshot(TestDb.DefaultOrgSlug, "legacy", null, Now.AddDays(-3));
 
         var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 50, flagOtherDeployments: true, default);
 
         listed.ToDictionary(o => o.FileName, o => o.FromAnotherDeployment).Should().BeEquivalentTo(
             new Dictionary<string, bool>
             {
-                ["default-ours" + PerTenantBackupService.FileSuffix] = false,
-                ["default-theirs" + PerTenantBackupService.FileSuffix] = true,
-                ["default-legacy" + PerTenantBackupService.FileSuffix] = false,
+                [$"{TestDb.DefaultOrgSlug}-ours" + PerTenantBackupService.FileSuffix] = false,
+                [$"{TestDb.DefaultOrgSlug}-theirs" + PerTenantBackupService.FileSuffix] = true,
+                [$"{TestDb.DefaultOrgSlug}-legacy" + PerTenantBackupService.FileSuffix] = false,
             });
     }
 
@@ -436,12 +436,12 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         _us.RecordFormer(_neighbour.Id, Now);
         PutDump("former-1", _neighbour, Now.AddDays(-1));
         PutDump("former-40", _neighbour, Now.AddDays(-40));
-        PutSnapshot("default", "former-40", _neighbour, Now.AddDays(-40));
+        PutSnapshot(TestDb.DefaultOrgSlug, "former-40", _neighbour, Now.AddDays(-40));
         PutDump("ours-1", _us, Now.AddDays(-1));
 
         await PruneAsync();
 
-        _store.Keys.Should().Contain([DumpKey("former-40"), SnapshotKey("default", "former-40")]);
+        _store.Keys.Should().Contain([DumpKey("former-40"), SnapshotKey(TestDb.DefaultOrgSlug, "former-40")]);
         var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 10, flagOtherDeployments: true, default);
         listed.Should().OnlyContain(o => !o.FromAnotherDeployment, "the former installation's snapshots can be restored here");
     }
@@ -536,12 +536,12 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     {
         await ConfigureOffsiteAsync();
         PutDump("there", _us, Now);
-        PutSnapshot("default", "snap", _us, Now);
+        PutSnapshot(TestDb.DefaultOrgSlug, "snap", _us, Now);
         var offsite = NewOffsite(_us);
 
         (await offsite.FindDumpAsync(DumpKey("there"), default)).Should().Be(DumpKey("there"));
         (await offsite.FindDumpAsync(DumpKey("gone"), default)).Should().BeNull("there is no such object");
-        (await offsite.FindDumpAsync(SnapshotKey("default", "snap"), default)).Should().BeNull("a snapshot is not a dump");
+        (await offsite.FindDumpAsync(SnapshotKey(TestDb.DefaultOrgSlug, "snap"), default)).Should().BeNull("a snapshot is not a dump");
         (await offsite.FindDumpAsync("../" + DumpKey("there"), default)).Should().BeNull();
     }
 
@@ -550,12 +550,12 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     {
         await ConfigureOffsiteAsync();
         PutDump("there", _us, Now);
-        PutSnapshot("default", "snap", _us, Now);
+        PutSnapshot(TestDb.DefaultOrgSlug, "snap", _us, Now);
         var offsite = NewOffsite(_us);
 
-        (await offsite.FindPerTenantSnapshotAsync(SnapshotKey("default", "snap"), default))
-            .Should().Be($"default-snap{PerTenantBackupService.FileSuffix}");
-        (await offsite.FindPerTenantSnapshotAsync(SnapshotKey("default", "gone"), default)).Should().BeNull();
+        (await offsite.FindPerTenantSnapshotAsync(SnapshotKey(TestDb.DefaultOrgSlug, "snap"), default))
+            .Should().Be($"{TestDb.DefaultOrgSlug}-snap{PerTenantBackupService.FileSuffix}");
+        (await offsite.FindPerTenantSnapshotAsync(SnapshotKey(TestDb.DefaultOrgSlug, "gone"), default)).Should().BeNull();
         (await offsite.FindPerTenantSnapshotAsync(DumpKey("there"), default)).Should().BeNull();
     }
 
@@ -590,8 +590,6 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     {
         await using var ctx = _db.NewContext();
         int[] tenants = [TestDb.DefaultOrgId, TestDb.OtherOrgId];
-        await ctx.OrganizationFiles.IgnoreQueryFilters()
-            .Where(f => tenants.Contains(f.OrganizationId)).ExecuteDeleteAsync();
         await ctx.Organizations.Where(o => tenants.Contains(o.Id)).ExecuteDeleteAsync();
         _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
     }

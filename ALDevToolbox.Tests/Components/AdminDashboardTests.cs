@@ -391,8 +391,10 @@ public sealed class AdminDashboardTests : IDisposable
     private static IReadOnlyList<string> CueLabels(IRenderedComponent<AdminDashboard> cut) =>
         cut.FindAll(".cue .cue__label").Select(l => l.TextContent.Trim()).ToList();
 
-    /// <summary>Just enough that the org is past its first run.</summary>
-    /// <summary>Seeds into whichever org the test is acting as, system or tenant.</summary>
+    /// <summary>
+    /// Just enough that the org is past its first run, seeded into whichever org
+    /// the test is acting as, system or tenant.
+    /// </summary>
     private void SeedSomeContent() => Seed(seed =>
     {
         var orgId = _db.OrgContext.CurrentOrganizationId!.Value;

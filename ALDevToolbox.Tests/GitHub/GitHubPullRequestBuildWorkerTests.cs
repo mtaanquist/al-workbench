@@ -55,6 +55,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
 
         resolved.Should().NotBeNull();
         resolved!.Value.Identity.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+        resolved.Value.Identity.IsSystemOrganization.Should().BeFalse("an ordinary tenant is not the system org");
         resolved.Value.OrgLogin.Should().Be("cronus-dk");
     }
 
@@ -88,8 +89,8 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         // The flag decides how storage-quota and template-import rules treat the
         // organisation, so scheduled work has to see the same value an interactive
         // request would.
-        // The system org is the one whose flag differs from the default, so it is
-        // the one that shows the flag is read rather than assumed.
+        // Together with the tenant case above, which expects false: a flag the
+        // walk hard-coded either way would fail one of the two.
         await ConfigureDeploymentAsync();
         await ConnectAsync(TestDb.SystemOrgId, ConnectedInstallation, "cronus-dk");
 
@@ -523,7 +524,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         var api = ApiAnswering(HttpStatusCode.NoContent);
         var builds = new ProjectBuildQueue();
 
-        await NewWorker(api: api, builds: builds, orgContext: OffRequest()).RunOneAsync(NewJob(), CancellationToken.None);
+        await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
 
         builds.Reader.TryRead(out var queued).Should().BeTrue();
         queued!.Identity.OrganizationId.Should().Be(TestDb.DefaultOrgId);
@@ -544,7 +545,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         var api = ApiAnswering(HttpStatusCode.NoContent);
         var builds = new ProjectBuildQueue();
 
-        await NewWorker(api: api, builds: builds, orgContext: OffRequest()).RunOneAsync(NewJob(), CancellationToken.None);
+        await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
 
         builds.Reader.TryRead(out _).Should().BeFalse();
         api.Calls.Should().NotContain(c => c.Contains("/check-runs"));
@@ -561,7 +562,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await SeedSolutionTrackingTheRepositoryAsync();
         await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
 
-        await NewWorker(orgContext: OffRequest()).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+        await NewWorker().RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
 
         (await AllHeadsAsync()).Should().ContainSingle().Which.OrganizationId.Should().Be(TestDb.DefaultOrgId);
     }
@@ -575,7 +576,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(otherOrgId, 99, "someone-else");
         await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
 
-        await NewWorker(orgContext: OffRequest()).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+        await NewWorker().RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
 
         (await AllHeadsAsync()).Should().BeEmpty();
         (await AllBuildsAsync()).Should().BeEmpty();
@@ -593,7 +594,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(
             System.Text.Encoding.UTF8.GetBytes(GitHubWebhookPayloads.MergedPullRequest()), "delivery", NullLogger.Instance);
 
-        await NewWorker(orgContext: OffRequest()).RunOneAsync(job!, CancellationToken.None);
+        await NewWorker().RunOneAsync(job!, CancellationToken.None);
 
         await using var ctx = _db.NewContext();
         (await ctx.OeRepositoryMergedPullRequests.IgnoreQueryFilters().AsNoTracking().ToListAsync())
@@ -617,7 +618,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         var api = ApiAnswering(HttpStatusCode.NoContent);
         var builds = new ProjectBuildQueue();
 
-        await NewWorker(api: api, builds: builds, orgContext: OffRequest()).RunOneAsync(NewJob(), CancellationToken.None);
+        await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
 
         builds.Reader.TryRead(out var queued).Should().BeTrue();
         queued!.Identity.OrganizationId.Should().Be(connectingOrgId);
@@ -636,7 +637,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await SeedSolutionTrackingTheRepositoryAsync();
         await SeedSolutionTrackingTheRepositoryAsync("Connecting Customer App", organizationId: connectingOrgId);
 
-        await NewWorker(orgContext: OffRequest()).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+        await NewWorker().RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
 
         (await AllHeadsAsync()).Should().ContainSingle().Which.OrganizationId.Should().Be(connectingOrgId);
     }
