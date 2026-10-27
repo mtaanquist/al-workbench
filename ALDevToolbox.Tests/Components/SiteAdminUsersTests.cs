@@ -128,8 +128,13 @@ public sealed class SiteAdminUsersTests : IDisposable
             cut.FindAll("table.data-table tbody tr").Should().HaveCount(2,
                 "SearchUsersAsync with no query must still return both rows — the page "
                 + "first-loads with the most-recent users to give the operator context");
-            cut.Markup.Should().Contain("alice@example.com");
-            cut.Markup.Should().Contain("bob@example.com");
+            var rows = cut.FindAll("table.data-table tbody tr")
+                .ToDictionary(r => r.QuerySelectorAll("td")[1].TextContent.Trim(), r => r.QuerySelectorAll("td"));
+            rows.Keys.Should().BeEquivalentTo("alice@example.com", "bob@example.com");
+            // Organisation, then role, then the site-admin flag.
+            rows["bob@example.com"][3].TextContent.Should().Contain("Other");
+            rows["alice@example.com"][5].TextContent.Trim().Should().Be("Yes");
+            rows["bob@example.com"][5].TextContent.Trim().Should().BeEmpty();
 
             // Deliberately zero, and this changed in PR 9a. The promote button
             // used to be btn--primary on every non-SiteAdmin row, which meant a

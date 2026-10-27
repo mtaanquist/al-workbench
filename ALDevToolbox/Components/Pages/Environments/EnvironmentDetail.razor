@@ -1363,7 +1363,7 @@
             _canManage = false;
             _operationsError = ex.Message;
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             throw; // the page was left mid-read; see DisposeAsync
         }
@@ -1429,7 +1429,7 @@
             _sessionsError = ex.Message;
             StopSessionsLive();
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             throw; // the page was left mid-read; see DisposeAsync
         }
@@ -1501,6 +1501,8 @@
     private void StartSessionsLive()
     {
         StopSessionsLive();
+        // A read that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         _sessionsLiveStopped = false;
         _sessionsLiveUntilUtc = DateTime.UtcNow.Add(SessionsLiveFor);
         _sessionsLive = new System.Threading.Timer(
@@ -1549,7 +1551,7 @@
         {
             StopSessionsLive();
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             StopSessionsLive();
         }
@@ -1621,7 +1623,7 @@
         {
             _settingError = ex.Message;
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             throw; // the page was left mid-read; see DisposeAsync
         }
@@ -1650,49 +1652,18 @@
     // but the re-reads after it are reads, and stop like the rest. Before this, a
     // load could still be finishing after Dispose, and its next query would land on
     // a context being torn down under it; the page's tests met that as #924.
-    private readonly CancellationTokenSource _gone = new();
-    private int _asking;
-    private TaskCompletionSource? _quiet;
+    private readonly PageCalls _calls = new();
 
-    private async Task<T> Read<T>(Func<CancellationToken, Task<T>> read) => await AskAsync(read(_gone.Token));
+    private Task<T> Read<T>(Func<CancellationToken, Task<T>> read) => _calls.Track(read(_calls.Token));
 
-    private async Task Write(Func<Task> write) => await AskAsync(Then(write()));
-
-    private static async Task<bool> Then(Task task)
-    {
-        await task;
-        return true;
-    }
-
-    private async Task<T> AskAsync<T>(Task<T> call)
-    {
-        Interlocked.Increment(ref _asking);
-        try
-        {
-            return await call;
-        }
-        finally
-        {
-            if (Interlocked.Decrement(ref _asking) == 0) _quiet?.TrySetResult();
-        }
-    }
+    private Task Write(Func<Task> write) => _calls.Track(write());
 
     public async ValueTask DisposeAsync()
     {
         StopSessionsLive();
-        await _gone.CancelAsync();
-        // Wait for whatever is still under way, including a call a finishing one
-        // starts next: the flag is armed before each look at the count, so a call
-        // that ends between the two is not missed. The source is left undisposed
-        // on purpose - a continuation queued behind this one may still ask it for
-        // the token, and a cancelled source with nothing registered holds nothing.
-        while (true)
-        {
-            var quiet = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            _quiet = quiet;
-            if (Volatile.Read(ref _asking) == 0) break;
-            await quiet.Task;
-        }
+        // Cancels the reads and waits for whatever is still under way, including a
+        // call a finishing one starts next (see PageCalls).
+        await _calls.LeaveAsync();
     }
 
     /// <summary>The operations list names an app only by id; the panel, when it has been read, knows the name.</summary>
@@ -1730,7 +1701,7 @@
             _canManage = false;
             _panelError = ex.Message;
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             throw; // the page was left mid-read; see DisposeAsync
         }
@@ -2111,7 +2082,7 @@
         if (!confirmed) return;
 
         await RunSettingWriteAsync($"pipeline-{booking.DeliveryId}",
-            () => Deliveries.CancelDeliveryAsync(booking.DeliveryId, _gone.Token),
+            () => Deliveries.CancelDeliveryAsync(booking.DeliveryId, _calls.Token),
             "Couldn't cancel the deployment. It may already have started: check the deployment pipeline.",
             () => $"The deployment of build #{booking.BuildId} was cancelled.");
     }
@@ -2266,7 +2237,7 @@
         {
             _windowError = ex.Message;
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             throw; // the page was left mid-read; see DisposeAsync
         }
@@ -2456,7 +2427,7 @@
         {
             _settingError = ex.Message;
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (_calls.IsGone)
         {
             throw; // the page was left mid-read; see DisposeAsync
         }

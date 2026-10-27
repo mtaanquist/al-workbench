@@ -616,6 +616,62 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
     }
 
+    // The rest of this class builds as a SiteAdmin, which passes the gate; these two
+    // press Build as ordinary users on a Read-only solution. Both have a token, so the
+    // only difference between them is the team.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pressing_build_on_a_read_only_solution_is_for_its_team(bool onTheTeam)
+    {
+        const int personId = 9640;
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        await using (var write = _db.NewContext())
+        {
+            write.Users.Add(new User
+            {
+                Id = personId, OrganizationId = TestDb.DefaultOrgId, Email = "pat@cronus.example", PasswordHash = "x",
+                DisplayName = "Pat", Role = UserRole.User, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Nordics", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+            write.Teams.Add(team);
+            await write.SaveChangesAsync();
+            write.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, TeamId = team.Id, CreatedAt = DateTime.UtcNow });
+            if (onTheTeam)
+            {
+                write.TeamMembers.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, TeamId = team.Id, UserId = personId, CreatedAt = DateTime.UtcNow });
+            }
+            (await write.OeProjects.SingleAsync(p => p.Id == projectId)).Visibility = ProjectVisibility.ReadOnly;
+            await write.SaveChangesAsync();
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = personId;
+        await using (var tokens = _db.NewContext())
+        {
+            await NewTokens(tokens).SaveTokenAsync(RepositoryProvider.GitHub, "ghp_pat", clear: false);
+        }
+        var queue = new ProjectBuildQueue();
+
+        await using var build = _db.NewContext();
+        var act = () => NewImporter(build, queue).StartBuildAsync(pipelineId);
+
+        await using var read = _db.NewContext();
+        if (onTheTeam)
+        {
+            var releaseId = await act();
+            (await read.OeProjectBuilds.SingleAsync(b => b.PipelineId == pipelineId)).ReleaseId.Should().Be(releaseId);
+            queue.Reader.TryRead(out _).Should().BeTrue();
+            return;
+        }
+        (await act.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
+            .Should().Be("You don't have permission to change this solution. Ask its owner, a member of its team or an administrator.");
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(0);
+        (await read.OeReleases.CountAsync()).Should().Be(0, "a refused build leaves no release behind either");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_build_is_not_built_again_by_someone_with_nothing_to_clone_with()
     {
