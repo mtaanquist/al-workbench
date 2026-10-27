@@ -357,18 +357,32 @@ all gated as of slice 3:
   gated in slice 2, so each handler catches `ProjectAccessDeniedException` and
   answers its existing 404 rather than letting a 500 escape.
 
-**Release-id writes** (#1430). `ReleaseManagementService`'s four admin writes —
-`SoftDeleteAsync`, `RestoreAsync`, `UpdateMetadataAsync`, `HardDeleteAsync`, behind
-the `/admin/object-explorer/{id}/…` endpoints — check `IsReleaseVisibleAsync` after
-the org-filtered load. Admin and Editor are the roles that reach them, so the rule is
-the read rule, not a stricter one: an org Admin and a SiteAdmin bypass it, the owner
-and the assigned teams' members pass, and anyone else gets the same "Release {id} not
-found in this organisation." an unknown id gets, so the refusal confirms nothing. The
-release manage page already reads through the gated `GetReleaseAsync`, so it shows
-nothing to act on in the first place. The importer's own soft-delete
-(`SupersedeAsync`, used by `ArtifactReleaseImporter` to replace or retire a Microsoft
-artifact release) is deliberately not gated, under the worker rule below: no project
-owns such a release, and the sweep runs with nobody signed in.
+**Release-id writes** (#1430). Every authoring write that takes a release id checks
+`IsReleaseVisibleAsync`, and asks it before the existence read so a hidden id and an
+unknown one run the same queries:
+
+- `ReleaseManagementService` — `SoftDeleteAsync`, `RestoreAsync`,
+  `UpdateMetadataAsync`, `HardDeleteAsync`, and `EnsureBackfillableAsync` (the
+  pre-check of the one-release system-reference backfill, which answers 404).
+- `ReleaseImportService.AmendReleaseAsync` — the module upload onto an existing
+  release.
+- `TranslationImportService` — `ImportSingleAsync` and `ImportZipAsync`, the two
+  translation uploads.
+
+Admin and Editor are the roles that reach them, so the rule is the read rule, not a
+stricter one: an org Admin and a SiteAdmin bypass it, the owner and the assigned
+teams' members pass, and anyone else gets exactly what an unknown id gets (the same
+field error word for word, or the same 404), so the refusal confirms nothing. The two
+import services take `ProjectAccess` as an optional constructor argument, like their
+other optional collaborators: the app always injects it, and only a test that builds
+the service by hand goes without.
+
+Not gated here: the importer's own soft-delete (`SupersedeAsync`, which
+`ArtifactReleaseImporter` uses to replace or retire a Microsoft artifact release),
+under the worker rule below, since no project owns such a release and the sweep runs
+with nobody signed in; and the bulk "backfill every release" action, which re-scans
+stored source and changes nothing a user sees. Retry and manual-symbols recovery
+were already behind the project manage check.
 
 **MCP** (`Services/Mcp/Tools/`, per the parity guide in `PROJECT.md`), gated as of
 slice 3. Each tool class has exactly one id-resolution choke point, which is where

@@ -40,6 +40,15 @@ public class ReleaseImportService
     /// </summary>
     private readonly ALDevToolbox.Services.GitHub.DependencyDriftService? _drift;
 
+    /// <summary>
+    /// The solution-visibility fence for the amend upload (#1430): a Private
+    /// solution's build release answers like an unknown id to someone outside its
+    /// teams. Optional only so a test can build this service by hand; the app always
+    /// injects it, and an import pipeline that never amends has no
+    /// use for it.
+    /// </summary>
+    private readonly ProjectAccess? _access;
+
     private static readonly HashSet<string> AllowedKinds = new(StringComparer.Ordinal)
     {
         "first_party",
@@ -60,7 +69,8 @@ public class ReleaseImportService
         CallSiteReferenceEmitter callSites,
         ILogger<ReleaseImportService> logger,
         ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
-        ReleaseIngests? ingests = null)
+        ReleaseIngests? ingests = null,
+        ProjectAccess? access = null)
     {
         _db = db;
         _orgContext = orgContext;
@@ -70,6 +80,7 @@ public class ReleaseImportService
         _logger = logger;
         _drift = drift;
         Ingests = ingests ?? new ReleaseIngests();
+        _access = access;
     }
 
     /// <summary>
@@ -370,11 +381,14 @@ public class ReleaseImportService
         // Pre-check the Release's current state so the operator gets a
         // field-keyed error instead of an unexpected status flip if they
         // try to amend an ingesting / failed / soft-deleted Release.
+        // Visibility first, so a hidden id and an unknown one run the same queries.
+        var visible = _access is null
+            || await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })
             .SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (preview is null)
+        if (preview is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {

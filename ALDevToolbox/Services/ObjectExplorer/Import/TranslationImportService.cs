@@ -25,6 +25,15 @@ public class TranslationImportService
     private readonly ILogger<TranslationImportService> _logger;
 
     /// <summary>
+    /// The solution-visibility fence for the admin uploads (#1430): a Private
+    /// solution's build release answers like an unknown id to someone outside its
+    /// teams. Optional only so a test can build this service by hand; the app always
+    /// injects it, and an import pipeline that never reaches the admin uploads has no
+    /// use for it.
+    /// </summary>
+    private readonly ProjectAccess? _access;
+
+    /// <summary>
     /// Per-entry decompression ceiling for an uploaded translation ZIP. A single
     /// BC language XLIFF runs to tens of MB; 256 MB is generous headroom while
     /// still refusing a decompression bomb before it fills the shared heap.
@@ -47,14 +56,24 @@ public class TranslationImportService
         IOrganizationContext orgContext,
         ALDevToolbox.Services.Translation.TranslationMemoryService memory,
         ALDevToolbox.Services.Organizations.StorageQuotaGuard quotaGuard,
-        ILogger<TranslationImportService> logger)
+        ILogger<TranslationImportService> logger,
+        ProjectAccess? access = null)
     {
         _db = db;
         _orgContext = orgContext;
         _memory = memory;
         _quotaGuard = quotaGuard;
         _logger = logger;
+        _access = access;
     }
+
+    /// <summary>
+    /// False when the visibility fence hides <paramref name="releaseId"/>. Asked
+    /// before the existence read so a hidden id and an unknown one run the same
+    /// queries and get the same error.
+    /// </summary>
+    private async Task<bool> IsReleaseVisibleAsync(int releaseId, CancellationToken ct) =>
+        _access is null || await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; TranslationImportService called outside an authenticated request.");
@@ -76,11 +95,12 @@ public class TranslationImportService
         var orgId = RequireOrganizationId();
         await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
 
+        var visible = await IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var module = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.ReleaseId == releaseId)
             .Select(m => new { m.Id, m.Name })
             .SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (module is null)
+        if (module is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -138,11 +158,12 @@ public class TranslationImportService
         var orgId = RequireOrganizationId();
         await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
 
+        var visible = await IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var release = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Id })
             .SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (release is null)
+        if (release is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {

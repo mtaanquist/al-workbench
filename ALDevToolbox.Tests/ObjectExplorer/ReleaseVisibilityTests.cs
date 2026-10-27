@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -785,12 +786,25 @@ public sealed class ReleaseVisibilityTests : IDisposable
 
     // ── The admin writes (#1430) ────────────────────────────────────────
 
-    public enum ReleaseWrite { SoftDelete, Restore, UpdateMetadata, HardDelete }
-
-    public static TheoryData<ReleaseWrite> AllWrites => new()
+    /// <summary>Every write keyed by a release id that the authoring endpoints reach.</summary>
+    public enum ReleaseWrite
     {
-        ReleaseWrite.SoftDelete, ReleaseWrite.Restore, ReleaseWrite.UpdateMetadata, ReleaseWrite.HardDelete,
-    };
+        SoftDelete, Restore, UpdateMetadata, HardDelete, Amend, TranslationFile, TranslationZip, Backfill,
+    }
+
+    public static TheoryData<ReleaseWrite, Linkage> AllWritesBothLinkages
+    {
+        get
+        {
+            var data = new TheoryData<ReleaseWrite, Linkage>();
+            foreach (var write in Enum.GetValues<ReleaseWrite>())
+            {
+                data.Add(write, Linkage.Build);
+                data.Add(write, Linkage.ImportJob);
+            }
+            return data;
+        }
+    }
 
     public static TheoryData<ReleaseWrite, int> AllWritesForAllowedUsers
     {
@@ -806,19 +820,38 @@ public sealed class ReleaseVisibilityTests : IDisposable
         }
     }
 
+    /// <summary>An id no release has, distinctive enough to find again inside an error message.</summary>
+    private const int UnknownReleaseId = 987_654_321;
+
+    private const string WriteLabel = "CRONUS on BC 26.0";
+
+    private static readonly string FixtureRoot =
+        Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
+
     private ReleaseManagementService Management(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, Access(ctx), NullLogger<ReleaseManagementService>.Instance);
 
+    private TranslationImportService Translations(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext,
+            new ALDevToolbox.Services.Translation.TranslationMemoryService(
+                ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, Access(ctx));
+
+    private ReleaseImportService Importer(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), Translations(ctx),
+            new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
+            NullLogger<ReleaseImportService>.Instance, access: Access(ctx));
+
     /// <summary>
-    /// A Private solution's build release, linked the way a pipeline build links it.
-    /// Seeded already soft-deleted for <see cref="ReleaseWrite.Restore"/> so each
-    /// write has something to change.
+    /// A Private solution's release, linked by <paramref name="linkage"/>. Seeded
+    /// already soft-deleted for <see cref="ReleaseWrite.Restore"/> so each write has
+    /// something to change.
     /// </summary>
-    private async Task<int> SeedPrivateBuildReleaseAsync(ReleaseWrite write, string label)
+    private async Task<SeededRelease> SeedPrivateReleaseAsync(ReleaseWrite write, Linkage linkage = Linkage.Build)
     {
         var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
-        var seeded = await SeedReleaseAsync(label);
-        await LinkByBuildAsync(projectId, seeded.ReleaseId);
+        var seeded = await SeedReleaseAsync(WriteLabel);
+        await LinkAsync(linkage, projectId, seeded.ReleaseId);
         if (write == ReleaseWrite.Restore)
         {
             await using var ctx = _db.NewContext();
@@ -826,64 +859,117 @@ public sealed class ReleaseVisibilityTests : IDisposable
             release.DeletedAt = DateTime.UtcNow;
             await ctx.SaveChangesAsync();
         }
-        return seeded.ReleaseId;
+        return seeded;
     }
 
-    private async Task RunWriteAsync(ReleaseWrite write, int releaseId, string label)
+    /// <summary>
+    /// Runs one write as the current user and returns the refusal it got, or null
+    /// when it went through. The backfill pre-check answers "absent" with false,
+    /// which the endpoint turns into a 404; that comes back as a <c>Status</c> entry.
+    /// </summary>
+    private async Task<Dictionary<string, string>?> RunWriteAsync(ReleaseWrite write, int releaseId, long moduleId)
     {
         await using var ctx = _db.NewContext();
-        var management = Management(ctx);
-        switch (write)
+        try
         {
-            case ReleaseWrite.SoftDelete: await management.SoftDeleteAsync(releaseId); break;
-            case ReleaseWrite.Restore: await management.RestoreAsync(releaseId); break;
-            case ReleaseWrite.UpdateMetadata: await management.UpdateMetadataAsync(releaseId, "Renamed A/S", "Renamed"); break;
-            case ReleaseWrite.HardDelete: await management.HardDeleteAsync(releaseId, label); break;
+            switch (write)
+            {
+                case ReleaseWrite.SoftDelete: await Management(ctx).SoftDeleteAsync(releaseId); break;
+                case ReleaseWrite.Restore: await Management(ctx).RestoreAsync(releaseId); break;
+                case ReleaseWrite.UpdateMetadata: await Management(ctx).UpdateMetadataAsync(releaseId, "Renamed A/S", "Renamed"); break;
+                case ReleaseWrite.HardDelete: await Management(ctx).HardDeleteAsync(releaseId, WriteLabel); break;
+                case ReleaseWrite.Amend:
+                {
+                    await using var app = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+                    await Importer(ctx).AmendReleaseAsync(releaseId, new[] { new AppFileUpload("Microsoft_DK_Core.app", app, null) });
+                    break;
+                }
+                case ReleaseWrite.TranslationFile:
+                {
+                    await using var xlf = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+                    await Translations(ctx).ImportSingleAsync(releaseId, moduleId, xlf, "OIOUBL.daDK.xlf");
+                    break;
+                }
+                case ReleaseWrite.TranslationZip:
+                {
+                    using var zip = new MemoryStream();
+                    using (var archive = new ZipArchive(zip, ZipArchiveMode.Create, leaveOpen: true))
+                    {
+                        archive.CreateEntryFromFile(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"), "OIOUBL.daDK.xlf");
+                    }
+                    zip.Position = 0;
+                    await Translations(ctx).ImportZipAsync(releaseId, zip);
+                    break;
+                }
+                case ReleaseWrite.Backfill:
+                    if (!await Management(ctx).EnsureBackfillableAsync(releaseId))
+                    {
+                        return new Dictionary<string, string> { ["Status"] = "404" };
+                    }
+                    break;
+            }
+            return null;
+        }
+        catch (PlanValidationException ex)
+        {
+            return new Dictionary<string, string>(ex.Errors);
         }
     }
 
     [Theory]
-    [MemberData(nameof(AllWrites))]
-    public async Task Every_release_write_treats_a_private_projects_release_as_not_found_for_a_non_member(ReleaseWrite write)
+    [MemberData(nameof(AllWritesBothLinkages))]
+    public async Task Every_release_write_answers_a_non_member_exactly_as_it_answers_an_unknown_id(
+        ReleaseWrite write, Linkage linkage)
     {
-        const string label = "CRONUS on BC 26.0";
-        var releaseId = await SeedPrivateBuildReleaseAsync(write, label);
+        var seeded = await SeedPrivateReleaseAsync(write, linkage);
 
         ActAs(OutsiderUserId);
-        var act = () => RunWriteAsync(write, releaseId, label);
+        var unknown = await RunWriteAsync(write, UnknownReleaseId, seeded.ModuleId);
+        var hidden = await RunWriteAsync(write, seeded.ReleaseId, seeded.ModuleId);
 
-        // Word for word what an id that does not exist gets, so the refusal confirms nothing.
-        (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors.Should().Equal(new Dictionary<string, string>
-            {
-                ["Release"] = $"Release {releaseId} not found in this organisation.",
-            });
+        // Word for word, with only the id swapped, so the refusal confirms nothing.
+        unknown.Should().NotBeNull();
+        hidden.Should().Equal(unknown!.ToDictionary(
+            e => e.Key, e => e.Value.Replace(UnknownReleaseId.ToString(), seeded.ReleaseId.ToString())));
 
         await using var read = _db.NewContext();
-        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == releaseId);
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
         release.Should().NotBeNull("a refused hard delete removes nothing");
         (release!.DeletedAt is not null).Should().Be(write == ReleaseWrite.Restore, "the deleted flag is as seeded");
         release.Publisher.Should().BeNull("a refused metadata edit changes nothing");
+        (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId))
+            .Should().Be(1, "a refused amend adds no module");
+        (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == seeded.ModuleId))
+            .Should().BeFalse("a refused translation upload stores nothing");
     }
 
     [Theory]
     [MemberData(nameof(AllWritesForAllowedUsers))]
     public async Task Every_release_write_goes_through_for_a_team_member_and_an_org_Admin(ReleaseWrite write, int userId)
     {
-        const string label = "CRONUS on BC 26.0";
-        var releaseId = await SeedPrivateBuildReleaseAsync(write, label);
+        var seeded = await SeedPrivateReleaseAsync(write);
 
         ActAs(userId);
-        await RunWriteAsync(write, releaseId, label);
+        (await RunWriteAsync(write, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
 
         await using var read = _db.NewContext();
-        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == releaseId);
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
         switch (write)
         {
             case ReleaseWrite.SoftDelete: release!.DeletedAt.Should().NotBeNull(); break;
             case ReleaseWrite.Restore: release!.DeletedAt.Should().BeNull(); break;
             case ReleaseWrite.UpdateMetadata: release!.Publisher.Should().Be("Renamed A/S"); break;
             case ReleaseWrite.HardDelete: release.Should().BeNull(); break;
+            case ReleaseWrite.Amend:
+                (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId)).Should().Be(2);
+                break;
+            case ReleaseWrite.TranslationFile:
+                (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == seeded.ModuleId)).Should().BeTrue();
+                break;
+            // The ZIP's XLIFF names a module this release doesn't have, so it is
+            // skipped; getting a summary rather than a refusal is the point.
+            case ReleaseWrite.TranslationZip: break;
+            case ReleaseWrite.Backfill: break;
         }
     }
 

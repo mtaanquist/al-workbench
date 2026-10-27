@@ -47,18 +47,42 @@ public class ReleaseManagementService
     /// <summary>
     /// The tracked release behind an admin write, or the not-found error when the
     /// org filter or the solution-visibility fence hides it. Hidden answers exactly
-    /// like absent, so the error confirms nothing about another team's release.
+    /// like absent, so the error confirms nothing about another team's release; the
+    /// visibility check runs first and always, so the two take the same queries too.
     /// </summary>
-    private async Task<OeRelease> LoadVisibleAsync(int releaseId, CancellationToken ct)
+    private async Task<OeRelease> LoadVisibleAsync(int releaseId, CancellationToken ct) =>
+        await FindVisibleAsync(releaseId, ct).ConfigureAwait(false) ?? throw NotFound(releaseId);
+
+    /// <summary>The release behind <see cref="LoadVisibleAsync"/>, or null where that throws.</summary>
+    private async Task<OeRelease?> FindVisibleAsync(int releaseId, CancellationToken ct)
     {
         RequireOrganizationId();
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
-        if (release is null || !await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false))
+        return visible ? release : null;
+    }
+
+    /// <summary>
+    /// The pre-check behind the one-release system-reference backfill: false when
+    /// the release is absent or hidden by the solution-visibility fence (the
+    /// endpoint answers both with the same 404), and a field error when it exists
+    /// but has no stored source to re-scan. Only a ready, live release qualifies;
+    /// queueing another would add a job row the worker refuses, and that row would
+    /// then shadow the real source on the Retry card.
+    /// </summary>
+    public async Task<bool> EnsureBackfillableAsync(int releaseId, CancellationToken ct = default)
+    {
+        var release = await FindVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        if (release is null) return false;
+        if (release.Status != "ready" || release.DeletedAt is not null)
         {
-            throw NotFound(releaseId);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Backfill"] = "Only a release that finished importing and isn't deleted can have its system references backfilled.",
+            });
         }
-        return release;
+        return true;
     }
 
     /// <summary>
