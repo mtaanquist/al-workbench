@@ -1,7 +1,9 @@
+using System.Text.RegularExpressions;
 using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,7 +15,7 @@ namespace ALDevToolbox.Services.Notifications;
 /// differs from the build before it, so a pipeline that fails every night
 /// produces one email, not one per night. See <c>.design/notifications.md</c>.
 /// </summary>
-public sealed class BuildNotifier
+public sealed partial class BuildNotifier
 {
     private readonly AppDbContext _db;
     private readonly NotificationService _notifications;
@@ -115,13 +117,16 @@ public sealed class BuildNotifier
         if (!IsChange(failed, previousFailed)) return;
 
         var nightly = build.Trigger == ProjectBuildTrigger.PreviewCheck;
-        // Whoever pressed Build, and the followers who develop the solution (#1463). A
-        // build on push or a nightly check runs as whoever last saved the pipeline, who
-        // did not start it, so it is told only as a follower.
+        // Whoever pressed Build, the authors of its commits, and the followers who develop
+        // the solution (#1463, #1464). A build on push or a nightly check runs as whoever
+        // last saved the pipeline, who did not start it, so it is told only as a follower.
+        // A nightly check fails because Business Central moved, not because of the
+        // commits since the last good build, so their authors are left out of it.
         var pressedBuild = build.Trigger == ProjectBuildTrigger.Manual ? build.StartedByUserId : null;
+        List<int> authors = nightly ? [] : await CommitAuthorsAsync(build.Id, ct);
         var followers = await _follows.ListFollowerIdsAsync(build.ProjectId, NotificationAudience.Builds, ct);
         var recipients = await NotificationAudience.RecipientsAsync(
-            _db, build.ProjectId, [pressedBuild], followers, build.SolutionOwner, ct);
+            _db, build.ProjectId, [pressedBuild, .. authors.Select(a => (int?)a)], followers, build.SolutionOwner, ct);
         if (recipients.Count == 0) return;
 
         var target = ProjectBuildTarget.IsPreview(build.BcTarget) ? ProjectBuildTarget.Label(build.BcTarget) : null;
@@ -147,6 +152,46 @@ public sealed class BuildNotifier
             ProjectId: build.ProjectId),
             ct);
     }
+
+    /// <summary>
+    /// The people whose commits are in build <paramref name="buildId"/>: the commits since
+    /// its pipeline's last successful build, which are what can have broken it, or, once
+    /// it works again, what broke it and what fixed it. An author is matched by the email
+    /// Git recorded, to an account with that address or, for GitHub's private
+    /// <c>id+login@users.noreply.github.com</c> addresses, to whoever linked that GitHub
+    /// account. Authors who match nobody are skipped; the access re-check still applies.
+    /// </summary>
+    private async Task<List<int>> CommitAuthorsAsync(int buildId, CancellationToken ct)
+    {
+        var emails = await _db.OeProjectBuildCommits.AsNoTracking()
+            .Where(c => c.ProjectBuildId == buildId && c.AuthorEmail != null)
+            .Select(c => c.AuthorEmail!)
+            .Distinct()
+            .ToListAsync(ct);
+        if (emails.Count == 0) return [];
+
+        var gitHubIds = emails
+            .Select(e => GitHubNoReplyEmail().Match(e))
+            .Where(m => m.Success)
+            .Select(m => m.Groups["id"].Value)
+            .ToList();
+        var addresses = emails.Select(e => e.ToLowerInvariant()).ToList();
+
+        // The organisation's query filter keeps both reads to its own people.
+        var byEmail = await _db.Users.AsNoTracking()
+            .Where(u => addresses.Contains(u.Email.ToLower()))
+            .Select(u => u.Id)
+            .ToListAsync(ct);
+        List<int> byGitHub = gitHubIds.Count == 0 ? [] : await _db.UserExternalLogins.AsNoTracking()
+            .Where(l => l.Provider == GitHubAccessService.ProviderName && gitHubIds.Contains(l.Subject))
+            .Select(l => l.UserId)
+            .ToListAsync(ct);
+        return byEmail.Concat(byGitHub).Distinct().ToList();
+    }
+
+    /// <summary>GitHub's private commit address, which carries the account's numeric id.</summary>
+    [GeneratedRegex(@"^(?<id>\d+)\+[^@]+@users\.noreply\.github\.com$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex GitHubNoReplyEmail();
 
     /// <summary>
     /// "Name: message" for each extension that failed in a ready build against
