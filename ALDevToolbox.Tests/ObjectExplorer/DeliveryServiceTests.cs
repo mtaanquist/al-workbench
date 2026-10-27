@@ -1643,6 +1643,61 @@ public sealed class DeliveryServiceTests : IDisposable
         options.LaterUpdateUnavailable.Should().Contain("isn't installed");
     }
 
+    // ── Boundaries, on a clock of the test's own (#1439) ─────────────────
+
+    /// <summary>A clock that stays at <paramref name="utc"/>, to the whole second, so a boundary can be met exactly.</summary>
+    private static ALDevToolbox.Tests.Auth.FakeTimeProvider ClockAt(DateTime utc) =>
+        new(new DateTimeOffset(utc.Ticks - utc.Ticks % TimeSpan.TicksPerSecond, TimeSpan.Zero));
+
+    [Theory]
+    [InlineData(-60, true)]
+    [InlineData(-61, false)]
+    public async Task A_picked_time_counts_as_now_for_the_minute_spent_in_the_dialog_and_no_longer(int secondsAgo, bool accepted)
+    {
+        var clock = ClockAt(DateTime.UtcNow);
+        var now = clock.GetUtcNow().UtcDateTime;
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx, clock: clock).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, now.AddHours(1));
+
+        var act = () => NewService(_db.NewContext(), clock: clock)
+            .RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, now.AddSeconds(secondsAgo));
+
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ScheduledFor")
+                .WhoseValue.Should().Contain("hasn't happened yet");
+        }
+    }
+
+    [Theory]
+    // A second before the 22:00-23:00 window opens, the moment it opens, its last
+    // second, and the moment it closes: the window is [start, end).
+    [InlineData("21:59:59", 0, "22:00:00")]
+    [InlineData("22:00:00", 0, "22:00:00")]
+    [InlineData("22:59:59", 0, "22:59:59")]
+    [InlineData("23:00:00", 1, "22:00:00")]
+    public async Task The_reschedule_dialog_offers_the_windows_next_opening(string at, int daysLater, string opening)
+    {
+        // Tomorrow rather than a fixed date, so the slot never falls into the past.
+        var day = DateTime.UtcNow.Date.AddDays(1);
+        var clock = ClockAt(day + TimeSpan.Parse(at, System.Globalization.CultureInfo.InvariantCulture));
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await SetWindowAsync(ctx, seed.EnvironmentId, new TimeOnly(22, 0), new TimeOnly(23, 0));
+        var deliveryId = await NewService(ctx, clock: clock)
+            .ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, clock.GetUtcNow().UtcDateTime.AddDays(3));
+
+        var options = await NewService(_db.NewContext(), clock: clock).GetRescheduleOptionsAsync(deliveryId);
+
+        options!.NextWindowOpeningUtc.Should().Be(
+            day.AddDays(daysLater) + TimeSpan.Parse(opening, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     [Fact]
     public async Task RunDeliveryAsync_leaves_a_queued_delivery_alone_once_it_was_moved_to_later()
     {

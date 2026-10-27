@@ -4119,6 +4119,67 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         }
     }
 
+    // ── An expired client secret, on the service's own clock (#1439) ─────
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(-1, true)]
+    public async Task A_solutions_own_secret_is_refused_for_deployments_from_the_second_it_expires(int expiresInSeconds, bool refused)
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        // To the whole second, so "expires now" survives the database's microseconds.
+        var now = _clock.GetUtcNow();
+        _clock.Set(now.AddTicks(-(now.UtcTicks % TimeSpan.TicksPerSecond)));
+        var expiry = _clock.GetUtcNow().UtcDateTime.AddSeconds(expiresInSeconds);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcClientSecretExpiresAt, expiry));
+        }
+
+        await using var read = _db.NewContext();
+        var acquire = () => Svc(read, TokenOk()).AcquireDeliveryContextAsync(id);
+
+        if (refused)
+        {
+            (await acquire.Should().ThrowAsync<BcApiException>()).Which.Message
+                .Should().StartWith("This solution's own Business Central client secret has expired.");
+        }
+        else
+        {
+            (await acquire()).AccessToken.Should().Be("tok");
+        }
+    }
+
+    [Fact]
+    public async Task The_organisations_secret_is_refused_for_deployments_the_second_it_expires_and_says_whose_it_is()
+    {
+        var id = await SeedProjectAsync();
+        await SaveOrgRegistrationAsAdminAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+                new BcConnectionInput(Guid.NewGuid(), null, null, null, null, UseOrganizationRegistration: true));
+        }
+        var now = _clock.GetUtcNow();
+        _clock.Set(now.AddTicks(-(now.UtcTicks % TimeSpan.TicksPerSecond)));
+        var expiry = _clock.GetUtcNow().UtcDateTime;
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OrganizationSettings.Where(o => o.OrganizationId == TestDb.DefaultOrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.BcClientSecretExpiresAt, expiry));
+        }
+
+        await using var read = _db.NewContext();
+        var acquire = () => Svc(read, TokenOk()).AcquireDeliveryContextAsync(id);
+
+        (await acquire.Should().ThrowAsync<BcApiException>()).Which.Message
+            .Should().StartWith("Your organisation's Business Central client secret has expired.");
+    }
+
     [Fact]
     public async Task A_cached_token_is_never_handed_out_for_a_different_tenant_or_client()
     {
