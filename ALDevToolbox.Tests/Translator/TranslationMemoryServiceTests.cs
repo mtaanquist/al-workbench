@@ -63,6 +63,75 @@ public sealed class TranslationMemoryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Search_counts_up_to_the_limit_and_then_reports_more()
+    {
+        // The page counted every match exactly, which over a production memory
+        // (about 1.7M pairs) was most of its load time.
+        await using (var ctx = _db.NewContext())
+        {
+            var insert = $"""
+                INSERT INTO translation_memory (organization_id, source_language, target_language,
+                    source_text, target_text, source_hash, target_hash, kind, hit_count, score,
+                    created_at, updated_at, last_seen_at)
+                SELECT {TestDb.DefaultOrgId}, 'en-US', 'da-DK', 'Source ' || g, 'Kilde ' || g,
+                    md5('s' || g), md5('t' || g), 'caption', 1, 0, now(), now(), now()
+                FROM generate_series(1, {MemorySearchQuery.CountLimit + 1}) g
+                """;
+            await ctx.Database.ExecuteSqlRawAsync(insert);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewMemory(ctx).SearchAsync(new MemorySearchQuery(Take: 50));
+            result.Total.Should().Be(MemorySearchQuery.CountLimit);
+            result.TotalIsCapped.Should().BeTrue();
+            result.HasMore.Should().BeTrue();
+            result.Items.Should().HaveCount(50);
+        }
+    }
+
+    [Fact]
+    public async Task Search_pages_through_tied_rows_without_repeating_or_skipping_any()
+    {
+        // Every pair below ties on score, hit count and last seen, so only the
+        // id tie-break keeps the pages apart.
+        var seen = DateTime.UtcNow;
+        await using (var ctx = _db.NewContext())
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                ctx.TranslationMemory.Add(new TranslationMemoryEntry
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    SourceLanguage = "en-US", TargetLanguage = "da-DK",
+                    SourceText = $"Source {i}", TargetText = $"Kilde {i}",
+                    SourceHash = $"s{i}", TargetHash = $"t{i}", Kind = "caption",
+                    HitCount = 1, CreatedAt = seen, UpdatedAt = seen, LastSeenAt = seen,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            var first = await memory.SearchAsync(new MemorySearchQuery(Skip: 0, Take: 2));
+            var second = await memory.SearchAsync(new MemorySearchQuery(Skip: 2, Take: 2));
+            var last = await memory.SearchAsync(new MemorySearchQuery(Skip: 4, Take: 2));
+
+            first.Total.Should().Be(5);
+            first.TotalIsCapped.Should().BeFalse();
+            first.HasMore.Should().BeTrue();
+            second.HasMore.Should().BeTrue();
+            last.HasMore.Should().BeFalse();
+            last.Items.Should().ContainSingle();
+
+            first.Items.Concat(second.Items).Concat(last.Items).Select(e => e.Id)
+                .Should().OnlyHaveUniqueItems().And.HaveCount(5).And.BeInDescendingOrder();
+        }
+    }
+
+    [Fact]
     public async Task An_upsert_that_names_no_source_does_not_erase_the_one_already_recorded()
     {
         // The repository sweep records which repository and file a pair came
