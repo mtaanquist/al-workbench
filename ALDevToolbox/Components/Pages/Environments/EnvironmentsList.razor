@@ -587,7 +587,12 @@
         _ => "Every environment you can reach",
     };
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    /// <summary>The reads and ticks under way, so leaving the page can cancel them and wait.</summary>
+    private readonly PageCalls _calls = new();
+
+    // Tracked, like the click's refresh below: both read with the page's token, and a
+    // cancelled query still unwinding has to be waited for on the way out.
+    protected override Task OnInitializedAsync() => _calls.Track(LoadAsync());
 
     /// <summary>Counts the listings started, so an earlier one finishing late doesn't overwrite a later one.</summary>
     private int _loads;
@@ -637,7 +642,7 @@
     /// reload - the same shape the Upgrades page uses. A pressed Refresh always asks:
     /// the person has decided the rows are too old, whatever the timestamps say.
     /// </summary>
-    private Task RefreshAsync() => RequestRefreshAsync(force: true);
+    private Task RefreshAsync() => _calls.Track(RequestRefreshAsync(force: true));
 
     /// <summary>
     /// The one path both Refresh and the auto-refresh tick take. Unforced, the service
@@ -725,12 +730,12 @@
     private static readonly TimeSpan PollFor = TimeSpan.FromMinutes(3);
     private System.Threading.Timer? _poll;
     private DateTime _pollUntilUtc;
-    private readonly PageCalls _calls = new();
 
     /// <summary>Whether the re-read timer is running, for the tests of leaving the page.</summary>
     internal bool IsPolling => _poll is not null;
 
-    private void StartPolling()
+    /// <summary>Internal so the tests of leaving the page can start it late; the page calls it after a refresh request.</summary>
+    internal void StartPolling()
     {
         // A request that comes back after the page has gone must not leave a timer behind.
         if (_calls.IsGone) return;
@@ -739,7 +744,8 @@
         _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
-    private async Task PollTickAsync()
+    /// <summary>One re-read. Internal so a test can drive it without waiting on the timer.</summary>
+    internal async Task PollTickAsync()
     {
         // On the renderer's context, so the rows land between a click's steps; the read
         // itself is on a scope of its own (see OnOwnScopeAsync).

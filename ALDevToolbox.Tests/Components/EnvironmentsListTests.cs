@@ -855,13 +855,11 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
     }
 
     /// <summary>
-    /// A refresh that comes back after the page has gone used to start the re-read
-    /// timer on a page nobody had open, and with leaving now skipping its ticks
-    /// nothing would ever stop it (#1437). Leaving cancels the request, and a request
-    /// that lands anyway starts nothing.
+    /// An auto-refresh tick that runs after the page has gone asks Business Central
+    /// for nothing: leaving cancels the page's requests (#1437).
     /// </summary>
     [Fact]
-    public async Task An_auto_refresh_that_lands_after_the_page_has_gone_starts_no_timer()
+    public async Task An_auto_refresh_after_the_page_has_gone_is_cancelled_with_it()
     {
         await MakeOwnerAnAdminAsync();
         var id = await SeedSolutionAsync("CRONUS Denmark");
@@ -882,6 +880,48 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
         page.IsPolling.Should().BeFalse();
         _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeFalse(
             "the request was cancelled with the page");
+    }
+
+    /// <summary>
+    /// A refresh that comes back after the page has gone used to start the re-read
+    /// timer on a page nobody had open, and since a tick skips its work once the page
+    /// has gone, nothing would ever stop it (#1437). Starting late starts nothing.
+    /// </summary>
+    [Fact]
+    public async Task Polling_started_after_the_page_has_gone_starts_no_timer()
+    {
+        var cut = _ctx.Render<EnvironmentsList>();
+        cut.WaitForAssertion(() => cut.FindAll(".loading-block").Should().BeEmpty());
+        var page = cut.Instance;
+
+        await _ctx.Renderer.DisposeAsync();
+        await _ctx.Renderer.Dispatcher.InvokeAsync(page.StartPolling);
+
+        page.IsPolling.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// A tick that had already fired when the page went finds it gone, and stops its
+    /// timer rather than only skipping the read.
+    /// </summary>
+    [Fact]
+    public async Task A_tick_that_finds_the_page_gone_stops_its_timer()
+    {
+        await MakeOwnerAnAdminAsync();
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-10));
+
+        var cut = _ctx.Render<EnvironmentsList>();
+        await cut.WaitForElement(".freshness [data-page-refresh]").ClickAsync(new());
+        cut.WaitForState(() => cut.Instance.IsPolling);
+        var page = cut.Instance;
+
+        await _ctx.Renderer.DisposeAsync();
+        await page.PollTickAsync();
+
+        page.IsPolling.Should().BeFalse();
     }
 
     [Fact]

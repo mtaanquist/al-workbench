@@ -780,7 +780,11 @@
         {
             _canPickFromGitHub = (await GitHubRepos.GetAccessAsync(_calls.Token)).IsReady;
         }
-        catch (Exception ex) when (!_calls.IsGone)
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            throw; // the page was left mid-read; see DisposeAsync
+        }
+        catch (Exception ex)
         {
             Log.LogWarning(ex, "Could not tell whether solution {ProjectId} can pick repositories from GitHub.", Id);
         }

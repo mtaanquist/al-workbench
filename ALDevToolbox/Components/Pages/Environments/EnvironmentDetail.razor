@@ -1501,6 +1501,8 @@
     private void StartSessionsLive()
     {
         StopSessionsLive();
+        // A read that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         _sessionsLiveStopped = false;
         _sessionsLiveUntilUtc = DateTime.UtcNow.Add(SessionsLiveFor);
         _sessionsLive = new System.Threading.Timer(
