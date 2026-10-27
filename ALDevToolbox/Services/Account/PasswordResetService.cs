@@ -135,6 +135,13 @@ public sealed class PasswordResetService
             // but the two consume paths should be consistent. #410
             throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This reset link is no longer valid. Request a new one." });
         }
+        // The org may have gone Microsoft-only between issue and consume, as
+        // the magic-link consume also checks: a password set now would come
+        // back to life if the policy were relaxed later.
+        if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page." });
+        }
         row.ConsumedAt = now;
         row.User.PasswordHash = _auth.HashPassword(newPassword);
         // Reset is the documented recovery path, so it has to actually recover:

@@ -85,6 +85,7 @@ public sealed class DatabaseUsageSnapshotTests : IDisposable
     {
         await using var ctx = _db.NewContext();
         var usage = _db.NewDatabaseUsageService(ctx);
+        _db.OrgContext.IsSiteAdmin = true;
 
         // No recompute yet: the LEFT JOIN still surfaces every org, with a
         // null ComputedAt (so the page can say "not computed yet").
@@ -97,6 +98,42 @@ public sealed class DatabaseUsageSnapshotTests : IDisposable
 
         var after = await usage.ListFromSnapshotsAsync(CancellationToken.None);
         after.Should().OnlyContain(r => r.ComputedAt != null);
+    }
+
+    /// <summary>
+    /// The two cross-organisation members run raw SQL or write any
+    /// organisation's row by id, so they check for SiteAdmin themselves
+    /// rather than trusting the page and endpoint roles alone (#1426).
+    /// </summary>
+    [Fact]
+    public async Task The_cross_org_listing_and_quota_override_refuse_a_non_site_admin()
+    {
+        await using var ctx = _db.NewContext();
+        var usage = _db.NewDatabaseUsageService(ctx);
+        _db.OrgContext.IsSiteAdmin = false;
+
+        var list = () => usage.ListFromSnapshotsAsync(CancellationToken.None);
+        var quota = () => usage.SetOrgQuotaAsync(TestDb.OtherOrgId, 100, CancellationToken.None);
+
+        await list.Should().ThrowAsync<InvalidOperationException>().WithMessage("SiteAdmin context is required*");
+        await quota.Should().ThrowAsync<InvalidOperationException>().WithMessage("SiteAdmin context is required*");
+        await using var read = _db.NewContext();
+        (await read.Organizations.AsNoTracking().SingleAsync(o => o.Id == TestDb.OtherOrgId))
+            .StorageQuotaMb.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_site_admin_sets_another_organisations_quota()
+    {
+        await using var ctx = _db.NewContext();
+        var usage = _db.NewDatabaseUsageService(ctx);
+        _db.OrgContext.IsSiteAdmin = true;
+
+        await usage.SetOrgQuotaAsync(TestDb.OtherOrgId, 100, CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.Organizations.AsNoTracking().SingleAsync(o => o.Id == TestDb.OtherOrgId))
+            .StorageQuotaMb.Should().Be(100);
     }
 
     /// <summary>

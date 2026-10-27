@@ -152,6 +152,72 @@ public sealed class AlCompilerProvisionerTests : IDisposable
         Directory.Exists(Path.Combine(_root, "30.0.1.1-beta")).Should().BeFalse();
     }
 
+    // ── Refusing a package that is not the one NuGet published (#427, #429) ──
+
+    [Fact]
+    public async Task A_package_whose_hash_does_not_match_is_refused_and_leaves_no_folder_behind()
+    {
+        var feed = new FakeNuGet("18.0.41.62505") { WrongHash = { "18.0.41.62505" } };
+
+        var act = () => NewProvisioner(feed).ProvisionVersionAsync("18.0.41.62505");
+
+        (await act.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*failed its SHA-512 integrity check*");
+        Directory.Exists(Path.Combine(_root, "18.0.41.62505")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_package_with_no_published_hash_is_refused_and_leaves_no_folder_behind()
+    {
+        var feed = new FakeNuGet("18.0.41.62505") { NoHash = { "18.0.41.62505" } };
+
+        var act = () => NewProvisioner(feed).ProvisionVersionAsync("18.0.41.62505");
+
+        (await act.Should().ThrowAsync<AlCompilerPackageException>())
+            .WithMessage("*no published integrity hash*");
+        Directory.Exists(Path.Combine(_root, "18.0.41.62505")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_catalog_entry_with_no_sha512_hash_is_refused()
+    {
+        var feed = new FakeNuGet("18.0.41.62505") { Sha256Only = { "18.0.41.62505" } };
+
+        var act = () => NewProvisioner(feed).ProvisionVersionAsync("18.0.41.62505");
+
+        (await act.Should().ThrowAsync<AlCompilerPackageException>())
+            .WithMessage("*publishes no SHA-512 hash*");
+        Directory.Exists(Path.Combine(_root, "18.0.41.62505")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_package_entry_that_climbs_out_of_the_install_folder_is_refused()
+    {
+        // The hash matches: the publisher itself shipped the hostile entry.
+        var feed = new FakeNuGet("18.0.41.62505") { Escaping = { "18.0.41.62505" } };
+
+        var act = () => NewProvisioner(feed).ProvisionVersionAsync("18.0.41.62505");
+
+        (await act.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*escapes the install directory*");
+        Directory.Exists(Path.Combine(_root, "18.0.41.62505")).Should().BeFalse();
+        File.Exists(Path.Combine(_root, "evil.dll")).Should().BeFalse("nothing may be written outside the bin folder");
+        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_tampered_newest_stable_is_not_skipped_for_an_older_one()
+    {
+        // A hash mismatch is not a feed quirk: the walk must stop, not fall back.
+        var feed = new FakeNuGet("17.0.34.45391", "18.0.41.62505") { WrongHash = { "18.0.41.62505" } };
+
+        var act = () => NewProvisioner(feed).ResolveAsync();
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*integrity check*");
+        feed.Downloads.Should().Equal("18.0.41.62505");
+        Directory.Exists(Path.Combine(_root, "17.0.34.45391")).Should().BeFalse();
+    }
+
     [Fact]
     public void PickPrereleaseCandidates_takes_the_newest_betas_ahead_of_stable()
     {
@@ -287,6 +353,18 @@ internal sealed class FakeNuGet : HttpMessageHandler, IHttpClientFactory
     /// <summary>Versions whose package carries no compiler.</summary>
     public HashSet<string> Empty { get; } = new();
 
+    /// <summary>Versions whose catalog entry publishes the hash of some other bytes.</summary>
+    public HashSet<string> WrongHash { get; } = new();
+
+    /// <summary>Versions with no registration leaf, so no hash can be fetched.</summary>
+    public HashSet<string> NoHash { get; } = new();
+
+    /// <summary>Versions whose catalog entry names a SHA-256 hash rather than a SHA-512 one.</summary>
+    public HashSet<string> Sha256Only { get; } = new();
+
+    /// <summary>Versions whose package also holds an entry with <c>..</c> segments that climb out of the bin folder.</summary>
+    public HashSet<string> Escaping { get; } = new();
+
     /// <summary>Every package version downloaded, in order.</summary>
     public List<string> Downloads { get; } = new();
 
@@ -311,13 +389,18 @@ internal sealed class FakeNuGet : HttpMessageHandler, IHttpClientFactory
         if (url.Contains("/registration5-gz-semver2/", StringComparison.Ordinal))
         {
             var version = Path.GetFileNameWithoutExtension(new Uri(url).AbsolutePath);
+            if (NoHash.Contains(version, StringComparer.OrdinalIgnoreCase))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             return Json(new { catalogEntry = $"https://catalog.test/{version}.json" });
         }
         if (url.StartsWith("https://catalog.test/", StringComparison.Ordinal))
         {
             var version = Path.GetFileNameWithoutExtension(new Uri(url).AbsolutePath);
             var original = Versions.Single(v => v.Equals(version, StringComparison.OrdinalIgnoreCase));
-            return Json(new { packageHashAlgorithm = "SHA512", packageHash = Convert.ToBase64String(SHA512.HashData(PackageBytes(original))) });
+            if (Sha256Only.Contains(original))
+                return Json(new { packageHashAlgorithm = "SHA256", packageHash = Convert.ToBase64String(SHA256.HashData(PackageBytes(original))) });
+            byte[] hashed = WrongHash.Contains(original) ? [.. PackageBytes(original), (byte)0] : PackageBytes(original);
+            return Json(new { packageHashAlgorithm = "SHA512", packageHash = Convert.ToBase64String(SHA512.HashData(hashed)) });
         }
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
     }
@@ -333,8 +416,15 @@ internal sealed class FakeNuGet : HttpMessageHandler, IHttpClientFactory
         {
             var entry = zip.CreateEntry(Empty.Contains(version) ? "tools/net10.0/any/analyzers.dll" : "tools/net10.0/any/alc.dll");
             entry.LastWriteTime = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-            using var writer = new StreamWriter(entry.Open());
-            writer.Write("alc " + version);
+            using (var writer = new StreamWriter(entry.Open())) writer.Write("alc " + version);
+            if (Escaping.Contains(version))
+            {
+                // bin/../.. is the install root, so this would land beside the version folders.
+                var evil = zip.CreateEntry("tools/net10.0/any/../../evil.dll");
+                evil.LastWriteTime = entry.LastWriteTime;
+                using var evilWriter = new StreamWriter(evil.Open());
+                evilWriter.Write("not a compiler");
+            }
         }
         return ms.ToArray();
     }

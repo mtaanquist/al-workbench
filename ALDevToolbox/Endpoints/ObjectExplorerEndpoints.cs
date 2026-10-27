@@ -124,7 +124,10 @@ internal static class ObjectExplorerEndpoints
         // release id; reuses the same FolderZip / AppFiles + SourceZips
         // form shape so the upload-building helpers come for free.
         // Same 1 GB cap — a late-landing partner DVD is rare but possible.
-        app.MapPost("/admin/object-explorer/release/{releaseId:int}/modules", async (
+        // Posts to .../modules/upload, not .../modules: that address is the
+        // AdminReleaseModules page, and Razor component endpoints accept POST
+        // too, so sharing it made every upload an AmbiguousMatchException.
+        app.MapPost("/admin/object-explorer/release/{releaseId:int}/modules/upload", async (
             int releaseId,
             HttpContext ctx,
             ReleaseImportRequestService imports,

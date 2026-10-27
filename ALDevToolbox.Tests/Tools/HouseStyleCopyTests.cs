@@ -17,12 +17,14 @@ namespace ALDevToolbox.Tests.Tools;
 /// agents parse.</para>
 ///
 /// <para><b>What this scans, and what it deliberately cannot.</b> It reads the
-/// app project's <c>.cs</c> and <c>.razor</c> sources, strips comments the way
+/// app project's <c>.cs</c>, <c>.razor</c> and <c>.js</c> sources, strips comments the way
 /// <see cref="IgnoreQueryFiltersBaselineTests"/> does, and flags the banned
 /// characters in what is left — string literals and Razor markup, which is
 /// where user-facing copy lives. The stripper is not a C# parser: a <c>//</c>
 /// inside a string literal (a URL, say) ends the "line" early, so a violation
-/// hiding after one is missed. That trade is deliberate — a whole-line scan
+/// hiding after one is missed, and a <c>/*</c> inside a string or a JavaScript
+/// regex opens a comment that blanks everything up to the next <c>*/</c>
+/// (<c>code-editor.js</c> has one). That trade is deliberate — a whole-line scan
 /// that under-reports is easier to trust than a parser that fires on code
 /// nobody reads. Comments are out of scope on purpose: no user sees them, and
 /// sweeping them would bury the real hits in churn.</para>
@@ -130,7 +132,11 @@ public sealed class HouseStyleCopyTests
         var findings = new List<Finding>();
         var files = Directory.EnumerateFiles(app, "*.*", SearchOption.AllDirectories)
             .Where(p => p.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
-                        || p.EndsWith(".razor", StringComparison.OrdinalIgnoreCase))
+                        || p.EndsWith(".razor", StringComparison.OrdinalIgnoreCase)
+                        // The scripts set text on screen themselves (the command
+                        // palette's "No search results", the import progress
+                        // labels), and their comments strip the same way.
+                        || p.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
             .Where(p => !IsExcluded(root, p))
             .OrderBy(p => p, StringComparer.Ordinal);
 
@@ -144,13 +150,15 @@ public sealed class HouseStyleCopyTests
 
     /// <summary>
     /// Generated code is out of scope: EF migrations are machine-written and
-    /// build output is not source.
+    /// build output is not source. So are the vendored bundles under
+    /// <c>wwwroot/lib</c>, which are someone else's minified code.
     /// </summary>
     private static bool IsExcluded(string root, string path)
     {
         var relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
         var segments = relative.Split('/');
-        return segments.Contains("obj") || segments.Contains("bin") || segments.Contains("Migrations");
+        return segments.Contains("obj") || segments.Contains("bin") || segments.Contains("Migrations")
+            || relative.StartsWith("ALDevToolbox/wwwroot/lib/", StringComparison.Ordinal);
     }
 
     private static IEnumerable<Finding> Scan(IReadOnlyList<string> raw, string path)

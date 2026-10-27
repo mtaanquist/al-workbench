@@ -1443,55 +1443,11 @@
 
     private PreviewNode BuildPreview()
     {
-        var rootName = PreviewRootName;
-
-        var children = new List<PreviewNode>();
-
-        // The org logo lands at the path the admin set on
-        // /admin/configuration/defaults' "Default logo path" (stripped of
-        // any extension-relative ../ prefix). No logo uploaded means no
-        // logo node at all - fresh orgs don't see a phantom .assets folder.
-        if (_orgConfig?.Logo is not null)
-        {
-            var logoExt = _orgConfig.Logo.ContentType switch
-            {
-                "image/svg+xml" => "svg",
-                _ => "png",
-            };
-            var logoPath = ALDevToolbox.Services.Generation.WorkspaceZipBuilder.NormaliseLogoPath(
-                _orgConfig.Settings.DefaultLogo, logoExt);
-            PreviewTreeBuilder.GraftFile(children, logoPath);
-        }
-
-        // Split the template's included files by scope once: workspace-root
-        // grafts into the workspace tree; per-extension is duplicated inside
-        // each extension folder by ExtensionPreviewBuilder. This is exactly
-        // what WorkspaceZipBuilder does at emit time so the preview matches
-        // the ZIP.
-        var workspaceRootPaths = new List<string>();
-        var perExtensionPaths = new List<string>();
-        if (_selected is not null && _orgConfig is not null)
-        {
-            var byId = _orgConfig.Files.ToDictionary(f => f.Id);
-            foreach (var joined in _selected.IncludedFiles.OrderBy(j => j.Ordering))
-            {
-                if (!byId.TryGetValue(joined.OrganizationFileId, out var file)) continue;
-                if (file.Scope == OrganizationFileScope.EveryExtension)
-                {
-                    perExtensionPaths.Add(file.Path);
-                }
-                else
-                {
-                    workspaceRootPaths.Add(file.Path);
-                }
-            }
-        }
-
         // The id ranges this form is about to allocate, from the same code that
         // will allocate them at emit time rather than a second copy of the walk
         // (#546). Keyed by the folder name each range belongs to, which is what
         // the tree rows are labelled with, so a row finds its own range without
-        // the two loops below having to stay index-aligned with the allocator.
+        // having to stay index-aligned with the allocator.
         var ranges = _selected is null
             ? new Dictionary<string, string>(StringComparer.Ordinal)
             : IdRangeAllocator
@@ -1500,38 +1456,11 @@
                 .GroupBy(r => r.Path, StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => g.First().Label, StringComparer.Ordinal);
 
-        if (_selected is not null)
-        {
-            foreach (var ext in _selected.WorkspaceExtensions.OrderBy(e => e.Ordering))
-            {
-                if (!ext.Required && !_selectedExtensionPaths.Contains(ext.Path)) continue;
-                children.Add(PreviewNode.Extension(
-                    ext.Path,
-                    ExtensionPreviewBuilder.BuildContents(ext.Folders, _includeExamples, perExtensionPaths))
-                    with { Meta = ranges.GetValueOrDefault(ext.Path) });
-            }
-        }
-
-        if (_modules is not null)
-        {
-            foreach (var module in SelectedModulesInOrder())
-            {
-                // Module-cloned extension folder name mirrors GenerationService:
-                // the module's ExtensionName (PascalCase) is what lands in the
-                // ZIP. Module.Key stays as the admin slug / dep ref target.
-                children.Add(PreviewNode.Extension(
-                    module.ExtensionName,
-                    ExtensionPreviewBuilder.BuildContents(module.ExtensionFolders, _includeExamples, perExtensionPaths))
-                    with { Meta = ranges.GetValueOrDefault(module.ExtensionName) });
-            }
-        }
-
-        // Workspace-root side-cars + workspace-root-scoped org files, then
-        // sort. Shared with the New Extension and Template Detail previews so
-        // all three stay identical - see PreviewTreeBuilder.BuildWorkspacePreview.
-        return PreviewTreeBuilder.BuildWorkspacePreview(
-            rootName, children, WorkspaceConfigService.FileName, workspaceRootPaths,
-            _selected?.RootFolders.OrderBy(f => f.Ordering).Select(f => f.Path));
+        // The tree itself is assembled in WorkspacePreviewBuilder, where a
+        // test holds it against a generated ZIP.
+        return WorkspacePreviewBuilder.Build(
+            PreviewRootName, _selected, _selectedExtensionPaths, _modules, _selectedModuleKeys,
+            _orgConfig, _includeExamples, ranges);
     }
 
 }

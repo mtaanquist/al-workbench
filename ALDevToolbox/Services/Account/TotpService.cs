@@ -108,7 +108,8 @@ public sealed class TotpService
     /// <summary>
     /// Verifies a code against the still-unconfirmed enrollment; on success
     /// stamps <c>confirmed_at</c>, flips <see cref="User.TotpEnabled"/>, and
-    /// issues 10 fresh recovery codes (returned for one-time display).
+    /// issues 10 fresh recovery codes (returned for one-time display). Refused
+    /// once the enrollment is confirmed (issue #1422).
     /// </summary>
     public async Task<IReadOnlyList<string>> ConfirmEnrollmentAsync(int userId, string code, CancellationToken ct = default)
     {
@@ -116,6 +117,18 @@ public sealed class TotpService
         var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.UserId == userId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start setting up the authenticator app first." });
+        // Confirming again would wipe the recovery codes and hand out new ones, with nothing
+        // asked but a code in its window - one that may already have signed someone in.
+        // Regenerating codes asks for the password, so this path must not offer a way round it.
+        // A double-clicked Confirm lands here too, after the first post already issued codes
+        // the browser never showed, so the message points at the way to get new ones.
+        if (secret.ConfirmedAt is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Totp"] = "The authenticator app is already turned on. If you didn't see your recovery codes, generate new ones below."
+            });
+        }
 
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
         if (VerifyCode(base32, code) is not { } step)
