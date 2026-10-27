@@ -27,12 +27,12 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
     private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
+            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 
     private ReleaseManagementService NewManagement(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
 
     private async Task<int> SeedReleaseAsync(string label = "Test Release", int? parentId = null, string kind = "first_party")
     {
@@ -194,7 +194,9 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "Cascade Test");
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(id);
+            await svc.HardDeleteAsync(id, confirmLabel: "Cascade Test");
         }
 
         await using var read = _db.NewContext();
@@ -208,13 +210,46 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     public async Task HardDeleteAsync_refuses_when_another_release_has_this_one_as_parent()
     {
         var parentId = await SeedReleaseAsync(label: "Parent");
-        await SeedReleaseAsync(label: "Customer X", parentId: parentId, kind: "project");
+        var childId = await SeedReleaseAsync(label: "Customer X", parentId: parentId, kind: "project");
 
-        await using var ctx = _db.NewContext();
-        var act = async () => await NewManagement(ctx).HardDeleteAsync(parentId, confirmLabel: "Parent");
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(parentId);
+            var act = async () => await svc.HardDeleteAsync(parentId, confirmLabel: "Parent");
 
-        (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors.Should().ContainKey("Release");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("parent");
+        }
+
+        // The refusal happens before anything is removed: both rows, and the parent's modules, survive.
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.Id == parentId || r.Id == childId)).Should().Be(2);
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == parentId)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_refuses_a_release_that_is_not_soft_deleted()
+    {
+        // The manage page only offers a permanent delete after a soft delete; the
+        // service holds the same order for a POST that skips the page.
+        var id = await SeedReleaseAsync(label: "Still Live");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "Still Live");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().Equal(new Dictionary<string, string>
+                {
+                    ["Release"] = "Soft delete this release first. You can permanently delete it once it is soft-deleted.",
+                });
+        }
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == id);
+        release.DeletedAt.Should().BeNull("a refused hard delete leaves the release live");
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == id)).Should().BeTrue();
     }
 
     [Fact]
@@ -222,7 +257,9 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     {
         var id = await SeedReleaseAsync(label: "Exactly This");
         await using var ctx = _db.NewContext();
-        var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "wrong");
+        var svc = NewManagement(ctx);
+        await svc.SoftDeleteAsync(id);
+        var act = async () => await svc.HardDeleteAsync(id, confirmLabel: "wrong");
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("ConfirmLabel");
 

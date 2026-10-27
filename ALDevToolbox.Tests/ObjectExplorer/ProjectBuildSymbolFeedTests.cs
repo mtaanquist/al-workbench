@@ -1508,10 +1508,10 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         var translations = new TranslationImportService(ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance, ingests: _ingests);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), ingests: _ingests);
         return new ProjectBuildService(
             ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),

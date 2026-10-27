@@ -108,6 +108,16 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresEmail: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // Same shared counter as the TOTP and recovery challenges. Sending a
+            // new email code gives that code fresh guesses (#1432), so the email
+            // service's own cap alone would let re-sends keep guessing; this one
+            // caps the person's wrong second-factor guesses whatever the code.
+            var attempt = await auth.TryReserveMfaAttemptAsync(state.UserId, ResolveIp(ctx), ct);
+            if (attempt is null)
+            {
+                ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=too-many-attempts");
+                return;
+            }
             var form = await ctx.Request.ReadFormAsync(ct);
             var code = form["Code"].ToString();
             if (!await mfa.VerifyAsync(state.UserId, code, ct))
@@ -115,6 +125,7 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=invalid");
                 return;
             }
+            await auth.ReleaseMfaAttemptAsync(attempt.Value, ct);
             await CompleteMfaSignIn(ctx, auth, state, SignInMethod.EmailCode, ct, logger);
         });
 
