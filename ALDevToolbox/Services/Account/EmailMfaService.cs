@@ -39,9 +39,12 @@ public sealed class EmailMfaService
     /// <summary>
     /// Generates and persists a fresh 6-digit code for the user. Returns the
     /// plaintext for the caller to email; only the user-bound SHA-256 hash
-    /// lands in the database. Retires the user's older live codes, so a new
-    /// code is the way out of a wrong-guess lockout. Returns <c>null</c> when
-    /// the per-user rate limit is exceeded.
+    /// lands in the database. Retires the user's older live codes, so only the
+    /// newest one works and it starts with a full per-code allowance. A new
+    /// code does not end a sign-in lockout: on the login challenge the shared
+    /// cap (<see cref="AuthService.MaxMfaAttempts"/> per
+    /// <see cref="AuthService.LockoutWindow"/>) still bounds guesses. Returns
+    /// <c>null</c> when the per-user rate limit is exceeded.
     /// </summary>
     public async Task<string?> IssueChallengeAsync(int userId, CancellationToken ct = default)
     {
@@ -66,9 +69,10 @@ public sealed class EmailMfaService
         if (recent >= MaxIssuesPerWindow) return null;
 
         // A new code retires every older one, so only the code in the latest
-        // email works and it starts with a full MaxVerifyAttempts. That is the
-        // way out of a lockout; the issue throttle above is what still bounds
-        // total guesses (#1432).
+        // email works and it starts with a full MaxVerifyAttempts (#1432). On
+        // the login challenge the shared sign-in cap bounds total guesses and a
+        // new code does not lift it (#1472). The Account page's enable flow has
+        // no shared cap, so there the issue throttle above is what bounds them.
         await userChallenges
             .Where(t => t.ConsumedAt == null && t.ExpiresAt > now)
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
@@ -116,9 +120,12 @@ public sealed class EmailMfaService
 
         // Brute-force guard: cap total wrong guesses across the live window so
         // the 6-digit space can't be walked before the codes expire. Once the
-        // cap is hit the user must request a fresh code, which retires this one
-        // and starts a new allowance; the issue throttle bounds how often that
-        // can happen. #409, #1432
+        // cap is hit this code is dead, and a fresh one starts a new allowance.
+        // That allowance is per code only: on the login challenge the shared
+        // sign-in cap (AuthService.MaxMfaAttempts) is checked first and still
+        // refuses once it is reached (#1472). On the Account page's enable
+        // flow, which has no shared cap, the issue throttle bounds how often a
+        // new allowance can be had. #409, #1432
         //
         // Guesses are charged to the newest live challenge, and the charge is
         // made before comparing, in one conditional update, so parallel

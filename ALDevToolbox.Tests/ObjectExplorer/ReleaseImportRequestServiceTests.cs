@@ -45,11 +45,14 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
     [Fact]
     public async Task Retrying_a_project_build_is_refused_before_anything_is_wiped_for_someone_who_cannot_manage_it()
     {
+        // Read-only, so the release is visible but only the assigned teams may
+        // rebuild it. A Private solution's release is hidden outright and answers
+        // as an unknown id (ReleaseVisibilityTests).
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
         var project = new Domain.Entities.ObjectExplorer.OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", Visibility = Domain.Entities.ObjectExplorer.ProjectVisibility.Private,
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", Visibility = Domain.Entities.ObjectExplorer.ProjectVisibility.ReadOnly,
             CreatedAt = now, UpdatedAt = now,
         };
         ctx.OeProjects.Add(project);
@@ -464,7 +467,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
                 _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance),
             TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
         return new ReleaseImportRequestService(
-            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds);
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds,
+            new ProjectAccess(ctx, _db.OrgContext));
     }
 
     private async Task SetAllowlistAsync(string hosts)

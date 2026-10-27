@@ -595,6 +595,85 @@ public sealed class AccountServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_reset_is_refused_when_the_account_is_disabled_while_the_submit_waits_for_the_lock()
+    {
+        // The disable lands after the consume has read the token and its user
+        // but before it holds the user-row lock, so only a check made under the
+        // lock can see it.
+        await SeedResettableUserAsync("racing@example.com");
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = (await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("racing@example.com", "10.0.0.1"))!;
+        }
+        var disableBeforeLock = new BeforeUserLock(async () =>
+        {
+            await using var disable = _db.NewContext();
+            await disable.Users.IgnoreQueryFilters().Where(u => u.Email == "racing@example.com")
+                .ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, UserStatus.Disabled));
+        });
+
+        PlanValidationException? refused = null;
+        await using (var consume = _db.NewContext(disableBeforeLock))
+        {
+            try
+            {
+                await NewPasswordReset(consume).ConsumePasswordResetTokenAsync(token, "verylongnewpassword!");
+            }
+            catch (PlanValidationException ex)
+            {
+                refused = ex;
+            }
+        }
+
+        // First, so a lock taken some other way fails on its cause, not on the refusal.
+        disableBeforeLock.Fired.Should().BeTrue("the disable has to land in the window under test");
+        refused.Should().NotBeNull("the account was disabled before the lock was taken");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "racing@example.com");
+        NewAuth(read).VerifyPassword("somelongpassword1", user.PasswordHash)
+            .Should().BeTrue("a disabled account must keep its old password");
+    }
+
+    /// <summary>
+    /// Runs a callback once, just before the consume takes its user-row lock,
+    /// whether the lock is sent as a statement or as a query.
+    /// </summary>
+    private sealed class BeforeUserLock : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        private readonly Func<Task> _callback;
+        public BeforeUserLock(Func<Task> callback) => _callback = callback;
+        public bool Fired { get; private set; }
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            await FireBeforeLockAsync(command);
+            return result;
+        }
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            await FireBeforeLockAsync(command);
+            return result;
+        }
+
+        private async Task FireBeforeLockAsync(System.Data.Common.DbCommand command)
+        {
+            if (Fired || !command.CommandText.Contains("FOR UPDATE")) return;
+            Fired = true;
+            await _callback();
+        }
+    }
+
+    [Fact]
     public async Task A_reset_link_submitted_twice_at_once_sets_one_password()
     {
         // Both submits past the read before either wrote (#1455, as #1208

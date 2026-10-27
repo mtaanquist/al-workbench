@@ -762,12 +762,21 @@ public class ReleaseImportService
     /// non-deleted Release in this org with a field-keyed (<c>Retry</c>) error
     /// so the manage page renders it inline. See the <c>/retry</c> endpoint.
     /// </summary>
-    public async Task ReopenForRetryAsync(int releaseId, CancellationToken ct = default)
+    public Task ReopenForRetryAsync(int releaseId, CancellationToken ct = default) =>
+        ReopenForRetryAsync(releaseId, visible: true, ct);
+
+    /// <summary>
+    /// <see cref="ReopenForRetryAsync(int, CancellationToken)"/> for a caller that
+    /// has already asked the solution-visibility fence. A hidden release is read
+    /// like any other and then answered as not found, so a hidden id and an
+    /// unknown one run the same queries and get the same error.
+    /// </summary>
+    public async Task ReopenForRetryAsync(int releaseId, bool visible, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw RetryError($"Release {releaseId} not found in this organisation.");
+        var found = await _db.OeReleases
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
+        var release = (visible ? found : null) ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
         {
@@ -809,7 +818,7 @@ public class ReleaseImportService
         RequireOrganizationId();
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw RetryError($"Release {releaseId} not found in this organisation.");
+            ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
         {
@@ -834,6 +843,10 @@ public class ReleaseImportService
 
     private static PlanValidationException RetryError(string message) =>
         new(new Dictionary<string, string> { ["Retry"] = message });
+
+    /// <summary>The retry path's answer for a release that is not there, or that the caller may not see.</summary>
+    private static PlanValidationException RetryNotFound(int releaseId) =>
+        RetryError($"Release {releaseId} not found in this organisation.");
 
     /// <summary>
     /// Refuses a dedup key that's already in use by another active Release in the

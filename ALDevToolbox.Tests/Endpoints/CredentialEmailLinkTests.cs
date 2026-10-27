@@ -156,6 +156,28 @@ public sealed class CredentialEmailLinkTests : IDisposable
         return client;
     }
 
+    [Fact]
+    public async Task A_refused_reset_link_redirects_with_a_reason_code_and_no_message()
+    {
+        // The page renders its own copy for a refused link, so nothing it shows
+        // there travels in the address.
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+        using var page = await client.GetAsync("/forgot-password");
+        var antiforgery = ExtractAntiforgeryToken(await page.Content.ReadAsStringAsync());
+
+        using var response = await client.PostAsync("/auth/reset-password", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string, string>("Token", "no-such-link"),
+            new KeyValuePair<string, string>("Password", "a long enough new password"),
+            new KeyValuePair<string, string>("__RequestVerificationToken", antiforgery),
+        }));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.OriginalString
+            .Should().Be("/reset-password?token=no-such-link&err=" + ResetPasswordReasons.InvalidLink);
+    }
+
     private async Task SeedVictimAsync()
     {
         await using var seed = _db.NewContext();

@@ -338,15 +338,16 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ProjectService projects,
             ReleaseImportService importer,
-            PersistedImportJobs persistedJobs,
+            ReleaseImportRequestService requests,
             ProjectBuildImporter projectBuilds,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
 
-            var origin = await persistedJobs.GetLatestForReleaseAsync(id, ct);
-            if (origin is not { Kind: "project_build", ProjectId: int projectId })
+            // A release hidden by the solution-visibility fence gets this answer
+            // too, so the refusal confirms nothing about another team's build.
+            if (await requests.FindSymbolRecoveryProjectAsync(id, ct) is not int projectId)
             {
                 RedirectManage(ctx, id, "Symbols", "This release isn't a solution build, so there's nothing to recover.");
                 return;

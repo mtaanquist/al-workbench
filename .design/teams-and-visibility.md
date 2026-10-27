@@ -368,6 +368,15 @@ unknown one run the same queries:
   release.
 - `TranslationImportService` — `ImportSingleAsync` and `ImportZipAsync`, the two
   translation uploads.
+- `ReleaseImportRequestService.RetryAsync` — the manage page's Retry. A hidden
+  release is treated as unknown: its saved source and its release row are read
+  and then discarded, so nothing is reused and the reopen answers not found. A
+  retry of a pipeline build is additionally held to the solution manage check, as
+  pressing Build is.
+- `ReleaseImportRequestService.FindSymbolRecoveryProjectAsync` — the pre-check of
+  manual-symbols recovery, which answers a hidden release with the same "isn't a
+  solution build" refusal as an unknown id, before the solution manage check the
+  rebuild itself holds to.
 - `ReleaseManagementService.ListBackfillableReleaseIdsAsync` — the bulk "backfill
   every release" action queues only the releases `VisibleReleasePredicate` lets the
   caller see, so the count it reports leaves the hidden ones out too.
@@ -375,15 +384,14 @@ unknown one run the same queries:
 Admin and Editor are the roles that reach them, so the rule is the read rule, not a
 stricter one: an org Admin and a SiteAdmin bypass it, the owner and the assigned
 teams' members pass, and anyone else gets exactly what an unknown id gets (the same
-field error word for word, or the same 404), so the refusal confirms nothing. Both
-import services take `ProjectAccess` as a required constructor argument, so nothing
-builds one without the fence.
+field error word for word, or the same 404), so the refusal confirms nothing. The
+import services and `ReleaseImportRequestService` take `ProjectAccess` as a required
+constructor argument, so nothing builds one without the fence.
 
 Not gated here: the importer's own soft-delete (`SupersedeAsync`, which
 `ArtifactReleaseImporter` uses to replace or retire a Microsoft artifact release),
 under the worker rule below, since no project owns such a release and the sweep runs
-with nobody signed in. Retry and manual-symbols recovery were already behind the
-project manage check.
+with nobody signed in.
 
 **MCP** (`Services/Mcp/Tools/`, per the parity guide in `PROJECT.md`), gated as of
 slice 3. Each tool class has exactly one id-resolution choke point, which is where
