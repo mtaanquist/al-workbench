@@ -1138,6 +1138,9 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     [InlineData("abc")]
     [InlineData("--upload-pack=touch /tmp/pwned")]
     [InlineData("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")]
+    // Abbreviated ids are hex, but a stored head is always the full object id.
+    [InlineData("abc1234")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
     public async Task A_push_whose_new_head_is_not_a_git_object_name_is_refused(string after)
     {
         await StoreSecretAsync();
@@ -1180,13 +1183,16 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
     }
 
-    [Fact]
-    public async Task A_listed_commit_whose_id_is_not_a_git_object_name_is_left_out()
+    [Theory]
+    [InlineData("--upload-pack=touch /tmp/pwned")]
+    [InlineData("abc1234")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public async Task A_listed_commit_whose_id_is_not_a_git_object_name_is_left_out(string id)
     {
         await StoreSecretAsync();
         using var client = _factory.CreateClient();
         var payload = System.Text.Json.Nodes.JsonNode.Parse(GitHubWebhookPayloads.Push(commitCount: 3))!;
-        payload["commits"]![0]!["id"] = "--upload-pack=touch /tmp/pwned";
+        payload["commits"]![0]!["id"] = id;
 
         using var response = await client.SendAsync(Delivery(payload.ToJsonString(), Secret, eventName: "push"));
 

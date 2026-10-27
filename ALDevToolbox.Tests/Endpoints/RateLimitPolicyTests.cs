@@ -37,25 +37,34 @@ public sealed class RateLimitPolicyTests : IDisposable
         _db.Dispose();
     }
 
-    [Theory]
-    [InlineData("POST", "/oauth/register", OAuthEndpoints.DcrRateLimitPolicy)]
-    [InlineData("POST", GitHubWebhookEndpoints.WebhookPath, GitHubWebhookEndpoints.WebhookRateLimitPolicy)]
-    [InlineData("POST", "/api/sealed/{token}/reveal", SealedEndpoints.RevealRateLimitPolicy)]
-    [InlineData("GET", PaletteEndpoints.SearchPath, PaletteEndpoints.SearchRateLimitPolicy)]
-    [InlineData("GET", PaletteEndpoints.ContextPath, PaletteEndpoints.SearchRateLimitPolicy)]
-    [InlineData("POST", "/api/compare/diff", CompareEndpoints.DiffRateLimitPolicy)]
-    public void A_limited_route_carries_its_policy(string method, string route, string policy)
+    [Fact]
+    public void Every_limited_route_carries_its_policy()
     {
-        var endpoint = _factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
+        (string Method, string Route, string Policy)[] limited =
+        [
+            ("POST", "/oauth/register", OAuthEndpoints.DcrRateLimitPolicy),
+            ("POST", GitHubWebhookEndpoints.WebhookPath, GitHubWebhookEndpoints.WebhookRateLimitPolicy),
+            ("POST", "/api/sealed/{token}/reveal", SealedEndpoints.RevealRateLimitPolicy),
+            ("GET", PaletteEndpoints.SearchPath, PaletteEndpoints.SearchRateLimitPolicy),
+            ("GET", PaletteEndpoints.ContextPath, PaletteEndpoints.SearchRateLimitPolicy),
+            ("POST", "/api/compare/diff", CompareEndpoints.DiffRateLimitPolicy),
+        ];
+        var endpoints = _factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
             .OfType<RouteEndpoint>()
-            .Where(e => string.Equals(e.RoutePattern.RawText?.TrimEnd('/'), route, StringComparison.OrdinalIgnoreCase)
-                && e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods.Contains(method) == true)
-            .Should().ContainSingle()
-            .Subject;
+            .ToList();
 
-        var limit = endpoint.Metadata.GetMetadata<EnableRateLimitingAttribute>();
-        limit.Should().NotBeNull("{0} {1} is limited per address", method, route);
-        limit!.PolicyName.Should().Be(policy);
+        foreach (var (method, route, policy) in limited)
+        {
+            var endpoint = endpoints
+                .Where(e => string.Equals(e.RoutePattern.RawText?.TrimEnd('/'), route, StringComparison.OrdinalIgnoreCase)
+                    && e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods.Contains(method) == true)
+                .Should().ContainSingle("{0} {1} is one endpoint", method, route)
+                .Subject;
+
+            var limit = endpoint.Metadata.GetMetadata<EnableRateLimitingAttribute>();
+            limit.Should().NotBeNull("{0} {1} is limited per address", method, route);
+            limit!.PolicyName.Should().Be(policy, "{0} {1} has its own budget", method, route);
+        }
     }
 
     [Fact]

@@ -601,6 +601,47 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
             .Should().ContainSingle().Which.OrganizationId.Should().Be(TestDb.DefaultOrgId);
     }
 
+    // The same two, with the roles turned round: the default organisation is the
+    // first one asked and also tracks the repository, but connected a different
+    // installation. Picking whichever organisation comes first would pass the
+    // cases above and fail these.
+
+    [Fact]
+    public async Task A_pull_request_builds_in_the_connecting_organisation_even_when_it_is_not_the_first()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, 99, "someone-else");
+        var connectingOrgId = await SeedOrganizationAsync("Connecting");
+        await ConnectAsync(connectingOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        var connectingProjectId = await SeedSolutionTrackingTheRepositoryAsync("Connecting Customer App", organizationId: connectingOrgId);
+        var api = ApiAnswering(HttpStatusCode.NoContent);
+        var builds = new ProjectBuildQueue();
+
+        await NewWorker(api: api, builds: builds, orgContext: OffRequest()).RunOneAsync(NewJob(), CancellationToken.None);
+
+        builds.Reader.TryRead(out var queued).Should().BeTrue();
+        queued!.Identity.OrganizationId.Should().Be(connectingOrgId);
+        queued.Source.Should().BeOfType<ReleaseImportSource.PullRequestBuild>().Which.ProjectId.Should().Be(connectingProjectId);
+        builds.Reader.TryRead(out _).Should().BeFalse("the default organisation's solution is not built");
+        (await AllBuildsAsync()).Should().OnlyContain(b => b.OrganizationId == connectingOrgId);
+    }
+
+    [Fact]
+    public async Task A_push_writes_its_head_in_the_connecting_organisation_even_when_it_is_not_the_first()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, 99, "someone-else");
+        var connectingOrgId = await SeedOrganizationAsync("Connecting");
+        await ConnectAsync(connectingOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        await SeedSolutionTrackingTheRepositoryAsync("Connecting Customer App", organizationId: connectingOrgId);
+
+        await NewWorker(orgContext: OffRequest()).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+
+        (await AllHeadsAsync()).Should().ContainSingle().Which.OrganizationId.Should().Be(connectingOrgId);
+    }
+
     /// <summary>The organisation context the hosted worker gets: no request, so only the ambient scope speaks.</summary>
     private static IOrganizationContext OffRequest() =>
         new HttpOrganizationContext(new Microsoft.AspNetCore.Http.HttpContextAccessor());

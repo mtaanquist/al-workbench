@@ -230,7 +230,10 @@ public sealed class GitHubAppEndpointsTests : IDisposable
         using var response = await client.GetAsync(
             $"{GitHubAppEndpoints.SetupCallbackPath}?state={Uri.EscapeDataString(state)}&installation_id=42");
 
-        response.Headers.Location?.OriginalString.Should().NotContain("ok=github-connected");
+        // The cookie handler's access-denied answer: a redirect to sign-in, never
+        // the Repositories tab the callback itself redirects to.
+        response.StatusCode.Should().Be(HttpStatusCode.Found, "the role gate answers before the callback runs");
+        response.Headers.Location!.AbsolutePath.Should().Be("/login");
         (await ConnectedInstallationAsync()).Should().BeNull(
             "a GitHub owner who is only a User here must not be able to bind the organisation");
         _api.Calls.Should().NotContain(c => c.Contains("app/installations/"));
