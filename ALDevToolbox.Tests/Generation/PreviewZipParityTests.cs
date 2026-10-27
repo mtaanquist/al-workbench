@@ -15,15 +15,13 @@ namespace ALDevToolbox.Tests.Generation;
 
 /// <summary>
 /// The New Workspace preview is a second implementation of the ZIP layout
-/// (<see cref="ExtensionPreviewBuilder"/> and
-/// <see cref="PreviewTreeBuilder.BuildWorkspacePreview"/>), and
-/// <c>generation-engine.md</c> promises the user sees what the ZIP holds.
-/// This builds both from one template and plan and compares the paths, so
-/// a rule changed on one side only fails here.
+/// (<see cref="WorkspacePreviewBuilder"/>, which <c>NewWorkspace.razor</c>
+/// calls), and <c>generation-engine.md</c> promises the user sees what the
+/// ZIP holds. This builds both from one template and plan and compares the
+/// paths, so a rule changed on one side only fails here.
 /// </summary>
 /// <remarks>
-/// The preview is assembled the way <c>NewWorkspace.razor</c>'s
-/// <c>BuildPreview</c> does it. The org logo is left out: the fixture has none.
+/// The org logo is left out: the fixture has none.
 /// </remarks>
 public sealed class PreviewZipParityTests : IDisposable
 {
@@ -62,7 +60,10 @@ public sealed class PreviewZipParityTests : IDisposable
         });
         var module = ModuleBuilder.Default("document-capture", "Document Capture")
             .WithExtensionFolder("src", ("Doc.Codeunit.al", "codeunit 91000 Doc { }"));
-        await SeedAsync(template, module);
+        // A second module the plan leaves unticked, so the selection filter counts.
+        var unticked = ModuleBuilder.Default("payroll", "Payroll")
+            .WithExtensionFolder("src", ("Pay.Codeunit.al", "codeunit 92000 Pay { }"));
+        await SeedAsync(template, module, unticked);
 
         var plan = PlanBuilder.WorkspacePlan(
             includeExamples: includeExamples,
@@ -110,34 +111,16 @@ public sealed class PreviewZipParityTests : IDisposable
         var hydrator = new FolderTreeHydrator(ctx);
         await hydrator.HydrateExtensionFolderTreeAsync(new[] { template }, pathsOnly: true);
         await hydrator.HydrateModuleExtensionFolderTreeAsync(modules, pathsOnly: true);
-        var orgFiles = await ctx.OrganizationFiles.AsNoTracking().ToDictionaryAsync(f => f.Id);
+        var orgConfig = await _db.NewOrganizationConfigService(ctx).GetCurrentAsync();
 
-        var workspaceRootPaths = new List<string>();
-        var perExtensionPaths = new List<string>();
-        foreach (var joined in template.IncludedFiles.OrderBy(j => j.Ordering))
-        {
-            var file = orgFiles[joined.OrganizationFileId];
-            (file.Scope == OrganizationFileScope.EveryExtension ? perExtensionPaths : workspaceRootPaths).Add(file.Path);
-        }
-
-        var rootName = CustomerNaming.Apply(plan.WorkspaceName, NamingStyle.PascalCase);
-        var children = new List<PreviewNode>();
-        foreach (var ext in template.WorkspaceExtensions.OrderBy(e => e.Ordering))
-        {
-            if (!ext.Required && !plan.SelectedExtensionPaths.Contains(ext.Path)) continue;
-            children.Add(PreviewNode.Extension(
-                ext.Path, ExtensionPreviewBuilder.BuildContents(ext.Folders, plan.IncludeExamples, perExtensionPaths)));
-        }
-        foreach (var module in modules.Where(m => plan.SelectedModuleKeys.Contains(m.Key)))
-        {
-            children.Add(PreviewNode.Extension(
-                module.ExtensionName,
-                ExtensionPreviewBuilder.BuildContents(module.ExtensionFolders, plan.IncludeExamples, perExtensionPaths)));
-        }
-
-        var root = PreviewTreeBuilder.BuildWorkspacePreview(
-            rootName, children, WorkspaceConfigService.FileName, workspaceRootPaths,
-            template.RootFolders.OrderBy(f => f.Ordering).Select(f => f.Path));
+        var root = WorkspacePreviewBuilder.Build(
+            CustomerNaming.Apply(plan.WorkspaceName, NamingStyle.PascalCase),
+            template,
+            plan.SelectedExtensionPaths.ToList(),
+            modules,
+            plan.SelectedModuleKeys.ToList(),
+            orgConfig,
+            plan.IncludeExamples);
 
         var paths = new List<string>();
         Flatten(root, string.Empty, paths);
@@ -163,11 +146,11 @@ public sealed class PreviewZipParityTests : IDisposable
     /// Seeds the template opted into every org file, as
     /// <c>WorkspaceGenerationTests.SeedTemplateAsync</c> does.
     /// </summary>
-    private async Task SeedAsync(RuntimeTemplate template, Module module)
+    private async Task SeedAsync(RuntimeTemplate template, params Module[] modules)
     {
         await using var ctx = _db.NewContext();
         ctx.RuntimeTemplates.Add(template);
-        ctx.Modules.Add(module);
+        ctx.Modules.AddRange(modules);
         await ctx.SaveChangesAsync();
 
         var orgFileIds = await ctx.OrganizationFiles
