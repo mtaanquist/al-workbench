@@ -425,6 +425,28 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// Days are calendar days, not whole days elapsed: two hours before a deadline that
+    /// falls just after midnight is still the day before it.
+    /// </summary>
+    [Fact]
+    public async Task The_deleted_view_counts_calendar_days_not_hours()
+    {
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "JLE-260911110359", "Sandbox", "Active", now, now);
+        await SoftDeleteAsync("JLE-260911110359", new DateTime(2026, 10, 4, 1, 0, 0, DateTimeKind.Utc));
+        _ctx.Services.AddSingleton<TimeProvider>(new ManualClock(new DateTimeOffset(2026, 10, 3, 23, 0, 0, TimeSpan.Zero)));
+
+        var cut = _ctx.Render<EnvironmentsList>();
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Trim().StartsWith("Deleted")).Click());
+        cut.WaitForAssertion(() =>
+            cut.FindAll(".data-table tbody tr").Should().ContainSingle().Subject
+                .QuerySelectorAll(".cell-stack__sub").Last().TextContent.Should().Be("1 day left to bring it back"));
+    }
+
+    /// <summary>
     /// Microsoft does not always give the date. An unknown one is said plainly rather
     /// than left as a dash the reader would have to take as "no deadline".
     /// </summary>

@@ -179,7 +179,9 @@ way rather than fire and forget them.
 
 ### Waiting and time
 
-**Signal, not sleep.** A test never sleeps to let something happen. A sleep
+**Signal, not sleep.** A test never sleeps to let something happen (the one
+exception is `StillTrue`, below, which polls on purpose to prove an absence:
+there is no event to wait for when the point is that nothing happens). A sleep
 followed by an assertion either fails when the machine is busy or passes
 without the thing having happened. Wait for the event itself instead: a
 `TaskCompletionSource` (with `RunContinuationsAsynchronously`) the code under
@@ -226,8 +228,9 @@ satisfy the wait.
 
 **Statics the pages read.** `UpgradesPage.SearchDebounce` and
 `EnvironmentsList.SearchDebounce` are statics a page reads when it first
-filters. Their test classes set them to zero in the constructor (the one test
-about the wait sets its own) and back to zero on dispose. The classes that
+filters. The classes that test the search box set them to zero in the
+constructor (the one test about the wait sets its own) and back to zero on
+dispose. The classes that
 render `UpgradesPage` share `[Collection("UpgradesPage.SearchDebounce")]` so
 that one class's setting never reaches another's page mid-test; a new class
 that renders it joins that collection.
