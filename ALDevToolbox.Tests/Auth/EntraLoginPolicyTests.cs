@@ -148,6 +148,40 @@ public sealed class EntraLoginPolicyTests : IDisposable
     }
 
     [Fact]
+    public async Task A_reset_link_issued_before_the_switch_to_entra_only_cannot_set_a_password()
+    {
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        string preIssued;
+        await using (var ctx = _db.NewContext())
+        {
+            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
+            preIssued = (await resets.CreatePasswordResetTokenAsync("mette@cronus.com", Ip))!;
+            preIssued.Should().NotBeNull();
+        }
+        string hashBefore;
+        await using (var read = _db.NewContext())
+        {
+            hashBefore = (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).PasswordHash;
+        }
+
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
+            Func<Task> act = () => resets.ConsumePasswordResetTokenAsync(preIssued, "a-brand-new-password-1");
+            var ex = await act.Should().ThrowAsync<PlanValidationException>(
+                "a link issued before the policy flip must not bypass it");
+            ex.Which.Errors["Token"].Should().Contain("Microsoft");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).PasswordHash.Should().Be(hashBefore);
+        (await after.PasswordResetTokens.IgnoreQueryFilters().SingleAsync(t => t.UserId == userId)).ConsumedAt
+            .Should().BeNull();
+    }
+
+    [Fact]
     public async Task Entra_only_cannot_be_enabled_until_an_admin_has_a_link()
     {
         await using var ctx = _db.NewContext();

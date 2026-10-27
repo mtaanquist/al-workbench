@@ -290,7 +290,8 @@ public sealed class PasskeyServiceTests : IDisposable
 
         var act = () => svc.CompleteLoginAsync(Assertion(options.Challenge, otherId, signCount: 1), envelope);
 
-        await act.Should().ThrowAsync<Exception>();
+        (await act.Should().ThrowAsync<Fido2VerificationException>())
+            .Which.Message.Should().Contain("User is not owner of the public key identified by the credential id");
         await using var read = _db.NewContext();
         (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(0);
         (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).LastLoginAt.Should().BeNull();
@@ -307,7 +308,10 @@ public sealed class PasskeyServiceTests : IDisposable
 
         var act = () => svc.CompleteLoginAsync(Assertion(options.Challenge, userId, signCount: 7), envelope);
 
-        await act.Should().ThrowAsync<Exception>();
+        // The library refuses this before the service's own check runs; the
+        // service repeats the check so a library change can't drop it.
+        (await act.Should().ThrowAsync<Fido2VerificationException>())
+            .Which.Message.Should().Contain("SignCount must be greater than the current SignatureCounter");
         await using var read = _db.NewContext();
         (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(7);
         (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).LastLoginAt.Should().BeNull();
@@ -327,6 +331,59 @@ public sealed class PasskeyServiceTests : IDisposable
         (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(1);
         (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).LastLoginAt
             .Should().BeNull("a step-up is not a sign-in");
+    }
+
+    [Fact]
+    public async Task A_touch_only_passkey_signs_in_without_counting_as_verified()
+    {
+        // A tap with no PIN or biometric proves the device, not the person,
+        // so the session it starts must still be asked to step up.
+        var userId = await SeedAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginLoginAsync("ada@cronus.example");
+
+        var (user, verified) = await svc.CompleteLoginAsync(Assertion(options.Challenge, userId, signCount: 1, userVerified: false), envelope);
+
+        user.Id.Should().Be(userId);
+        verified.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_touch_only_passkey_cannot_complete_a_step_up()
+    {
+        var userId = await SeedAsync("ada@cronus.example", storedCounter: 3);
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginStepUpAsync(userId);
+
+        var act = () => svc.CompleteStepUpAsync(userId, Assertion(options.Challenge, userId, signCount: 4, userVerified: false), envelope);
+
+        // As with the counter, the library refuses this first, because the
+        // step-up options require verification; the service checks the flag
+        // again itself.
+        (await act.Should().ThrowAsync<Fido2VerificationException>())
+            .Which.Message.Should().Contain("User Verified flag not set");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task A_step_up_whose_counter_did_not_move_forward_is_refused()
+    {
+        var userId = await SeedAsync("ada@cronus.example", storedCounter: 7);
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginStepUpAsync(userId);
+
+        var act = () => svc.CompleteStepUpAsync(userId, Assertion(options.Challenge, userId, signCount: 7, userVerified: true), envelope);
+
+        // The library refuses this before the service's own check runs; the
+        // service repeats the check so a library change can't drop it.
+        (await act.Should().ThrowAsync<Fido2VerificationException>())
+            .Which.Message.Should().Contain("SignCount must be greater than the current SignatureCounter");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(7);
     }
 
     [Fact]
