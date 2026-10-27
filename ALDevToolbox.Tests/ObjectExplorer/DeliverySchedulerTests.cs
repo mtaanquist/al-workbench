@@ -1,5 +1,6 @@
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.Operations;
@@ -24,7 +25,7 @@ public sealed class DeliverySchedulerTests : IDisposable
 
     private readonly TestDb _db = new();
     private readonly FakeTimeProvider _clock = new(Started);
-    private int _failNextResolves;
+    private int _failNextResolvesForDefaultOrg;
 
     public void Dispose() => _db.Dispose();
 
@@ -53,7 +54,7 @@ public sealed class DeliverySchedulerTests : IDisposable
         await using var provider = BuildProvider();
         var scheduler = NewScheduler(provider);
 
-        _failNextResolves = 1;
+        _failNextResolvesForDefaultOrg = 1;
         await scheduler.SweepAsync(CancellationToken.None);
         (await DeliveryHost.StatusAsync(_db, orphan)).Should().Be(ProjectDeliveryStatus.Installing, "the check for this organisation threw");
 
@@ -80,7 +81,7 @@ public sealed class DeliverySchedulerTests : IDisposable
         var due = Started.UtcDateTime.AddMinutes(-1);
         var orphans = new Dictionary<int, int>();
         var scheduled = new Dictionary<int, int>();
-        foreach (var orgId in new[] { TestDb.DefaultOrgId, TestDb.OtherOrgId, pendingOrgId })
+        foreach (var orgId in new[] { TestDb.SystemOrgId, TestDb.DefaultOrgId, pendingOrgId })
         {
             var seed = await DeliveryHost.SeedAsync(_db, Started.UtcDateTime, orgId);
             orphans[orgId] = await DeliveryHost.AddDeliveryAsync(_db, seed, ProjectDeliveryStatus.Installing, before, before);
@@ -92,16 +93,16 @@ public sealed class DeliverySchedulerTests : IDisposable
 
         await scheduler.SweepAsync(CancellationToken.None);
 
+        (await DeliveryHost.StatusAsync(_db, orphans[TestDb.SystemOrgId])).Should().Be(ProjectDeliveryStatus.Failed);
         (await DeliveryHost.StatusAsync(_db, orphans[TestDb.DefaultOrgId])).Should().Be(ProjectDeliveryStatus.Failed);
-        (await DeliveryHost.StatusAsync(_db, orphans[TestDb.OtherOrgId])).Should().Be(ProjectDeliveryStatus.Failed);
         (await DeliveryHost.StatusAsync(_db, orphans[pendingOrgId])).Should().Be(ProjectDeliveryStatus.Installing,
             "a pending organisation is not swept");
         var queued = Drain(queue).ToDictionary(j => j.DeliveryId, j => j.Identity);
-        queued.Keys.Should().BeEquivalentTo([scheduled[TestDb.DefaultOrgId], scheduled[TestDb.OtherOrgId]]);
+        queued.Keys.Should().BeEquivalentTo([scheduled[TestDb.SystemOrgId], scheduled[TestDb.DefaultOrgId]]);
+        queued[scheduled[TestDb.SystemOrgId]].OrganizationId.Should().Be(TestDb.SystemOrgId);
+        queued[scheduled[TestDb.SystemOrgId]].IsSystemOrganization.Should().BeTrue("the sweep carries the org row's own flag");
         queued[scheduled[TestDb.DefaultOrgId]].OrganizationId.Should().Be(TestDb.DefaultOrgId);
-        queued[scheduled[TestDb.DefaultOrgId]].IsSystemOrganization.Should().BeTrue("the default organisation is the system one");
-        queued[scheduled[TestDb.OtherOrgId]].OrganizationId.Should().Be(TestDb.OtherOrgId);
-        queued[scheduled[TestDb.OtherOrgId]].IsSystemOrganization.Should().BeFalse();
+        queued[scheduled[TestDb.DefaultOrgId]].IsSystemOrganization.Should().BeFalse();
     }
 
     /// <summary>
@@ -140,9 +141,12 @@ public sealed class DeliverySchedulerTests : IDisposable
         new(provider, _clock, NullLogger<DeliveryScheduler>.Instance, new WorkerHeartbeatRegistry());
 
     // Resolving the delivery service is how a test makes one organisation's check throw.
-    private ServiceProvider BuildProvider(DeliveryQueue? queue = null) => DeliveryHost.Build(_db, _clock, () => _failNextResolves-- > 0
-        ? throw new InvalidOperationException("The database went away for a moment.")
-        : new NoTokens(), queue);
+    // Keyed to the organisation the sweep is acting as, not to the order it visits them in:
+    // the sweep reads the organisations unordered, and the system org is one of them.
+    private ServiceProvider BuildProvider(DeliveryQueue? queue = null) => DeliveryHost.Build(_db, _clock, () =>
+        AmbientOrganizationScope.Current?.OrganizationId == TestDb.DefaultOrgId && _failNextResolvesForDefaultOrg-- > 0
+            ? throw new InvalidOperationException("The database went away for a moment.")
+            : new NoTokens(), queue);
 
     private static List<DeliveryJob> Drain(DeliveryQueue queue)
     {

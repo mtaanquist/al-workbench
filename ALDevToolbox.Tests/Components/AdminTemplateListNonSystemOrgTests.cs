@@ -28,11 +28,9 @@ public sealed class AdminTemplateListNonSystemOrgTests : IDisposable
 
     public AdminTemplateListNonSystemOrgTests()
     {
-        // Acting as a non-system org. TestDb seeds DefaultOrg as the system
-        // org and OtherOrg as a regular one — point the OrgContext at the
-        // latter so the page renders its "non-system" branch.
+        // Acting as an ordinary tenant so the page renders its "non-system"
+        // branch. Other rather than Default: the admin signs in from it below.
         _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
-        _db.OrgContext.IsSystemOrganization = false;
 
         var auth = _ctx.AddAuthorization();
         auth.SetAuthorized("admin@other.example");
@@ -79,12 +77,12 @@ public sealed class AdminTemplateListNonSystemOrgTests : IDisposable
     [Fact]
     public async Task System_org_templates_render_as_importable_rows_with_an_import_button()
     {
-        // Seed a template into the system org (DefaultOrgId=1, IsSystem=true).
-        // The acting org is OtherOrgId=2 — no overlap, so the row shows the
-        // Import button rather than the Already imported label.
+        // Seed a template into the system org. The acting org is Other, with
+        // no overlap, so the row shows the Import button rather than the
+        // Already imported label.
         await using (var seed = _db.NewContext())
         {
-            var sys = TemplateBuilder.Default(key: "runtime-system", organizationId: TestDb.DefaultOrgId);
+            var sys = TemplateBuilder.Default(key: "runtime-system", organizationId: TestDb.SystemOrgId);
             sys.Name = "System runtime";
             sys.Description = "Canonical template published by the site.";
             seed.RuntimeTemplates.Add(sys);
@@ -109,7 +107,7 @@ public sealed class AdminTemplateListNonSystemOrgTests : IDisposable
         // Same key in both orgs simulates the post-import state.
         await using (var seed = _db.NewContext())
         {
-            var sys = TemplateBuilder.Default(key: "shared-key", organizationId: TestDb.DefaultOrgId);
+            var sys = TemplateBuilder.Default(key: "shared-key", organizationId: TestDb.SystemOrgId);
             sys.Name = "Shared";
             seed.RuntimeTemplates.Add(sys);
 

@@ -539,9 +539,11 @@ public sealed class BackupServiceTests : IDisposable
                 OffsiteObjectKey = "aldevtoolbox-20260515T000000000Z-adhoc.dump",
             };
             ctx.Backups.Add(newer);
+            // The stand-in pg_restore restores nothing, so the database it leaves is a
+            // freshly migrated one: the system org is the only organisation in it.
             ctx.PerTenantBackups.Add(new PerTenantBackup
             {
-                OrganizationId = TestDb.DefaultOrgId, FileName = "default-20260515T000000Z-adhoc.tenant.zip",
+                OrganizationId = TestDb.SystemOrgId, FileName = "default-20260515T000000Z-adhoc.tenant.zip",
                 FileSizeBytes = 1, CreatedAt = DateTime.UtcNow, Kind = BackupKind.AdHoc, SchemaVersion = 3,
             });
             ctx.PerTenantBackups.Add(new PerTenantBackup
@@ -571,7 +573,7 @@ public sealed class BackupServiceTests : IDisposable
             newer.CreatedByUserId.Should().BeNull("the creator does not exist in the restored database");
 
             (await ctx.PerTenantBackups.AsNoTracking().Select(b => b.OrganizationId).ToListAsync())
-                .Should().Equal([TestDb.DefaultOrgId], "a snapshot whose organisation is not in the restored database has nowhere to go");
+                .Should().Equal([TestDb.SystemOrgId], "a snapshot whose organisation is not in the restored database has nowhere to go");
 
             // The identity sequence is realigned past the re-inserted ids.
             var fresh = new Backup { FileName = "after.dump", CreatedAt = DateTime.UtcNow, Kind = BackupKind.AdHoc };

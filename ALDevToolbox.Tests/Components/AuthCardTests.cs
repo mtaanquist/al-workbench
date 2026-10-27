@@ -191,7 +191,7 @@ public sealed class AuthCardTests : IDisposable
 
         cut.WaitForAssertion(() =>
         {
-            cut.Find(".auth__title").TextContent.Should().Contain("Default");
+            cut.Find(".auth__title").TextContent.Should().Contain("Tenant");
             var email = cut.Find("#ai-email");
             email.GetAttribute("value").Should().Be("new.consultant@cronus.example");
             // readonly, not disabled: a disabled input is skipped by the
