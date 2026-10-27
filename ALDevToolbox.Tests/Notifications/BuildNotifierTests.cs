@@ -188,6 +188,26 @@ public sealed class BuildNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task The_owner_still_hears_when_the_one_who_started_it_can_no_longer_see_the_solution()
+    {
+        await SeedAsync();
+        await MakePrivateAsync(_projectId);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeProjectFollowers.Add(new OeProjectFollower
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, UserId = _creator, Following = false, UpdatedAt = _clock,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await FinishAsync(ProjectBuildStatus.Failed);
+
+        _email.Sent.Select(s => s.To).Should().Equal(["creator@cronus.example"],
+            "the starter is dropped for access, which would otherwise leave nobody to tell");
+    }
+
+    [Fact]
     public async Task A_digest_choice_keeps_the_first_line_of_the_failure()
     {
         await SeedAsync();

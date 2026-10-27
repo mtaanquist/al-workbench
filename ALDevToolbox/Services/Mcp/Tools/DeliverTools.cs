@@ -569,13 +569,13 @@ public sealed class DeliverTools
         return (id, project);
     }
 
+    private static List<string> Names(IReadOnlyList<ProjectPersonRole> roles) => roles.Select(r => r.ToString()).ToList();
+
     /// <summary>
     /// Runs a gated service read and answers a refusal exactly as an unknown solution:
     /// a Private solution is absent, not locked. Resolution has already applied the same
     /// fence, so this only matters if the solution's access changes between the two reads.
     /// </summary>
-    private static List<string> Names(IReadOnlyList<ProjectPersonRole> roles) => roles.Select(r => r.ToString()).ToList();
-
     private static async Task<T> Guard<T>(object what, Func<Task<T>> read)
     {
         try

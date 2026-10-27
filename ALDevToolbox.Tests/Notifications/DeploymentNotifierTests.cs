@@ -153,11 +153,25 @@ public sealed class DeploymentNotifierTests : IDisposable
     public async Task A_deployment_without_approval_is_not_news_to_whoever_turned_that_on()
     {
         await SeedAsync();
+        await DeployWithoutApprovalAsAsync(_approver);
         var id = await AddDeliveryAsync(ProjectDeliveryStatus.Deployed, triggeredBy: _approver, withoutApproval: true);
 
         await Notifier().NotifyAsync(id);
 
         _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["owner@cronus.example", "leader@cronus.example"]);
+    }
+
+    [Fact]
+    public async Task Someone_who_rescheduled_a_deployment_without_approval_hears_how_it_went()
+    {
+        await SeedAsync();
+        await DeployWithoutApprovalAsAsync(_leader);
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Deployed, triggeredBy: _approver, withoutApproval: true);
+
+        await Notifier().NotifyAsync(id);
+
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
+            ["approver@cronus.example", "owner@cronus.example", "leader@cronus.example"]);
     }
 
     [Fact]
@@ -310,6 +324,13 @@ public sealed class DeploymentNotifierTests : IDisposable
         _releasePipelineId = releasePipeline.Id;
         _buildId = build.Id;
         await AddPersonAsync(_leader, ProjectPersonRole.ProjectLeader);
+    }
+
+    private async Task DeployWithoutApprovalAsAsync(int userId)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.OeReleasePipelines.Where(r => r.Id == _releasePipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.DeployWithoutApprovalByUserId, userId));
     }
 
     private async Task AddPersonAsync(int userId, params ProjectPersonRole[] roles)

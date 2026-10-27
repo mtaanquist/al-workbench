@@ -120,7 +120,8 @@ public sealed class BuildNotifier
         // did not start it, so it is told only as a follower.
         var pressedBuild = build.Trigger == ProjectBuildTrigger.Manual ? build.StartedByUserId : null;
         var followers = await _follows.ListFollowerIdsAsync(build.ProjectId, NotificationAudience.Builds, ct);
-        var recipients = NotificationAudience.Recipients(pressedBuild, followers, build.SolutionOwner);
+        var recipients = await NotificationAudience.RecipientsAsync(
+            _db, build.ProjectId, [pressedBuild], followers, build.SolutionOwner, ct);
         if (recipients.Count == 0) return;
 
         var target = ProjectBuildTarget.IsPreview(build.BcTarget) ? ProjectBuildTarget.Label(build.BcTarget) : null;
