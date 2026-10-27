@@ -109,6 +109,15 @@ public sealed class ProjectBuildQueue
         get { lock (_lock) return _rejoining; }
     }
 
+    /// <summary>
+    /// Whether the build of <paramref name="releaseId"/> is still standing aside, not
+    /// yet back in a place. For tests, which need to know it had not come back yet.
+    /// </summary>
+    internal bool IsSteppedAside(int releaseId)
+    {
+        lock (_lock) return _steppedAside.Contains(releaseId);
+    }
+
     /// <summary>The limit that applies when no site admin value is saved.</summary>
     public int DefaultLimit { get; }
 

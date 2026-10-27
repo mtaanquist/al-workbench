@@ -293,22 +293,32 @@ public sealed class ProjectBuildQueueTests
     [Fact]
     public async Task A_build_that_comes_back_while_its_place_is_taken_waits_ahead_of_new_builds()
     {
-        var queue = OneAtATime(1, 2, 3);
-        Take(queue);
-        var wait = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var aside = queue.StepAsideAsync(1, () => wait.Task, CancellationToken.None);
-        var second = Take(queue);
+        // Build 1 comes back on the thread pool once the place is free, so a run where it
+        // got there before the read below says nothing about the rule: the place is taken
+        // again and the queue is empty whatever the rule says. Such a run is repeated
+        // until one reads the queue while build 1 is provably still on its way back.
+        for (var attempt = 1; ; attempt++)
+        {
+            var queue = OneAtATime(1, 2, 3);
+            Take(queue);
+            var wait = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var aside = queue.StepAsideAsync(1, () => wait.Task, CancellationToken.None);
+            var second = Take(queue);
 
-        wait.SetResult(7);
-        Eventually(() => queue.RejoiningCount > 0);
-        queue.Complete(second);
-        // Straight away, before build 1 has had its turn: the place is free, and only the
-        // build on its way back keeps build 3 out of it (#1180). Read after the rejoin
-        // instead, the place is taken again and the queue is empty whatever the rule says.
-        TakeAll(queue).Should().BeEmpty("the returning build was here first");
+            wait.SetResult(7);
+            Eventually(() => queue.RejoiningCount > 0);
+            queue.Complete(second);
+            // Straight away, before build 1 has had its turn: the place is free, and only
+            // the build on its way back keeps build 3 out of it (#1180).
+            var taken = TakeAll(queue);
+            var stillOnItsWay = queue.IsSteppedAside(1);
+            if (stillOnItsWay) taken.Should().BeEmpty("the returning build was here first");
 
-        (await aside.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(7);
-        TakeAll(queue).Should().BeEmpty("build 3 waits behind the build that came back");
+            (await aside.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(7);
+            TakeAll(queue).Should().BeEmpty("build 3 waits behind the build that came back");
+            if (stillOnItsWay) return;
+            attempt.Should().BeLessThan(50, "build 1 has to be caught on its way back at least once");
+        }
     }
 
     [Fact]

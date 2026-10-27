@@ -1273,6 +1273,21 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
+        // The control: with nothing asked, one tick of the test's clock reads again. So the
+        // live timer runs on that clock, and the frozen reads below are the confirm's doing.
+        cut.WaitForAssertion(() => cut.Find(".data-table__actions button"));
+        SpinWait.SpinUntil(() => clock.PendingTimers > 0, TimeSpan.FromSeconds(5)).Should().BeTrue("the list keeps itself current");
+        var readsBeforeTick = Volatile.Read(ref _admin.Reads);
+        var rendersBeforeTick = cut.RenderCount;
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        cut.WaitForAssertion(() =>
+        {
+            Volatile.Read(ref _admin.Reads).Should().Be(readsBeforeTick + 1);
+            // Drawn as it started and again once it finished, so the read is over before
+            // the confirm opens and cannot be what holds the later ticks back.
+            cut.RenderCount.Should().BeGreaterThanOrEqualTo(rendersBeforeTick + 2);
+        }, TimeSpan.FromSeconds(5));
+
         cut.WaitForAssertion(() => cut.Find(".data-table__actions button").Click());
 
         cut.WaitForAssertion(() =>

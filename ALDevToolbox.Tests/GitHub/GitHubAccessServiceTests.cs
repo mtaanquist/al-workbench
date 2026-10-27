@@ -480,12 +480,12 @@ public sealed class GitHubAccessServiceTests : IDisposable
 
     /// <summary>
     /// Polls Postgres until a session in this test's database is queued for the per-user
-    /// refresh lock: the advisory lock the service takes is two keys, the namespace "GHRT"
-    /// and the user id.
+    /// refresh lock: the advisory lock the service takes is two keys, its namespace and
+    /// the user id.
     /// </summary>
     private async Task UntilSomeoneWaitsForTheRefreshLockAsync()
     {
-        const long refreshLockClass = 0x47_48_52_54;
+        const long refreshLockClass = GitHubAccessService.TokenRefreshLockClass;
         const long userId = UserId;
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (true)

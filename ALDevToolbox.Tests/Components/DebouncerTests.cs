@@ -34,8 +34,11 @@ public sealed class DebouncerTests
             });
         }
 
+        // One wait left, for the last call, and it has not fired: the earlier four were
+        // dropped rather than left to run, and the burst has not been quiet long enough.
+        _clock.PendingTimers.Should().Be(1, "only the last call is still waiting");
         _clock.Advance(Delay - TimeSpan.FromMilliseconds(1));
-        done.Task.IsCompleted.Should().BeFalse("the burst has not been quiet for the whole delay yet");
+        _clock.PendingTimers.Should().Be(1, "the burst has not been quiet for the whole delay yet");
 
         _clock.Advance(TimeSpan.FromMilliseconds(1));
         await done.Task.WaitAsync(Settle, TestContext.Current.CancellationToken);
