@@ -43,11 +43,9 @@ public class ReleaseImportService
     /// <summary>
     /// The solution-visibility fence for the amend upload (#1430): a Private
     /// solution's build release answers like an unknown id to someone outside its
-    /// teams. Optional only so a test can build this service by hand; the app always
-    /// injects it, and an import pipeline that never amends has no
-    /// use for it.
+    /// teams. Required, so nothing can build the service without the fence.
     /// </summary>
-    private readonly ProjectAccess? _access;
+    private readonly ProjectAccess _access;
 
     private static readonly HashSet<string> AllowedKinds = new(StringComparer.Ordinal)
     {
@@ -68,9 +66,9 @@ public class ReleaseImportService
         TranslationImportService translations,
         CallSiteReferenceEmitter callSites,
         ILogger<ReleaseImportService> logger,
+        ProjectAccess access,
         ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
-        ReleaseIngests? ingests = null,
-        ProjectAccess? access = null)
+        ReleaseIngests? ingests = null)
     {
         _db = db;
         _orgContext = orgContext;
@@ -382,8 +380,7 @@ public class ReleaseImportService
         // field-keyed error instead of an unexpected status flip if they
         // try to amend an ingesting / failed / soft-deleted Release.
         // Visibility first, so a hidden id and an unknown one run the same queries.
-        var visible = _access is null
-            || await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })

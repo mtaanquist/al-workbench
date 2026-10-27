@@ -27,11 +27,9 @@ public class TranslationImportService
     /// <summary>
     /// The solution-visibility fence for the admin uploads (#1430): a Private
     /// solution's build release answers like an unknown id to someone outside its
-    /// teams. Optional only so a test can build this service by hand; the app always
-    /// injects it, and an import pipeline that never reaches the admin uploads has no
-    /// use for it.
+    /// teams. Required, so nothing can build the service without the fence.
     /// </summary>
-    private readonly ProjectAccess? _access;
+    private readonly ProjectAccess _access;
 
     /// <summary>
     /// Per-entry decompression ceiling for an uploaded translation ZIP. A single
@@ -57,7 +55,7 @@ public class TranslationImportService
         ALDevToolbox.Services.Translation.TranslationMemoryService memory,
         ALDevToolbox.Services.Organizations.StorageQuotaGuard quotaGuard,
         ILogger<TranslationImportService> logger,
-        ProjectAccess? access = null)
+        ProjectAccess access)
     {
         _db = db;
         _orgContext = orgContext;
@@ -72,8 +70,8 @@ public class TranslationImportService
     /// before the existence read so a hidden id and an unknown one run the same
     /// queries and get the same error.
     /// </summary>
-    private async Task<bool> IsReleaseVisibleAsync(int releaseId, CancellationToken ct) =>
-        _access is null || await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+    private Task<bool> IsReleaseVisibleAsync(int releaseId, CancellationToken ct) =>
+        _access.IsReleaseVisibleAsync(releaseId, ct);
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; TranslationImportService called outside an authenticated request.");

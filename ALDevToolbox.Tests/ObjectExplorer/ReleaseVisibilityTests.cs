@@ -840,7 +840,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
     private ReleaseImportService Importer(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), Translations(ctx),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance, access: Access(ctx));
+            NullLogger<ReleaseImportService>.Instance, Access(ctx));
 
     /// <summary>
     /// A Private solution's release, linked by <paramref name="linkage"/>. Seeded
@@ -971,6 +971,26 @@ public sealed class ReleaseVisibilityTests : IDisposable
             case ReleaseWrite.TranslationZip: break;
             case ReleaseWrite.Backfill: break;
         }
+    }
+
+    [Fact]
+    public async Task The_bulk_backfill_queues_only_the_releases_the_caller_can_see()
+    {
+        var (privateId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(privateId, hidden.ReleaseId);
+        var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+
+        async Task<List<int>> ListAsAsync(int userId)
+        {
+            ActAs(userId);
+            await using var ctx = _db.NewContext();
+            return await Management(ctx).ListBackfillableReleaseIdsAsync();
+        }
+
+        (await ListAsAsync(OutsiderUserId)).Should().Equal(open.ReleaseId);
+        (await ListAsAsync(MemberUserId)).Should().Equal(hidden.ReleaseId, open.ReleaseId);
+        (await ListAsAsync(AdminUserId)).Should().Equal(hidden.ReleaseId, open.ReleaseId);
     }
 
     private ReferenceSessionService Sessions(AppDbContext ctx) =>

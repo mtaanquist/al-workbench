@@ -341,9 +341,9 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
                 new ALDevToolbox.Services.Translation.TranslationMemoryService(
                     ctx, _db.OrgContext,
                     NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-                _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
+                _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         await using var stream = File.OpenRead(Path.Combine(FixtureRoot, appFileName));
         var summary = await importer.ImportReleaseAsync(new ReleaseImportRequest(
             Label: label,

@@ -86,6 +86,24 @@ public class ReleaseManagementService
     }
 
     /// <summary>
+    /// The releases the bulk "backfill every release" action queues: ready, live,
+    /// in this org, and visible to the caller. A Private solution's release the
+    /// caller cannot see is left out, so the count on the confirmation does not
+    /// include it either; an org Admin bypasses the fence and gets every one.
+    /// </summary>
+    public async Task<List<int>> ListBackfillableReleaseIdsAsync(CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        return await _db.OeReleases.AsNoTracking()
+            .Where(r => r.Status == "ready" && r.DeletedAt == null)
+            .Where(_access.VisibleReleasePredicate(snapshot))
+            .OrderBy(r => r.Id)
+            .Select(r => r.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Sets <c>deleted_at</c> to now. Reversible via <see cref="RestoreAsync"/>.
     /// Soft-deleted Releases stay queryable for admins but disappear from the
     /// regular browse list.

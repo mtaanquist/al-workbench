@@ -760,7 +760,8 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
             sp.GetRequiredService<StorageQuotaGuard>(),
             sp.GetRequiredService<TranslationImportService>(),
             sp.GetRequiredService<CallSiteReferenceEmitter>(),
-            NullLogger<ReleaseImportService>.Instance));
+            NullLogger<ReleaseImportService>.Instance,
+            sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>()));
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
         services.AddScoped(sp => new ReleaseManagementService(

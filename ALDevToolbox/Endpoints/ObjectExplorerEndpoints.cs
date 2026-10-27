@@ -448,17 +448,13 @@ internal static class ObjectExplorerEndpoints
         // in the org — the "I don't want to reimport my whole catalogue" path.
         app.MapPost("/admin/object-explorer/backfill-system-references-all", async (
             HttpContext ctx,
-            AppDbContext db,
+            ReleaseManagementService management,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            // Query-filtered to the caller's org; no cross-tenant enqueue.
-            var releaseIds = await db.OeReleases.AsNoTracking()
-                .Where(r => r.Status == "ready" && r.DeletedAt == null)
-                .Select(r => r.Id)
-                .ToListAsync(ct);
+            var releaseIds = await management.ListBackfillableReleaseIdsAsync(ct);
             foreach (var rid in releaseIds)
             {
                 var source = new ReleaseImportSource.Backfill();
