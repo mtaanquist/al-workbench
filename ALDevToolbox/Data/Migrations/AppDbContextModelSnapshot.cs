@@ -2990,6 +2990,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(250)")
                         .HasColumnName("author");
 
+                    b.Property<string>("AuthorEmail")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("author_email");
+
                     b.Property<DateTime?>("CommittedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("committed_at");
@@ -3916,11 +3921,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
 
-                    b.Property<string>("Role")
+                    b.PrimitiveCollection<string[]>("Roles")
                         .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("role");
+                        .HasColumnType("character varying(30)[]")
+                        .HasColumnName("roles");
 
                     b.Property<int>("UserId")
                         .HasColumnType("integer")

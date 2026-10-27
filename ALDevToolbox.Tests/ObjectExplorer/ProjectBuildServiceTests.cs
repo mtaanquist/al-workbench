@@ -477,6 +477,24 @@ public sealed class ProjectBuildServiceTests
     }
 
     [Fact]
+    public void ParseChangelog_keeps_the_author_email_when_git_gave_one()
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            $"a1b2c3d{Us}Ada Lovelace{Us}2026-06-20T09:30:00+00:00{Us}Fix the posting routine{Us}ada@cronus.example",
+            $"e4f5061{Us}Alan Turing{Us}2026-06-19T17:05:00+02:00{Us}Add a setup field",
+            $"9a8b7c6{Us}Grace Hopper{Us}2026-06-18T08:00:00+00:00{Us}Tidy the setup page{Us}",
+        });
+
+        var (entries, _) = ProjectBuildService.ParseChangelog(stdout, cap: 100);
+
+        entries[0].AuthorEmail.Should().Be("ada@cronus.example");
+        entries[0].Subject.Should().Be("Fix the posting routine");
+        entries[1].AuthorEmail.Should().BeNull();
+        entries[2].AuthorEmail.Should().BeNull("git gives an empty address when the commit has none");
+    }
+
+    [Fact]
     public void ParseChangelog_flags_truncation_and_caps_the_list()
     {
         // The caller fetches cap + 1 lines so an over-cap range is detectable.

@@ -1292,7 +1292,7 @@ public sealed class ProjectBuildService
                     var log = await _processRunner.RunAsync(new ProcessRunRequest(
                         gitPath,
                         new[] { "-C", clone.Dir, "log", "--no-merges", "-n", (ChangelogCommitCap + 1).ToString(),
-                                "--pretty=format:%h%an%cI%s", $"{prevSha}..HEAD" },
+                                "--pretty=format:%h%an%cI%s%ae", $"{prevSha}..HEAD" },
                         clone.Dir, Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                     var (parsed, truncated) = ParseChangelog(log.StdOut, ChangelogCommitCap);
                     var ordering = 0;
@@ -1306,6 +1306,7 @@ public sealed class ProjectBuildService
                             ShortHash = Truncate(entry.ShortHash, 64),
                             Message = entry.Subject,
                             Author = Truncate(entry.Author, 250),
+                            AuthorEmail = entry.AuthorEmail is { } email ? Truncate(email, 320) : null,
                             CommittedAt = entry.CommittedAt,
                             Ordering = ordering++,
                         });
@@ -1392,7 +1393,7 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// Parses <c>git log</c> output formatted as short-hash / author / committer-date
-    /// / subject, separated by the ASCII unit-separator (0x1F) with one commit per
+    /// / subject / author email (missing from output recorded before #1464), separated by the ASCII unit-separator (0x1F) with one commit per
     /// line, into changelog entries. Returns whether the range exceeded
     /// <paramref name="cap"/> (the caller passed <c>cap + 1</c> to <c>-n</c>).
     /// </summary>
@@ -1407,7 +1408,8 @@ public sealed class ProjectBuildService
             var parts = line.Split('');
             if (parts.Length < 4) continue;
             DateTime? date = DateTimeOffset.TryParse(parts[2].Trim(), out var dto) ? dto.UtcDateTime : null;
-            entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim()));
+            entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim(),
+                parts.Length > 4 && parts[4].Trim() is { Length: > 0 } email ? email : null));
         }
 
         var truncated = entries.Count > cap;
@@ -2996,4 +2998,4 @@ public sealed record ProjectBuildOutcome(
     bool IsPreview = false);
 
 /// <summary>One parsed changelog commit (short hash, author, committer date, subject).</summary>
-public sealed record ChangelogEntry(string ShortHash, string Author, DateTime? CommittedAt, string Subject);
+public sealed record ChangelogEntry(string ShortHash, string Author, DateTime? CommittedAt, string Subject, string? AuthorEmail = null);

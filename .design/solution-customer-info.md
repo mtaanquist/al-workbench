@@ -142,9 +142,9 @@ Sections, top to bottom:
    add another**, because with no import somebody types these in a few hundred times. A short list,
    one row each, edited in place with an **Add contact** button - not a grid.
 4. **Modules** (slice 3) - see below.
-5. **Who knows this customer** (slice 2) - `oe_project_people`: one of our users, a role
-   (`Consultant`, `Developer`, `ProjectLeader`, `Architect`) and free-text areas
-   ("finance, warehouse"). Separate from Teams on purpose: a team says who *may* change
+5. **Who knows this customer** (slice 2) - `oe_project_people`: one of our users, one or more roles
+   (`Consultant`, `Developer`, `ProjectLeader`, `Architect`; several since #1462, picked
+   as checkboxes) and free-text areas ("finance, warehouse"). Separate from Teams on purpose: a team says who *may* change
    the Solution, this says who to *ask*.
 6. **Integrations** (slice 2) - `oe_project_integrations`: a name and a direction
    (`Inbound`, `Outbound`, `Both`).
