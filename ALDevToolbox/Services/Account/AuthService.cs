@@ -17,10 +17,10 @@ public sealed class AuthService
     public const int MaxAttemptsPerIp = 30;
     public const int LockoutThreshold = 5;
     /// <summary>
-    /// Wrong second-factor guesses (TOTP / recovery code) allowed within the
-    /// lockout window before the challenge endpoints refuse. Mirrors the
-    /// email-MFA verify cap so the 6-digit space can't be walked inside the
-    /// renewable MfaPending window. See #477.
+    /// Wrong second-factor guesses (TOTP, recovery code or email code) allowed
+    /// within the lockout window before the challenge endpoints refuse, so the
+    /// 6-digit space can't be walked inside the renewable MfaPending window,
+    /// however many email codes are sent. See #477 and #1432.
     /// </summary>
     public const int MaxMfaAttempts = 5;
     public static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(15);
@@ -280,7 +280,7 @@ public sealed class AuthService
 
     /// <summary>
     /// Takes one second-factor attempt for the user before the code is
-    /// checked. Gates the TOTP and recovery-code challenges so their short
+    /// checked. Gates the TOTP, recovery-code and email-code challenges so their short
     /// code space can't be brute-forced inside the renewable MfaPending
     /// window: after <see cref="MaxMfaAttempts"/> failed attempts for the
     /// user's email within the lockout window and since their last completed
