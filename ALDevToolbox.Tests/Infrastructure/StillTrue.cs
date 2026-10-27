@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AwesomeAssertions;
 
 namespace ALDevToolbox.Tests.Infrastructure;
@@ -11,15 +12,30 @@ namespace ALDevToolbox.Tests.Infrastructure;
 /// </summary>
 public static class StillTrue
 {
+    private const int PollMilliseconds = 50;
+
     public static void For(Func<bool> condition, string because, int milliseconds = 750)
     {
-        var until = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        var clock = Stopwatch.StartNew();
         do
         {
             condition().Should().BeTrue(because);
-            Thread.Sleep(50);
+            Thread.Sleep(PollMilliseconds);
         }
-        while (DateTime.UtcNow < until);
+        while (clock.ElapsedMilliseconds < milliseconds);
         condition().Should().BeTrue(because);
+    }
+
+    /// <inheritdoc cref="For"/>
+    public static async Task ForAsync(Func<Task<bool>> condition, string because, int milliseconds = 750)
+    {
+        var clock = Stopwatch.StartNew();
+        do
+        {
+            (await condition()).Should().BeTrue(because);
+            await Task.Delay(PollMilliseconds, TestContext.Current.CancellationToken);
+        }
+        while (clock.ElapsedMilliseconds < milliseconds);
+        (await condition()).Should().BeTrue(because);
     }
 }

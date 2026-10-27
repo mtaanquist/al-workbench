@@ -165,7 +165,13 @@ public sealed class SealedPageTests : IAsyncDisposable
 
         CreateButton(cut).Click();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Pick when the link expires: in an hour, a day or a week."));
+        cut.WaitForAssertion(() =>
+        {
+            // The one error on the form, and it sits in the expiry field itself.
+            var error = cut.FindAll("[role=alert]").Should().ContainSingle().Subject;
+            error.TextContent.Trim().Should().Be("Pick when the link expires: in an hour, a day or a week.");
+            error.Closest(".field")!.QuerySelector("select").Should().BeSameAs(ExpirySelect(cut));
+        });
         cut.Markup.Should().NotContain("Your link is ready");
         StoredLinks().Should().BeEmpty();
     }

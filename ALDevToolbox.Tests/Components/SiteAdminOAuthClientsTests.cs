@@ -129,7 +129,7 @@ public sealed class SiteAdminOAuthClientsTests : IAsyncDisposable
         cut.FindAll(".confirm-dialog__actions .btn").Single(b => b.TextContent.Trim() == "Cancel").Click();
 
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions").Should().BeEmpty());
-        StillTrue.For(() => StoredAsync().GetAwaiter().GetResult() == (true, 2),
+        await StillTrue.ForAsync(async () => await StoredAsync() == (true, 2),
             "saying no must leave the registration and both organisations' consents alone");
     }
 
