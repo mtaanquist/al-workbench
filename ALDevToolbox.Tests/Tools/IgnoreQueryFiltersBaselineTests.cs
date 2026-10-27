@@ -135,9 +135,9 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Services/Account/PasswordResetService.cs"] = new()
         {
             ["ConsumeMagicLoginTokenAsync"] = 1,
-            ["ConsumePasswordResetTokenAsync"] = 1,
             ["CreateMagicLoginTokenAsync"] = 1,
             ["CreatePasswordResetTokenAsync"] = 1,
+            ["ResetTokens"] = 1,
         },
         ["ALDevToolbox/Services/Account/PendingSignupService.cs"] = new()
         {
