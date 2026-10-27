@@ -395,6 +395,15 @@
                 Text: _text, TargetLanguage: _targetLang, Kind: string.IsNullOrEmpty(_kind) ? null : _kind,
                 Origin: _origin, IncludeDeleted: _includeDeleted, Skip: _skip, Take: _pageSize)));
             _loadError = null;
+
+            // Removing the last row on the last page leaves this page empty, and an
+            // empty page renders the "nothing learned yet" state with no pager to go
+            // back with. Step back to the last page that has rows instead.
+            if (_result.Items.Count == 0 && _skip > 0)
+            {
+                _skip = Math.Max(0, _skip - _pageSize);
+                await LoadAsync();
+            }
         }
         catch (Exception ex)
         {
