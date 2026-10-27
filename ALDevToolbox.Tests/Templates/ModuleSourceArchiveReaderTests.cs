@@ -1,3 +1,5 @@
+using System.Formats.Tar;
+using System.IO.Compression;
 using System.Text;
 using ALDevToolbox.Services.Templates;
 using AwesomeAssertions;
@@ -257,6 +259,53 @@ public sealed class ModuleSourceArchiveReaderTests
         var act = () => ReadAsync(Encoding.UTF8.GetBytes("<html>not a tarball</html>"), path: null);
 
         await act.Should().ThrowAsync<ModuleSourceException>();
+    }
+
+    [Fact]
+    public async Task A_small_download_that_unpacks_past_the_cap_is_refused()
+    {
+        // Zeros compress about a thousand to one: a few hundred KB on the wire that
+        // would be over 200 MB once inflated.
+        using var bomb = new MemoryStream();
+        using (var gzip = new GZipStream(bomb, CompressionLevel.Fastest, leaveOpen: true))
+        using (var writer = new TarWriter(gzip, TarEntryFormat.Pax, leaveOpen: true))
+        {
+            writer.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "cronus-dk-doc-aaaaaaa/zeros.bin")
+            {
+                DataStream = new ZeroStream(ModuleSourceLimits.MaxUnpackedBytes + 1),
+            });
+        }
+        bomb.Length.Should().BeLessThan(ModuleSourceLimits.MaxDownloadBytes, "the download cap alone would not catch it");
+
+        var act = () => ReadAsync(bomb.ToArray(), path: null);
+
+        (await act.Should().ThrowAsync<ModuleSourceException>())
+            .WithMessage("The repository is too large to copy (more than 200 MB unpacked).");
+    }
+
+    /// <summary><paramref name="length"/> zero bytes, without holding them.</summary>
+    private sealed class ZeroStream(long length) : Stream
+    {
+        private long _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => length;
+        public override long Position { get => _position; set => _position = value; }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var n = (int)Math.Min(count, length - _position);
+            Array.Clear(buffer, offset, n);
+            _position += n;
+            return n;
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static Task<ModuleSourceSnapshot> ReadAsync(byte[] tarball, string? path) =>

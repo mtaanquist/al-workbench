@@ -180,6 +180,28 @@ public sealed class ModuleSourceServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_repository_over_the_download_cap_is_refused_with_the_size_it_went_past()
+    {
+        var api = new FakeGitHubApi()
+            .Repository(Public, isPrivate: false)
+            .ResolveRef(Public, "HEAD", ShaA)
+            .OnRedirect(HttpMethod.Get, $"/repos/{Public}/tarball/{ShaA}", $"https://codeload.github.com/{Public}/legacy.tar.gz/{ShaA}")
+            .OnResponse(HttpMethod.Get, $"/{Public}/legacy.tar.gz/{ShaA}", () =>
+            {
+                var content = new ByteArrayContent(SimpleExtension());
+                content.Headers.ContentLength = ModuleSourceLimits.MaxDownloadBytes + 1;
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            });
+
+        var act = () => CreateAsync(api, new ModuleSourceInput(Public, null, null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Source.Address"].Should().Be("The repository is too large to copy (more than 50 MB to download).");
+        await using var ctx = _db.NewContext();
+        (await ctx.Modules.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task GitHub_not_answering_refuses_the_save_and_says_to_try_again()
     {
         var api = new FakeGitHubApi().On(HttpMethod.Get, $"/repos/{Public}", FakeGitHubApi.Unreachable);
