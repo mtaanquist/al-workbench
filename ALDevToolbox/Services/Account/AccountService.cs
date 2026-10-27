@@ -432,11 +432,24 @@ public sealed class AccountService
         return new AccountOverview(user, organization, entraEnabled);
     }
 
-    /// <summary>Self-service password change. Verifies the current password before applying the new one.</summary>
+    /// <summary>
+    /// Self-service password change. Verifies the current password before applying the new one,
+    /// and refuses members of a Microsoft-only organisation (SiteAdmins excepted).
+    /// </summary>
     public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default)
     {
         // Filtered: the signed-in user's own row is in their own organisation.
         var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
+        // A Microsoft-only organisation refuses password sign-in, so a password
+        // set now would only come back to life if the policy were relaxed later
+        // (#1455). SiteAdmins keep theirs as break-glass, as at sign-in.
+        if (await _auth.IsLocalLoginDisabledAsync(user, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Password"] = "Your organisation signs in with Microsoft, so there is no password to change here. Use \"Sign in with Microsoft\" instead.",
+            });
+        }
         if (!_auth.VerifyPassword(currentPassword, user.PasswordHash))
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });

@@ -595,6 +595,74 @@ public sealed class AccountServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_reset_link_submitted_twice_at_once_sets_one_password()
+    {
+        // Both submits past the read before either wrote (#1455, as #1208
+        // for magic links).
+        await SeedResettableUserAsync("twice@example.com");
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = (await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("twice@example.com", "10.0.0.1"))!;
+        }
+
+        var passwords = new[] { "first-new-password-1", "second-new-password-2" };
+        var results = await Task.WhenAll(passwords.Select(async password =>
+        {
+            await using var ctx = _db.NewContext();
+            try
+            {
+                await NewPasswordReset(ctx).ConsumePasswordResetTokenAsync(token, password);
+                return password;
+            }
+            catch (PlanValidationException)
+            {
+                return null;
+            }
+        }));
+
+        var winner = results.Should().ContainSingle(r => r != null).Which!;
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "twice@example.com");
+        NewAuth(read).VerifyPassword(winner, user.PasswordHash)
+            .Should().BeTrue("the password is the one from the submit that claimed the link");
+    }
+
+    [Fact]
+    public async Task Requesting_a_new_reset_email_retires_the_earlier_link()
+    {
+        // The reset page promises this (#1455).
+        await SeedResettableUserAsync("again@example.com", password: "originalpasswordlong");
+        await using var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var first = await svc.CreatePasswordResetTokenAsync("again@example.com", "10.0.0.1");
+        var second = await svc.CreatePasswordResetTokenAsync("again@example.com", "10.0.0.1");
+
+        Func<Task> old = () => svc.ConsumePasswordResetTokenAsync(first!, "from-the-old-link-1");
+        (await old.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Token");
+
+        await svc.ConsumePasswordResetTokenAsync(second!, "from-the-new-link-1");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "again@example.com");
+        NewAuth(read).VerifyPassword("from-the-new-link-1", user.PasswordHash).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Requesting_a_reset_email_leaves_a_magic_link_alone()
+    {
+        // Only earlier reset links are retired; a sign-in link sent the same
+        // minute is a different credential and keeps working.
+        await SeedResettableUserAsync("both@example.com");
+        await using var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var magic = await svc.CreateMagicLoginTokenAsync("both@example.com", "10.0.0.1");
+        await svc.CreatePasswordResetTokenAsync("both@example.com", "10.0.0.1");
+
+        var user = await svc.ConsumeMagicLoginTokenAsync(magic!);
+        user.Email.Should().Be("both@example.com");
+    }
+
+    [Fact]
     public async Task Reset_requests_are_throttled_on_the_same_window_as_sign_in()
     {
         // Without a limit this is an unauthenticated way to make the site send
