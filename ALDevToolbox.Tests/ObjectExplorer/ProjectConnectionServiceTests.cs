@@ -3513,11 +3513,11 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
     // ── The exclusive latest-selectable bound (issue #804) ────────────────
 
-    /// <summary>Microsoft's bound as the reporter saw it: midnight UTC, meaning "before 1 March".</summary>
-    private static readonly DateTimeOffset MidnightBound = new(2027, 3, 1, 0, 0, 0, TimeSpan.Zero);
+    /// <summary>Microsoft's bound as the reporter saw it: midnight UTC, meaning "before that day". Relative, so ScheduledDate stays before it.</summary>
+    private static readonly DateTimeOffset MidnightBound = Today.AddDays(120);
 
     /// <summary>The last moment inside that bound, and what the PATCH must carry.</summary>
-    private static readonly DateTimeOffset LastAllowedDay = new(2027, 2, 28, 0, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset LastAllowedDay = MidnightBound.AddDays(-1);
 
     [Fact]
     public async Task Pushing_the_date_sends_the_day_before_an_exclusive_midnight_bound()
@@ -3527,7 +3527,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // Business Central stores the date inside the customer's update window, so the day
         // it reads back carries a time of day the PATCH never named.
-        var landed = new DateTimeOffset(2027, 2, 28, 21, 0, 0, TimeSpan.Zero);
+        var landed = LastAllowedDay.AddHours(21);
         var admin = AdminWithUpdates(Update(ScheduledDate, MidnightBound), Update(landed, MidnightBound));
 
         await using (var ctx = _db.NewContext())
@@ -3550,7 +3550,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // The same day as the effective latest, at a different time of day: an exact-tick
         // guard misses this and re-PATCHes the customer's tenant on every sweep.
-        var onTheDay = new DateTimeOffset(2027, 2, 28, 21, 0, 0, TimeSpan.Zero);
+        var onTheDay = LastAllowedDay.AddHours(21);
         var admin = new FakeAdminClient { OnEnvironmentUpdates = _ => new[] { Update(onTheDay, MidnightBound) } };
 
         await using var ctx = _db.NewContext();
@@ -3570,7 +3570,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         // The customer's update window opens at 02:00 in Copenhagen, which is 01:00 UTC on
         // the following day. The date moved, so the action is done - checking that it
         // landed on the exact day we sent would fail a write that worked.
-        var landed = new DateTimeOffset(2027, 3, 1, 1, 0, 0, TimeSpan.Zero);
+        var landed = MidnightBound.AddHours(1);
         var admin = AdminWithUpdates(Update(ScheduledDate, MidnightBound), Update(landed, MidnightBound));
 
         await using (var ctx = _db.NewContext())
@@ -3592,7 +3592,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // Where the window put it a day beyond the bound: as late as it goes, and
         // re-sending would fail loudly on every sweep.
-        var pastTheBound = new DateTimeOffset(2027, 3, 1, 1, 0, 0, TimeSpan.Zero);
+        var pastTheBound = MidnightBound.AddHours(1);
         var admin = new FakeAdminClient { OnEnvironmentUpdates = _ => new[] { Update(pastTheBound, MidnightBound) } };
 
         await using var ctx = _db.NewContext();
