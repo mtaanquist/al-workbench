@@ -99,12 +99,9 @@ public sealed class McpRequestFilterTests : IDisposable
         using var doc = await RpcAsync(client, pat, "tools/call",
             new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
 
-        // The tool itself answers (no such build or pipeline); what matters is that
-        // the step-up filter did not refuse it first.
-        var reply = ReplyText(doc);
-        reply.Should().NotBeEmpty(doc.RootElement.GetRawText());
-        reply.Should().NotContain("confirm it's them");
-        reply.Should().NotContain("personal access token");
+        // The tool itself answers (no such build or pipeline), so the step-up
+        // filter did not refuse it first.
+        ReplyText(doc).Should().Contain(ToolsOwnAnswer, doc.RootElement.GetRawText());
     }
 
     [Fact]
@@ -150,28 +147,59 @@ public sealed class McpRequestFilterTests : IDisposable
         await EnableMcpAsync();
         using var factory = new EndpointFactory(_db);
         var (clientId, accessToken) = await ConnectAssistantAsync(factory);
-        // Stands in for approving from a session with a recent second factor,
-        // which is what the authorize endpoint stamps on the consent.
-        await using (var ctx = _db.NewContext())
-        {
-            var consent = await ctx.OAuthConsents.IgnoreQueryFilters().SingleAsync(c => c.ClientId == clientId);
-            consent.StrongAuthAt = DateTime.UtcNow;
-            await ctx.SaveChangesAsync();
-        }
+        await StampConsentAsync(clientId, revoked: false);
         await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
         using var assistant = factory.CreateClient();
 
         using var doc = await RpcAsync(assistant, accessToken, "tools/call",
             new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
 
-        // The tool itself answers (no such build or pipeline); what matters is that
-        // the step-up filter did not refuse it first.
-        var reply = ReplyText(doc);
-        reply.Should().NotBeEmpty(doc.RootElement.GetRawText());
-        reply.Should().NotContain("confirm it's them");
+        // The tool itself answers (no such build or pipeline), so the step-up
+        // filter did not refuse it first.
+        ReplyText(doc).Should().Contain(ToolsOwnAnswer, doc.RootElement.GetRawText());
+    }
+
+    [Fact]
+    public async Task A_revoked_consent_is_refused_for_a_writing_tool_marked_for_step_up_even_with_a_second_factor()
+    {
+        await EnableMcpAsync();
+        using var factory = new EndpointFactory(_db);
+        var (clientId, accessToken) = await ConnectAssistantAsync(factory);
+        // Revoking through the app also revokes the token, so /mcp would answer
+        // 401 before the filter runs. Stamping the row alone reaches the filter
+        // and pins that it ignores a revoked approval, second factor or not.
+        await StampConsentAsync(clientId, revoked: true);
+        await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
+        using var assistant = factory.CreateClient();
+
+        using var doc = await RpcAsync(assistant, accessToken, "tools/call",
+            new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
+
+        Refusal(doc).Should().Contain("Approve this assistant again");
     }
 
     // ---- helpers -----------------------------------------------------------
+
+    /// <summary>
+    /// What deploy_build says when the build and pipeline do not exist: proof the
+    /// call got past every filter to the tool itself.
+    /// </summary>
+    private const string ToolsOwnAnswer = "Couldn't deploy that build";
+
+    /// <summary>
+    /// Marks the assistant's consent as approved from a session with a recent
+    /// second factor, which is what the authorize endpoint stamps, and optionally
+    /// as revoked. The test context is scoped to the default organisation that
+    /// owns the consent.
+    /// </summary>
+    private async Task StampConsentAsync(string clientId, bool revoked)
+    {
+        await using var ctx = _db.NewContext();
+        var consent = await ctx.OAuthConsents.SingleAsync(c => c.ClientId == clientId);
+        consent.StrongAuthAt = DateTime.UtcNow;
+        if (revoked) consent.RevokedAt = DateTime.UtcNow;
+        await ctx.SaveChangesAsync();
+    }
 
     /// <summary>
     /// Posts one JSON-RPC request. Accept names JSON alone, so the gateway shim
