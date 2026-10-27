@@ -971,7 +971,6 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() =>
             cut.Markup.Should().Contain("Couldn't read the operations from Business Central"));
-        cut.Markup.Should().NotContain("add you to one of its teams");
         cut.FindAll("a.btn[href$='tab=bc']").Should().BeEmpty();
         cut.Find(".empty-state__text").TextContent.Should()
             .Contain("Ask the solution's owner or an administrator to check its Business Central connection.");

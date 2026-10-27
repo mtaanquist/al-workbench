@@ -22,7 +22,11 @@ namespace ALDevToolbox.Tests.Components;
 /// needs a customer with a working connection, which the upgrade-action fixture seeds
 /// the way the app would.
 /// </summary>
-public sealed class UpgradesPageSelectVersionRunTests : IDisposable
+// UpgradesPage.SearchDebounce is a static the page reads when it is built: the classes
+// that render the page share one collection so that one class's wait never reaches
+// another's page mid-test.
+[Collection("UpgradesPage.SearchDebounce")]
+public sealed class UpgradesPageSelectVersionRunTests : IAsyncDisposable
 {
     private readonly UpgradeActionTestFixture _f = new();
     private readonly BunitContext _ctx = new();
@@ -79,10 +83,13 @@ public sealed class UpgradesPageSelectVersionRunTests : IDisposable
     private static AngleSharp.Dom.IElement ChangeVersionCommand(IRenderedComponent<UpgradesPage> cut) =>
         cut.FindAll(".cmdbar .ra__menu .menu__item").First(i => i.TextContent.Trim() == "Change the next version...");
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _f.Db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _f.Dispose();
     }
 

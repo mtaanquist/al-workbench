@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Organizations;
 
 namespace ALDevToolbox.Tests.Auth;
@@ -194,6 +195,72 @@ public sealed class EntraLoginPolicyTests : IDisposable
             var token = await resets.CreatePasswordResetTokenAsync("operator@cronus.com", Ip);
             token.Should().NotBeNull();
             await resets.ConsumePasswordResetTokenAsync(token!, newPassword);
+        }
+
+        await using var login = _db.NewContext();
+        var (outcome, _) = await NewAuth(login).TryLoginAsync("operator@cronus.com", newPassword, Ip);
+        outcome.Should().Be(LoginOutcome.Success);
+    }
+
+    private AccountService NewAccounts(AppDbContext ctx) =>
+        new(ctx, NewAuth(ctx),
+            new SystemSettingsService(ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, TimeProvider.System),
+            new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(false),
+            NullLogger<AccountService>.Instance, TimeProvider.System, _db.OpenIddictTokens);
+
+    [Fact]
+    public async Task Changing_a_password_is_refused_for_a_member_of_an_entra_only_org()
+    {
+        // A password set now would come back to life if the policy were
+        // relaxed later (#1455).
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
+        string hashBefore;
+        await using (var read = _db.NewContext())
+        {
+            hashBefore = (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).PasswordHash;
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> act = () => NewAccounts(ctx).ChangePasswordAsync(userId, Password, "a-brand-new-password-1");
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors["Password"].Should().Contain("Microsoft");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).PasswordHash.Should().Be(hashBefore);
+    }
+
+    [Fact]
+    public async Task The_account_page_knows_password_sign_in_is_off_for_members_but_not_site_admins()
+    {
+        // What decides whether the Account page shows the password form; the
+        // same rule as the refusal above.
+        var memberId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        var operatorId = await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com", siteAdmin: true);
+        await using (var before = _db.NewContext())
+        {
+            (await NewAccounts(before).GetAccountOverviewAsync(memberId))!.PasswordSignInDisabled.Should().BeFalse();
+        }
+
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
+
+        await using var ctx = _db.NewContext();
+        (await NewAccounts(ctx).GetAccountOverviewAsync(memberId))!.PasswordSignInDisabled.Should().BeTrue();
+        (await NewAccounts(ctx).GetAccountOverviewAsync(operatorId))!.PasswordSignInDisabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_site_admin_in_an_entra_only_org_can_still_change_their_password()
+    {
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com", siteAdmin: true);
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
+        const string newPassword = "a-brand-new-password-1";
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewAccounts(ctx).ChangePasswordAsync(userId, Password, newPassword);
         }
 
         await using var login = _db.NewContext();

@@ -1131,6 +1131,77 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
             .Reader.TryRead(out _).Should().BeFalse();
     }
 
+    // A push's branch and commit reach git too, when a pipeline builds on push
+    // (#1079), so they are held to the same shape as a pull request's.
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("--upload-pack=touch /tmp/pwned")]
+    [InlineData("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")]
+    // Abbreviated ids are hex, but a stored head is always the full object id.
+    [InlineData("abc1234")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public async Task A_push_whose_new_head_is_not_a_git_object_name_is_refused(string after)
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var response = await client.SendAsync(Delivery(GitHubWebhookPayloads.Push(after: after), Secret, eventName: "push"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_branch_delete_whose_last_head_is_not_a_git_object_name_is_refused()
+    {
+        // A delete keeps "before" as the head, so that is the value checked.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var response = await client.SendAsync(Delivery(
+            GitHubWebhookPayloads.Push(deleted: true, before: "--force"), Secret, eventName: "push"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("-x")]
+    [InlineData("a..b")]
+    [InlineData("feature vat")]
+    [InlineData("x;rm")]
+    [InlineData("feature/.hidden")]
+    public async Task A_push_to_a_branch_git_could_not_be_asked_for_is_refused(string branch)
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var response = await client.SendAsync(Delivery(GitHubWebhookPayloads.Push(branch: branch), Secret, eventName: "push"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("--upload-pack=touch /tmp/pwned")]
+    [InlineData("abc1234")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public async Task A_listed_commit_whose_id_is_not_a_git_object_name_is_left_out(string id)
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var payload = System.Text.Json.Nodes.JsonNode.Parse(GitHubWebhookPayloads.Push(commitCount: 3))!;
+        payload["commits"]![0]!["id"] = id;
+
+        using var response = await client.SendAsync(Delivery(payload.ToJsonString(), Secret, eventName: "push"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted, "one bad entry does not cost the push its head");
+        _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out var read).Should().BeTrue();
+        var push = read.Should().BeOfType<GitHubPushJob>().Subject;
+        push.Commits.Select(c => c.Sha).Should().Equal(GitHubWebhookPayloads.Sha(2), GitHubWebhookPayloads.After);
+    }
+
     [Fact]
     public async Task A_full_queue_is_answered_with_a_retryable_503_and_nothing_is_announced()
     {

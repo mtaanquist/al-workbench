@@ -24,7 +24,7 @@ namespace ALDevToolbox.Tests.Components;
 /// wrong one reports an environment as never checked when only its updates were
 /// unreadable.</para>
 /// </summary>
-public sealed class EnvironmentsListTests : IDisposable
+public sealed class EnvironmentsListTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -78,12 +78,15 @@ public sealed class EnvironmentsListTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         // A test that set a real wait must not hand it to a page in another test class.
         EnvironmentsList.SearchDebounce = TimeSpan.Zero;
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -851,6 +854,76 @@ public sealed class EnvironmentsListTests : IDisposable
         _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeTrue();
     }
 
+    /// <summary>
+    /// An auto-refresh tick that runs after the page has gone asks Business Central
+    /// for nothing: leaving cancels the page's requests (#1437).
+    /// </summary>
+    [Fact]
+    public async Task An_auto_refresh_after_the_page_has_gone_is_cancelled_with_it()
+    {
+        await MakeOwnerAnAdminAsync();
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-10));
+
+        // From the address, so the auto-refresh is on without a first round of its own.
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().NavigateTo("/environments?auto=1");
+        var cut = _ctx.Render<EnvironmentsList>();
+        cut.WaitForAssertion(() => AutoBox(cut).HasAttribute("checked").Should().BeTrue());
+
+        var page = cut.Instance;
+
+        await _ctx.Renderer.DisposeAsync();
+        await _ctx.Renderer.Dispatcher.InvokeAsync(() => page.AutoRefreshTickAsync());
+
+        page.IsPolling.Should().BeFalse();
+        _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeFalse(
+            "the request was cancelled with the page");
+    }
+
+    /// <summary>
+    /// A refresh that comes back after the page has gone used to start the re-read
+    /// timer on a page nobody had open, and since a tick skips its work once the page
+    /// has gone, nothing would ever stop it (#1437). Starting late starts nothing.
+    /// </summary>
+    [Fact]
+    public async Task Polling_started_after_the_page_has_gone_starts_no_timer()
+    {
+        var cut = _ctx.Render<EnvironmentsList>();
+        cut.WaitForAssertion(() => cut.FindAll(".loading-block").Should().BeEmpty());
+        var page = cut.Instance;
+
+        await _ctx.Renderer.DisposeAsync();
+        await _ctx.Renderer.Dispatcher.InvokeAsync(page.StartPolling);
+
+        page.IsPolling.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// A tick that had already fired when the page went finds it gone, and stops its
+    /// timer rather than only skipping the read.
+    /// </summary>
+    [Fact]
+    public async Task A_tick_that_finds_the_page_gone_stops_its_timer()
+    {
+        await MakeOwnerAnAdminAsync();
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-10));
+
+        var cut = _ctx.Render<EnvironmentsList>();
+        await cut.WaitForElement(".freshness [data-page-refresh]").ClickAsync(new());
+        cut.WaitForState(() => cut.Instance.IsPolling);
+        var page = cut.Instance;
+
+        await _ctx.Renderer.DisposeAsync();
+        await page.PollTickAsync();
+
+        page.IsPolling.Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_tick_leaves_a_freshly_read_solution_alone_and_says_so()
     {
@@ -978,6 +1051,7 @@ public sealed class EnvironmentsListTests : IDisposable
         cut.Find("input[type=search]").Input("CRONUS");
         cut.Find("input[type=search]").Input("CRONUS ");
         cut.Find("input[type=search]").Input("CRONUS D");
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
         cut.WaitForAssertion(() =>
             cut.Find("input[type=search]").GetAttribute("value").Should().Be("CRONUS D"));
