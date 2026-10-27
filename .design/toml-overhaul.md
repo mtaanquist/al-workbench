@@ -96,7 +96,7 @@ From the issue body:
   a dependency row with none or more than one of the three reference shapes.
   (It replaced `UnifiedExtensionsShapeTests`, which only read back property
   setters.)
-- `Generation.WorkspaceGenerationTests` — 13 end-to-end tests covering the
+- `Generation.WorkspaceGenerationTests` — end-to-end tests covering the
   per-extension walk, module-clone implicit-Core-dep, recursive folder
   layout, example filtering, `{{affix}}` + `{{extension_prefix}}`
   substitution, extension/literal/module dependency resolution, id-range

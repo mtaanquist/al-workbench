@@ -22,7 +22,9 @@ namespace ALDevToolbox.Tests.Tools;
 /// characters in what is left — string literals and Razor markup, which is
 /// where user-facing copy lives. The stripper is not a C# parser: a <c>//</c>
 /// inside a string literal (a URL, say) ends the "line" early, so a violation
-/// hiding after one is missed. That trade is deliberate — a whole-line scan
+/// hiding after one is missed, and a <c>/*</c> inside a string or a JavaScript
+/// regex opens a comment that blanks everything up to the next <c>*/</c>
+/// (<c>code-editor.js</c> has one). That trade is deliberate — a whole-line scan
 /// that under-reports is easier to trust than a parser that fires on code
 /// nobody reads. Comments are out of scope on purpose: no user sees them, and
 /// sweeping them would bury the real hits in churn.</para>
