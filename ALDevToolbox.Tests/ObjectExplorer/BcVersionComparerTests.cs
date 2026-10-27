@@ -31,7 +31,7 @@ public sealed class BcVersionComparerTests
     // A non-numeric segment sorts below any number rather than throwing.
     [InlineData("28.preview", "28.0", -1)]
     [InlineData("28.preview", "28", -1)]
-    // Null is "no version" and sorts last.
+    // Null is "no version" and compares greater than any version: last ascending, first descending.
     [InlineData(null, "28.0", 1)]
     [InlineData("28.0", null, -1)]
     [InlineData(null, null, 0)]
@@ -39,7 +39,7 @@ public sealed class BcVersionComparerTests
         Compare(x, y).Should().Be(expected);
 
     [Fact]
-    public void Sorting_descending_puts_the_newest_first_and_nulls_last()
+    public void Sorting_descending_puts_a_null_first_then_the_newest()
     {
         string?[] versions = ["28.2", null, "28.10", "27.9", "28"];
 
