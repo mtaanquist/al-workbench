@@ -92,9 +92,10 @@ From the issue body:
   optional template-declared extensions, `IncludeForNav` removed.
 
 ### Tests in place
-- `Domain.Tests.Extensions.UnifiedExtensionsShapeTests` — pins the entity
-  shape (recursive folder tree, three-way dep, `AffixType.None`, module
-  folder mirror).
+- `Extensions.WorkspaceExtensionDependencyShapeTests` — the database refuses
+  a dependency row with none or more than one of the three reference shapes.
+  (It replaced `UnifiedExtensionsShapeTests`, which only read back property
+  setters.)
 - `Generation.WorkspaceGenerationTests` — 13 end-to-end tests covering the
   per-extension walk, module-clone implicit-Core-dep, recursive folder
   layout, example filtering, `{{affix}}` + `{{extension_prefix}}`

@@ -38,7 +38,8 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
             CoreIdRangeTo: 80999,
             IncludeExamples: false,
             SelectedExtensionPaths: new List<string> { "Hotfix", "Reports" },
-            SelectedModuleKeys: new List<string> { "payments", "warehouse" });
+            SelectedModuleKeys: new List<string> { "payments", "warehouse" },
+            TenantId: "7d3a1f5e-2b4c-4e8a-9f61-0c2d3e4f5a6b");
 
         var identities = new List<WorkspaceExtensionIdentity>
         {
@@ -69,6 +70,10 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
         parsed.Workspace.IncludeExamples.Should().Be(plan.IncludeExamples);
         parsed.Workspace.SelectedExtensionPaths.Should().Equal(plan.SelectedExtensionPaths);
         parsed.Workspace.SelectedModuleKeys.Should().Equal(plan.SelectedModuleKeys);
+        parsed.Workspace.TenantId.Should().Be(plan.TenantId);
+        // The whole record too, so a field added to the plan later cannot be
+        // left out of the file without this test noticing.
+        parsed.Workspace.Should().BeEquivalentTo(plan, o => o.WithStrictOrdering());
 
         parsed.Extensions.Should().HaveCount(2);
         parsed.Extensions.Should().BeEquivalentTo(identities);
