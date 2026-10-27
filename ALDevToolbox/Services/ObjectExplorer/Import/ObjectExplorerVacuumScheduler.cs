@@ -77,7 +77,13 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
         return 3;
     }
 
-    protected override async Task TickAsync(CancellationToken ct)
+    protected override Task TickAsync(CancellationToken ct) => TickOnceAsync(ct);
+
+    /// <summary>
+    /// One poll: vacuums when the day's slot has come and not been run yet.
+    /// Internal so a test can drive it with a fake clock, without the poll loop.
+    /// </summary>
+    internal async Task TickOnceAsync(CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
         if (!ShouldRun(now)) return;

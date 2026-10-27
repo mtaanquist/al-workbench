@@ -133,6 +133,17 @@ public sealed class FakeGitHubApi : HttpMessageHandler
     }
 
     /// <summary>
+    /// Registers a whole response built by the test - for a body that is a stream
+    /// rather than bytes, or content headers (a declared <c>Content-Length</c>)
+    /// that say something other than what the body holds.
+    /// </summary>
+    public FakeGitHubApi OnResponse(HttpMethod method, string path, Func<HttpResponseMessage> reply)
+    {
+        _routes.Add((method.Method, Normalise(path), _ => reply()));
+        return this;
+    }
+
+    /// <summary>
     /// Registers a reply computed from the request itself - for the routes whose
     /// answer depends on <em>which credential</em> asked, as GitHub's own do
     /// when two installations call the same path.
