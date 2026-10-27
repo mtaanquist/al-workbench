@@ -1,4 +1,5 @@
 using ALDevToolbox.Components.Shared;
+using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 
 namespace ALDevToolbox.Tests.Components;
@@ -9,15 +10,18 @@ namespace ALDevToolbox.Tests.Components;
 /// </summary>
 public sealed class DebouncerTests
 {
+    // On a clock of its own, so a stall between two keystrokes can never let an earlier
+    // one through (#1439): time moves only when the test says so.
     private static readonly TimeSpan Delay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan Settle = TimeSpan.FromSeconds(5);
+    private readonly ManualClock _clock = new(DateTimeOffset.UnixEpoch);
 
     [Fact]
     public async Task A_burst_of_calls_runs_only_the_last_one_once()
     {
-        using var debouncer = new Debouncer(Delay);
+        using var debouncer = new Debouncer(Delay, _clock);
         var ran = new List<int>();
-        var done = new TaskCompletionSource();
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         for (var i = 1; i <= 5; i++)
         {
@@ -30,36 +34,55 @@ public sealed class DebouncerTests
             });
         }
 
+        _clock.Advance(Delay - TimeSpan.FromMilliseconds(1));
+        done.Task.IsCompleted.Should().BeFalse("the burst has not been quiet for the whole delay yet");
+
+        _clock.Advance(TimeSpan.FromMilliseconds(1));
         await done.Task.WaitAsync(Settle, TestContext.Current.CancellationToken);
-        await Task.Delay(Delay * 3, TestContext.Current.CancellationToken);
-        ran.Should().Equal(5);
+        _clock.Advance(Delay * 3);
+        lock (ran) ran.Should().Equal(5);
     }
 
     [Fact]
     public async Task Nothing_runs_once_it_is_disposed()
     {
-        var debouncer = new Debouncer(Delay);
+        var debouncer = new Debouncer(Delay, _clock);
         var ran = false;
         debouncer.Trigger(() => { ran = true; return Task.CompletedTask; });
 
         debouncer.Dispose();
         debouncer.Trigger(() => { ran = true; return Task.CompletedTask; });
 
-        await Task.Delay(Delay * 4, TestContext.Current.CancellationToken);
+        await AdvancePastAsync();
         ran.Should().BeFalse();
     }
 
     [Fact]
     public async Task Cancel_drops_the_waiting_call()
     {
-        using var debouncer = new Debouncer(Delay);
+        using var debouncer = new Debouncer(Delay, _clock);
         var ran = false;
         debouncer.Trigger(() => { ran = true; return Task.CompletedTask; });
 
         debouncer.Cancel();
 
-        await Task.Delay(Delay * 4, TestContext.Current.CancellationToken);
+        await AdvancePastAsync();
         ran.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Moves past the delay with a second debouncer waiting on the same clock, and waits
+    /// for that one to run: a call that was not dropped falls due before it, so by then it
+    /// has had its turn.
+    /// </summary>
+    private async Task AdvancePastAsync()
+    {
+        using var witness = new Debouncer(Delay, _clock);
+        var witnessed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        witness.Trigger(() => { witnessed.TrySetResult(); return Task.CompletedTask; });
+
+        _clock.Advance(Delay * 4);
+        await witnessed.Task.WaitAsync(Settle, TestContext.Current.CancellationToken);
     }
 
     [Fact]

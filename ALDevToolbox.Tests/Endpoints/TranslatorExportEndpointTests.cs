@@ -4,6 +4,8 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
@@ -165,17 +167,58 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task A_malformed_learn_list_still_downloads_and_teaches_nothing()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
+        var exports = new FinishedExports();
+        using var factory = new EndpointFactory(_db, services =>
+            services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter>(exports));
         using var client = await SignInAsync(factory);
 
         var exported = await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited, learn: "{not a list");
         exported.Should().Contain("Beloeb").And.Contain("Bogfoeringsdato");
 
-        // A second, well-formed export is the marker: once it has been learned,
-        // the first one has long had its chance.
+        // A second, well-formed export shows that learning still works. Learning runs
+        // after each download is sent, so wait until both requests have finished it
+        // rather than for the first row: the first export's could land after the
+        // second's in any order (#1439).
         await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited,
             learn: """["Table 1 - Field 3 - Property Caption"]""");
-        (await LearnedSourcesAsync(expected: 1)).Should().Equal("Posting Date");
+        await exports.UntilAsync(2);
+        await using var ctx = _db.NewContext();
+        ctx.TranslationMemory.Select(e => e.SourceText).ToList().Should().Equal("Posting Date");
+    }
+
+    /// <summary>
+    /// Counts the export requests that have run to the end, learning included: the
+    /// endpoint learns after the download is sent but before it returns.
+    /// </summary>
+    private sealed class FinishedExports : Microsoft.AspNetCore.Hosting.IStartupFilter
+    {
+        private readonly SemaphoreSlim _finished = new(0);
+
+        public async Task UntilAsync(int count)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                (await _finished.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken))
+                    .Should().BeTrue("every export finishes learning");
+            }
+        }
+
+        public Action<IApplicationBuilder> Configure(
+            Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use(async (context, inner) =>
+            {
+                try
+                {
+                    await inner();
+                }
+                finally
+                {
+                    if (context.Request.Path == "/api/translator/export") _finished.Release();
+                }
+            });
+            next(app);
+        };
     }
 
     private static readonly string TwoUnitDanish = Generated

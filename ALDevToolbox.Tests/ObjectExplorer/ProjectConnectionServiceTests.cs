@@ -341,7 +341,17 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         public TestClock(DateTimeOffset start) => _now = start;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+        public void Set(DateTimeOffset at) => _now = at;
     }
+
+    /// <summary>
+    /// Puts the clock on tomorrow at 12:00 UTC, for the window tests: 13:00 or 14:00 in
+    /// Copenhagen and 07:00 or 08:00 in New York, outside every night window they book
+    /// against and hours from a change of summer time, whatever time of day the suite
+    /// runs (#1439). Tomorrow rather than a fixed date, so it never falls into the past.
+    /// </summary>
+    private void AtNoonUtcTomorrow() =>
+        _clock.Set(new DateTimeOffset(DateTime.UtcNow.Date.AddDays(1).AddHours(12), TimeSpan.Zero));
 
     private async Task<int> SeedProjectAsync(string name = "CRONUS A/S")
     {
@@ -2444,9 +2454,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         // Outside the window, so both bookings wait for its next 22:00 rather than running now.
-        var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
-        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(8));
+        AtNoonUtcTomorrow();
         var apps = AppsWithWaiting();
 
         await using var ctx = _db.NewContext();
@@ -2745,8 +2753,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         // Outside the window, so the booking waits for its next 22:00.
-        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(8));
+        AtNoonUtcTomorrow();
 
         await using var ctx = _db.NewContext();
         var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
@@ -2766,6 +2773,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     public async Task An_upload_while_the_delivery_window_is_open_is_booked_for_now()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
+        // An hour either side of now never wraps midnight or meets a change of summer time.
+        AtNoonUtcTomorrow();
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         var local = TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(_clock.GetUtcNow().UtcDateTime, copenhagen));
         await SetWindowsAsync(envId, deliveryStart: local.AddHours(-1), deliveryEnd: local.AddHours(1));
@@ -2784,8 +2793,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, bcStart: new TimeOnly(1, 0), bcEnd: new TimeOnly(5, 0), bcZone: "America/New_York");
         var newYork = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-        if (UpdateWindow.IsWithin(new TimeOnly(1, 0), new TimeOnly(5, 0), newYork, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(6));
+        // Outside Microsoft's window, so the booking waits for its next 01:00.
+        AtNoonUtcTomorrow();
         var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
