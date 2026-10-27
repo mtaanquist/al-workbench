@@ -308,6 +308,18 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_role_the_tool_does_not_know_does_not_count_as_one()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null,
+            new CustomerPersonInput(OtherUserId, [(ProjectPersonRole)99], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Roles");
+    }
+
+    [Fact]
     public async Task A_colleague_has_to_be_someone_in_the_organisation()
     {
         var id = await SeedAsync();

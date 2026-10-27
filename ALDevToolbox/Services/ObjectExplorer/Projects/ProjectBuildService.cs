@@ -1306,7 +1306,7 @@ public sealed class ProjectBuildService
                             ShortHash = Truncate(entry.ShortHash, 64),
                             Message = entry.Subject,
                             Author = Truncate(entry.Author, 250),
-                            AuthorEmail = entry.AuthorEmail is { Length: > 0 } email ? Truncate(email, 320) : null,
+                            AuthorEmail = entry.AuthorEmail is { } email ? Truncate(email, 320) : null,
                             CommittedAt = entry.CommittedAt,
                             Ordering = ordering++,
                         });
@@ -1409,7 +1409,7 @@ public sealed class ProjectBuildService
             if (parts.Length < 4) continue;
             DateTime? date = DateTimeOffset.TryParse(parts[2].Trim(), out var dto) ? dto.UtcDateTime : null;
             entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim(),
-                parts.Length > 4 ? parts[4].Trim() : null));
+                parts.Length > 4 && parts[4].Trim() is { Length: > 0 } email ? email : null));
         }
 
         var truncated = entries.Count > cap;

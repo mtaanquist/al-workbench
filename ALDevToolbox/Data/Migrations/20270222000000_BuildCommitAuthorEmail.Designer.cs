@@ -14,7 +14,7 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20270204000000_BuildCommitAuthorEmail")]
+    [Migration("20270222000000_BuildCommitAuthorEmail")]
     partial class BuildCommitAuthorEmail
     {
         /// <inheritdoc />

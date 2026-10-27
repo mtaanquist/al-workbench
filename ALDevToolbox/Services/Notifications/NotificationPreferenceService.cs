@@ -21,10 +21,12 @@ public sealed class NotificationPreferenceService
 {
     /// <summary>
     /// When a person is emailed before they choose. Immediately, because those
-    /// notifications go to someone who caused or owns the thing they are about,
-    /// and the email links to the place to turn it off. Followed solutions are
-    /// the exception: everyone on a solution's People list follows it without
-    /// asking, so their email is opt-in and they hear in the app only.
+    /// notifications go to someone who caused the thing they are about or looks
+    /// after that part of the solution (builds and deployments go to followers by
+    /// their role, which Mads chose to keep on by default, 2026-10-27), and the
+    /// email links to the place to turn it off. Solution news is the exception:
+    /// it goes to every follower whatever their role, so its email is opt-in and
+    /// they hear in the app only.
     /// </summary>
     public static NotificationDelivery DefaultDeliveryFor(NotificationCategory category) =>
         category == NotificationCategory.Solutions ? NotificationDelivery.Off : NotificationDelivery.Immediately;

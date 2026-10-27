@@ -22,6 +22,9 @@ Agreed with the maintainer on 2026-10-03:
   for everyone without a backfill. Solutions is the exception: its email starts Off. People
   follow a solution without asking (the owner and its People list), so its email is opt-in
   to avoid suddenly mailing a whole team (Mads, 2026-10-03); it still shows in the app.
+  Builds and Deployments stay on Immediately even though they now go to followers too:
+  those are filtered by role, so each reaches the people who look after that part of the
+  solution, and that is the point of sending them (Mads, 2026-10-27).
 - **Customer-facing email is out of scope.** These emails go to colleagues only.
 
 ## Categories
@@ -161,7 +164,8 @@ untouched, so it applies again if access comes back.
 
 - After a build prepared deployments waiting for approval (release import worker), with the
   ids it prepared. Goes to the solution's followers who look after deployments (Project
-  leaders, Consultants, and followers with no role), marked urgent, so a digest choice still gets it straight away (Off still stops it).
+  leaders, Consultants, and followers with no role), marked urgent, so a digest choice
+  still gets it straight away (Off still stops it).
 - After a run the delivery worker claimed ends deployed, accepted by Business Central for a
   scheduled install, or failed. Goes to the same followers and to the person it ran as (who
   started it, approved a prepared one or last rescheduled it). One deployed without

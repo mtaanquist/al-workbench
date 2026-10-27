@@ -183,7 +183,8 @@ public sealed partial class BuildNotifier
             .Select(u => u.Id)
             .ToListAsync(ct);
         List<int> byGitHub = gitHubIds.Count == 0 ? [] : await _db.UserExternalLogins.AsNoTracking()
-            .Where(l => l.Provider == GitHubAccessService.ProviderName && gitHubIds.Contains(l.Subject))
+            .Where(l => l.Provider == GitHubAccessService.ProviderName && l.Issuer == GitHubAccessService.IssuerValue
+                && gitHubIds.Contains(l.Subject))
             .Select(l => l.UserId)
             .ToListAsync(ct);
         return byEmail.Concat(byGitHub).Distinct().ToList();
