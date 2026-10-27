@@ -44,11 +44,6 @@ public sealed class AntiforgeryRejectionTests : IDisposable
             ["/auth/passkey/login/options"] = "WebAuthn JSON ceremony; hands out a challenge and changes nothing",
             ["/auth/step-up/passkey"] = "WebAuthn JSON ceremony; the signed challenge is the anti-replay proof",
             ["/auth/step-up/passkey/options"] = "WebAuthn JSON ceremony; hands out a challenge and changes nothing",
-            // The handler does call ValidateAntiforgeryAsync, but the route is
-            // shared with the release-modules page's own POST, so routing throws
-            // AmbiguousMatchException before either runs. Remove this entry once
-            // that collision is fixed.
-            ["/admin/object-explorer/release/{releaseId:int}/modules"] = "route collides with the AdminReleaseModules page; unreachable until that is fixed",
         };
 
     private readonly TestDb _db = new();
