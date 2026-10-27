@@ -120,11 +120,13 @@ public sealed class TotpService
         // Confirming again would wipe the recovery codes and hand out new ones, with nothing
         // asked but a code in its window - one that may already have signed someone in.
         // Regenerating codes asks for the password, so this path must not offer a way round it.
+        // A double-clicked Confirm lands here too, after the first post already issued codes
+        // the browser never showed, so the message points at the way to get new ones.
         if (secret.ConfirmedAt is not null)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Totp"] = "The authenticator app is already turned on. Turn it off first if you want to set it up again."
+                ["Totp"] = "The authenticator app is already turned on. If you didn't see your recovery codes, generate new ones below."
             });
         }
 
