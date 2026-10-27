@@ -266,6 +266,8 @@ public sealed class PipelineService
     /// disable it instead (#1131). Refused while a deployment pipeline still draws from
     /// it: the delete is soft, so the foreign key's restrict never fires, and the
     /// deployment pipeline would go on naming a source that no longer builds (#1123).
+    /// An archived deployment pipeline does not count: it deploys nothing and is kept only
+    /// for its history, which survives the build pipeline going (#1466).
     /// </summary>
     public async Task SoftDeletePipelineAsync(int id, CancellationToken ct = default)
     {
@@ -277,7 +279,7 @@ public sealed class PipelineService
         await _access.EnsureCanDeletePipelinesAsync(ct);
 
         var dependents = await _db.OeReleasePipelines.AsNoTracking()
-            .Where(r => r.BuildPipelineId == id && r.DeletedAt == null)
+            .Where(r => r.BuildPipelineId == id && r.DeletedAt == null && r.ArchivedAt == null)
             .OrderBy(r => r.Name)
             .Select(r => r.Name)
             .ToListAsync(ct);
@@ -285,8 +287,8 @@ public sealed class PipelineService
         {
             var names = string.Join(", ", dependents.Select(n => $"\"{n}\""));
             throw Validation("Pipeline", dependents.Count == 1
-                ? $"The deployment pipeline {names} deploys this pipeline's builds. Delete it, or point it at another build pipeline, first."
-                : $"The deployment pipelines {names} deploy this pipeline's builds. Delete them, or point them at another build pipeline, first.");
+                ? $"The deployment pipeline {names} deploys this pipeline's builds. Disable and archive it, or point it at another build pipeline, first."
+                : $"The deployment pipelines {names} deploy this pipeline's builds. Disable and archive them, or point them at another build pipeline, first.");
         }
 
         pipeline.DeletedAt = DateTime.UtcNow;
@@ -611,7 +613,7 @@ public sealed class PipelineService
     private async Task RenameDeploymentPipelinesAsync(OePipeline buildPipeline, CancellationToken ct)
     {
         var siblings = await _db.OeReleasePipelines
-            .Where(r => r.ProjectId == buildPipeline.ProjectId && r.DeletedAt == null)
+            .Where(r => r.ProjectId == buildPipeline.ProjectId && r.DeletedAt == null && r.ArchivedAt == null)
             .Include(r => r.ProjectEnvironment)
             .ToListAsync(ct);
         var taken = siblings.Select(r => r.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);

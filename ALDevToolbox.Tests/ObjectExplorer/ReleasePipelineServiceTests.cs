@@ -16,7 +16,7 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// <see cref="TestDb"/> fixture: name required and unique per project (free to repeat
 /// across projects), the source build pipeline and target environment must belong to
 /// the same project, the environment must have a company picked, the version /
-/// schema-sync modes are validated, plus update, soft-delete, and the list
+/// schema-sync modes are validated, plus update, archiving, and the list
 /// projection. See <c>.design/saas-delivery.md</c>.
 /// </summary>
 public sealed class ReleasePipelineServiceTests : IDisposable
@@ -453,22 +453,159 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         rp.SchemaSyncMode.Should().Be(BcSyncMode.ForceSync);
     }
 
-    [Fact]
-    public async Task SoftDeleteReleasePipelineAsync_hides_the_release_pipeline()
+    // ── Archiving (#1466) ──────────────────────────────────────────────────────
+
+    /// <summary>A deployment pipeline under a fresh solution, and the service that made it.</summary>
+    private async Task<(int ProjectId, int BuildId, int EnvId, int Id, ReleasePipelineInput Input)> SeedArchivableAsync(AppDbContext ctx)
     {
-        await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
         var buildId = await SeedBuildPipelineAsync(ctx, projectId);
         var envId = await SeedEnvironmentAsync(ctx, projectId);
-        var svc = NewService(ctx);
-        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(
-            projectId, "Production", buildId, envId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
+        var input = new ReleasePipelineInput(projectId, "Production", buildId, envId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add);
+        var id = await NewService(ctx).CreateReleasePipelineAsync(input);
+        return (projectId, buildId, envId, id, input);
+    }
 
-        await svc.SoftDeleteReleasePipelineAsync(id);
+    [Fact]
+    public async Task An_archived_pipeline_leaves_the_lists_but_its_page_and_history_stay()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
 
         await using var read = _db.NewContext();
-        (await NewService(read).GetReleasePipelineAsync(id)).Should().BeNull();
-        (await read.OeReleasePipelines.IgnoreQueryFilters().SingleAsync(r => r.Id == id)).DeletedAt.Should().NotBeNull();
+        var reader = NewService(read);
+        (await reader.ListReleasePipelinesAsync(seed.ProjectId)).Should().BeEmpty();
+        (await reader.ListReleasePipelineOverviewAsync()).Should().NotContain(r => r.Id == seed.Id);
+        var archived = (await reader.ListReleasePipelineOverviewAsync(includeArchived: true)).Single(r => r.Id == seed.Id);
+        archived.Archived.Should().BeTrue();
+        archived.Disabled.Should().BeTrue();
+        var rp = await reader.GetReleasePipelineAsync(seed.Id);
+        rp.Should().NotBeNull("the page still opens, with its history");
+        rp!.ArchivedAt.Should().NotBeNull();
+        rp.DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Only_a_disabled_pipeline_can_be_archived()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+
+        var act = () => NewService(ctx).SetReleasePipelineArchivedAsync(seed.Id, true);
+
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors["ReleasePipeline"].Should().Be("Disable this deployment pipeline before archiving it.");
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_archived_pipeline_can_be_neither_enabled_nor_edited_until_it_is_restored()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
+
+        var enable = () => NewService(_db.NewContext()).SetReleasePipelineDisabledAsync(seed.Id, false);
+        var edit = () => NewService(_db.NewContext()).UpdateReleasePipelineAsync(seed.Id, seed.Input);
+
+        (await enable.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleasePipeline"]
+            .Should().Be(ReleasePipelineService.ArchivedRefusal);
+        (await edit.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleasePipeline"]
+            .Should().Be(ReleasePipelineService.ArchivedRefusal);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).DisabledAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Restoring_brings_the_pipeline_back_still_disabled()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
+
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+
+        var row = (await NewService(_db.NewContext()).ListReleasePipelinesAsync(seed.ProjectId)).Single();
+        row.Archived.Should().BeFalse();
+        row.Disabled.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Archiving_frees_the_name_and_restoring_is_refused_while_another_pipeline_has_it()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
+
+        // The same setup again generates the same name, which the archived one no longer holds.
+        var replacement = await NewService(_db.NewContext()).CreateReleasePipelineAsync(seed.Input);
+        var restore = () => NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+
+        await using var read = _db.NewContext();
+        var names = await read.OeReleasePipelines.Where(r => r.Id == seed.Id || r.Id == replacement).Select(r => r.Name).ToListAsync();
+        names.Distinct(StringComparer.OrdinalIgnoreCase).Should().ContainSingle();
+        (await restore.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleasePipeline"]
+            .Should().Contain("Another deployment pipeline in this solution is called");
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Archiving_or_restoring_twice_changes_nothing()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
+        var archivedAt = (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt;
+
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, true);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().Be(archivedAt);
+
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_database_refuses_an_archived_pipeline_that_is_not_disabled()
+    {
+        // What keeps an archive and an enable racing each other from leaving a hidden
+        // pipeline that still deploys.
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+
+        var act = () => _db.NewContext().OeReleasePipelines.Where(r => r.Id == seed.Id)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+
+        (await act.Should().ThrowAsync<Npgsql.PostgresException>()).Which.ConstraintName
+            .Should().Be("ck_oe_release_pipelines_archived_is_disabled");
+    }
+
+    [Fact]
+    public async Task Someone_who_manages_the_solution_can_archive_and_restore_without_being_an_admin()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedArchivableAsync(ctx);
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync(ctx, "Team Member");
+
+        var svc = NewService(_db.NewContext());
+        await svc.SetReleasePipelineDisabledAsync(seed.Id, true);
+        await svc.SetReleasePipelineArchivedAsync(seed.Id, true);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().NotBeNull();
+
+        await NewService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.Id, false);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.Id)).ArchivedAt.Should().BeNull();
     }
 
     [Fact]
@@ -481,7 +618,10 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         var svc = NewService(ctx);
         var input = new ReleasePipelineInput(projectId, "Production", buildId, envId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add);
         var id = await svc.CreateReleasePipelineAsync(input);
-        await svc.SoftDeleteReleasePipelineAsync(id);
+        // Nothing deletes a deployment pipeline any more (#1466), but ones deleted before
+        // that, and those of a deleted solution, still carry the marker.
+        await ctx.OeReleasePipelines.Where(r => r.Id == id)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
 
         var act = () => svc.UpdateReleasePipelineAsync(id, input);
 

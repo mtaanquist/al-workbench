@@ -681,6 +681,13 @@
         {
             var rp = await Releases.GetReleasePipelineAsync(id);
             if (rp is null) { _notFound = true; return; }
+            // An archived pipeline can't be changed until it is restored (#1466); its page
+            // says so and offers Restore.
+            if (rp.ArchivedAt is not null)
+            {
+                Nav.NavigateTo($"/pipelines/deployments/{id}", replace: true);
+                return;
+            }
             _canManage = await Releases.CanManageAsync(id);
             _projectId = rp.ProjectId;
             _projectName = rp.Project?.Name ?? string.Empty;

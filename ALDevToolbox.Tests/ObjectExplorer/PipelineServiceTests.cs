@@ -540,6 +540,21 @@ public sealed class PipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task An_archived_deployment_pipeline_does_not_stop_its_source_being_deleted()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        await SeedDeploymentPipelineAsync(ctx, projectId, id, "main to Production", archived: true);
+
+        await svc.SoftDeletePipelineAsync(id);
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task Editing_a_deleted_pipeline_is_not_reported_as_a_name_clash()
     {
         await using var ctx = _db.NewContext();
@@ -1145,7 +1160,7 @@ public sealed class PipelineServiceTests : IDisposable
         return env.Id;
     }
 
-    private static async Task SeedDeploymentPipelineAsync(AppDbContext ctx, int projectId, int buildPipelineId, string name, bool deleted = false)
+    private static async Task SeedDeploymentPipelineAsync(AppDbContext ctx, int projectId, int buildPipelineId, string name, bool deleted = false, bool archived = false)
     {
         var now = DateTime.UtcNow;
         var env = new OeProjectEnvironment
@@ -1160,6 +1175,7 @@ public sealed class PipelineServiceTests : IDisposable
             BuildPipelineId = buildPipelineId, ProjectEnvironmentId = env.Id,
             DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
             CreatedAt = now, UpdatedAt = now, DeletedAt = deleted ? now : null,
+            DisabledAt = archived ? now : null, ArchivedAt = archived ? now : null,
         });
         await ctx.SaveChangesAsync();
     }
