@@ -3264,8 +3264,12 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     private const int PlainTeamUserId = 9601;
     private const int OrgAdminUserId = 9602;
 
-    private static readonly DateTimeOffset ScheduledDate = new(2026, 10, 1, 2, 0, 0, TimeSpan.Zero);
-    private static readonly DateTimeOffset Latest = new(2026, 10, 29, 2, 0, 0, TimeSpan.Zero);
+    // Relative to the day the suite runs, never fixed dates: the version-change tests reach
+    // DateForVersionChange, which compares Latest against the clock and refuses once it has
+    // passed, so a fixed Latest turned these tests red on a date with no code change.
+    private static readonly DateTimeOffset Today = new(DateTime.UtcNow.Date, TimeSpan.Zero);
+    private static readonly DateTimeOffset ScheduledDate = Today.AddDays(5).AddHours(2);
+    private static readonly DateTimeOffset Latest = Today.AddDays(33).AddHours(2);
 
     private static BcEnvironmentUpdate Update(
         DateTimeOffset? selectedDateTime, DateTimeOffset? latestSelectable, bool selected = true, bool ignoresWindow = false) =>
