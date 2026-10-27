@@ -1019,6 +1019,7 @@
 
     private PeriodicTimer? _poll;
     private CancellationTokenSource? _pollCts;
+    private readonly PageCalls _calls = new();
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2.5);
 
     protected override async Task OnInitializedAsync()
@@ -1506,7 +1507,7 @@
         if (_poll is not null) return;
         _pollCts = new CancellationTokenSource();
         _poll = new PeriodicTimer(PollInterval);
-        _ = PollLoopAsync(_poll, _pollCts.Token);
+        _ = _calls.Track(PollLoopAsync(_poll, _pollCts.Token));
     }
 
     private async Task PollLoopAsync(PeriodicTimer timer, CancellationToken token)
@@ -1708,9 +1709,11 @@
         return parts.Length > 1 ? $"{first}{char.ToUpperInvariant(parts[^1][0])}" : first.ToString();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         StopPoll();
-        return ValueTask.CompletedTask;
+        // Wait for a tick already on its way to the database, so leaving the page
+        // means nothing of its is still reading.
+        await _calls.LeaveAsync();
     }
 }

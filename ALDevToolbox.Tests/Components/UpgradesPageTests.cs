@@ -27,7 +27,11 @@ namespace ALDevToolbox.Tests.Components;
 /// glyph for state, and the row's commands - history first - in one trailing menu
 /// rather than as buttons inside data cells, which is what #805 got wrong.</para>
 /// </summary>
-public sealed class UpgradesPageTests : IDisposable
+// UpgradesPage.SearchDebounce is a static the page reads when it is built: the classes
+// that render the page share one collection so that one class's wait never reaches
+// another's page mid-test.
+[Collection("UpgradesPage.SearchDebounce")]
+public sealed class UpgradesPageTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -84,12 +88,15 @@ public sealed class UpgradesPageTests : IDisposable
         _db.OrgContext.CurrentUserId = AdminUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         // A test that set a real wait must not hand it to a page in another test class.
         UpgradesPage.SearchDebounce = TimeSpan.Zero;
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -472,6 +479,7 @@ public sealed class UpgradesPageTests : IDisposable
         cut.Find(".cmdbar__search input").Input("f");
         cut.Find(".cmdbar__search input").Input("fa");
         cut.Find(".cmdbar__search input").Input("fab");
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
         cut.WaitForAssertion(() =>
             cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab"));

@@ -24,7 +24,7 @@ namespace ALDevToolbox.Tests.Components;
 /// wrong one reports an environment as never checked when only its updates were
 /// unreadable.</para>
 /// </summary>
-public sealed class EnvironmentsListTests : IDisposable
+public sealed class EnvironmentsListTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -78,12 +78,15 @@ public sealed class EnvironmentsListTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         // A test that set a real wait must not hand it to a page in another test class.
         EnvironmentsList.SearchDebounce = TimeSpan.Zero;
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -978,6 +981,7 @@ public sealed class EnvironmentsListTests : IDisposable
         cut.Find("input[type=search]").Input("CRONUS");
         cut.Find("input[type=search]").Input("CRONUS ");
         cut.Find("input[type=search]").Input("CRONUS D");
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
         cut.WaitForAssertion(() =>
             cut.Find("input[type=search]").GetAttribute("value").Should().Be("CRONUS D"));

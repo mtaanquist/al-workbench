@@ -1,7 +1,7 @@
 @page "/environments"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
 @rendermode InteractiveServer
-@implements IDisposable
+@implements IAsyncDisposable
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ILogger<EnvironmentsList> Log
@@ -717,12 +717,13 @@
     private static readonly TimeSpan PollFor = TimeSpan.FromMinutes(3);
     private System.Threading.Timer? _poll;
     private DateTime _pollUntilUtc;
+    private readonly PageCalls _calls = new();
 
     private void StartPolling()
     {
         _poll?.Dispose();
         _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = PollTickAsync(), null, PollEvery, PollEvery);
+        _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
     private async Task PollTickAsync()
@@ -733,7 +734,7 @@
         {
             // A re-read waits for the next tick rather than moving the rows under the
             // dialog while it works.
-            if (_bulkWindowDialog?.IsWorking == true) return;
+            if (_calls.IsGone || _bulkWindowDialog?.IsWorking == true) return;
             await LoadAsync(ownScope: true);
             if (DateTime.UtcNow >= _pollUntilUtc)
             {
@@ -748,11 +749,14 @@
         });
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         _poll?.Dispose();
         _searchDebounce.Dispose();
         _autoTimer?.Dispose();
+        // A tick that had already fired may still be reading; wait for it, so leaving
+        // the page means nothing of its is still on its way to the database.
+        await _calls.LeaveAsync();
     }
 
     // ── Auto-refresh ─────────────────────────────────────────────────────
@@ -809,11 +813,12 @@
         _autoRefresh = true;
         _autoUntilUtc = DateTime.UtcNow.Add(AutoRefreshFor);
         _autoTimer = new System.Threading.Timer(
-            _ => _ = InvokeAsync(async () =>
+            _ => _ = _calls.Track(InvokeAsync(async () =>
             {
+                if (_calls.IsGone) return;
                 await AutoRefreshTickAsync();
                 StateHasChanged();
-            }),
+            })),
             null, AutoRefreshEvery, AutoRefreshEvery);
     }
 

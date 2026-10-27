@@ -38,7 +38,7 @@ namespace ALDevToolbox.Tests.Components;
 /// <para>A screenshot is not possible in this environment, so these renders are the
 /// evidence for the "looked at it rendered" check.</para>
 /// </summary>
-public sealed class GitHubReleaseDialogsTests : IDisposable
+public sealed class GitHubReleaseDialogsTests : IAsyncDisposable
 {
     private const int UserId = 9632;
     private const long InstallationId = 42;
@@ -93,10 +93,13 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         _db.OrgContext.IsSiteAdmin = true; // manage rights on an ownerless solution
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 

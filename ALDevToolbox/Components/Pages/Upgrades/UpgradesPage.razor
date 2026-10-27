@@ -1,7 +1,7 @@
 @page "/upgrades"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
 @rendermode InteractiveServer
-@implements IDisposable
+@implements IAsyncDisposable
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService Actions
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentUpgradeService Upgrades
@@ -726,12 +726,14 @@
         else if (_view == UpgradesView.Fleet && _rows is not null) ApplyFilters();
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        _gone.Cancel();
         StopPolling();
         _searchDebounce.Dispose();
         _watch.Dispose();
+        // Cancels the reads on Gone too, and waits for a tick that had already fired, so
+        // leaving the page means nothing of its is still on its way to the database.
+        await _calls.LeaveAsync();
     }
 
     private void ReadQuery()
@@ -858,15 +860,18 @@
         List<UpgradeActionRow> pending;
         await using (var scope = ScopeFactory.CreateAsyncScope())
         {
-            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: _gone.Token);
-            pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync(_gone.Token);
+            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: Gone);
+            pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync(Gone);
         }
-        if (_gone.IsCancellationRequested || PollPaused) return;
+        if (Gone.IsCancellationRequested || PollPaused) return;
         ShowLoaded(fleet, pending);
     }
 
+    /// <summary>The poll and watch ticks under way, so leaving the page can cancel them and wait.</summary>
+    private readonly PageCalls _calls = new();
+
     /// <summary>Cancelled when the page goes, so a read on a scope of its own stops with it.</summary>
-    private readonly CancellationTokenSource _gone = new();
+    private CancellationToken Gone => _calls.Token;
 
     private void ShowLoaded(List<UpgradeFleetRow> all, List<UpgradeActionRow> pending)
     {
@@ -1082,7 +1087,7 @@
         // "Refresh restarts it": a watch that gave up may join again on the reload.
         _watch.ForgetStopped();
         _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = PollTickAsync(), null, PollEvery, PollEvery);
+        _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
     private void StopPolling()
@@ -1107,7 +1112,7 @@
         {
             await InvokeAsync(async () =>
             {
-                if (PollPaused) return;
+                if (Gone.IsCancellationRequested || PollPaused) return;
                 await LoadOnOwnScopeAsync();
                 StateHasChanged();
             });
@@ -1116,7 +1121,7 @@
         {
             StopPolling();
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
         {
             StopPolling();
         }
@@ -1141,7 +1146,7 @@
 
     protected override void OnInitialized()
     {
-        _watch = new UpdateWatch(Connection, Log, InvokeAsync,
+        _watch = new UpdateWatch(Connection, Log, work => _calls.Track(InvokeAsync(work)),
             // Paused off the Fleet view too: its rows are the fleet's, and leaving the view
             // stops the watch (a tick already on its way must not read under another view).
             paused: () => Running || _denied || DialogOpen || _view != UpgradesView.Fleet,
@@ -1242,9 +1247,9 @@
         {
             await using var scope = ScopeFactory.CreateAsyncScope();
             feed = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>()
-                .ListEnvironmentActivityAsync(projectId, environmentId, _gone.Token);
+                .ListEnvironmentActivityAsync(projectId, environmentId, Gone);
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
         {
             return; // the page went while the read was out
         }

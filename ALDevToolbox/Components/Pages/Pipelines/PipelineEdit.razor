@@ -400,6 +400,7 @@
 
     private PeriodicTimer? _poll;
     private CancellationTokenSource? _pollCts;
+    private readonly PageCalls _calls = new();
 
     /// <summary>True while the cache is being read or a background discovery is running.</summary>
     private bool IsDiscovering => _loadingDiscovery || _poll is not null;
@@ -667,7 +668,7 @@
         if (_poll is not null) return;
         _pollCts = new CancellationTokenSource();
         _poll = new PeriodicTimer(PollInterval);
-        _ = PollLoopAsync(_poll, _projectId, _pollCts.Token);
+        _ = _calls.Track(PollLoopAsync(_poll, _projectId, _pollCts.Token));
     }
 
     private async Task PollLoopAsync(PeriodicTimer timer, int projectId, CancellationToken token)
@@ -892,9 +893,11 @@
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         StopPoll();
-        return ValueTask.CompletedTask;
+        // Wait for a tick already on its way to the database, so leaving the page
+        // means nothing of its is still reading.
+        await _calls.LeaveAsync();
     }
 }

@@ -134,9 +134,11 @@ public sealed class RepositoryPickerTests : IDisposable
             .Add(p => p.Hint, "Picking one fills this form in."));
 
         // Promising what picking a repository leads to, under a state that
-        // cannot offer one, is a promise the page cannot keep.
+        // cannot offer one, is a promise the page cannot keep. The state first:
+        // while it loads the hint is held back anyway.
         cut.WaitForAssertion(() =>
-            cut.Markup.Should().NotContain("Picking one fills this form in."));
+            cut.Markup.Should().Contain("No GitHub organisation is connected yet"));
+        cut.Markup.Should().NotContain("Picking one fills this form in.");
     }
 
     [Fact]

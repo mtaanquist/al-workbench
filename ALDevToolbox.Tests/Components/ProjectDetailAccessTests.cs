@@ -28,7 +28,7 @@ namespace ALDevToolbox.Tests.Components;
 /// Public clears the team picks rather than leaving a disabled control holding
 /// values that the service would then refuse.</para>
 /// </summary>
-public sealed class ProjectDetailAccessTests : IDisposable
+public sealed class ProjectDetailAccessTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -104,10 +104,13 @@ public sealed class ProjectDetailAccessTests : IDisposable
         nav.NavigateTo(Microsoft.AspNetCore.Components.NavigationManagerExtensions.GetUriWithQueryParameter(nav, "tab", "general"));
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -429,10 +432,12 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
 
+        // The tabs first: before the load ends there are none, and an absence would
+        // pass on the loading render.
         cut.WaitForAssertion(() =>
             cut.FindAll(".settings__tabs button, .settings__tabs a")
                 .Select(t => t.TextContent.Trim())
-                .Should().NotContain("Access"));
+                .Should().Contain("Customer").And.NotContain("Access"));
     }
 
     [Fact]
