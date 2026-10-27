@@ -302,6 +302,10 @@ public sealed class ProjectBuildQueueTests
         wait.SetResult(7);
         Eventually(() => queue.RejoiningCount > 0);
         queue.Complete(second);
+        // Straight away, before build 1 has had its turn: the place is free, and only the
+        // build on its way back keeps build 3 out of it (#1180). Read after the rejoin
+        // instead, the place is taken again and the queue is empty whatever the rule says.
+        TakeAll(queue).Should().BeEmpty("the returning build was here first");
 
         (await aside.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(7);
         TakeAll(queue).Should().BeEmpty("build 3 waits behind the build that came back");
