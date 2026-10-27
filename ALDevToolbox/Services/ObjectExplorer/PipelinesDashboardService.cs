@@ -178,7 +178,7 @@ public sealed class PipelinesDashboardService
             : new PipelinesLastBuild(newest.Id, newest.PipelineId, pipelineById[newest.PipelineId].Name, newest.Branch, newest.StartedAt);
 
         // ── Deployment side ────────────────────────────────────────────────────
-        var targets = await _releases.ListReleasePipelineOverviewAsync(ct);
+        var targets = await _releases.ListReleasePipelineOverviewAsync(ct: ct);
 
         var deploymentsToday = targets.Count == 0
             ? 0
