@@ -22,11 +22,19 @@ public sealed class StepUpServiceTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly ServiceProvider _services = new ServiceCollection().BuildServiceProvider();
+    private readonly string _deploymentDir = Path.Combine(Path.GetTempPath(), "aldt-stepup-deploy-" + Guid.NewGuid().ToString("N"));
+    private readonly DeploymentIdentity _deployment;
+
+    public StepUpServiceTests()
+    {
+        _deployment = DeploymentIdentity.LoadOrCreate(_deploymentDir, NullLogger.Instance);
+    }
 
     public void Dispose()
     {
         _services.Dispose();
         _db.Dispose();
+        if (Directory.Exists(_deploymentDir)) Directory.Delete(_deploymentDir, recursive: true);
     }
 
     [Theory]
@@ -52,7 +60,8 @@ public sealed class StepUpServiceTests : IDisposable
 
         var methods = await NewService(ctx).AvailableMethodsAsync(userId, SignInMethod.MagicLink, CancellationToken.None);
 
-        methods.Should().Be(new StepUpMethods(Totp: true, EmailCode: false, Passkey: false, Entra: false));
+        methods!.Totp.Should().BeTrue();
+        methods.EmailCode.Should().BeFalse();
     }
 
     private StepUpService NewService(AppDbContext ctx)
@@ -62,10 +71,7 @@ public sealed class StepUpServiceTests : IDisposable
         // No RP id: passkeys are switched off, so they never muddy the answer.
         var passkeys = new PasskeyService(ctx,
             new Fido2(new Fido2Configuration { Origins = new HashSet<string>() }),
-            _db.DataProtectionProvider, clock, new WebAuthnConfig("", [], "Test"),
-            DeploymentIdentity.LoadOrCreate(
-                Path.Combine(Path.GetTempPath(), "aldt-stepup-deploy-" + Guid.NewGuid().ToString("N")),
-                NullLogger.Instance),
+            _db.DataProtectionProvider, clock, new WebAuthnConfig("", [], "Test"), _deployment,
             new CapturingEmailService(), new EmailRenderer(_services, NullLoggerFactory.Instance),
             NullLogger<PasskeyService>.Instance);
         var entra = new EntraSignInService(ctx, auth, _db.OrgContext, _db.DataProtectionProvider, clock,

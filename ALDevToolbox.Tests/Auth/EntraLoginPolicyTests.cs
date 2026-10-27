@@ -182,6 +182,26 @@ public sealed class EntraLoginPolicyTests : IDisposable
     }
 
     [Fact]
+    public async Task A_site_admin_in_an_entra_only_org_can_still_reset_their_password_as_break_glass()
+    {
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
+        await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com", siteAdmin: true);
+        const string newPassword = "a-brand-new-password-1";
+
+        await using (var ctx = _db.NewContext())
+        {
+            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
+            var token = await resets.CreatePasswordResetTokenAsync("operator@cronus.com", Ip);
+            token.Should().NotBeNull();
+            await resets.ConsumePasswordResetTokenAsync(token!, newPassword);
+        }
+
+        await using var login = _db.NewContext();
+        var (outcome, _) = await NewAuth(login).TryLoginAsync("operator@cronus.com", newPassword, Ip);
+        outcome.Should().Be(LoginOutcome.Success);
+    }
+
+    [Fact]
     public async Task Entra_only_cannot_be_enabled_until_an_admin_has_a_link()
     {
         await using var ctx = _db.NewContext();

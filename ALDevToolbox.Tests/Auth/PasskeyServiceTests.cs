@@ -38,12 +38,20 @@ public sealed class PasskeyServiceTests : IDisposable
     private readonly byte[] _credentialId = RandomNumberGenerator.GetBytes(16);
     private readonly CapturingEmailService _transport = new();
     private readonly ServiceProvider _services = new ServiceCollection().BuildServiceProvider();
+    private readonly string _deploymentDir = Path.Combine(Path.GetTempPath(), "aldt-pk-deploy-" + Guid.NewGuid().ToString("N"));
+    private readonly DeploymentIdentity _deployment;
+
+    public PasskeyServiceTests()
+    {
+        _deployment = DeploymentIdentity.LoadOrCreate(_deploymentDir, NullLogger.Instance);
+    }
 
     public void Dispose()
     {
         _services.Dispose();
         _key.Dispose();
         _db.Dispose();
+        if (Directory.Exists(_deploymentDir)) Directory.Delete(_deploymentDir, recursive: true);
     }
 
     [Fact]
@@ -298,7 +306,7 @@ public sealed class PasskeyServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_counter_that_did_not_move_forward_is_refused()
+    public async Task A_counter_that_did_not_move_forward_is_refused_by_the_library()
     {
         // A cloned authenticator replays an old counter value.
         var userId = await SeedAsync("ada@cronus.example", storedCounter: 7);
@@ -308,8 +316,9 @@ public sealed class PasskeyServiceTests : IDisposable
 
         var act = () => svc.CompleteLoginAsync(Assertion(options.Challenge, userId, signCount: 7), envelope);
 
-        // The library refuses this before the service's own check runs; the
-        // service repeats the check so a library change can't drop it.
+        // The library refuses this before the service's own counter check is
+        // reached, so this pins the outcome, not that check. The message is
+        // the pinned library version's own.
         (await act.Should().ThrowAsync<Fido2VerificationException>())
             .Which.Message.Should().Contain("SignCount must be greater than the current SignatureCounter");
         await using var read = _db.NewContext();
@@ -350,7 +359,7 @@ public sealed class PasskeyServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_touch_only_passkey_cannot_complete_a_step_up()
+    public async Task A_touch_only_step_up_is_refused_by_the_library()
     {
         var userId = await SeedAsync("ada@cronus.example", storedCounter: 3);
         await using var ctx = _db.NewContext();
@@ -359,9 +368,9 @@ public sealed class PasskeyServiceTests : IDisposable
 
         var act = () => svc.CompleteStepUpAsync(userId, Assertion(options.Challenge, userId, signCount: 4, userVerified: false), envelope);
 
-        // As with the counter, the library refuses this first, because the
-        // step-up options require verification; the service checks the flag
-        // again itself.
+        // The step-up options require verification, so the library refuses
+        // this before the service's own flag check is reached; this pins the
+        // outcome, not that check.
         (await act.Should().ThrowAsync<Fido2VerificationException>())
             .Which.Message.Should().Contain("User Verified flag not set");
         await using var read = _db.NewContext();
@@ -369,7 +378,7 @@ public sealed class PasskeyServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_step_up_whose_counter_did_not_move_forward_is_refused()
+    public async Task A_step_up_whose_counter_did_not_move_forward_is_refused_by_the_library()
     {
         var userId = await SeedAsync("ada@cronus.example", storedCounter: 7);
         await using var ctx = _db.NewContext();
@@ -378,8 +387,9 @@ public sealed class PasskeyServiceTests : IDisposable
 
         var act = () => svc.CompleteStepUpAsync(userId, Assertion(options.Challenge, userId, signCount: 7, userVerified: true), envelope);
 
-        // The library refuses this before the service's own check runs; the
-        // service repeats the check so a library change can't drop it.
+        // The library refuses this before the service's own counter check is
+        // reached, so this pins the outcome, not that check. The message is
+        // the pinned library version's own.
         (await act.Should().ThrowAsync<Fido2VerificationException>())
             .Which.Message.Should().Contain("SignCount must be greater than the current SignatureCounter");
         await using var read = _db.NewContext();
@@ -425,15 +435,12 @@ public sealed class PasskeyServiceTests : IDisposable
             Origins = new HashSet<string> { Origin },
         });
         var config = new WebAuthnConfig(RpId, new[] { Origin }, "Test");
-        var deployment = DeploymentIdentity.LoadOrCreate(
-            Path.Combine(Path.GetTempPath(), "aldt-pk-deploy-" + Guid.NewGuid().ToString("N")),
-            NullLogger.Instance);
         // The real outbox in front of a capturing transport, so a test can
         // tell queued mail (a row) from mail sent inline (the transport).
         var outbox = new OutboxEmailService(_transport,
             new EmailOutbox(_db.NewContextFactory(), _db.DataProtectionProvider, TimeProvider.System, NullLogger<EmailOutbox>.Instance),
             _db.OrgContext);
-        return new PasskeyService(ctx, fido2, _db.DataProtectionProvider, TimeProvider.System, config, deployment,
+        return new PasskeyService(ctx, fido2, _db.DataProtectionProvider, TimeProvider.System, config, _deployment,
             outbox, new EmailRenderer(_services, NullLoggerFactory.Instance), NullLogger<PasskeyService>.Instance);
     }
 

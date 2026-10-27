@@ -237,6 +237,36 @@ public sealed class AuthCardTests : IDisposable
         cut.WaitForAssertion(() => cut.FindAll(".pill-tabs").Should().BeEmpty());
     }
 
+    // ---- ResetPassword ----
+
+    [Fact]
+    public void A_refused_reset_link_offers_the_way_back_instead_of_the_form_again()
+    {
+        Navigate("/reset-password?token=spent&err=Token&msg=" + Uri.EscapeDataString("This reset link is no longer valid. Request a new one."));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("form").Should().BeEmpty("the link can't be submitted again");
+            cut.Find(".auth__title").TextContent.Trim().Should().Be("This link can't be used");
+            cut.Markup.Should().Contain("This reset link is no longer valid. Request a new one.");
+            cut.Find("a.btn--primary").GetAttribute("href").Should().Be("/login");
+        });
+    }
+
+    [Fact]
+    public void A_rejected_password_keeps_the_form_so_it_can_be_retyped()
+    {
+        Navigate("/reset-password?token=live&err=Password&msg=" + Uri.EscapeDataString("Password must be at least 12 characters."));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("form").GetAttribute("action").Should().Be("/auth/reset-password");
+            cut.Markup.Should().Contain("Password must be at least 12 characters.");
+        });
+    }
+
     [Fact]
     public void An_expired_challenge_explains_itself_instead_of_showing_a_dead_form()
     {
