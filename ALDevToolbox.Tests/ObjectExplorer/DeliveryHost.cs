@@ -9,6 +9,7 @@ using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
@@ -48,6 +49,7 @@ internal static class DeliveryHost
         services.AddSingleton(new PublicOrigin(null));
         services.AddScoped<NotificationPreferenceService>();
         services.AddScoped<NotificationService>();
+        services.AddScoped<ProjectFollowService>();
         services.AddScoped<DeploymentNotifier>();
         return services.BuildServiceProvider();
     }

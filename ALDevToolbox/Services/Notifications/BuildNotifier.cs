@@ -17,12 +17,14 @@ public sealed class BuildNotifier
 {
     private readonly AppDbContext _db;
     private readonly NotificationService _notifications;
+    private readonly ProjectFollowService _follows;
     private readonly ILogger<BuildNotifier> _logger;
 
-    public BuildNotifier(AppDbContext db, NotificationService notifications, ILogger<BuildNotifier> logger)
+    public BuildNotifier(AppDbContext db, NotificationService notifications, ProjectFollowService follows, ILogger<BuildNotifier> logger)
     {
         _db = db;
         _notifications = notifications;
+        _follows = follows;
         _logger = logger;
     }
 
@@ -66,7 +68,7 @@ public sealed class BuildNotifier
                 b.FinishedAt,
                 SolutionName = b.Project!.Name,
                 PipelineName = b.Pipeline!.Name,
-                PipelineCreatedBy = b.Pipeline!.CreatedByUserId,
+                SolutionOwner = b.Project!.CreatedByUserId,
             })
             .FirstOrDefaultAsync(ct);
         // A pull request build already reports on the pull request itself, and
@@ -113,12 +115,13 @@ public sealed class BuildNotifier
         if (!IsChange(failed, previousFailed)) return;
 
         var nightly = build.Trigger == ProjectBuildTrigger.PreviewCheck;
-        // StartedByUserId is the person the build ran as: whoever pressed Build,
-        // or whoever had the nightly check on when it was queued.
-        var recipients = new[] { build.StartedByUserId, build.PipelineCreatedBy }
-            .OfType<int>()
-            .Distinct()
-            .ToList();
+        // Whoever pressed Build, and the followers who develop the solution (#1463). A
+        // build on push or a nightly check runs as whoever last saved the pipeline, who
+        // did not start it, so it is told only as a follower.
+        var pressedBuild = build.Trigger == ProjectBuildTrigger.Manual ? build.StartedByUserId : null;
+        var followers = await _follows.ListFollowerIdsAsync(build.ProjectId, NotificationAudience.Builds, ct);
+        var recipients = await NotificationAudience.RecipientsAsync(
+            _db, build.ProjectId, [pressedBuild], followers, build.SolutionOwner, ct);
         if (recipients.Count == 0) return;
 
         var target = ProjectBuildTarget.IsPreview(build.BcTarget) ? ProjectBuildTarget.Label(build.BcTarget) : null;
