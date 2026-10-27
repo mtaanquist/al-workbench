@@ -74,19 +74,16 @@ public sealed class ReleasePipelineService
     }
 
     /// <summary>
-    /// True when the current user may delete deployment pipelines: an org Admin or a
-    /// SiteAdmin. Everyone else who manages a solution disables them instead (#1131).
-    /// </summary>
-    public Task<bool> CanDeleteAsync(CancellationToken ct = default) => _access.CanDeletePipelinesAsync(ct);
-
-    /// <summary>
     /// Active deployment pipelines for the current org, optionally scoped to one project,
     /// each with its target environment and source build-pipeline name resolved for
-    /// display. Ordered by name.
+    /// display. Ordered by name. Archived ones are left out unless
+    /// <paramref name="includeArchived"/> (#1466).
     /// </summary>
-    public async Task<List<ReleasePipelineRow>> ListReleasePipelinesAsync(int? projectId = null, CancellationToken ct = default)
+    public async Task<List<ReleasePipelineRow>> ListReleasePipelinesAsync(
+        int? projectId = null, bool includeArchived = false, CancellationToken ct = default)
     {
         var query = _db.OeReleasePipelines.AsNoTracking().Where(r => r.DeletedAt == null && r.Project!.DeletedAt == null);
+        if (!includeArchived) query = query.Where(r => r.ArchivedAt == null);
         if (projectId is { } pid)
         {
             await _access.EnsureCanViewAsync(pid, ct);
@@ -127,6 +124,7 @@ public sealed class ReleasePipelineService
                 BuildPipelineDeleted = r.BuildPipeline != null && r.BuildPipeline.DeletedAt != null,
                 Disabled = r.DisabledAt != null,
                 BuildPipelineDisabled = r.BuildPipeline != null && r.BuildPipeline.DisabledAt != null,
+                Archived = r.ArchivedAt != null,
             })
             .ToListAsync(ct);
     }
@@ -140,9 +138,9 @@ public sealed class ReleasePipelineService
     /// whole list, never one per row - the page re-reads this every two seconds
     /// while something is shipping. See <c>.design/saas-delivery.md</c>.
     /// </summary>
-    public async Task<List<ReleasePipelineRow>> ListReleasePipelineOverviewAsync(CancellationToken ct = default)
+    public async Task<List<ReleasePipelineRow>> ListReleasePipelineOverviewAsync(bool includeArchived = false, CancellationToken ct = default)
     {
-        var rows = await ListReleasePipelinesAsync(null, ct);
+        var rows = await ListReleasePipelinesAsync(null, includeArchived, ct);
         if (rows.Count == 0) return rows;
 
         var pipelineIds = rows.Select(r => r.Id).ToList();
@@ -364,6 +362,7 @@ public sealed class ReleasePipelineService
         var pipeline = await _db.OeReleasePipelines
             .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
             ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+        if (pipeline.ArchivedAt is not null) throw Validation("ReleasePipeline", ArchivedRefusal);
 
         // A deployment pipeline can't move between projects; validate against its own.
         var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existing: pipeline, ct);
@@ -400,29 +399,6 @@ public sealed class ReleasePipelineService
         _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
 
     /// <summary>
-    /// Soft-deletes a deployment pipeline and sets aside what it still had waiting:
-    /// scheduled deployments are cancelled and prepared ones dismissed, each by
-    /// compare-and-set so a deployment a worker already claimed runs on (#1108). People
-    /// delete a pipeline to stop it, so leaving tonight's install booked would do the
-    /// opposite of what they asked. Deployments already handed to Business Central are
-    /// held there and stay booked; <see cref="CountWaitingDeploymentsAsync"/> lets the
-    /// confirmation say so. Admins only: anyone else who manages the solution can
-    /// disable it instead (#1131).
-    /// </summary>
-    public async Task SoftDeleteReleasePipelineAsync(int id, CancellationToken ct = default)
-    {
-        RequireOrganizationId();
-        var pipeline = await _db.OeReleasePipelines
-            .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
-            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
-
-        await _access.EnsureCanDeletePipelinesAsync(ct);
-
-        await StopAsync(pipeline, (p, now) => p.DeletedAt = now, DeletedPipelineReason, "deleted", ct);
-        _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
-    }
-
-    /// <summary>
     /// Disables or enables a deployment pipeline. A disabled pipeline deploys nothing: no
     /// deployment can be made or approved through it, new builds are neither prepared nor
     /// deployed, and what it still had waiting is set aside the way deleting does, so a
@@ -444,6 +420,9 @@ public sealed class ReleasePipelineService
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
 
         if ((pipeline.DisabledAt is not null) == disabled) return;
+        // An archived pipeline stays disabled: everything that keeps a disabled pipeline
+        // from deploying is what keeps an archived one from deploying.
+        if (!disabled && pipeline.ArchivedAt is not null) throw Validation("ReleasePipeline", ArchivedRefusal);
         if (disabled)
         {
             await StopAsync(pipeline, (p, now) => p.DisabledAt = now, DisabledPipelineReason, "disabled", ct);
@@ -459,8 +438,54 @@ public sealed class ReleasePipelineService
     }
 
     /// <summary>
-    /// Marks <paramref name="pipeline"/> stopped (deleted or disabled) and sets aside what
-    /// it still had waiting, in one transaction. See <see cref="SoftDeleteReleasePipelineAsync"/>.
+    /// Archives or restores a deployment pipeline (#1466). Only a disabled pipeline can be
+    /// archived; it then leaves the active lists, frees its name and no longer holds on to
+    /// its build pipeline, while its page and its deployment history stay. Restoring brings
+    /// it back still disabled, and is refused while another pipeline in the solution has
+    /// its name. Anyone who may manage the solution may do either, as with disabling.
+    /// Doing it twice changes nothing.
+    /// </summary>
+    public async Task SetReleasePipelineArchivedAsync(int id, bool archived, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OeReleasePipelines
+            .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == pipeline.ProjectId)
+            .Select(p => p.CreatedByUserId)
+            .FirstOrDefaultAsync(ct);
+        await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
+
+        if ((pipeline.ArchivedAt is not null) == archived) return;
+        if (archived && pipeline.DisabledAt is null)
+        {
+            throw Validation("ReleasePipeline", "Disable this deployment pipeline before archiving it.");
+        }
+        if (!archived && await NameTakenAsync(pipeline.ProjectId, pipeline.Id, pipeline.Name, ct))
+        {
+            throw Validation("ReleasePipeline",
+                $"Another deployment pipeline in this solution is called \"{pipeline.Name}\" now. Archive that one, or change its setup so it gets another name, before restoring this one.");
+        }
+
+        var now = DateTime.UtcNow;
+        pipeline.ArchivedAt = archived ? now : null;
+        pipeline.UpdatedAt = now;
+        await SaveTranslatingNameClashAsync(ct);
+        _logger.LogInformation("{Action} deployment pipeline {ReleasePipelineId} as user {UserId}.",
+            archived ? "Archived" : "Restored", id, _orgContext.CurrentUserId);
+    }
+
+    /// <summary>What changing an archived pipeline is refused with: it has to come back first.</summary>
+    internal const string ArchivedRefusal = "This deployment pipeline is archived. Restore it first.";
+
+    /// <summary>
+    /// Marks <paramref name="pipeline"/> stopped (disabled) and sets aside what it still had
+    /// waiting, in one transaction: scheduled deployments are cancelled and prepared ones
+    /// dismissed, each by compare-and-set so a deployment a worker already claimed runs on
+    /// (#1108). Deployments already handed to Business Central are held there and stay
+    /// booked; <see cref="CountWaitingDeploymentsAsync"/> lets the confirmation say so.
     /// </summary>
     private async Task StopAsync(
         OeReleasePipeline pipeline, Action<OeReleasePipeline, DateTime> mark, string reason, string verb, CancellationToken ct)
@@ -794,12 +819,13 @@ public sealed class ReleasePipelineService
     }
 
     /// <summary>
-    /// Whether another active deployment pipeline in the project already has
+    /// Whether another active (not archived) deployment pipeline in the project already has
     /// <paramref name="name"/>, compared the way the case-insensitive unique index compares it.
     /// </summary>
     private Task<bool> NameTakenAsync(int projectId, int exceptId, string name, CancellationToken ct) =>
         _db.OeReleasePipelines.AsNoTracking()
             .AnyAsync(r => r.DeletedAt == null
+                           && r.ArchivedAt == null
                            && r.ProjectId == projectId
                            && r.Id != exceptId
                            && r.Name.ToLower() == name.ToLower(), ct);
@@ -979,6 +1005,12 @@ public sealed record ReleasePipelineRow(
 
     /// <summary>True when the build pipeline it draws from is disabled, so no new builds reach it for now.</summary>
     public bool BuildPipelineDisabled { get; init; }
+
+    /// <summary>
+    /// True when the pipeline is archived (#1466): disabled, off the active lists, kept for
+    /// its history. Only listed when archived pipelines were asked for.
+    /// </summary>
+    public bool Archived { get; init; }
 
     /// <summary>True when a person typed the name because the generated one was taken; the editor shows it for editing.</summary>
     [System.Text.Json.Serialization.JsonIgnore]

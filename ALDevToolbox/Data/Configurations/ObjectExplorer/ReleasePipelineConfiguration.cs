@@ -30,6 +30,7 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DisabledAt).HasColumnName("disabled_at");
+        entity.Property(e => e.ArchivedAt).HasColumnName("archived_at");
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
 
         entity.HasOne(e => e.Organization)

@@ -4246,6 +4246,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("allowed_branch");
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("archived_at");
+
                     b.Property<string>("ArtifactSource")
                         .IsRequired()
                         .HasMaxLength(30)
