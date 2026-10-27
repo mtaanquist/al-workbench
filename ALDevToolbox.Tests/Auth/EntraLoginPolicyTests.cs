@@ -473,6 +473,8 @@ public sealed class EntraLoginPolicyTests : IDisposable
             passwordPrimary.Should().BeTrue("the Other org still allows passwords");
         }
 
+        // "Every org" includes the system org, which is a row like any other.
+        await SetPolicyAsync(TestDb.SystemOrgId, LocalLoginPolicy.EntraOnly, entraEnabled: false);
         await SetPolicyAsync(TestDb.OtherOrgId, LocalLoginPolicy.EntraOnly, entraEnabled: false);
         await using (var ctx = _db.NewContext())
         {

@@ -66,7 +66,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         });
         await ctx.SaveChangesAsync();
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.ProjectBuild(project.Id), storeSymbolReference: false);
         _db.OrgContext.IsSiteAdmin = false;
         _db.OrgContext.CurrentUserId = 9632;
@@ -99,7 +99,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         // A full queue holds the retry at its last step, the enqueue, after the
         // release is reopened and wiped but before its job is queued.
         var queue = new ReleaseImportQueue();
-        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.Backfill());
         for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
 
@@ -138,7 +138,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         await ctx.SaveChangesAsync();
         const string artifactUrl = "https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk";
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.BcArtifact(artifactUrl), storeSymbolReference: false);
         var queue = new ReleaseImportQueue();
 
@@ -177,7 +177,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         settings.DefaultStorageQuotaMb = 0;
         await ctx.SaveChangesAsync();
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.BcArtifact("https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk"),
             storeSymbolReference: false);
         var queue = new ReleaseImportQueue();
@@ -208,7 +208,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         ctx.OeReleases.Add(release);
         await ctx.SaveChangesAsync();
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.Backfill(), storeSymbolReference: false);
         var queue = new ReleaseImportQueue();
 

@@ -121,10 +121,11 @@ public sealed class PersonPaletteSourceTests : IDisposable
     {
         // The sidebar hides Administration in the system organisation of a
         // multi-tenant site; people are administered from the site console.
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
         await SeedAsync("Annette Møller", "annette@cronus.test", UserRole.User);
-        _db.OrgContext.IsSystemOrganization = true;
 
-        var results = await SearchAsync(Principal(nameof(UserRole.Admin), siteAdmin: true), "annette");
+        var results = await SearchAsync(
+            Principal(nameof(UserRole.Admin), siteAdmin: true, organizationId: TestDb.SystemOrgId), "annette");
 
         results.Should().ContainSingle().Which.Href.Should().StartWith("/site-admin/users?q=");
     }
@@ -196,12 +197,13 @@ public sealed class PersonPaletteSourceTests : IDisposable
 
     private static ClaimsPrincipal Admin() => Principal(nameof(UserRole.Admin));
 
-    private static ClaimsPrincipal Principal(string role, bool siteAdmin = false)
+    private static ClaimsPrincipal Principal(
+        string role, bool siteAdmin = false, int organizationId = TestDb.DefaultOrgId)
     {
         var claims = new List<Claim>
         {
             new(HttpOrganizationContext.UserIdClaim, "9400"),
-            new(HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString()),
+            new(HttpOrganizationContext.OrganizationIdClaim, organizationId.ToString()),
             new(ClaimTypes.Role, role),
         };
         if (siteAdmin) claims.Add(new Claim(ClaimTypes.Role, HttpOrganizationContext.SiteAdminRole));
@@ -212,7 +214,7 @@ public sealed class PersonPaletteSourceTests : IDisposable
         string displayName, string email, UserRole role, UserStatus status = UserStatus.Active)
     {
         await using var ctx = _db.NewContext();
-        var user = NewUser(TestDb.DefaultOrgId, displayName, email, role, status);
+        var user = NewUser(_db.OrgContext.CurrentOrganizationId!.Value, displayName, email, role, status);
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
         return user.Id;

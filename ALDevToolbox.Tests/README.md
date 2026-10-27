@@ -122,6 +122,23 @@ public sealed class MyServiceTests : IDisposable
 For audit-interceptor tests use `TestDb.NewContextWithAudit(interceptor)`
 so the same write path the application uses runs in the test.
 
+Every fixture database holds three organisations, and `TestDb.OrgContext`
+acts as an ordinary tenant unless a test says otherwise (#1441):
+
+| Constant      | Id | What it is                                                        |
+|---------------|----|-------------------------------------------------------------------|
+| `DefaultOrgId`| 3  | An ordinary tenant, seeded the way signup creates one (platform files included). What tests act as by default. |
+| `OtherOrgId`  | 2  | A second, bare tenant for cross-organisation isolation tests.     |
+| `SystemOrgId` | 1  | The singleton system org the migration stamps. Act as it only to test system-org behaviour. |
+
+To act as the system org, set `_db.OrgContext.CurrentOrganizationId =
+TestDb.SystemOrgId` and seed its rows with that id. `OrgContext` has no
+settable `IsSystemOrganization`: it follows from the acting org, the way a
+real sign-in reads it off the org row, so a test cannot claim the system org
+is a tenant or the other way round. Hand-built identities
+(`AmbientOrganizationContext`, `OrganizationIdentity`) in a test that has a
+database should keep the same pairing.
+
 ### Component tests over a database
 
 A bUnit test whose page reads the database through a scoped `AppDbContext`

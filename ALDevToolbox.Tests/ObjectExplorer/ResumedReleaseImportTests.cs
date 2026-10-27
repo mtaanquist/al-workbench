@@ -39,7 +39,7 @@ public sealed class ResumedReleaseImportTests : IDisposable
     private static readonly string[] Apps = ["Microsoft_DK_Core.app", "Microsoft_OIOUBL.app"];
 
     private static readonly AmbientOrganizationScope.OrganizationIdentity Identity =
-        new(OrganizationId: TestDb.DefaultOrgId, UserId: null, IsSiteAdmin: false, IsSystemOrganization: true);
+        new(OrganizationId: TestDb.DefaultOrgId, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
 
     private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),

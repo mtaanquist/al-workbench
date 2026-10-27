@@ -180,7 +180,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     {
         await ConfigureOffsiteAsync();
         var theirs = await CreateSnapshotAsync(_neighbour);
-        var key = SnapshotKey("default", "copied");
+        var key = SnapshotKey(TestDb.DefaultOrgSlug, "copied");
         _store.Put(key, await File.ReadAllBytesAsync(SnapshotPath(theirs)), metadata: null, Now);
 
         var act = () => NewOffsite(_us).DownloadPerTenantAsync(key, progress: null, default);
@@ -276,7 +276,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
 
         var act = () => NewOffsite(_us).DownloadPerTenantAsync(key, progress: null, default);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*manifest names org 'default'*");
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage($"*manifest names org '{TestDb.DefaultOrgSlug}'*");
         Directory.GetFiles(Path.Combine(_options.Directory, "tenants", "other"))
             .Should().BeEmpty("the staging copy is deleted along with the refusal");
         await using var ctx = _db.NewContext();
@@ -375,7 +375,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
             await ctx.SaveChangesAsync();
             ctx.OeProjects.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
             {
-                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", CreatedByUserId = user.Id,
+                OrganizationId = TestDb.SystemOrgId, Name = "CRONUS", CreatedByUserId = user.Id,
                 CreatedAt = Now, UpdatedAt = Now,
             });
             await ctx.SaveChangesAsync();
@@ -582,11 +582,18 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
 
     // ---- plumbing -----------------------------------------------------------
 
-    /// <summary>The shape of a just-built host: the system org alone.</summary>
+    /// <summary>
+    /// The shape of a just-built host: the system org alone, which is the org the
+    /// site admin then acts in.
+    /// </summary>
     private async Task MakeFreshAsync()
     {
         await using var ctx = _db.NewContext();
-        await ctx.Organizations.Where(o => o.Id == TestDb.OtherOrgId).ExecuteDeleteAsync();
+        int[] tenants = [TestDb.DefaultOrgId, TestDb.OtherOrgId];
+        await ctx.OrganizationFiles.IgnoreQueryFilters()
+            .Where(f => tenants.Contains(f.OrganizationId)).ExecuteDeleteAsync();
+        await ctx.Organizations.Where(o => tenants.Contains(o.Id)).ExecuteDeleteAsync();
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
     }
 
     private static string DumpKey(string name) => $"aldevtoolbox-{name}{BackupService.BackupFileSuffix}";
@@ -617,7 +624,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         return row;
     }
 
-    private string SnapshotPath(PerTenantBackup row) => Path.Combine(_options.Directory, "tenants", "default", row.FileName);
+    private string SnapshotPath(PerTenantBackup row) => Path.Combine(_options.Directory, "tenants", TestDb.DefaultOrgSlug, row.FileName);
 
     private static PerTenantBackupManifest ReadManifest(byte[] zipBytes)
     {
@@ -635,9 +642,10 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
             ForcePathStyle: false, RetentionDays: RetentionDays));
     }
 
+    /// <summary>A member of the system org, the only org a fresh host has.</summary>
     private User NewUser(string name) => new()
     {
-        OrganizationId = TestDb.DefaultOrgId, Email = $"{name}@cronus.example", DisplayName = name,
+        OrganizationId = TestDb.SystemOrgId, Email = $"{name}@cronus.example", DisplayName = name,
         PasswordHash = "x", Role = UserRole.Admin, Status = UserStatus.Active, CreatedAt = Now,
     };
 

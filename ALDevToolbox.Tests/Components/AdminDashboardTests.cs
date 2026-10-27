@@ -75,7 +75,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void A_quiet_organisation_says_nothing_is_waiting_rather_than_showing_a_bare_card()
     {
-        _db.OrgContext.IsSystemOrganization = false;
         SeedSomeContent();
 
         var cut = _ctx.Render<AdminDashboard>();
@@ -95,7 +94,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void A_waiting_signup_turns_its_cue_red_and_adds_a_row_with_a_keyline_not_a_pill()
     {
-        _db.OrgContext.IsSystemOrganization = false;
         SeedSomeContent();
         Seed(seed => seed.SignupRequests.Add(new SignupRequest
         {
@@ -146,7 +144,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void The_six_cues_are_the_right_six_in_the_right_order()
     {
-        _db.OrgContext.IsSystemOrganization = false;
         SeedSomeContent();
 
         var cut = _ctx.Render<AdminDashboard>();
@@ -165,7 +162,7 @@ public sealed class AdminDashboardTests : IDisposable
     {
         // In multi-tenant hosting the system org curates content and has no user
         // list of its own, so the two user-shaped cues have nothing to point at.
-        _db.OrgContext.IsSystemOrganization = true;
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
         SeedSomeContent();
 
         var cut = _ctx.Render<AdminDashboard>();
@@ -202,7 +199,7 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void The_single_tenant_organisation_manages_users_and_still_authors()
     {
-        _db.OrgContext.IsSystemOrganization = true;
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
         _singleTenant.IsEnabled = true;
 
         var cut = _ctx.Render<AdminDashboard>();
@@ -224,7 +221,7 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void The_single_tenant_organisation_keeps_its_user_cues()
     {
-        _db.OrgContext.IsSystemOrganization = true;
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
         _singleTenant.IsEnabled = true;
         SeedSomeContent();
 
@@ -244,7 +241,6 @@ public sealed class AdminDashboardTests : IDisposable
         // A plausible real state: an org that signed people up, then never
         // imported anything. It owns nothing and nothing is waiting, so the
         // page has the same one thing to say.
-        _db.OrgContext.IsSystemOrganization = false;
         Seed(seed => seed.Users.Add(new User
         {
             OrganizationId = TestDb.DefaultOrgId,
@@ -270,7 +266,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void A_recent_change_names_the_person_who_made_it()
     {
-        _db.OrgContext.IsSystemOrganization = false;
         SeedSomeContent();
         Seed(seed => seed.AuditLog.Add(new AuditLogEntry
         {
@@ -306,7 +301,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void A_recent_change_names_the_thing_that_changed_not_its_row_id()
     {
-        _db.OrgContext.IsSystemOrganization = false;
         SeedSomeContent();
         Seed(seed => seed.AuditLog.Add(new AuditLogEntry
         {
@@ -337,7 +331,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void A_brand_new_organisation_gets_one_thing_to_do_instead_of_six_zeroes()
     {
-        _db.OrgContext.IsSystemOrganization = false;
 
         var cut = _ctx.Render<AdminDashboard>();
 
@@ -364,7 +357,7 @@ public sealed class AdminDashboardTests : IDisposable
     {
         // It is the source every other organisation copies from, so there is
         // nothing for it to import. Single-tenant hosting runs on this org too.
-        _db.OrgContext.IsSystemOrganization = true;
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
 
         var cut = _ctx.Render<AdminDashboard>();
 
@@ -376,7 +369,6 @@ public sealed class AdminDashboardTests : IDisposable
     [Fact]
     public void One_person_waiting_is_enough_to_leave_the_first_run_state()
     {
-        _db.OrgContext.IsSystemOrganization = false;
         Seed(seed => seed.SignupRequests.Add(new SignupRequest
         {
             OrganizationId = TestDb.DefaultOrgId,
@@ -400,10 +392,12 @@ public sealed class AdminDashboardTests : IDisposable
         cut.FindAll(".cue .cue__label").Select(l => l.TextContent.Trim()).ToList();
 
     /// <summary>Just enough that the org is past its first run.</summary>
+    /// <summary>Seeds into whichever org the test is acting as, system or tenant.</summary>
     private void SeedSomeContent() => Seed(seed =>
     {
-        seed.RuntimeTemplates.Add(TemplateBuilder.Default("one"));
-        seed.Recipes.Add(RecipeBuilder.Default("One recipe"));
+        var orgId = _db.OrgContext.CurrentOrganizationId!.Value;
+        seed.RuntimeTemplates.Add(TemplateBuilder.Default("one", organizationId: orgId));
+        seed.Recipes.Add(RecipeBuilder.Default("One recipe", organizationId: orgId));
     });
 
     private void Seed(Action<AppDbContext> arrange)

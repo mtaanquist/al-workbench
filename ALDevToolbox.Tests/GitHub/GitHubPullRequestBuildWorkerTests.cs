@@ -88,16 +88,15 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         // The flag decides how storage-quota and template-import rules treat the
         // organisation, so scheduled work has to see the same value an interactive
         // request would.
+        // The system org is the one whose flag differs from the default, so it is
+        // the one that shows the flag is read rather than assumed.
         await ConfigureDeploymentAsync();
-        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
-
-        await using var ctx = _db.NewContext();
-        var isSystem = await ctx.Organizations.AsNoTracking()
-            .Where(o => o.Id == TestDb.DefaultOrgId).Select(o => o.IsSystem).SingleAsync();
+        await ConnectAsync(TestDb.SystemOrgId, ConnectedInstallation, "cronus-dk");
 
         var resolved = await NewWorker().ResolveOrganizationAsync(ConnectedInstallation, CancellationToken.None);
 
-        resolved!.Value.Identity.IsSystemOrganization.Should().Be(isSystem);
+        resolved!.Value.Identity.OrganizationId.Should().Be(TestDb.SystemOrgId);
+        resolved.Value.Identity.IsSystemOrganization.Should().BeTrue();
         resolved.Value.Identity.IsSiteAdmin.Should().BeFalse("background work acts for an organisation, never as a site admin");
         resolved.Value.Identity.UserId.Should().BeNull("a webhook build has no user behind it");
     }
@@ -730,7 +729,10 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         IOrganizationContext? orgContext = null)
     {
         var services = new ServiceCollection();
-        services.AddSingleton<IOrganizationContext>(orgContext ?? _db.OrgContext);
+        // Off-request by default, as in production: the worker asks each organisation
+        // under its own ambient scope. The fixture's context is pinned to one org and
+        // would answer for every org the walk visits (#1441).
+        services.AddSingleton<IOrganizationContext>(orgContext ?? OffRequest());
         services.AddDbContext<AppDbContext>(opts =>
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         services.AddSingleton<IMemoryCache>(new MemoryCache(Options.Create(new MemoryCacheOptions())));

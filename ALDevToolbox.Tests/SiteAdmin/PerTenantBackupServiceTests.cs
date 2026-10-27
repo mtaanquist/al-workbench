@@ -345,7 +345,7 @@ public sealed class PerTenantBackupServiceTests : IDisposable
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*row write failed*");
 
-        var dir = Path.Combine(_backupsDir, "tenants", "default");
+        var dir = Path.Combine(_backupsDir, "tenants", TestDb.DefaultOrgSlug);
         Directory.GetFiles(dir).Should().BeEmpty("neither the finished file nor its staging copy may outlive the failure");
     }
 

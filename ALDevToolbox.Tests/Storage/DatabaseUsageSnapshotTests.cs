@@ -36,7 +36,7 @@ public sealed class DatabaseUsageSnapshotTests : IDisposable
         await using var read = _db.NewContext();
         var snapshots = await read.OrganizationUsageSnapshots.AsNoTracking().ToListAsync();
         snapshots.Select(s => s.OrganizationId)
-            .Should().BeEquivalentTo(new[] { TestDb.DefaultOrgId, TestDb.OtherOrgId });
+            .Should().BeEquivalentTo(new[] { TestDb.SystemOrgId, TestDb.OtherOrgId, TestDb.DefaultOrgId });
         snapshots.Should().OnlyContain(s => s.ComputedAt != default);
     }
 
@@ -51,8 +51,8 @@ public sealed class DatabaseUsageSnapshotTests : IDisposable
 
         await using var read = _db.NewContext();
         var count = await read.OrganizationUsageSnapshots.CountAsync();
-        // UPSERT, not insert: a second pass refreshes the same rows.
-        count.Should().Be(2);
+        // UPSERT, not insert: a second pass refreshes the same rows, one per org.
+        count.Should().Be(3);
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public sealed class DatabaseUsageSnapshotTests : IDisposable
         // null ComputedAt (so the page can say "not computed yet").
         var before = await usage.ListFromSnapshotsAsync(CancellationToken.None);
         before.Select(r => r.OrganizationId)
-            .Should().BeEquivalentTo(new[] { TestDb.DefaultOrgId, TestDb.OtherOrgId });
+            .Should().BeEquivalentTo(new[] { TestDb.SystemOrgId, TestDb.OtherOrgId, TestDb.DefaultOrgId });
         before.Should().OnlyContain(r => r.ComputedAt == null);
 
         await usage.RecomputeSnapshotsAsync(CancellationToken.None);

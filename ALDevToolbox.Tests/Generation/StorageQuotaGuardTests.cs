@@ -67,7 +67,7 @@ public sealed class StorageQuotaGuardTests : IDisposable
             ctx, orgContext: new HttpOrganizationContext(new HttpContextAccessor()));
 
         using (AmbientOrganizationScope.Enter(
-            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: true)))
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.SystemOrgId, isSystem: true)))
         {
             var act = () => guard.EnsureCanWriteAsync(CancellationToken.None);
             await act.Should().NotThrowAsync();
