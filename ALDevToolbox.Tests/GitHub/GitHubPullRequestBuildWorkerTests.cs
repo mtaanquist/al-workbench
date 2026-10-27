@@ -760,11 +760,13 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
             sp.GetRequiredService<StorageQuotaGuard>(),
             sp.GetRequiredService<TranslationImportService>(),
             sp.GetRequiredService<CallSiteReferenceEmitter>(),
-            NullLogger<ReleaseImportService>.Instance));
+            NullLogger<ReleaseImportService>.Instance,
+            sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>()));
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
         services.AddScoped(sp => new ReleaseManagementService(
             sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>()),
             NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         // The importer's credential check is for manual builds; a pull-request build never consults it.

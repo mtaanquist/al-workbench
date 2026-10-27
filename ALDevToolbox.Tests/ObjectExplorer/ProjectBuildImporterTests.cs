@@ -1065,11 +1065,11 @@ public sealed class ProjectBuildImporterTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
         var access = new ProjectAccess(ctx, _db.OrgContext);
         var credentials = new CloneCredentialResolver(
@@ -1077,7 +1077,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
             _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance);
         return new ProjectBuildImporter(
-            importer, new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance),
+            importer, new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance),
             queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance);
     }
