@@ -6,8 +6,11 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// "28.10" sorts before "28.2" — which is the bug the Object Explorer
 /// browser hit before this was wired in.
 ///
-/// Missing parts are treated as zero so "28" and "28.0.0" compare equal.
-/// Non-numeric segments are pushed to the bottom by treating their numeric
+/// Missing parts are treated as zero so "28" and "28.0.0" compare equal -
+/// which matters because the comparer also decides whether an app.json is
+/// behind (<c>DependencyDriftService</c>), and "27.0" against "27.0.0.0" is
+/// not drift. Callers that sort and need a fixed order between such twins
+/// break the tie themselves. Non-numeric segments are pushed to the bottom by treating their numeric
 /// value as -1, which keeps the sort total without throwing on the
 /// occasional non-conforming label.
 /// </summary>
@@ -28,10 +31,13 @@ internal sealed class BcVersionComparer : IComparer<string?>
         var len = Math.Max(xs.Length, ys.Length);
         for (var i = 0; i < len; i++)
         {
-            var xi = i < xs.Length && int.TryParse(xs[i], out var xv) ? xv : -1;
-            var yi = i < ys.Length && int.TryParse(ys[i], out var yv) ? yv : -1;
+            var xi = Segment(xs, i);
+            var yi = Segment(ys, i);
             if (xi != yi) return xi.CompareTo(yi);
         }
         return 0;
     }
+
+    private static int Segment(string[] parts, int index) =>
+        index >= parts.Length ? 0 : int.TryParse(parts[index], out var value) ? value : -1;
 }

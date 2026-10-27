@@ -1370,19 +1370,25 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.1.3.4/dk");
     }
 
-    [Fact]
-    public async Task A_next_version_build_leaves_refreshing_a_stale_preview_parent_to_the_daily_sweep()
+    [Theory]
+    // Either side of the sweep's refresh age, with a newer insider build on offer.
+    [InlineData(-24)]
+    [InlineData(24)]
+    public async Task A_next_version_build_links_the_preview_parent_whatever_its_age_and_leaves_refreshing_it_to_the_daily_sweep(
+        int hoursPastRefreshAge)
     {
         // It indexes nothing of its own (#1140), so importing 2 GB of preview to parent
-        // onto would buy it nothing; it links what is there.
+        // onto would buy it nothing; it links what is there, fresh or stale.
         var (projectId, releaseId, _) = await SeedAsync();
-        var staleId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-20));
+        var importedAt = DateTime.UtcNow - ArtifactReleaseImporter.PreviewRefreshAge - TimeSpan.FromHours(hoursPastRefreshAge);
+        var previewId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", importedAt);
 
         var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
-        outcome.ParentReleaseId.Should().Be(staleId);
+        outcome.ParentReleaseId.Should().Be(previewId);
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-insider:30.0:dk"))
+            .Id.Should().Be(previewId, "nothing was imported beside it or in its place");
     }
 
     [Fact]
@@ -1397,17 +1403,6 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         await using var read = _db.NewContext();
         (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().BeNull();
         (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
-    }
-
-    [Fact]
-    public async Task A_recent_preview_parent_is_kept_even_when_a_newer_insider_build_exists()
-    {
-        var (projectId, releaseId, _) = await SeedAsync();
-        var recentId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-2));
-
-        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
-
-        outcome.ParentReleaseId.Should().Be(recentId);
     }
 
     // ── A parent import nobody finishes (#1180) ────────────────────────

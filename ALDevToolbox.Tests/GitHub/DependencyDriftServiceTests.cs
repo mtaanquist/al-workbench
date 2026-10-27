@@ -225,6 +225,34 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_dependency_written_with_fewer_parts_than_the_catalogue_is_not_behind()
+    {
+        // "27.0" and "27.0.0.0" are the same version; a missing part counts as zero.
+        // Comparing it as lower would offer a pull request that changes nothing.
+        const string shortDependency = """
+            {"id":"1c0ffee0-0000-4000-8000-000000000004","name":"Payment Import","publisher":"CRONUS",
+             "version":"1.0.0.0","application":"28.2.0.0","platform":"28.0.0.0",
+             "dependencies":[{"id":"63ca2fa4-4f03-4f2b-a480-172fef340d3f","name":"System Application",
+               "publisher":"Microsoft","version":"27.0"}]}
+            """;
+        await ReadyAsync();
+        await SeedCatalogueAsync("27.0.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var api = BaseApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", shortDependency));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+        api.Calls.Should().Contain(c => c.Contains($"/repos/{RepoA}/contents/app.json"), "the manifest was read");
+    }
+
+    [Fact]
     public async Task A_manifest_with_no_application_is_left_alone()
     {
         await ReadyAsync();
