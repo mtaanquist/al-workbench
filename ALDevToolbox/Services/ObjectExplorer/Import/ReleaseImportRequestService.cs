@@ -106,6 +106,7 @@ public sealed class ReleaseImportRequestService
     private readonly PersistedImportJobs _persistedJobs;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectBuildImporter _projectBuilds;
+    private readonly ProjectAccess _access;
 
     public ReleaseImportRequestService(
         ReleaseImportService importer,
@@ -114,7 +115,8 @@ public sealed class ReleaseImportRequestService
         ReleaseImportQueue queue,
         PersistedImportJobs persistedJobs,
         IOrganizationContext orgContext,
-        ProjectBuildImporter projectBuilds)
+        ProjectBuildImporter projectBuilds,
+        ProjectAccess access)
     {
         _importer = importer;
         _management = management;
@@ -123,6 +125,7 @@ public sealed class ReleaseImportRequestService
         _persistedJobs = persistedJobs;
         _orgContext = orgContext;
         _projectBuilds = projectBuilds;
+        _access = access;
     }
 
     /// <summary>
@@ -305,7 +308,13 @@ public sealed class ReleaseImportRequestService
     public async Task<ReleaseImportOutcome> RetryAsync(
         int releaseId, ReleaseRetrySubmission submission, CancellationToken ct = default)
     {
-        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        // A release the solution-visibility fence hides is answered exactly as an
+        // unknown id: its saved source is read and then discarded, so there is
+        // nothing to reuse, and the reopen reads the release and answers not
+        // found. Asked first and always, so the two run the same queries.
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var latest = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        var origin = visible ? latest : null;
 
         // Project builds re-run from the project id alone — no URL, no
         // re-upload. Reopen the release, wipe the previous attempt's modules,
@@ -385,7 +394,7 @@ public sealed class ReleaseImportRequestService
         // the job is queued only after it: until then nothing else says the release
         // is being worked on, so a build polling it would take it for abandoned (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
-        await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
+        await _importer.ReopenForRetryAsync(releaseId, visible, ct).ConfigureAwait(false);
         await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
         ReleaseImportSource source;
@@ -416,6 +425,19 @@ public sealed class ReleaseImportRequestService
 
         await EnqueueImportAsync(releaseId, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
         return new ReleaseImportOutcome.Queued(releaseId);
+    }
+
+    /// <summary>
+    /// The solution whose build produced <paramref name="releaseId"/>, for the
+    /// manual-symbols recovery, or null when the release is not a solution build.
+    /// A release the solution-visibility fence hides also answers null, after the
+    /// same read, so the refusal does not confirm that the id exists.
+    /// </summary>
+    public async Task<int?> FindSymbolRecoveryProjectAsync(int releaseId, CancellationToken ct = default)
+    {
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        return visible && origin is { Kind: "project_build", ProjectId: int projectId } ? projectId : null;
     }
 
     /// <summary>

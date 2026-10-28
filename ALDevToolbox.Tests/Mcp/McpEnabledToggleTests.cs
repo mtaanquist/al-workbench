@@ -149,6 +149,62 @@ public sealed class McpEnabledToggleTests : IDisposable
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
+    /// <summary>
+    /// <c>/mcp</c> authenticates only by bearer token, never by the browser's
+    /// sign-in cookie. If the cookie scheme joined the MCP policy, any page on
+    /// another site could drive the tools as the signed-in user with a plain
+    /// cross-site POST (#1425).
+    /// </summary>
+    [Fact]
+    public async Task Mcp_endpoint_ignores_a_signed_in_browser_cookie()
+    {
+        await EnableMcpAsync();
+        const string password = "correct horse battery staple";
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Users.Add(new Domain.Entities.User
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Email = "mette@cronus.example",
+                DisplayName = "Mette",
+                PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(password),
+                Role = Domain.Entities.UserRole.Admin,
+                Status = Domain.Entities.UserStatus.Active,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+        using (var page = await client.GetAsync("/login"))
+        {
+            var token = System.Text.RegularExpressions.Regex.Match(await page.Content.ReadAsStringAsync(),
+                """name="__RequestVerificationToken"[^>]*value="([^"]+)""").Groups[1].Value;
+            using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["Email"] = "mette@cronus.example",
+                ["Password"] = password,
+                ["__RequestVerificationToken"] = token,
+            }));
+            login.StatusCode.Should().Be(HttpStatusCode.Redirect);
+            login.Headers.Location!.OriginalString.Should().NotContain("err=", "the cookie must really be signed in");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"tools/list"}""",
+                System.Text.Encoding.UTF8,
+                "application/json"),
+        };
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        (await response.Content.ReadAsStringAsync()).Should().NotContain("\"result\"");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private async Task EnableMcpAsync()

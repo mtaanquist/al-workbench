@@ -2095,11 +2095,12 @@ public sealed class ProjectBuildService
             .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
-        // A next-version build parents onto the catalogue's preview of that
-        // Major.Minor, the one the daily sweep imports (#999), and refreshes it
-        // by the sweep's own rule: older than PreviewRefreshAge, a different
-        // insider build, and not mid-ingest. The org keeps one preview per
-        // Major.Minor and country whether or not it has opted into the sweep.
+        // Only a current-version build gets here: a next-version build links the
+        // catalogue's preview as it is (ExistingParentReleaseAsync, #1140) and leaves
+        // refreshing it to the daily sweep. A current build resolves a released
+        // artifact, so the prerelease clause below - the sweep's own refresh rule:
+        // older than PreviewRefreshAge, a different insider build, not mid-ingest -
+        // only applies should a prerelease ever be resolved here.
         int? stalePreviewId = null;
         if (existing is not null)
         {

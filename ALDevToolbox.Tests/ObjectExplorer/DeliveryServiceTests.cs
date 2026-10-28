@@ -743,7 +743,8 @@ public sealed class DeliveryServiceTests : IDisposable
             await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTimeZone, "Europe/Copenhagen"));
             await SetWindowAsync(ctx, seed.EnvironmentId, start, end);
-            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            // Scheduled on the clock the run below reads, so no step of the test sees today.
+            deliveryId = await NewService(ctx, clock: clock).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, utcNow.AddHours(1));
             await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(d => d.ScheduledFor, utcNow.AddMinutes(-90))
@@ -759,6 +760,7 @@ public sealed class DeliveryServiceTests : IDisposable
         var movedLocal = TimeZoneInfo.ConvertTimeFromUtc(delivery.ScheduledFor, tz);
         new TimeOnly(movedLocal.Hour, movedLocal.Minute).Should().Be(start, "it moves to the window's opening in the solution's own time");
         delivery.DiagnosticsLog.Should().Contain($"at {UpdateWindow.Clock(start)} (Europe/Copenhagen)");
+        delivery.DiagnosticsLog.Should().Contain("10:00:00  ", "the log is stamped on the same clock as the row");
     }
 
     [Fact]
@@ -1663,6 +1665,61 @@ public sealed class DeliveryServiceTests : IDisposable
         options.LaterUpdateUnavailable.Should().Contain("isn't installed");
     }
 
+    // ── Boundaries, on a clock of the test's own (#1439) ─────────────────
+
+    /// <summary>A clock that stays at <paramref name="utc"/>, to the whole second, so a boundary can be met exactly.</summary>
+    private static ALDevToolbox.Tests.Auth.FakeTimeProvider ClockAt(DateTime utc) =>
+        new(new DateTimeOffset(utc.Ticks - utc.Ticks % TimeSpan.TicksPerSecond, TimeSpan.Zero));
+
+    [Theory]
+    [InlineData(-60, true)]
+    [InlineData(-61, false)]
+    public async Task A_picked_time_counts_as_now_for_the_minute_spent_in_the_dialog_and_no_longer(int secondsAgo, bool accepted)
+    {
+        var clock = ClockAt(DateTime.UtcNow);
+        var now = clock.GetUtcNow().UtcDateTime;
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx, clock: clock).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, now.AddHours(1));
+
+        var act = () => NewService(_db.NewContext(), clock: clock)
+            .RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, now.AddSeconds(secondsAgo));
+
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ScheduledFor")
+                .WhoseValue.Should().Contain("hasn't happened yet");
+        }
+    }
+
+    [Theory]
+    // A second before the 22:00-23:00 window opens, the moment it opens, its last
+    // second, and the moment it closes: the window is [start, end).
+    [InlineData("21:59:59", 0, "22:00:00")]
+    [InlineData("22:00:00", 0, "22:00:00")]
+    [InlineData("22:59:59", 0, "22:59:59")]
+    [InlineData("23:00:00", 1, "22:00:00")]
+    public async Task The_reschedule_dialog_offers_the_windows_next_opening(string at, int daysLater, string opening)
+    {
+        // Tomorrow rather than a fixed date, so the slot never falls into the past.
+        var day = DateTime.UtcNow.Date.AddDays(1);
+        var clock = ClockAt(day + TimeSpan.Parse(at, System.Globalization.CultureInfo.InvariantCulture));
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await SetWindowAsync(ctx, seed.EnvironmentId, new TimeOnly(22, 0), new TimeOnly(23, 0));
+        var deliveryId = await NewService(ctx, clock: clock)
+            .ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, clock.GetUtcNow().UtcDateTime.AddDays(3));
+
+        var options = await NewService(_db.NewContext(), clock: clock).GetRescheduleOptionsAsync(deliveryId);
+
+        options!.NextWindowOpeningUtc.Should().Be(
+            day.AddDays(daysLater) + TimeSpan.Parse(opening, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     [Fact]
     public async Task RunDeliveryAsync_leaves_a_queued_delivery_alone_once_it_was_moved_to_later()
     {
@@ -2429,7 +2486,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
-        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
         results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
         results[0].Message.Should().Be("Unchanged; Production already has the newer 1.0.10.0.");
@@ -2460,7 +2517,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
-        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.HandedOff);
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
         results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
         results[0].Message.Should().Be("Unchanged; this version is already waiting for the update.");
@@ -2563,8 +2620,15 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
-        if (accepted) await act.Should().NotThrowAsync();
-        else await act.Should().ThrowAsync<PlanValidationException>();
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"].Should()
+                .Contain($"Build #{seed.BuildId} was built from").And.Contain("this deployment pipeline only deploys builds from");
+        }
     }
 
     [Fact]
@@ -3637,8 +3701,8 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using (var run = _db.NewContext()) (await NewService(run).RunDeliveryAsync(id)).Should().BeTrue();
 
-        _apps.UploadedOrder.Should().NotBeEmpty();
-        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" });
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
     }
 
     [Fact]
@@ -3703,8 +3767,8 @@ public sealed class DeliveryServiceTests : IDisposable
         }
         else
         {
-            delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
-            _apps.UploadedOrder.Should().NotBeEmpty();
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+            _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" });
         }
     }
 

@@ -48,8 +48,25 @@ namespace ALDevToolbox.Tests.Infrastructure;
 /// </summary>
 public sealed class TestDb : IDisposable
 {
-    public const int DefaultOrgId = 1;
+    /// <summary>
+    /// The singleton system organisation the migration seeds and stamps
+    /// <c>is_system</c>. Tests act as it only when they mean system-org
+    /// behaviour (the canonical catalogue, the quota exemption); everything
+    /// else acts as <see cref="DefaultOrgId"/>, an ordinary tenant (#1441).
+    /// </summary>
+    public const int SystemOrgId = 1;
+
+    /// <summary>A second ordinary tenant, for cross-organisation isolation tests.</summary>
     public const int OtherOrgId = 2;
+
+    /// <summary>
+    /// The ordinary tenant <see cref="OrgContext"/> acts as by default. Seeded
+    /// the way signup creates an organisation, platform files included.
+    /// </summary>
+    public const int DefaultOrgId = 3;
+
+    /// <summary>The slug of <see cref="DefaultOrgId"/>, which names its per-tenant backup folder.</summary>
+    public const string DefaultOrgSlug = "tenant";
 
     private static readonly Lazy<PostgresHost> SharedHost = new(PostgresHost.Start, isThreadSafe: true);
 
@@ -70,7 +87,7 @@ public sealed class TestDb : IDisposable
     /// </summary>
     public string ConnectionString => _connectionString;
 
-    public AmbientOrganizationContext OrgContext { get; } = new() { CurrentOrganizationId = DefaultOrgId };
+    public TestOrganizationContext OrgContext { get; } = new() { CurrentOrganizationId = DefaultOrgId };
 
     /// <summary>
     /// Counts EF commands still holding a connection on this fixture's
@@ -149,22 +166,35 @@ public sealed class TestDb : IDisposable
         {
             ctx.Database.Migrate();
 
-            // Migration seeds the Default organisation and stamps it as the
-            // singleton system org. Add the Other organisation tests use to
-            // verify cross-org isolation; it stays a regular org.
+            // Migration seeds org 1 and stamps it as the singleton system org.
+            // Add two ordinary tenants: the one tests act as by default, and
+            // the Other one cross-org isolation tests compare it against. The
+            // default gets the platform files signup gives a new org; Other
+            // stays bare, as the isolation tests expect.
+            var now = DateTime.UtcNow;
             ctx.Organizations.Add(new Organization
             {
                 Id = OtherOrgId,
                 Name = "Other",
                 Slug = "other",
-                CreatedAt = DateTime.UtcNow,
+                CreatedAt = now,
             });
+            ctx.Organizations.Add(new Organization
+            {
+                Id = DefaultOrgId,
+                Name = "Tenant",
+                Slug = DefaultOrgSlug,
+                CreatedAt = now,
+            });
+            ctx.SaveChanges();
+            PlatformOrganizationFileSeeder.EnsureForOrganizationAsync(ctx, DefaultOrgId, now)
+                .GetAwaiter().GetResult();
             ctx.SaveChanges();
 
             // Postgres identity sequences don't advance when a row is inserted
             // with an explicit id; the next nextval() would otherwise collide
-            // with our seeded OtherOrg at id=2. Re-align the sequence to MAX(id)
-            // so SignupAsync-style inserts in tests get a free id.
+            // with the orgs seeded above. Re-align the sequence to MAX(id) so
+            // SignupAsync-style inserts in tests get a free id.
             ctx.Database.ExecuteSqlRaw(
                 "SELECT setval(pg_get_serial_sequence('organizations', 'id'), (SELECT MAX(id) FROM organizations))");
         }

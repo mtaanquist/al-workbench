@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
+using ALDevToolbox.Tests.Auth;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -31,11 +32,21 @@ public sealed class BcThrottleHandlerTests
         return response;
     }
 
+    /// <summary>The fixed "now" every test runs at, so an HTTP-date Retry-After has a known distance.</summary>
+    private static readonly DateTimeOffset Now = new(2026, 10, 27, 2, 0, 0, TimeSpan.Zero);
+
+    private static HttpResponseMessage ThrottledUntil(DateTimeOffset until, HttpStatusCode status = HttpStatusCode.TooManyRequests)
+    {
+        var response = new HttpResponseMessage(status);
+        response.Headers.RetryAfter = new RetryConditionHeaderValue(until);
+        return response;
+    }
+
     private static (HttpClient Client, Scripted Inner, List<TimeSpan> Waits) Build(params HttpResponseMessage[] answers)
     {
         var inner = new Scripted(answers);
         var waits = new List<TimeSpan>();
-        var handler = new BcThrottleHandler(TimeProvider.System, NullLogger<BcThrottleHandler>.Instance)
+        var handler = new BcThrottleHandler(new FakeTimeProvider(Now), NullLogger<BcThrottleHandler>.Instance)
         {
             InnerHandler = inner,
             Delay = (wait, _) => { waits.Add(wait); return Task.CompletedTask; },
@@ -98,6 +109,41 @@ public sealed class BcThrottleHandlerTests
         response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
         inner.Seen.Should().HaveCount(1);
         waits.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_503_that_names_a_wait_is_waited_out_and_tried_once_more()
+    {
+        var (client, inner, waits) = Build(
+            Throttled(TimeSpan.FromSeconds(7), HttpStatusCode.ServiceUnavailable), new HttpResponseMessage(HttpStatusCode.OK));
+
+        var response = await client.SendAsync(Get());
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        waits.Should().Equal(TimeSpan.FromSeconds(7));
+        inner.Seen.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task A_retry_after_given_as_a_date_waits_until_that_time()
+    {
+        var (client, inner, waits) = Build(ThrottledUntil(Now.AddSeconds(20)), new HttpResponseMessage(HttpStatusCode.OK));
+
+        await client.SendAsync(Get());
+
+        waits.Should().Equal(TimeSpan.FromSeconds(20));
+        inner.Seen.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task A_retry_after_date_already_past_still_waits_a_second()
+    {
+        var (client, _, waits) = Build(
+            ThrottledUntil(Now.AddSeconds(-30), HttpStatusCode.ServiceUnavailable), new HttpResponseMessage(HttpStatusCode.OK));
+
+        await client.SendAsync(Get());
+
+        waits.Should().Equal(TimeSpan.FromSeconds(1));
     }
 
     [Fact]

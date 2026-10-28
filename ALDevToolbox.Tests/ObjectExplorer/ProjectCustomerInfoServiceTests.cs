@@ -319,15 +319,34 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Roles");
     }
 
+    /// <summary>
+    /// The person is real and active, just in another organisation: only the tenant
+    /// boundary can turn them away, from the list and from the picker that offers it.
+    /// </summary>
     [Fact]
     public async Task A_colleague_has_to_be_someone_in_the_organisation()
     {
+        const int strangerId = 9895;
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(new User
+            {
+                Id = strangerId, OrganizationId = TestDb.OtherOrgId, Email = "someone@fabrikam.example", PasswordHash = "x",
+                DisplayName = "Someone Else", Role = UserRole.Editor, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
         var id = await SeedAsync();
         await using var ctx = _db.NewContext();
 
-        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(424242, [ProjectPersonRole.Consultant], null));
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(strangerId, [ProjectPersonRole.Consultant], null));
 
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UserId");
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
+            .Should().Be("Choose one of your colleagues.");
+        (await ctx.OeProjectPeople.AnyAsync(p => p.ProjectId == id)).Should().BeFalse();
+        var offered = (await Svc(ctx).ListAssignableUsersAsync()).Select(u => u.UserId).ToList();
+        offered.Should().Contain(OtherUserId);
+        offered.Should().NotContain(strangerId, "the picker offers this organisation's people only");
     }
 
     [Fact]

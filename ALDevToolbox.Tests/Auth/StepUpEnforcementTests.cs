@@ -191,7 +191,7 @@ public sealed class StepUpEnforcementTests : IDisposable
     private (HttpContext Http, IDataProtectionProvider Protection) ChallengeContext(int currentUserId)
     {
         var services = new ServiceCollection()
-            .AddSingleton<IOrganizationContext>(new AmbientOrganizationContext { CurrentUserId = currentUserId, CurrentOrganizationId = 1 })
+            .AddSingleton<IOrganizationContext>(new AmbientOrganizationContext { CurrentUserId = currentUserId, CurrentOrganizationId = TestDb.DefaultOrgId })
             .BuildServiceProvider();
         var http = new DefaultHttpContext { RequestServices = services };
         return (http, _db.DataProtectionProvider);

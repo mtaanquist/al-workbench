@@ -88,7 +88,7 @@ public sealed class DeliveryService
     /// Thin wrapper over <see cref="ScheduleDeliveryAsync"/> with <c>scheduledFor = now</c>.
     /// </summary>
     public Task<int> ReleaseBuildNowAsync(int releasePipelineId, int projectBuildId, CancellationToken ct = default)
-        => ScheduleDeliveryAsync(releasePipelineId, projectBuildId, DateTime.UtcNow, ct);
+        => ScheduleDeliveryAsync(releasePipelineId, projectBuildId, _clock.GetUtcNow().UtcDateTime, ct);
 
     /// <summary>
     /// Creates a delivery of <paramref name="projectBuildId"/> through
@@ -123,7 +123,7 @@ public sealed class DeliveryService
     /// immediately, unconfirmed (#1122).
     /// </summary>
     public Task<int> DeployNowForAgentAsync(int releasePipelineId, int projectBuildId, CancellationToken ct = default)
-        => CreateDeliveryAsync(releasePipelineId, projectBuildId, DateTime.UtcNow, forceSyncOnce: false, ct, forAgent: true);
+        => CreateDeliveryAsync(releasePipelineId, projectBuildId, _clock.GetUtcNow().UtcDateTime, forceSyncOnce: false, ct, forAgent: true);
 
     internal static string ProductionRefusedForAgents(string environmentName) =>
         $"{environmentName} is not a sandbox, and this organisation does not let AI assistants deploy to production. Deploy to it from the deployment pipeline's page, which asks you to confirm first.";
@@ -151,7 +151,7 @@ public sealed class DeliveryService
         {
             throw Validation("Delivery", "Only a failed deployment can be deployed again.");
         }
-        return await CreateDeliveryAsync(failed.ReleasePipelineId, failed.ProjectBuildId, DateTime.UtcNow, forceSyncOnce, ct);
+        return await CreateDeliveryAsync(failed.ReleasePipelineId, failed.ProjectBuildId, _clock.GetUtcNow().UtcDateTime, forceSyncOnce, ct);
     }
 
     /// <summary>
@@ -320,7 +320,7 @@ public sealed class DeliveryService
         int orgId, ReleasePlan plan, DateTime scheduledForUtc, bool forceSyncOnce, bool proposed, CancellationToken ct,
         string? openingLog = null, bool withoutApproval = false, bool startedByAgent = false)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var delivery = new OeProjectDelivery
         {
             OrganizationId = orgId,
@@ -716,7 +716,7 @@ public sealed class DeliveryService
             {
                 opening += LogLine(DeliveryProposalLog.NotDeployedWithoutApproval(why));
             }
-            var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(DateTime.UtcNow), forceSyncOnce: false, proposed: true, ct, opening);
+            var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(_clock.GetUtcNow().UtcDateTime), forceSyncOnce: false, proposed: true, ct, opening);
             prepared.Add(delivery.Id);
             _logger.LogInformation(
                 "Prepared delivery {DeliveryId}: build {BuildId} → deployment pipeline {ReleasePipelineId} ({Env}), waiting for approval; replaced {Replaced} older.",
@@ -761,7 +761,7 @@ public sealed class DeliveryService
         var replacedReason = DeliveryProposalLog.ReplacedReason(newerBuildId);
         foreach (var id in waitingIds)
         {
-            var now = DateTime.UtcNow;
+            var now = _clock.GetUtcNow().UtcDateTime;
             await _db.OeProjectDeliveries
                 .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Proposed)
                 .ExecuteUpdateAsync(u => u
@@ -775,7 +775,7 @@ public sealed class DeliveryService
         }
         // The newer build's request replaces theirs; the old one has nothing left to approve.
         await NotificationSubject.MarkDoneAsync(
-            _db, waitingIds.Select(NotificationSubject.Delivery).ToList(), DateTime.UtcNow, _logger, ct);
+            _db, waitingIds.Select(NotificationSubject.Delivery).ToList(), _clock.GetUtcNow().UtcDateTime, _logger, ct);
     }
 
     // ── Deploying to a sandbox without approval (#1096) ─────────────────────────────
@@ -800,7 +800,7 @@ public sealed class DeliveryService
         var reason = DeliveryProposalLog.ReplacedReason(newerBuildId);
         foreach (var id in ids)
         {
-            var now = DateTime.UtcNow;
+            var now = _clock.GetUtcNow().UtcDateTime;
             var changed = await _db.OeProjectDeliveries
                 .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
                 .ExecuteUpdateAsync(u => u
@@ -928,7 +928,7 @@ public sealed class DeliveryService
         // window) is replaced too, so a day's builds don't all install when it opens.
         await ReplaceWaitingDeploymentsWithoutApprovalAsync(releasePipelineId, projectBuildId, ct);
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var when = plan.RuleTime(now);
         var opening = LogLine(DeliveryProposalLog.DeployedWithoutApproval(projectBuildId, await CurrentUserNameAsync(ct)));
         var delivery = await WriteDeliveryAsync(orgId, plan, when, forceSyncOnce: false, proposed: false, ct, opening, withoutApproval: true);
@@ -971,7 +971,7 @@ public sealed class DeliveryService
             throw Validation("Delivery", NoLongerWaiting);
         }
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var when = plan.RuleTime(now);
         var outsideWindow = plan.IsOutsideWindow(when);
         var line = LogLine(DeliveryProposalLog.Approved(await CurrentUserNameAsync(ct)));
@@ -1034,7 +1034,7 @@ public sealed class DeliveryService
 
         var line = LogLine(DeliveryProposalLog.Dismissed(await CurrentUserNameAsync(ct), why));
         var userId = _orgContext.CurrentUserId;
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var changed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Proposed)
             .ExecuteUpdateAsync(u => u
@@ -1059,7 +1059,7 @@ public sealed class DeliveryService
     /// </summary>
     private async Task MarkAppsNotSentAsync(int deliveryId, string message, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         await _db.OeProjectDeliveryResults
             .Where(r => r.ProjectDeliveryId == deliveryId && r.Status == ProjectDeliveryResultStatus.Pending)
             .ExecuteUpdateAsync(u => u
@@ -1086,7 +1086,7 @@ public sealed class DeliveryService
             ?? throw Validation("Delivery", "That delivery no longer exists.");
         await _access.EnsureCanManageAsync(owner.ProjectId, owner.OwnerId, ct);
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var changed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
@@ -1122,7 +1122,7 @@ public sealed class DeliveryService
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
         var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
         DateTime? nextOpening = hasWindow
-            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, DateTime.UtcNow, info.WindowDays)
+            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, _clock.GetUtcNow().UtcDateTime, info.WindowDays)
             : null;
         var current = CurrentTiming(info.DeploymentSchedule, info.ScheduledByDeliveryWindow, info.ScheduledOutsideWindow, hasWindow);
         var update = await _db.OeProjectEnvironments.AsNoTracking()
@@ -1205,7 +1205,7 @@ public sealed class DeliveryService
             throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
         }
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
         if (!await ApplyTimingAsync(deliveryId, t, now, ct))
         {
@@ -1367,7 +1367,7 @@ public sealed class DeliveryService
     /// </summary>
     private async Task<int> MoveHeldDeliveryAsync(RescheduleInfo info, RescheduleTiming timing, DateTime? atUtc, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
         if (t.Schedule == BcDeploymentSchedule.Normalize(info.DeploymentSchedule))
         {
@@ -1499,7 +1499,7 @@ public sealed class DeliveryService
             : await query.ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, to)
                 .SetProperty(d => d.CancelledByUserId, (int?)null)
-                .SetProperty(d => d.UpdatedAt, DateTime.UtcNow), ct);
+                .SetProperty(d => d.UpdatedAt, _clock.GetUtcNow().UtcDateTime), ct);
         return changed > 0;
     }
 
@@ -1690,7 +1690,7 @@ public sealed class DeliveryService
             .ToListAsync(ct);
         if (stopped.Count == 0) return;
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var dismissed = new List<int>();
         foreach (var group in stopped.GroupBy(d => (d.Status, d.Reason)))
         {
@@ -1728,7 +1728,7 @@ public sealed class DeliveryService
             .ToListAsync(ct);
         if (orphans.Count == 0) return [];
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         foreach (var d in orphans)
         {
             d.Status = ProjectDeliveryStatus.Failed;
@@ -1990,7 +1990,7 @@ public sealed class DeliveryService
             return;
         }
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         delivery.Status = ProjectDeliveryStatus.Uploading;
         delivery.StartedAt = now;
         delivery.UpdatedAt = now;
@@ -2093,7 +2093,7 @@ public sealed class DeliveryService
             var olderRefusal = $"{ordered[i].AppName} {ordered[i].AppVersion} is older than {newerOn}, which is already installed in {delivery.EnvironmentName}. "
                 + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice;
             ordered[i].Status = ProjectDeliveryResultStatus.Failed;
-            ordered[i].FinishedAt = DateTime.UtcNow;
+            ordered[i].FinishedAt = _clock.GetUtcNow().UtcDateTime;
             ordered[i].UpdatedAt = ordered[i].FinishedAt!.Value;
             ordered[i].Message = olderRefusal;
             await FailAsync(delivery, log, olderRefusal, ct);
@@ -2135,7 +2135,7 @@ public sealed class DeliveryService
             if (failedIndex >= 0)
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 continue;
             }
 
@@ -2144,7 +2144,7 @@ public sealed class DeliveryService
             {
                 failedIndex = i;
                 result.Status = ProjectDeliveryResultStatus.Failed;
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.Message = "The build's deliverables changed under the delivery.";
                 Append(log, $"FAILED {label}: deliverable missing.");
                 break;
@@ -2159,7 +2159,7 @@ public sealed class DeliveryService
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
                 result.Message = $"Already on {onVersion}.";
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 Append(log, $"Skipped {label}: {delivery.EnvironmentName} already has this version.");
                 await SaveResultAsync(delivery, log, ct);
                 continue;
@@ -2169,7 +2169,7 @@ public sealed class DeliveryService
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
                 result.Message = $"Unchanged; {delivery.EnvironmentName} already has the newer {newerOn}.";
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 Append(log, $"Skipped {label}: unchanged in this build, and {delivery.EnvironmentName} already has {newerOn}.");
                 await SaveResultAsync(delivery, log, ct);
                 continue;
@@ -2181,7 +2181,7 @@ public sealed class DeliveryService
                 {
                     result.Status = ProjectDeliveryResultStatus.Skipped;
                     result.Message = "Unchanged; this version is already waiting for the update.";
-                    result.UpdatedAt = DateTime.UtcNow;
+                    result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                     Append(log, $"Skipped {label}: unchanged in this build and already waiting on {delivery.EnvironmentName}.");
                     await SaveResultAsync(delivery, log, ct);
                     continue;
@@ -2189,7 +2189,7 @@ public sealed class DeliveryService
                 failedIndex = i;
                 refusal = waitingRefusal;
                 result.Status = ProjectDeliveryResultStatus.Failed;
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.FinishedAt.Value;
                 result.Message = waitingRefusal;
                 Append(log, waitingRefusal);
@@ -2213,7 +2213,7 @@ public sealed class DeliveryService
                     .FirstAsync(ct);
 
                 result.Status = ProjectDeliveryResultStatus.Uploading;
-                result.StartedAt = DateTime.UtcNow;
+                result.StartedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.StartedAt.Value;
                 Append(log, $"Uploading {label} ({bytes.Length} bytes)...");
                 await SaveResultAsync(delivery, log, ct);
@@ -2233,7 +2233,7 @@ public sealed class DeliveryService
                 uploadedAny = true;
                 result.OperationId = operation.Id;
                 result.AppId = operation.AppId?.ToString();
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
                 // BC read the version out of the package it just accepted. If that isn't
                 // the version this delivery promised, something other than this build's
@@ -2243,7 +2243,7 @@ public sealed class DeliveryService
                 {
                     failedIndex = i;
                     result.Status = ProjectDeliveryResultStatus.Failed;
-                    result.FinishedAt = DateTime.UtcNow;
+                    result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                     result.Message = $"Business Central read version {operation.TargetAppVersion} from the uploaded app, but this build says {result.AppVersion}.";
                     Append(log, $"FAILED {label}: {result.Message}");
                     await SaveResultAsync(delivery, log, ct);
@@ -2255,17 +2255,17 @@ public sealed class DeliveryService
                     // Nothing left to watch: BC runs this in its own window, and no poll
                     // of ours would ever see it go terminal.
                     result.Status = ProjectDeliveryResultStatus.Scheduled;
-                    result.FinishedAt = DateTime.UtcNow;
+                    result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                     Append(log, $"Business Central has scheduled {label} (operation {operation.Id}).");
                     await SaveResultAsync(delivery, log, ct);
                     continue;
                 }
 
                 result.Status = ProjectDeliveryResultStatus.Installing;
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 delivery.Status = ProjectDeliveryStatus.Installing;
                 delivery.InstallStartedAt ??= result.UpdatedAt;
-                delivery.UpdatedAt = DateTime.UtcNow;
+                delivery.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 Append(log, $"Installing {label} (operation {operation.Id})...");
                 await SaveResultAsync(delivery, log, ct);
 
@@ -2293,7 +2293,7 @@ public sealed class DeliveryService
                         Append(log, $"FAILED {label}: {outcome.Message}");
                     }
                 }
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.FinishedAt.Value;
                 await SaveResultAsync(delivery, log, ct);
             }
@@ -2313,13 +2313,13 @@ public sealed class DeliveryService
                 {
                     result.Message = Short(ex.Message);
                 }
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.FinishedAt.Value;
                 Append(log, $"FAILED {label}: {OneLine(ex.Message)}");
             }
         }
 
-        var endNow = DateTime.UtcNow;
+        var endNow = _clock.GetUtcNow().UtcDateTime;
         if (failedIndex >= 0)
         {
             var failed = results[failedIndex];
@@ -2430,7 +2430,7 @@ public sealed class DeliveryService
 
         if (env is not null)
         {
-            var stamped = DateTime.UtcNow;
+            var stamped = _clock.GetUtcNow().UtcDateTime;
             await _db.OeProjectEnvironments.Where(e => e.Id == env.Id)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(e => e.Status, live.Status)
@@ -2732,11 +2732,11 @@ public sealed class DeliveryService
     internal const string InterruptedAppMessage =
         "Not confirmed: the deployment stopped while this app was on its way, and Business Central may still have installed it. Check the environment's installed apps.";
 
-    private static void Append(StringBuilder log, string line) => log.Append(LogLine(line));
+    private void Append(StringBuilder log, string line) => log.Append(LogLine(line));
 
     /// <summary>One line of a delivery's log as the run writes it: <c>HH:mm:ss  message</c>, UTC.</summary>
-    private static string LogLine(string line) =>
-        DateTime.UtcNow.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
+    private string LogLine(string line) =>
+        _clock.GetUtcNow().UtcDateTime.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
 
     /// <summary>The acting person's name for a history line, or "someone" once there is none to read.</summary>
     private async Task<string> CurrentUserNameAsync(CancellationToken ct)

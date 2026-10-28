@@ -55,6 +55,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
 
         resolved.Should().NotBeNull();
         resolved!.Value.Identity.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+        resolved.Value.Identity.IsSystemOrganization.Should().BeFalse("an ordinary tenant is not the system org");
         resolved.Value.OrgLogin.Should().Be("cronus-dk");
     }
 
@@ -88,16 +89,15 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         // The flag decides how storage-quota and template-import rules treat the
         // organisation, so scheduled work has to see the same value an interactive
         // request would.
+        // Together with the tenant case above, which expects false: a flag the
+        // walk hard-coded either way would fail one of the two.
         await ConfigureDeploymentAsync();
-        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
-
-        await using var ctx = _db.NewContext();
-        var isSystem = await ctx.Organizations.AsNoTracking()
-            .Where(o => o.Id == TestDb.DefaultOrgId).Select(o => o.IsSystem).SingleAsync();
+        await ConnectAsync(TestDb.SystemOrgId, ConnectedInstallation, "cronus-dk");
 
         var resolved = await NewWorker().ResolveOrganizationAsync(ConnectedInstallation, CancellationToken.None);
 
-        resolved!.Value.Identity.IsSystemOrganization.Should().Be(isSystem);
+        resolved!.Value.Identity.OrganizationId.Should().Be(TestDb.SystemOrgId);
+        resolved.Value.Identity.IsSystemOrganization.Should().BeTrue();
         resolved.Value.Identity.IsSiteAdmin.Should().BeFalse("background work acts for an organisation, never as a site admin");
         resolved.Value.Identity.UserId.Should().BeNull("a webhook build has no user behind it");
     }
@@ -499,6 +499,167 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         return await ctx.OeRepositoryBranchHeads.AsNoTracking().OrderBy(h => h.Id).ToListAsync();
     }
 
+    // --- Another organisation tracking the same repository ------------------
+    //
+    // Any organisation can type any github.com address into a solution, so two
+    // tenants tracking one repository is ordinary. A delivery names an
+    // installation, and only the organisation that connected it may see anything
+    // happen. The reads below cross the tenant filter on purpose, to see every
+    // organisation's rows.
+    //
+    // These workers run on the app's own organisation context rather than the
+    // fixture's, which is pinned to the default organisation: off a request it
+    // follows the ambient scope the worker enters, so a scope entered for the
+    // wrong organisation, or too late, shows up here.
+
+    [Fact]
+    public async Task A_pull_request_builds_only_the_solution_of_the_organisation_that_connected_the_installation()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        var otherOrgId = await SeedOrganizationAsync("Other");
+        await ConnectAsync(otherOrgId, 99, "someone-else");
+        var ownProjectId = await SeedSolutionTrackingTheRepositoryAsync();
+        await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
+        var api = ApiAnswering(HttpStatusCode.NoContent);
+        var builds = new ProjectBuildQueue();
+
+        await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
+
+        builds.Reader.TryRead(out var queued).Should().BeTrue();
+        queued!.Identity.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+        queued.Source.Should().BeOfType<ReleaseImportSource.PullRequestBuild>().Which.ProjectId.Should().Be(ownProjectId);
+        builds.Reader.TryRead(out _).Should().BeFalse("the other organisation's solution is not built");
+        api.Calls.Count(c => c.Contains("/check-runs")).Should().Be(1, "one check run, for the one solution");
+        (await AllBuildsAsync()).Should().OnlyContain(b => b.OrganizationId == TestDb.DefaultOrgId);
+    }
+
+    [Fact]
+    public async Task A_pull_request_never_reaches_another_organisations_solution_when_its_own_tracks_nothing()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        var otherOrgId = await SeedOrganizationAsync("Other");
+        await ConnectAsync(otherOrgId, 99, "someone-else");
+        await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
+        var api = ApiAnswering(HttpStatusCode.NoContent);
+        var builds = new ProjectBuildQueue();
+
+        await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
+
+        builds.Reader.TryRead(out _).Should().BeFalse();
+        api.Calls.Should().NotContain(c => c.Contains("/check-runs"));
+        (await AllBuildsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_push_writes_branch_heads_only_for_the_organisation_that_connected_the_installation()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        var otherOrgId = await SeedOrganizationAsync("Other");
+        await ConnectAsync(otherOrgId, 99, "someone-else");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
+
+        await NewWorker().RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+
+        (await AllHeadsAsync()).Should().ContainSingle().Which.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+    }
+
+    [Fact]
+    public async Task A_push_never_reaches_another_organisations_solution_when_its_own_tracks_nothing()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        var otherOrgId = await SeedOrganizationAsync("Other");
+        await ConnectAsync(otherOrgId, 99, "someone-else");
+        await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
+
+        await NewWorker().RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+
+        (await AllHeadsAsync()).Should().BeEmpty();
+        (await AllBuildsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_merged_pull_request_is_recorded_only_for_the_organisation_that_connected_the_installation()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        var otherOrgId = await SeedOrganizationAsync("Other");
+        await ConnectAsync(otherOrgId, 99, "someone-else");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        await SeedSolutionTrackingTheRepositoryAsync("Other Customer App", organizationId: otherOrgId);
+        var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(
+            System.Text.Encoding.UTF8.GetBytes(GitHubWebhookPayloads.MergedPullRequest()), "delivery", NullLogger.Instance);
+
+        await NewWorker().RunOneAsync(job!, CancellationToken.None);
+
+        await using var ctx = _db.NewContext();
+        (await ctx.OeRepositoryMergedPullRequests.IgnoreQueryFilters().AsNoTracking().ToListAsync())
+            .Should().ContainSingle().Which.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+    }
+
+    // The same two, with the roles turned round: the default organisation is the
+    // first one asked and also tracks the repository, but connected a different
+    // installation. Picking whichever organisation comes first would pass the
+    // cases above and fail these.
+
+    [Fact]
+    public async Task A_pull_request_builds_in_the_connecting_organisation_even_when_it_is_not_the_first()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, 99, "someone-else");
+        var connectingOrgId = await SeedOrganizationAsync("Connecting");
+        await ConnectAsync(connectingOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        var connectingProjectId = await SeedSolutionTrackingTheRepositoryAsync("Connecting Customer App", organizationId: connectingOrgId);
+        var api = ApiAnswering(HttpStatusCode.NoContent);
+        var builds = new ProjectBuildQueue();
+
+        await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
+
+        builds.Reader.TryRead(out var queued).Should().BeTrue();
+        queued!.Identity.OrganizationId.Should().Be(connectingOrgId);
+        queued.Source.Should().BeOfType<ReleaseImportSource.PullRequestBuild>().Which.ProjectId.Should().Be(connectingProjectId);
+        builds.Reader.TryRead(out _).Should().BeFalse("the default organisation's solution is not built");
+        (await AllBuildsAsync()).Should().OnlyContain(b => b.OrganizationId == connectingOrgId);
+    }
+
+    [Fact]
+    public async Task A_push_writes_its_head_in_the_connecting_organisation_even_when_it_is_not_the_first()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, 99, "someone-else");
+        var connectingOrgId = await SeedOrganizationAsync("Connecting");
+        await ConnectAsync(connectingOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        await SeedSolutionTrackingTheRepositoryAsync("Connecting Customer App", organizationId: connectingOrgId);
+
+        await NewWorker().RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push()), CancellationToken.None);
+
+        (await AllHeadsAsync()).Should().ContainSingle().Which.OrganizationId.Should().Be(connectingOrgId);
+    }
+
+    /// <summary>The organisation context the hosted worker gets: no request, so only the ambient scope speaks.</summary>
+    private static IOrganizationContext OffRequest() =>
+        new HttpOrganizationContext(new Microsoft.AspNetCore.Http.HttpContextAccessor());
+
+    /// <summary>Every organisation's branch heads.</summary>
+    private async Task<List<ALDevToolbox.Domain.Entities.ObjectExplorer.OeRepositoryBranchHead>> AllHeadsAsync()
+    {
+        await using var ctx = _db.NewContext();
+        return await ctx.OeRepositoryBranchHeads.IgnoreQueryFilters().AsNoTracking().ToListAsync();
+    }
+
+    /// <summary>Every organisation's solution builds.</summary>
+    private async Task<List<ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectBuild>> AllBuildsAsync()
+    {
+        await using var ctx = _db.NewContext();
+        return await ctx.OeProjectBuilds.IgnoreQueryFilters().AsNoTracking().ToListAsync();
+    }
+
     // --- Fixture -----------------------------------------------------------
 
     private static GitHubPullRequestJob NewJob(bool isMemberFork = false, string authorLogin = "erik") => new(
@@ -528,14 +689,15 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         return api.On(HttpMethod.Get, "/orgs/cronus-dk/members/erik", membership);
     }
 
-    /// <summary>A solution tracking the repository the deliveries are about.</summary>
-    private async Task SeedSolutionTrackingTheRepositoryAsync(
-        string name = "CRONUS Customer App", string url = "https://github.com/cronus-dk/customer-app.git")
+    /// <summary>A solution tracking the repository the deliveries are about; answers its id.</summary>
+    private async Task<int> SeedSolutionTrackingTheRepositoryAsync(
+        string name = "CRONUS Customer App", string url = "https://github.com/cronus-dk/customer-app.git",
+        int organizationId = TestDb.DefaultOrgId)
     {
         await using var ctx = _db.NewContext();
         var project = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = organizationId,
             Name = name,
             CreatedAt = DateTime.UtcNow,
         };
@@ -544,13 +706,14 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
 
         ctx.OeProjectRepositories.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = organizationId,
             ProjectId = project.Id,
             Url = url,
             Provider = ALDevToolbox.Domain.ValueObjects.RepositoryProvider.GitHub,
             DisplayName = "customer-app",
         });
         await ctx.SaveChangesAsync();
+        return project.Id;
     }
 
 
@@ -563,10 +726,14 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         GitHubWebhookQueue? queue = null,
         MaintenanceModeState? maintenance = null,
         FakeGitHubApi? api = null,
-        ProjectBuildQueue? builds = null)
+        ProjectBuildQueue? builds = null,
+        IOrganizationContext? orgContext = null)
     {
         var services = new ServiceCollection();
-        services.AddSingleton<IOrganizationContext>(_db.OrgContext);
+        // Off-request by default, as in production: the worker asks each organisation
+        // under its own ambient scope. The fixture's context is pinned to one org and
+        // would answer for every org the walk visits (#1441).
+        services.AddSingleton<IOrganizationContext>(orgContext ?? OffRequest());
         services.AddDbContext<AppDbContext>(opts =>
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         services.AddSingleton<IMemoryCache>(new MemoryCache(Options.Create(new MemoryCacheOptions())));
@@ -596,11 +763,13 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
             sp.GetRequiredService<StorageQuotaGuard>(),
             sp.GetRequiredService<TranslationImportService>(),
             sp.GetRequiredService<CallSiteReferenceEmitter>(),
-            NullLogger<ReleaseImportService>.Instance));
+            NullLogger<ReleaseImportService>.Instance,
+            sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>()));
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
         services.AddScoped(sp => new ReleaseManagementService(
             sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>()),
             NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         // The importer's credential check is for manual builds; a pull-request build never consults it.

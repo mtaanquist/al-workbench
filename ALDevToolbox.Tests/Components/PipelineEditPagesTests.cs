@@ -31,7 +31,7 @@ namespace ALDevToolbox.Tests.Components;
 /// that is gone, and one the person may look at but not change. The fields themselves
 /// are covered in <see cref="GitHubReleaseDialogsTests"/>.</para>
 /// </summary>
-public sealed class PipelineEditPagesTests : IDisposable
+public sealed class PipelineEditPagesTests : IAsyncDisposable
 {
     private const int OwnerUserId = 10801;
     private const int ColleagueUserId = 10802;
@@ -77,10 +77,13 @@ public sealed class PipelineEditPagesTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 

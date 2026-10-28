@@ -27,7 +27,11 @@ namespace ALDevToolbox.Tests.Components;
 /// is the other two views, the switch between the three, and the planned upgrades' own
 /// dialogs.</para>
 /// </summary>
-public sealed class UpgradesListPageTests : IDisposable
+// UpgradesPage.SearchDebounce is a static the page reads when it is built: the classes
+// that render the page share one collection so that one class's wait never reaches
+// another's page mid-test.
+[Collection("UpgradesPage.SearchDebounce")]
+public sealed class UpgradesListPageTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -81,10 +85,13 @@ public sealed class UpgradesListPageTests : IDisposable
         _db.OrgContext.CurrentUserId = UserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 

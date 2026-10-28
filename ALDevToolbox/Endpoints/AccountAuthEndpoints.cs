@@ -500,8 +500,15 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect(
-                    $"/reset-password?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}");
+                // A refused link is sent as a reason code alone: the page renders
+                // its own copy for it, so the card can't be made to say anything
+                // by editing the URL.
+                var query = first.Key != "Token"
+                    ? $"err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}"
+                    : first.Value == PasswordResetService.MicrosoftOnlyMessage
+                        ? $"err={ResetPasswordReasons.MicrosoftOnly}"
+                        : $"err={ResetPasswordReasons.InvalidLink}";
+                ctx.Response.Redirect($"/reset-password?token={Uri.EscapeDataString(token)}&{query}");
             }
         });
 

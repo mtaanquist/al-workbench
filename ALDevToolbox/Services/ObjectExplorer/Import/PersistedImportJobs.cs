@@ -311,6 +311,7 @@ public sealed class PersistedImportJobs
         // /site-admin/workers, gated by [Authorize(Roles = SiteAdminRole)].
         var pending = await _db.OeImportJobs.IgnoreQueryFilters()
             .CountAsync(j => j.Status == "queued" || j.Status == "running", ct).ConfigureAwait(false);
+        // Same category 2 read, for the same SiteAdmin-only page.
         var jobs = await _db.OeImportJobs.IgnoreQueryFilters()
             .OrderByDescending(j => j.CreatedAt)
             .Take(recentLimit)

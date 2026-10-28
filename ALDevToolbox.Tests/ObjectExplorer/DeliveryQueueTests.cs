@@ -144,16 +144,13 @@ public sealed class DeliveryQueueTests
         (await queue.EnqueueAsync(Job(2))).Should().BeTrue();
 
         await worker.StartAsync(CancellationToken.None);
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline && logger.Errors.Count < 2)
-        {
-            await Task.Delay(20);
-        }
+        await logger.SecondError.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         await worker.StopAsync(CancellationToken.None);
 
         // The second logged failure is the proof the loop was not torn down by the first.
-        logger.Errors.Should().HaveCount(2);
-        logger.Errors.Should().AllSatisfy(m => m.Should().Contain("DeliveryId"));
+        var errors = logger.Snapshot();
+        errors.Should().HaveCount(2);
+        errors.Should().AllSatisfy(m => m.Should().Contain("DeliveryId"));
 
         // ...and the finally cleared both flags, so neither delivery id is wedged.
         (await queue.EnqueueAsync(Job(1))).Should().BeTrue("a failed delivery must be re-runnable");
@@ -258,7 +255,17 @@ public sealed class DeliveryQueueTests
     /// <summary>Captures the worker's error log so a drained-past-a-failure can be awaited deterministically.</summary>
     private sealed class RecordingLogger : ILogger<DeliveryWorker>
     {
-        public List<string> Errors { get; } = [];
+        private readonly List<string> _errors = [];
+        private readonly TaskCompletionSource _second = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes when the second error is logged.</summary>
+        public Task SecondError => _second.Task;
+
+        /// <summary>The errors so far, copied under the lock the worker writes them with.</summary>
+        public List<string> Snapshot()
+        {
+            lock (_errors) return [.. _errors];
+        }
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
@@ -267,7 +274,11 @@ public sealed class DeliveryQueueTests
             Func<TState, Exception?, string> formatter)
         {
             if (logLevel < LogLevel.Error) return;
-            lock (Errors) Errors.Add(formatter(state, exception));
+            lock (_errors)
+            {
+                _errors.Add(formatter(state, exception));
+                if (_errors.Count == 2) _second.TrySetResult();
+            }
         }
     }
 }

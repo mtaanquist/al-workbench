@@ -285,12 +285,12 @@ public sealed class OAuthClaimsTransformerTests : IDisposable
     [Fact]
     public async Task System_org_member_gets_the_system_org_claim()
     {
-        // The migration stamps the Default org as the singleton system org.
-        var user = await SeedUserAsync(organizationId: TestDb.DefaultOrgId);
+        // The migration stamps org 1 as the singleton system org.
+        var user = await SeedUserAsync(organizationId: TestDb.SystemOrgId);
 
         var result = await TransformAsync(TokenPrincipal(
             (OpenIddictConstants.Claims.Subject, user.Id.ToString()),
-            (OAuthClaimsTransformer.OrgClaim, TestDb.DefaultOrgId.ToString())));
+            (OAuthClaimsTransformer.OrgClaim, TestDb.SystemOrgId.ToString())));
 
         result.FindFirstValue(HttpOrganizationContext.SystemOrgClaim).Should().Be("true");
     }

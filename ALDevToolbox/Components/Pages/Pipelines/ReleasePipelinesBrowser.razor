@@ -512,6 +512,7 @@
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
     private PeriodicTimer? _poll;
     private CancellationTokenSource? _pollCts;
+    private readonly PageCalls _calls = new();
 
     /// <summary>
     /// The tab to open on, from <c>?show=</c> (<c>shipping</c>, <c>attention</c> or
@@ -1061,11 +1062,12 @@
 
     private void EnsurePolling()
     {
-        if (_poll is not null) return;
+        // A load that comes back after the page has gone must not start a timer.
+        if (_poll is not null || _calls.IsGone) return;
         if (_rows is null || !_rows.Any(r => r.LiveDelivery is not null)) return;
         _pollCts = new CancellationTokenSource();
         _poll = new PeriodicTimer(PollInterval);
-        _ = PollLoopAsync(_poll, _pollCts.Token);
+        _ = _calls.Track(PollLoopAsync(_poll, _pollCts.Token));
     }
 
     private async Task PollLoopAsync(PeriodicTimer timer, CancellationToken token)
@@ -1114,9 +1116,11 @@
         timer?.Dispose();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         StopPoll();
-        return ValueTask.CompletedTask;
+        // Wait for a tick already on its way to the database, so leaving the page
+        // means nothing of its is still reading.
+        await _calls.LeaveAsync();
     }
 }

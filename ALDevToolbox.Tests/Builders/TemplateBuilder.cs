@@ -1,3 +1,4 @@
+using ALDevToolbox.Tests.Infrastructure;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 
@@ -17,7 +18,7 @@ namespace ALDevToolbox.Tests.Builders;
 /// </remarks>
 public static class TemplateBuilder
 {
-    public const int DefaultOrganizationId = 1;
+    public const int DefaultOrganizationId = TestDb.DefaultOrgId;
     public const string CoreExtensionPath = "Core";
 
     public static RuntimeTemplate Default(string key = "runtime-test", string runtime = "15", int organizationId = DefaultOrganizationId) => new()

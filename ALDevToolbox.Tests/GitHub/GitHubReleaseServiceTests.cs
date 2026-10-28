@@ -99,13 +99,12 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     public async Task A_publish_waits_while_another_build_is_publishing_to_the_same_repository()
     {
         await ConnectOrganisationAsync();
-        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        // The gate is process-wide and every test database numbers its repositories from
+        // one, so the repository gets an id no other class uses: a publish elsewhere
+        // queued on the same key would otherwise count as this one reaching the gate.
+        const int repositoryId = 92_101;
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")], repositoryId: repositoryId);
         var api = PublishableApi(existingRelease: false);
-        int repositoryId;
-        await using (var read = _db.NewContext())
-        {
-            repositoryId = (await read.OePipelines.AsNoTracking().SingleAsync(p => p.Id == seed.PipelineId)).GithubReleaseRepositoryId!.Value;
-        }
 
         await using var ctx = _db.NewContext();
         Task<GitHubReleasePublishResult> publishing;
@@ -113,7 +112,8 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         using (await GitHubReleaseService.PublishGate.EnterAsync(repositoryId, TestContext.Current.CancellationToken))
         {
             publishing = NewService(ctx, api).PublishBuildAsync(seed.BuildId);
-            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            SpinWait.SpinUntil(() => GitHubReleaseService.PublishGate.WaitingCount(repositoryId) == 1,
+                TimeSpan.FromSeconds(30)).Should().BeTrue("the publish has to reach the gate and wait there");
             publishing.IsCompleted.Should().BeFalse("the repository is taken");
             api.Calls.Should().NotContain(c => c.Contains("/releases"), "nothing is read or written on GitHub until it is free");
         }
@@ -1224,7 +1224,8 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     private const string BuiltCommit = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
     private async Task<Seed> SeedAsync(
-        bool publishTo, (string Name, string Version)[] apps, string? repoUrl = null, bool releaseSourced = false)
+        bool publishTo, (string Name, string Version)[] apps, string? repoUrl = null, bool releaseSourced = false,
+        int? repositoryId = null)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1240,6 +1241,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
 
         var repository = new OeProjectRepository
         {
+            Id = repositoryId ?? 0,
             OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id,
             Provider = RepositoryProvider.GitHub, Url = repoUrl ?? RepoUrl, DisplayName = RepoName,
         };

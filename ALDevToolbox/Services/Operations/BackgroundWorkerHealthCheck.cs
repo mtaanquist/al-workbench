@@ -5,15 +5,16 @@ namespace ALDevToolbox.Services.Operations;
 
 /// <summary>
 /// Liveness probe for every <see cref="Microsoft.Extensions.Hosting.BackgroundService"/>
-/// that registers a <see cref="WorkerHeartbeat"/>. Tagged <c>healthz</c> so it
-/// joins the existing live probe — a stuck DVD import or a silent scheduler
-/// loop now flips <c>/healthz</c> to 503, which the Docker <c>HEALTHCHECK</c>
-/// (and any reverse proxy / orchestrator polling it) acts on.
+/// that registers a <see cref="WorkerHeartbeat"/>. Tagged <c>workers</c>, so a
+/// stuck DVD import or a silent scheduler loop flips <c>/healthz/workers</c> to
+/// 503 for alerting. It is deliberately kept off <c>/healthz</c>, which the
+/// Docker <c>HEALTHCHECK</c> polls: a slow job must not restart the container
+/// (#377).
 ///
 /// <para>Each registered worker carries its own thresholds (<see cref="WorkerHeartbeat.MaxActiveDuration"/>,
 /// <see cref="WorkerHeartbeat.MaxIdleSilence"/>); this check just evaluates them
 /// against the wall clock at call time. The unhealthy message names every
-/// failing worker plus its reason so an operator reading <c>/healthz</c>'s
+/// failing worker plus its reason so an operator reading <c>/healthz/workers</c>'s
 /// detail can tell <i>which</i> background task is stuck without digging into
 /// logs.</para>
 /// </summary>

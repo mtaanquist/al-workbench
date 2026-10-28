@@ -127,9 +127,10 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
         UsePublicOrigin(null);
 
         var cut = _ctx.Render<SiteAdminSettingsGitHub>();
+        // The form first: the loading render has no fields at all.
+        cut.WaitForElement("input[name=GitHubWebhookSecret]");
 
-        cut.WaitForAssertion(() =>
-            cut.FindAll("input[name=ClearGitHubWebhookSecret]").Should().BeEmpty());
+        cut.FindAll("input[name=ClearGitHubWebhookSecret]").Should().BeEmpty();
     }
 
     [Fact]

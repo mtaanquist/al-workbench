@@ -110,6 +110,35 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Publisher_in_root_files_is_the_one_typed_on_the_form_not_the_org_default()
+    {
+        // generation-engine.md: the New Extension form's publisher is what
+        // app.json carries, so the root files say the same thing.
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationConfigService(ctx).SaveSettingsAsync(new OrganizationSettingsInput(
+                "Org Default Publisher", 50000, 50999, string.Empty, string.Empty));
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = TemplateBuilder.DefaultOrganizationId,
+                Path = "PUBLISHER.txt",
+                Content = "by {{publisher}}",
+                MustacheEnabled = true,
+                Scope = OrganizationFileScope.WorkspaceRoot,
+                Ordering = 3000,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        using var zip = await GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature", publisher: "CRONUS Partner"));
+
+        ReadEntry(zip.GetEntry("MyCustomFeature/PUBLISHER.txt")!).Should().Be("by CRONUS Partner");
+    }
+
+    [Fact]
     public async Task Sibling_workspace_file_keeps_the_root_entry_last_and_excludes_every_extension()
     {
         await SeedTemplateAsync(TemplateBuilder.Default());

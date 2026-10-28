@@ -18,6 +18,18 @@ public sealed class PasswordResetService
     public static readonly TimeSpan ResetTokenLifetime = TimeSpan.FromHours(1);
     public static readonly TimeSpan MagicLinkTokenLifetime = TimeSpan.FromMinutes(15);
 
+    /// <summary>Shown when a reset link is spent, expired, or no longer belongs to an active account.</summary>
+    public const string InvalidLinkMessage = "This reset link is no longer valid. Request a new one.";
+
+    /// <summary>
+    /// Shown when the organisation signs in with Microsoft only. The reset
+    /// endpoint turns it into <see cref="ResetPasswordReasons.MicrosoftOnly"/>,
+    /// for which the page offers sign-in rather than a new link, since a new
+    /// link would be refused the same way.
+    /// </summary>
+    public const string MicrosoftOnlyMessage =
+        "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page.";
+
     private readonly AppDbContext _db;
     private readonly AuthService _auth;
     private readonly TimeProvider _clock;
@@ -91,16 +103,32 @@ public sealed class PasswordResetService
             return null;
         }
 
+        // A new reset email retires the links sent before it, as the reset page
+        // tells the user (#1455): only the newest one can set a password.
+        // Retire and insert commit together under a lock on the user row, so
+        // two requests at once leave exactly one live link and a failed insert
+        // leaves the old one working.
         var (raw, hash) = TokenIssuer.Issue();
-        _db.PasswordResetTokens.Add(new PasswordResetToken
+        await using (var tx = await _db.Database.BeginTransactionAsync(ct))
         {
-            UserId = user.Id,
-            TokenHash = hash,
-            Purpose = TokenPurpose.PasswordReset,
-            CreatedAt = now,
-            ExpiresAt = now + ResetTokenLifetime,
-        });
-        await _db.SaveChangesAsync(ct);
+            // Raw SQL, like ClaimEmailChangeTokenAsync: a row lock pinned to the
+            // id the typed email resolved to, with no query filter to bypass.
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT 1 FROM users WHERE id = {user.Id} FOR UPDATE", ct);
+            await ResetTokens()
+                .Where(t => t.UserId == user.Id && t.ConsumedAt == null)
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
+            _db.PasswordResetTokens.Add(new PasswordResetToken
+            {
+                UserId = user.Id,
+                TokenHash = hash,
+                Purpose = TokenPurpose.PasswordReset,
+                CreatedAt = now,
+                ExpiresAt = now + ResetTokenLifetime,
+            });
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
         await _auth.RecordAttemptAsync(normalised, ip, succeeded: true, now, ct);
         return raw;
     }
@@ -119,21 +147,59 @@ public sealed class PasswordResetService
 
         var hash = TokenIssuer.Sha256Hex(token);
         var now = _clock.GetUtcNow().UtcDateTime;
-        // Fence category 1 (pre-auth routing): pinned to the reset token's hash.
-        var row = await _db.PasswordResetTokens.IgnoreQueryFilters()
+        var tokenRows = ResetTokens().Where(t => t.TokenHash == hash);
+        var row = await tokenRows
             .Include(t => t.User)
-            .FirstOrDefaultAsync(t => t.TokenHash == hash && t.Purpose == TokenPurpose.PasswordReset, ct);
+            .FirstOrDefaultAsync(ct);
         if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This reset link is no longer valid. Request a new one." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = InvalidLinkMessage });
         }
+        // Single use, claimed with a conditional update inside the transaction
+        // that sets the password: of two submits of one link, one sets a
+        // password and the other is told the link is spent (#1455, as #1208
+        // did for magic links). A failed save rolls the claim back with it.
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        // The same user-row lock as issuing a link takes, first, so the two
+        // queue on each other instead of deadlocking on the token and user rows.
+        // Raw SQL pinned to the user id on the token row found by its hash.
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM users WHERE id = {row.UserId} FOR UPDATE", ct);
+        // The account checks run on the row as it stands under the lock, not as
+        // it was read above, so a disable that lands between the two still
+        // refuses the reset.
+        // Not a fence site: EF reloads a tracked entity by its primary key and
+        // applies no query filter to it, so no explicit bypass is written here.
+        // The key is the user on the token row found by its hash.
+        await _db.Entry(row.User).ReloadAsync(ct);
         if (row.User.Status != UserStatus.Active)
         {
             // Defensive, mirroring the magic-link consume: a token issued before
             // the account was disabled (or a status change mid-flow) must not let
             // a non-Active user complete a reset. Login already blocks Disabled,
             // but the two consume paths should be consistent. #410
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This reset link is no longer valid. Request a new one." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = InvalidLinkMessage });
+        }
+        // The org may have gone Microsoft-only between issue and consume, as
+        // the magic-link consume also checks: a password set now would come
+        // back to life if the policy were relaxed later. The policy lives on
+        // organization_settings, so its row is held FOR SHARE until the commit:
+        // a switch to Microsoft-only made after this check waits for the reset
+        // to finish instead of landing before it. (An org that has never saved
+        // its settings has no row to hold; its first save is an insert.)
+        // Raw SQL pinned to the organisation of the user locked above.
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM organization_settings WHERE organization_id = {row.User.OrganizationId} FOR SHARE", ct);
+        if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MicrosoftOnlyMessage });
+        }
+        var claimed = await tokenRows
+            .Where(t => t.Id == row.Id && t.ConsumedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
+        if (claimed == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = InvalidLinkMessage });
         }
         row.ConsumedAt = now;
         row.User.PasswordHash = _auth.HashPassword(newPassword);
@@ -143,7 +209,18 @@ public sealed class PasswordResetService
         // tokens and OAuth tokens an intruder may have minted. #675
         row.User.CredentialsChangedAt = now;
         await AccountService.CommitCredentialChangeAsync(_db, _oauthTokens, row.User.Id, now, ct);
+        await tx.CommitAsync(ct);
     }
+
+    /// <summary>
+    /// Password-reset rows across every organisation. Both callers run before
+    /// any cookie exists, when the organisation filter would hide every row.
+    /// </summary>
+    private IQueryable<PasswordResetToken> ResetTokens() =>
+        // Fence category 1 (pre-auth routing): every caller pins further, to the reset token's
+        // hash (consume) or to the id of the user the typed email resolved to (issue).
+        _db.PasswordResetTokens.IgnoreQueryFilters()
+            .Where(t => t.Purpose == TokenPurpose.PasswordReset);
 
     /// <summary>
     /// Generates a single-use magic-link token for the user with the given
@@ -243,4 +320,17 @@ public sealed class PasswordResetService
         await _db.SaveChangesAsync(ct);
         return row.User;
     }
+}
+
+/// <summary>
+/// The <c>err</c> codes the reset endpoint sends back for a refused link. The
+/// page renders its own copy for each and ignores any message in the URL.
+/// </summary>
+public static class ResetPasswordReasons
+{
+    /// <summary>The link is spent, expired, or no longer belongs to an active account.</summary>
+    public const string InvalidLink = "Token";
+
+    /// <summary>The organisation signs in with Microsoft only.</summary>
+    public const string MicrosoftOnly = "TokenMicrosoftOnly";
 }

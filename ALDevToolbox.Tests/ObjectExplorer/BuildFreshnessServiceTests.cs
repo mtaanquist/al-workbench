@@ -321,6 +321,24 @@ public sealed class BuildFreshnessServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_successful_preview_check_is_not_the_last_build()
+    {
+        // A nightly next-version check pins the branch's newest commit, but nothing
+        // deployable was built from it: the pipeline is still behind its branch.
+        var s = await SeedAsync(branch: "main");
+        var current = await AddBuildAsync(s, Built, startedAt: DateTime.UtcNow.AddDays(-2));
+        await AddBuildAsync(s, Newest, startedAt: DateTime.UtcNow.AddDays(-1), target: ProjectBuildTarget.NextMajor);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+
+        var freshness = await GetAsync(s.PipelineId);
+
+        freshness.LastBuildId.Should().Be(current);
+        var repo = Single(freshness);
+        repo.State.Should().Be(BuildFreshnessState.Ahead);
+        repo.BuiltSha.Should().Be(Built);
+    }
+
+    [Fact]
     public async Task A_pipeline_that_does_not_exist_answers_null()
     {
         await using var ctx = _db.NewContext();
@@ -473,7 +491,7 @@ public sealed class BuildFreshnessServiceTests : IDisposable
 
     private async Task<int> AddBuildAsync(
         Seeded s, string sha, string status = ProjectBuildStatus.Ready, DateTime? startedAt = null,
-        params int[] alsoPinned)
+        string target = ProjectBuildTarget.Current, params int[] alsoPinned)
     {
         await using var ctx = _db.NewContext();
         var started = startedAt ?? DateTime.UtcNow.AddHours(-1);
@@ -483,6 +501,7 @@ public sealed class BuildFreshnessServiceTests : IDisposable
             ProjectId = s.ProjectId,
             PipelineId = s.PipelineId,
             Status = status,
+            BcTarget = target,
             StartedAt = started,
             FinishedAt = started.AddMinutes(5),
         };

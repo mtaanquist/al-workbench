@@ -174,6 +174,18 @@
         };
     }
 
+    /// <summary>
+    /// Completes once the panel has drawn what its load decided: the access check when
+    /// it has nothing to show, the drift read otherwise. Completed after that render, so
+    /// the markup already reflects it. The panel draws nothing while it loads, so a test
+    /// of "draws nothing" waits for this first.
+    /// </summary>
+    internal Task Settled => _drawn.Task;
+
+    private readonly TaskCompletionSource _drawn = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private bool _settled;
+
     protected override async Task OnInitializedAsync()
     {
         // Two cached database reads and no call to GitHub, so a slow or
@@ -191,10 +203,15 @@
         {
             Logger.LogWarning(ex, "Could not tell whether the Solutions page can show dependency drift.");
         }
+        finally
+        {
+            _settled = !_show;
+        }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (_settled) _drawn.TrySetResult();
         // Deliberately not gated on firstRender: Blazor renders this component
         // once before OnInitializedAsync has come back from the database, so at
         // the first render it does not yet know whether it has anything to show.
@@ -214,6 +231,7 @@
             Logger.LogWarning(ex, "Could not read the dependency drift for the Solutions page.");
             _summary = null;
         }
+        _settled = true;
         StateHasChanged();
     }
 
