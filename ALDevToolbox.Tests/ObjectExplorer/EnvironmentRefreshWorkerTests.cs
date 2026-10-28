@@ -82,11 +82,10 @@ public sealed class EnvironmentRefreshWorkerTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var deadline = DateTime.UtcNow.AddSeconds(10);
-            while (_queue.IsInFlight(ProjectId) && DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(10, TestContext.Current.CancellationToken);
-            }
+            // Without this a job still in flight at the deadline fell through, and the
+            // test read what the worker had done before it had done it.
+            SpinWait.SpinUntil(() => !_queue.IsInFlight(ProjectId), TimeSpan.FromSeconds(10))
+                .Should().BeTrue("the worker has to finish the job before the test reads what it did");
         }
         finally
         {

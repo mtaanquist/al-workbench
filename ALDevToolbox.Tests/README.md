@@ -211,6 +211,10 @@ render (`EnvironmentsListTests`), or swap it in behind a clock that delegates
 after the click whether or not the page ignored the answer, because a page
 that carried on writes a moment later. Check with `StillTrue.For` /
 `ForAsync`, which keeps checking for a while, so the late write is caught.
+"A while" is 750 ms by default: it proves nothing happened within that window,
+not that nothing ever will. A write that would land later still passes, so
+when the code under test waits on something slower, pass a longer window or
+wait for the event that would have caused the write.
 
 **A positive marker before an absence check.** "Another organisation's row is
 not shown" also passes on a page that has not loaded yet. Assert something

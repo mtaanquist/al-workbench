@@ -359,6 +359,47 @@ public sealed class IgnoreQueryFiltersBaselineTests
     }
 
     /// <summary>
+    /// A justification belongs to the call under it. A second call a line
+    /// below, or one past a blank line, used to borrow it and pass unread.
+    /// </summary>
+    [Fact]
+    public void A_second_call_cannot_borrow_the_comment_above_the_first()
+    {
+        string[] source =
+        [
+            "public sealed class Service",
+            "{",
+            "    public async Task<User?> NextLineAsync(int id, CancellationToken ct)",
+            "    {",
+            "        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == id.",
+            "        var a = await _db.Users.IgnoreQueryFilters().FirstOrDefaultAsync(u => u.Id == id, ct);",
+            "        var b = await _db.Users.IgnoreQueryFilters().FirstOrDefaultAsync(ct);",
+            "        return a ?? b;",
+            "    }",
+            "",
+            "    public async Task<User?> PastABlankLineAsync(int id, CancellationToken ct)",
+            "    {",
+            "        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == id.",
+            "",
+            "        return await _db.Users.IgnoreQueryFilters().FirstOrDefaultAsync(ct);",
+            "    }",
+            "",
+            "    public async Task<User?> WrappedAsync(int id, CancellationToken ct)",
+            "    {",
+            "        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == id.",
+            "        return await _db.Users",
+            "            .IgnoreQueryFilters()",
+            "            .FirstOrDefaultAsync(u => u.Id == id, ct);",
+            "    }",
+            "}",
+        ];
+
+        var sites = ScanSource(source);
+
+        sites.Select(s => (s.Line, s.HasComment)).Should().Equal((6, true), (7, false), (15, false), (22, true));
+    }
+
+    /// <summary>
     /// A comment marker inside a string is not a comment. A <c>//</c> in a
     /// URL used to hide the rest of its line from the scan and pass as a
     /// justification, and <c>$"{bare}/*"</c> opened a block comment that hid
@@ -447,7 +488,8 @@ public sealed class IgnoreQueryFiltersBaselineTests
     /// The case the per-file count missed (#1426): one bypass deleted and a
     /// commented copy added in another method of the same file. The file's
     /// total stays the same; the per-member counts do not, and the failure
-    /// reads as a likely rename with the entry to paste.
+    /// asks whether it is a rename or a move, gives the advice for a move
+    /// (which needs the maintainer's confirmation), and the entry to paste.
     /// </summary>
     [Fact]
     public void A_bypass_moved_to_another_member_changes_the_baseline_key()
@@ -488,7 +530,8 @@ public sealed class IgnoreQueryFiltersBaselineTests
             "grew",
             "shrank");
         problems.Should().ContainSingle().Which.Should()
-            .Contain("member renamed? move the entry").And.Contain("Service.cs:12")
+            .Contain("renamed, or moved to another member?").And.Contain("A move is a change to the fence: grew")
+            .And.Contain("Service.cs:12")
             .And.Contain("[\"Service.cs\"] = new() { [\"ListAsync\"] = 1 }");
     }
 
@@ -521,7 +564,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
         {
             var occurrences = Marker.Matches(lines[i].Code).Count;
             if (occurrences == 0) continue;
-            var comment = FenceSourceScan.JustifyingComment(lines, i);
+            var comment = FenceSourceScan.JustifyingComment(lines, i, l => Marker.IsMatch(l.Code));
             var member = FenceSourceScan.EnclosingMember(lines, i);
             var namesCategory = comment is not null && CategoryName.IsMatch(comment);
             for (var n = 0; n < occurrences; n++)

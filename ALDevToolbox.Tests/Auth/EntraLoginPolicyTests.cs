@@ -182,6 +182,63 @@ public sealed class EntraLoginPolicyTests : IDisposable
             .Should().BeNull();
     }
 
+    /// <summary>
+    /// The switch lands after the consume has checked the policy and before it commits.
+    /// The settings row is held until the commit, so the switch waits for the reset rather
+    /// than slipping in under it and leaving a password set in a Microsoft-only org.
+    /// </summary>
+    [Fact]
+    public async Task A_switch_to_entra_only_during_a_reset_waits_for_the_reset_to_finish()
+    {
+        await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.AllowAll);
+        await SeedUserAsync(TestDb.DefaultOrgId, "racing@cronus.com");
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
+            token = (await resets.CreatePasswordResetTokenAsync("racing@cronus.com", Ip))!;
+        }
+
+        Task? switchToEntraOnly = null;
+        var switchWaited = false;
+        // The token claim is the consume's first write after its policy check.
+        var afterCheck = new BeforeCommand(
+            sql => sql.Contains("UPDATE") && sql.Contains("password_reset_tokens") && !sql.Contains("FOR UPDATE"),
+            async () =>
+            {
+                switchToEntraOnly = Task.Run(async () =>
+                {
+                    await using var admin = _db.NewContext();
+                    await admin.OrganizationSettings.IgnoreQueryFilters()
+                        .Where(s => s.OrganizationId == TestDb.DefaultOrgId)
+                        .ExecuteUpdateAsync(s => s.SetProperty(x => x.LocalLoginPolicy, LocalLoginPolicy.EntraOnly));
+                });
+                // The switch either finishes (nothing held the row) or queues on a lock.
+                await using var watch = _db.NewContext();
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!switchToEntraOnly.IsCompleted && DateTime.UtcNow < deadline)
+                {
+                    var waiting = await watch.Database.SqlQuery<int>(
+                        $"SELECT count(*)::int AS \"Value\" FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%organization_settings%'")
+                        .SingleAsync();
+                    if (waiting > 0) { switchWaited = true; break; }
+                }
+            });
+
+        await using (var consume = _db.NewContext(afterCheck))
+        {
+            var resets = new PasswordResetService(consume, NewAuth(consume), TimeProvider.System, _db.OpenIddictTokens);
+            await resets.ConsumePasswordResetTokenAsync(token, "a-brand-new-password-1");
+        }
+        await switchToEntraOnly!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        afterCheck.Fired.Should().BeTrue("the switch has to land in the window under test");
+        switchWaited.Should().BeTrue("a switch made after the policy check must wait for the reset to commit");
+        await using var read = _db.NewContext();
+        (await read.OrganizationSettings.IgnoreQueryFilters().SingleAsync(s => s.OrganizationId == TestDb.DefaultOrgId))
+            .LocalLoginPolicy.Should().Be(LocalLoginPolicy.EntraOnly, "the switch still lands, after the reset");
+    }
+
     [Fact]
     public async Task A_site_admin_in_an_entra_only_org_can_still_reset_their_password_as_break_glass()
     {

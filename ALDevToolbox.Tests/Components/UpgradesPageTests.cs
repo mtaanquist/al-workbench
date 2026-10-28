@@ -488,6 +488,7 @@ public sealed class UpgradesPageTests : IAsyncDisposable
             cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab"));
         clock.PendingTimers.Should().Be(1, "each keystroke drops the wait of the one before");
         clock.Advance(TimeSpan.FromMilliseconds(299));
+        clock.PendingTimers.Should().Be(1, "the typing has not paused for the whole wait yet");
         cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
         clock.Advance(TimeSpan.FromMilliseconds(1));
@@ -498,6 +499,31 @@ public sealed class UpgradesPageTests : IAsyncDisposable
             rows[0].QuerySelector("td.upg-customer a")!.TextContent.Should().Be("Fabrikam Norway");
         }, TimeSpan.FromSeconds(5));
         cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab");
+    }
+
+    /// <summary>
+    /// After a refresh the page re-reads on its own clock, so the answers that come in
+    /// show up without a reload, and the re-reading stops once its few minutes are up.
+    /// </summary>
+    [Fact]
+    public async Task After_a_refresh_the_table_re_reads_on_the_page_clock_and_then_stops()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().ContainSingle());
+        cut.WaitForAssertion(() => BarButton(cut, "Refresh").Click());
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(1, "the refresh sets the re-read going"));
+
+        await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
+        clock.Advance(TimeSpan.FromSeconds(20));
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2),
+            TimeSpan.FromSeconds(5));
+
+        clock.Advance(TimeSpan.FromMinutes(3));
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(0, "a page left open must not re-read forever"));
     }
 
     // ── The solution's short name (#966) ───────────────────────────────

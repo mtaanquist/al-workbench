@@ -114,21 +114,16 @@ public sealed class TotpService
     public async Task<IReadOnlyList<string>> ConfirmEnrollmentAsync(int userId, string code, CancellationToken ct = default)
     {
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId.
-        var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.UserId == userId, ct)
+        // The claim below narrows this same query to the row read here.
+        var mine = _db.UserTotpSecrets.IgnoreQueryFilters().Where(s => s.UserId == userId);
+        var secret = await mine.AsNoTracking().FirstOrDefaultAsync(ct)
             ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start setting up the authenticator app first." });
         // Confirming again would wipe the recovery codes and hand out new ones, with nothing
         // asked but a code in its window - one that may already have signed someone in.
         // Regenerating codes asks for the password, so this path must not offer a way round it.
         // A double-clicked Confirm lands here too, after the first post already issued codes
         // the browser never showed, so the message points at the way to get new ones.
-        if (secret.ConfirmedAt is not null)
-        {
-            throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["Totp"] = "The authenticator app is already turned on. If you didn't see your recovery codes, generate new ones below."
-            });
-        }
+        if (secret.ConfirmedAt is not null) throw AlreadyConfirmed();
 
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
         if (VerifyCode(base32, code) is not { } step)
@@ -137,17 +132,42 @@ public sealed class TotpService
         }
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        secret.ConfirmedAt = now;
-        secret.LastUsedAt = now;
-        // The code that confirmed setup counts as used, like any other.
-        secret.LastUsedTimeStep = step;
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        // The check above was a read, so two confirms posted together can both pass it.
+        // Claiming with a conditional update lets exactly one of them go on to issue
+        // recovery codes; the other would replace the set the first one's browser shows.
+        // The secret must still be the one the code matched: a setup restarted in
+        // another tab since the read above replaced it, and this code proves nothing
+        // about the new one. The code that confirmed setup counts as used, like any other.
+        var claimed = await mine
+            .Where(s => s.Id == secret.Id && s.ConfirmedAt == null && s.SecretEncrypted == secret.SecretEncrypted)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.ConfirmedAt, now)
+                .SetProperty(s => s.LastUsedAt, now)
+                .SetProperty(s => s.LastUsedTimeStep, step), ct);
+        if (claimed == 0)
+        {
+            var stored = await mine.AsNoTracking().Select(s => new { s.ConfirmedAt }).FirstOrDefaultAsync(ct);
+            if (stored?.ConfirmedAt is not null) throw AlreadyConfirmed();
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Code"] = "Setup was started again in another window. Scan the new QR code and enter a code from it."
+            });
+        }
         // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
         user.TotpEnabled = true;
         await _db.SaveChangesAsync(ct);
-
-        return await _recoveryCodes.RegenerateAsync(userId, ct);
+        // Inside the same transaction, so setup is never left on without codes.
+        var codes = await _recoveryCodes.RegenerateAsync(userId, ct);
+        await tx.CommitAsync(ct);
+        return codes;
     }
+
+    private static PlanValidationException AlreadyConfirmed() => new(new Dictionary<string, string>
+    {
+        ["Totp"] = "The authenticator app is already turned on. If you didn't see your recovery codes, generate new ones below."
+    });
 
     /// <summary>
     /// Verifies a code against the user's confirmed TOTP secret. Returns false
@@ -199,12 +219,23 @@ public sealed class TotpService
         await _db.SaveChangesAsync(ct);
     }
 
+    /// <summary>
+    /// Whether <paramref name="code"/> has the shape of an authenticator code: six
+    /// digits, spaces ignored. Anything else cannot match, so the sign-in challenge
+    /// checks this before it takes one of the person's limited guesses.
+    /// </summary>
+    public static bool IsWellFormed(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return false;
+        var trimmed = code.Replace(" ", "").Trim();
+        return trimmed.Length == 6 && trimmed.All(char.IsDigit);
+    }
+
     /// <summary>The matched time step, or null when the code does not match.</summary>
     private long? VerifyCode(string secretBase32, string code)
     {
-        if (string.IsNullOrWhiteSpace(code)) return null;
+        if (!IsWellFormed(code)) return null;
         var trimmed = code.Replace(" ", "").Trim();
-        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return null;
         var secretBytes = Base32Encoding.ToBytes(secretBase32);
         var totp = new Totp(secretBytes);
         // VerificationWindow.RfcSpecifiedNetworkDelay accepts the current step

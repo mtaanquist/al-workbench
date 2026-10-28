@@ -188,6 +188,85 @@ public sealed class TotpServiceTests : IDisposable
             .Should().BeEquivalentTo(before, "the owner's codes must survive");
     }
 
+    /// <summary>
+    /// Two confirms posted together during first setup (a double-click). The second one
+    /// lands after the first has read the setup as unconfirmed and before it writes, so
+    /// only a claim made in the write can see it. Exactly one of them may issue recovery
+    /// codes, or the browser shows a set that is not the one stored.
+    /// </summary>
+    [Fact]
+    public async Task Two_confirms_at_once_issue_recovery_codes_once()
+    {
+        var userId = await SeedUserAsync();
+        TotpEnrollment enrollment;
+        await using (var ctx = _db.NewContext())
+        {
+            enrollment = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        }
+        var code = CodeAt(enrollment.SecretBase32, _clock.GetUtcNow());
+
+        IReadOnlyList<string>? shown = null;
+        // The first write to the setup row, sent as a statement or a query.
+        var otherConfirmFirst = new BeforeCommand(
+            sql => sql.Contains("UPDATE") && sql.Contains("user_totp_secrets"),
+            async () =>
+            {
+                await using var other = _db.NewContext();
+                shown = await NewTotp(other).ConfirmEnrollmentAsync(userId, code);
+            });
+
+        await using (var ctx = _db.NewContext(otherConfirmFirst))
+        {
+            var act = () => NewTotp(ctx).ConfirmEnrollmentAsync(userId, code);
+            (await act.Should().ThrowAsync<PlanValidationException>(
+                "the other confirm already turned the app on")).Which.Errors.Should().ContainKey("Totp");
+        }
+
+        otherConfirmFirst.Fired.Should().BeTrue("the other confirm has to land in the window under test");
+        shown.Should().NotBeNull();
+        await using var verify = _db.NewContext();
+        (await NewRecovery(verify).ConsumeAsync(userId, shown![0]))
+            .Should().BeTrue("the codes the browser showed are the ones stored");
+    }
+
+    /// <summary>
+    /// Setup started again in another tab after this confirm checked its code and
+    /// before it wrote. The code matched the old secret, so it must not turn the
+    /// new one on: the person's app holds the old seed and would never sign in.
+    /// </summary>
+    [Fact]
+    public async Task A_confirm_does_not_turn_on_a_secret_replaced_after_its_code_was_checked()
+    {
+        var userId = await SeedUserAsync();
+        TotpEnrollment first;
+        await using (var ctx = _db.NewContext())
+        {
+            first = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        }
+        var code = CodeAt(first.SecretBase32, _clock.GetUtcNow());
+
+        var restartFirst = new BeforeCommand(
+            sql => sql.Contains("UPDATE") && sql.Contains("user_totp_secrets"),
+            async () =>
+            {
+                await using var other = _db.NewContext();
+                await NewTotp(other).BeginEnrollmentAsync(userId);
+            });
+
+        await using (var ctx = _db.NewContext(restartFirst))
+        {
+            var act = () => NewTotp(ctx).ConfirmEnrollmentAsync(userId, code);
+            (await act.Should().ThrowAsync<PlanValidationException>(
+                "the code was for a secret that is no longer stored")).Which.Errors.Should().ContainKey("Code");
+        }
+
+        restartFirst.Fired.Should().BeTrue("the restart has to land in the window under test");
+        await using var verify = _db.NewContext();
+        (await verify.UserTotpSecrets.IgnoreQueryFilters().SingleAsync(s => s.UserId == userId))
+            .ConfirmedAt.Should().BeNull("the new secret never reached an authenticator");
+        (await verify.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeFalse();
+    }
+
     [Fact]
     public async Task The_code_used_to_sign_in_cannot_confirm_setup_again()
     {

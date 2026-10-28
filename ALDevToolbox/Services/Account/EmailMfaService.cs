@@ -92,14 +92,26 @@ public sealed class EmailMfaService
     }
 
     /// <summary>
+    /// Whether <paramref name="code"/> has the shape of an emailed code: six digits,
+    /// spaces ignored. Anything else cannot match, so the sign-in challenge checks this
+    /// before it takes one of the person's limited guesses: an empty box or a typo is
+    /// not a guess at the code.
+    /// </summary>
+    public static bool IsWellFormed(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return false;
+        var trimmed = code.Replace(" ", "").Trim();
+        return trimmed.Length == 6 && trimmed.All(char.IsDigit);
+    }
+
+    /// <summary>
     /// Consumes a code; returns true on first valid match. Single-use is
     /// enforced via <c>ConsumedAt</c>.
     /// </summary>
     public async Task<bool> VerifyAsync(int userId, string code, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(code)) return false;
+        if (!IsWellFormed(code)) return false;
         var trimmed = code.Replace(" ", "").Trim();
-        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return false;
         var now = _clock.GetUtcNow().UtcDateTime;
         var hash = HashCode(trimmed, userId);
 
