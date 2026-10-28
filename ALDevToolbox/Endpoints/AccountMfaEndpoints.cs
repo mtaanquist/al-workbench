@@ -37,6 +37,15 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresTotp: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // A code that is not six digits cannot be right, so it is turned away
+            // before it takes a guess: a few typos must not lock the person out.
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var code = form["Code"].ToString();
+            if (!TotpService.IsWellFormed(code))
+            {
+                ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=invalid");
+                return;
+            }
             // Brute-force guard: the attacker already has the password (that's
             // how they reached the challenge), so cap wrong second-factor
             // guesses. The attempt is taken before verifying, so parallel
@@ -47,8 +56,6 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
             }
-            var form = await ctx.Request.ReadFormAsync(ct);
-            var code = form["Code"].ToString();
             if (!await totp.VerifyAsync(state.UserId, code, ct))
             {
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=invalid");
@@ -145,6 +152,14 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresTotp: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // Turned away before it takes a guess, as on the TOTP path.
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var code = form["Code"].ToString();
+            if (!RecoveryCodeService.IsWellFormed(code))
+            {
+                ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=invalid");
+                return;
+            }
             // Same brute-force guard as the TOTP path — recovery codes are a
             // longer but still finite space, and the counter is shared so an
             // attacker can't dodge it by alternating methods. See #477.
@@ -154,8 +169,6 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
             }
-            var form = await ctx.Request.ReadFormAsync(ct);
-            var code = form["Code"].ToString();
             if (!await recovery.ConsumeAsync(state.UserId, code, ct))
             {
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=invalid");

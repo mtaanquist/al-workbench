@@ -60,12 +60,48 @@ public sealed class MfaEndpointTests : IDisposable
 
         for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
         {
-            using var wrong = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", "AAAA-BBBB"));
+            using var wrong = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", "AAAAA-BBBBB"));
             wrong.Headers.Location!.OriginalString.Should().Contain("err=invalid");
         }
 
         using var right = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", recoveryCodes[0]));
         right.Headers.Location!.OriginalString.Should().Contain("err=too-many-attempts");
+    }
+
+    [Fact]
+    public async Task A_typo_shaped_totp_code_does_not_count_toward_the_lockout()
+    {
+        const string email = "typo-totp@cronus.example";
+        await SeedTotpUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+
+        // The shared counter covers every second-factor method, so typos here would
+        // lock the person out of recovery codes too.
+        foreach (var typo in new[] { "", "12345", "abcdef", "1234567", "12345" })
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/totp", token, ("Code", typo));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+
+        (await CountFailedAttemptsAsync(email)).Should().Be(0, "a code that cannot be right is not a guess");
+    }
+
+    [Fact]
+    public async Task A_typo_shaped_recovery_code_does_not_count_toward_the_lockout()
+    {
+        const string email = "typo-recovery@cronus.example";
+        var (_, _, recoveryCodes) = await SeedTotpUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+
+        foreach (var typo in new[] { "", "AAAA-BBBB", "AAAAA-BBBBBB", "-", "AAAAA" })
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", typo));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        (await CountFailedAttemptsAsync(email)).Should().Be(0, "a code that cannot be right is not a guess");
+
+        using var right = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", recoveryCodes[0]));
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
     }
 
     [Fact]
