@@ -167,11 +167,10 @@ public sealed class PasswordResetService
             $"SELECT 1 FROM users WHERE id = {row.UserId} FOR UPDATE", ct);
         // The account checks run on the row as it stands under the lock, not as
         // it was read above, so a disable that lands between the two still
-        // refuses the reset. The lock does not cover the Microsoft-only policy,
-        // which lives on organization_settings: a policy change can still land
-        // after this check and before the commit.
-        // Fence category 1 (pre-auth routing): the reload reads past the org filter by
-        // primary key, pinned to the user on the token row found by its hash.
+        // refuses the reset.
+        // Not a fence site: EF reloads a tracked entity by its primary key and
+        // applies no query filter to it, so no explicit bypass is written here.
+        // The key is the user on the token row found by its hash.
         await _db.Entry(row.User).ReloadAsync(ct);
         if (row.User.Status != UserStatus.Active)
         {
@@ -183,7 +182,14 @@ public sealed class PasswordResetService
         }
         // The org may have gone Microsoft-only between issue and consume, as
         // the magic-link consume also checks: a password set now would come
-        // back to life if the policy were relaxed later.
+        // back to life if the policy were relaxed later. The policy lives on
+        // organization_settings, so its row is held FOR SHARE until the commit:
+        // a switch to Microsoft-only made after this check waits for the reset
+        // to finish instead of landing before it. (An org that has never saved
+        // its settings has no row to hold; its first save is an insert.)
+        // Raw SQL pinned to the organisation of the user locked above.
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM organization_settings WHERE organization_id = {row.User.OrganizationId} FOR SHARE", ct);
         if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MicrosoftOnlyMessage });

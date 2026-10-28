@@ -187,6 +187,14 @@ public sealed class EndpointAuthorizationMetadataTests : IDisposable
         && (e.Metadata.GetOrderedMetadata<IAuthorizeData>().Any()
             || e.Metadata.GetOrderedMetadata<AuthorizationPolicy>().Any());
 
+    /// <summary>
+    /// The roles an endpoint names, read deliberately conservatively: the union over
+    /// every role requirement, though ASP.NET Core makes each requirement pass in turn,
+    /// so the roles that really get in are the intersection. The union is never
+    /// narrower than the truth, so a check that refuses a role outside the allowed set
+    /// can raise a false alarm on an endpoint that stacks requirements, but cannot pass
+    /// one that lets in more than it reports.
+    /// </summary>
     private static HashSet<string> AllowedRoles(RouteEndpoint endpoint)
     {
         var roles = new HashSet<string>(StringComparer.Ordinal);

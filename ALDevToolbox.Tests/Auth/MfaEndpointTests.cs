@@ -115,6 +115,26 @@ public sealed class MfaEndpointTests : IDisposable
         (await CountFailedAttemptsAsync(email)).Should().Be(failuresBefore, "a right code is not a failed attempt");
     }
 
+    [Fact]
+    public async Task A_typo_shaped_email_code_does_not_count_toward_the_lockout()
+    {
+        const string email = "typo-email@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+        var code = await IssueEmailCodeAsync(userId);
+
+        // An empty box, a short code and letters are typos, not guesses at the code.
+        foreach (var typo in new[] { "", "12345", "abcdef", "1234567" })
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", typo));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        (await CountFailedAttemptsAsync(email)).Should().Be(0, "a code that cannot be right is not a guess");
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
+    }
+
     private async Task<int> CountFailedAttemptsAsync(string email)
     {
         await using var read = _db.NewContext();

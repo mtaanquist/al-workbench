@@ -606,7 +606,8 @@ public sealed class AccountServiceTests : IDisposable
         {
             token = (await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("racing@example.com", "10.0.0.1"))!;
         }
-        var disableBeforeLock = new BeforeUserLock(async () =>
+        // Just before the consume takes its user-row lock, sent as a statement or a query.
+        var disableBeforeLock = new BeforeCommand(sql => sql.Contains("FOR UPDATE"), async () =>
         {
             await using var disable = _db.NewContext();
             await disable.Users.IgnoreQueryFilters().Where(u => u.Email == "racing@example.com")
@@ -633,44 +634,6 @@ public sealed class AccountServiceTests : IDisposable
         var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "racing@example.com");
         NewAuth(read).VerifyPassword("somelongpassword1", user.PasswordHash)
             .Should().BeTrue("a disabled account must keep its old password");
-    }
-
-    /// <summary>
-    /// Runs a callback once, just before the consume takes its user-row lock,
-    /// whether the lock is sent as a statement or as a query.
-    /// </summary>
-    private sealed class BeforeUserLock : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
-    {
-        private readonly Func<Task> _callback;
-        public BeforeUserLock(Func<Task> callback) => _callback = callback;
-        public bool Fired { get; private set; }
-
-        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
-            System.Data.Common.DbCommand command,
-            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
-            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
-            CancellationToken cancellationToken = default)
-        {
-            await FireBeforeLockAsync(command);
-            return result;
-        }
-
-        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
-            System.Data.Common.DbCommand command,
-            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
-            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result,
-            CancellationToken cancellationToken = default)
-        {
-            await FireBeforeLockAsync(command);
-            return result;
-        }
-
-        private async Task FireBeforeLockAsync(System.Data.Common.DbCommand command)
-        {
-            if (Fired || !command.CommandText.Contains("FOR UPDATE")) return;
-            Fired = true;
-            await _callback();
-        }
     }
 
     [Fact]

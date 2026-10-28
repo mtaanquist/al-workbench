@@ -1110,6 +1110,7 @@ public sealed class EnvironmentsListTests : IAsyncDisposable
             cut.Find("input[type=search]").GetAttribute("value").Should().Be("CRONUS D"));
         clock.PendingTimers.Should().Be(waitingBefore + 1, "each keystroke drops the wait of the one before");
         clock.Advance(TimeSpan.FromMilliseconds(299));
+        clock.PendingTimers.Should().Be(waitingBefore + 1, "the typing has not paused for the whole wait yet");
         cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
         clock.Advance(TimeSpan.FromMilliseconds(1));

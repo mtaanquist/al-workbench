@@ -412,16 +412,33 @@ public sealed class ReleaseVisibilityTests : IDisposable
         await LinkByBuildAsync(projectId, seeded.ReleaseId);
         var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
 
+        // The same reads, in the same order, as the non-member test above: each empty
+        // answer there is only proof of the fence if the same call answers here.
         ActAs(MemberUserId);
         await using (var ctx = _db.NewContext())
         {
             (await Explorer(ctx).GetReleaseAsync(seeded.ReleaseId)).Should().NotBeNull();
             (await Explorer(ctx).ListModulesAsync(seeded.ReleaseId, new ModuleListFilter())).Should().ContainSingle();
+            (await Explorer(ctx).ListModuleSummariesAsync(seeded.ReleaseId)).Should().ContainSingle();
+            (await Explorer(ctx).ListObjectsAsync(seeded.ModuleId, new ObjectListFilter(), 0, 50)).Rows.Should().ContainSingle();
             (await Explorer(ctx).GetObjectAsync(seeded.ObjectId)).Should().NotBeNull();
+            (await Explorer(ctx).GetObjectOutlineAsync(seeded.ReleaseId, "table", "Loyalty Card")).Should().NotBeNull();
+
             (await Search(ctx).SearchObjectsInReleaseAsync(
                 seeded.ReleaseId, new ObjectListFilter(Search: "Loyalty"))).Should().ContainSingle();
+            (await Search(ctx).ListObjectKindsInReleaseAsync(seeded.ReleaseId)).Should().NotBeEmpty();
+
             (await Viewer(ctx).GetFileAsync(seeded.FileId)).Should().NotBeNull();
+            (await Viewer(ctx).GetFileHeaderAsync(seeded.FileId)).Should().NotBeNull();
+            (await Tree(ctx).ListModuleFilesAsync(seeded.ModuleId)).Should().NotBeEmpty();
+            (await Tree(ctx).SearchTreeAsync(seeded.ReleaseId, "Loyalty")).Should().NotBeEmpty();
+
             (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Rows.Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleasesAsync(open.ReleaseId, seeded.ReleaseId)).Should().NotBeNull();
+            (await Comparison(ctx).FindObjectFileInReleaseAsync(seeded.ReleaseId, "table", 50100, "Loyalty Card"))
+                .Should().NotBeNull();
+
             (await Explorer(ctx).ListLatestPipelineBuildReleasesAsync())
                 .Should().ContainSingle(r => r.Id == seeded.ReleaseId);
         }

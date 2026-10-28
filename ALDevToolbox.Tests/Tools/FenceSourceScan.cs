@@ -240,9 +240,11 @@ internal static class FenceSourceScan
     /// that line, or the run of pure comment lines ending within the three lines
     /// above it (the shape CLAUDE.md asks for). <c>null</c> when there is none.
     /// A justification that wraps, or sits under a longer remark, reads as one
-    /// comment.
+    /// comment. The search upward stops at a blank line and at a line
+    /// <paramref name="isSite"/> says is another fence call, so a second call
+    /// cannot borrow the comment written for the first.
     /// </summary>
-    public static string? JustifyingComment(IReadOnlyList<Line> lines, int index)
+    public static string? JustifyingComment(IReadOnlyList<Line> lines, int index, Func<Line, bool> isSite)
     {
         var text = new StringBuilder(lines[index].HasComment ? lines[index].Comment : string.Empty);
         var documented = lines[index].HasComment;
@@ -250,6 +252,8 @@ internal static class FenceSourceScan
         for (var k = index - 1; k >= Math.Max(0, index - 3); k--)
         {
             if (lines[k].IsPureComment) { nearest = k; break; }
+            if (!lines[k].HasComment && lines[k].Code.Trim().Length == 0) break;
+            if (isSite(lines[k])) break;
         }
         if (nearest >= 0)
         {
@@ -324,7 +328,8 @@ internal static class FenceSourceScan
     /// Compares sites found (file, member, the lines they sit on) with a
     /// reviewed baseline of counts, as the fence baselines do. Each problem
     /// names the lines, and a file whose total is unchanged but whose members
-    /// moved is reported once, as a likely rename, with the entry to paste.
+    /// moved is reported once, as a rename or a move, with the advice for a
+    /// move and the entry to paste.
     /// </summary>
     public static List<string> CompareWithBaseline(
         IReadOnlyDictionary<string, Dictionary<string, List<int>>> found,
@@ -355,7 +360,8 @@ internal static class FenceSourceScan
             if (reviewed.Count > 0 && totalNow == reviewed.Values.Sum())
             {
                 problems.Add(
-                    $"{path}: still {totalNow} site(s), but under different members - member renamed? move the entry. " +
+                    $"{path}: still {totalNow} site(s), but under different members - renamed, or moved to another member? " +
+                    $"A rename only needs the entry moved. A move is a change to the fence: {grewAdvice} " +
                     string.Join("; ", changed.Select(Describe)) + $". Regenerated entry: {entry}");
                 continue;
             }

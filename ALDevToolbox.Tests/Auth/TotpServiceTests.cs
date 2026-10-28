@@ -188,6 +188,47 @@ public sealed class TotpServiceTests : IDisposable
             .Should().BeEquivalentTo(before, "the owner's codes must survive");
     }
 
+    /// <summary>
+    /// Two confirms posted together during first setup (a double-click). The second one
+    /// lands after the first has read the setup as unconfirmed and before it writes, so
+    /// only a claim made in the write can see it. Exactly one of them may issue recovery
+    /// codes, or the browser shows a set that is not the one stored.
+    /// </summary>
+    [Fact]
+    public async Task Two_confirms_at_once_issue_recovery_codes_once()
+    {
+        var userId = await SeedUserAsync();
+        TotpEnrollment enrollment;
+        await using (var ctx = _db.NewContext())
+        {
+            enrollment = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        }
+        var code = CodeAt(enrollment.SecretBase32, _clock.GetUtcNow());
+
+        IReadOnlyList<string>? shown = null;
+        // The first write to the setup row, sent as a statement or a query.
+        var otherConfirmFirst = new BeforeCommand(
+            sql => sql.Contains("UPDATE") && sql.Contains("user_totp_secrets"),
+            async () =>
+            {
+                await using var other = _db.NewContext();
+                shown = await NewTotp(other).ConfirmEnrollmentAsync(userId, code);
+            });
+
+        await using (var ctx = _db.NewContext(otherConfirmFirst))
+        {
+            var act = () => NewTotp(ctx).ConfirmEnrollmentAsync(userId, code);
+            (await act.Should().ThrowAsync<PlanValidationException>(
+                "the other confirm already turned the app on")).Which.Errors.Should().ContainKey("Totp");
+        }
+
+        otherConfirmFirst.Fired.Should().BeTrue("the other confirm has to land in the window under test");
+        shown.Should().NotBeNull();
+        await using var verify = _db.NewContext();
+        (await NewRecovery(verify).ConsumeAsync(userId, shown![0]))
+            .Should().BeTrue("the codes the browser showed are the ones stored");
+    }
+
     [Fact]
     public async Task The_code_used_to_sign_in_cannot_confirm_setup_again()
     {

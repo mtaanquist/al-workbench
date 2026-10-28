@@ -108,6 +108,15 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresEmail: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // A code that is not six digits cannot be right, so it is turned away
+            // before it takes a guess: a few typos must not lock the person out.
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var code = form["Code"].ToString();
+            if (!EmailMfaService.IsWellFormed(code))
+            {
+                ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=invalid");
+                return;
+            }
             // Same shared counter as the TOTP and recovery challenges. Sending a
             // new email code gives that code fresh guesses (#1432), so the email
             // service's own cap alone would let re-sends keep guessing; this one
@@ -118,8 +127,6 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
             }
-            var form = await ctx.Request.ReadFormAsync(ct);
-            var code = form["Code"].ToString();
             if (!await mfa.VerifyAsync(state.UserId, code, ct))
             {
                 ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=invalid");

@@ -1079,7 +1079,7 @@
     // answered by then isn't going to, and a page left open overnight must not poll
     // forever.
 
-    private System.Threading.Timer? _poll;
+    private ITimer? _poll;
     private DateTime _pollUntilUtc;
 
     private static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(20);
@@ -1092,8 +1092,8 @@
         if (_calls.IsGone) return;
         // "Refresh restarts it": a watch that gave up may join again on the reload.
         _watch.ForgetStopped();
-        _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
+        _pollUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(PollFor);
+        _poll = Clock.CreateTimer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
     private void StopPolling()
@@ -1108,7 +1108,7 @@
 
     private async Task PollTickAsync()
     {
-        if (_calls.IsGone || DateTime.UtcNow > _pollUntilUtc)
+        if (_calls.IsGone || Clock.GetUtcNow().UtcDateTime > _pollUntilUtc)
         {
             StopPolling();
             return;

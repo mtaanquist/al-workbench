@@ -743,7 +743,8 @@ public sealed class DeliveryServiceTests : IDisposable
             await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTimeZone, "Europe/Copenhagen"));
             await SetWindowAsync(ctx, seed.EnvironmentId, start, end);
-            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            // Scheduled on the clock the run below reads, so no step of the test sees today.
+            deliveryId = await NewService(ctx, clock: clock).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, utcNow.AddHours(1));
             await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(d => d.ScheduledFor, utcNow.AddMinutes(-90))
