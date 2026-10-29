@@ -18,8 +18,9 @@ project thread "One-time secret sharing links".
 - The sender can open their own link to check what they sent without using up a view
   (asked for by Mads on 2026-10-29). They need the whole link and the passphrase like
   anyone else, and must be signed in to the organisation as the person who created it.
-  Nothing is counted, recorded or notified; a wrong passphrase still counts towards the
-  lockout.
+  Their look is not counted, recorded or notified. A wrong passphrase is recorded and
+  counts towards the lockout like anyone else's. If they were signed out between loading
+  the page and pressing Show secret, the reveal is refused rather than spending a view.
 - The sender sees their links on `/sealed`: opened how many times, when and from which
   address, and whether it is still open. Admins can switch to everyone's links in the
   organisation and revoke any of them. Closed links disappear from the list 30 days after
@@ -62,6 +63,9 @@ The server never sees the secret or the key.
    sign-in cookie with the reveal only when the page says the viewer is the creator;
    otherwise it stays `credentials: "omit"`. The key is still only in the link: a
    creator who has lost the link cannot see the secret, from the list or anywhere else.
+   The cost: someone holding both the link and the creator's signed-in session reads the
+   secret without the sender being told. A stolen session is already a serious breach;
+   the passphrase still guards against it.
 8. The reveal endpoint is anonymous, rate limited to 20 requests per address per 10
    minutes, takes a body of at most 1 KB and answers `Cache-Control: no-store`. The
    recipient page sets `noindex` and `no-referrer`.

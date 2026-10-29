@@ -159,6 +159,37 @@ public sealed class SealedLinkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_creator_look_after_signing_out_is_refused_without_spending_the_view()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+        SignOut();
+
+        var result = await Service().RevealAsync(token, input.LinkCheck, null, null, asCreator: true);
+
+        result.Status.Should().Be(SealedRevealStatus.NotCreator);
+        result.Ciphertext.Should().BeNull();
+        var link = await ReadLinkAsync();
+        link.ViewCount.Should().Be(0, "the page promised the creator a free look, so nothing may be spent");
+        link.ClosedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_creator_gets_nothing_from_a_wrong_link_or_a_closed_one()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+
+        (await Service().RevealAsync(token, B64(32), null, null, asCreator: true)).Status.Should().Be(SealedRevealStatus.Gone);
+        await Service().RevokeAsync((await Service().ListAsync()).Single().Id);
+
+        (await Service().GetForRecipientAsync(token)).Should().BeNull();
+        (await Service().RevealAsync(token, input.LinkCheck, null, null, asCreator: true)).Status.Should().Be(SealedRevealStatus.Gone);
+    }
+
+    [Fact]
     public async Task Someone_else_signed_in_spends_a_view_like_any_recipient()
     {
         var alex = await SignInAsync("alex@cronus.example");

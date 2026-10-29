@@ -52,6 +52,7 @@ else
                                 @(_summary.ViewsLeft == 1
                                     ? "The person you send it to can still open it once."
                                     : $"The people you send it to can still open it {_summary.ViewsLeft} times.")
+                                It expires <span data-sealed-local-time="@_summary.ExpiresAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)"><Timestamp Value="@_summary.ExpiresAt" Format="d MMM yyyy 'at' HH:mm" /></span>.
                             </p>
                         }
                         else
@@ -73,7 +74,9 @@ else
                                 <label class="field__label" for="sealed-passphrase">Passphrase</label>
                                 <input class="input" id="sealed-passphrase" type="text" autocomplete="off" autocapitalize="off"
                                        autocorrect="off" spellcheck="false" data-sealed-passphrase />
-                                <span class="field__hint">The sender should have given you this separately, for example by phone. Capital letters count.</span>
+                                <span class="field__hint">@(_summary.OpenedByCreator
+                                    ? "The passphrase you chose when you created the link. Capital letters count."
+                                    : "The sender should have given you this separately, for example by phone. Capital letters count.")</span>
                             </div>
                         }
                         <div data-sealed-error hidden>
@@ -88,7 +91,7 @@ else
 
                 <div data-sealed-state="revealed" hidden>
                     <div class="auth__head">
-                        <h1 class="auth__title">Your secret from @_summary.OrganizationName</h1>
+                        <h1 class="auth__title">@(_summary.OpenedByCreator ? "The secret you sent" : $"Your secret from {_summary.OrganizationName}")</h1>
                         <p class="auth__sub" data-sealed-left></p>
                     </div>
                     <textarea class="textarea textarea--code" rows="4" readonly spellcheck="false"

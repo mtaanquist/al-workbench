@@ -66,6 +66,8 @@ public enum SealedRevealStatus
     WrongPassphrase,
     /// <summary>That wrong passphrase was the last one allowed: the link is now closed.</summary>
     LockedOut,
+    /// <summary>The page offered the creator a free look, but the caller is no longer signed in as them. Nothing was spent.</summary>
+    NotCreator,
 }
 
 /// <summary>The outcome of <see cref="SealedLinkService.RevealAsync"/>.</summary>
@@ -373,8 +375,14 @@ public sealed class SealedLinkService
     /// counts towards the lockout like anyone else's.</para>
     /// </summary>
     /// <param name="ipAddress">The recipient's address, recorded for the sender.</param>
+    /// <param name="asCreator">
+    /// The page told the caller they are the creator. If the sign-in has gone since
+    /// (signed out in another tab, the session ended), refuse instead of spending the
+    /// view the page promised to keep.
+    /// </param>
     public async Task<SealedRevealResult> RevealAsync(
-        string token, string? linkCheck, string? passphraseCheck, string? ipAddress, CancellationToken ct = default)
+        string token, string? linkCheck, string? passphraseCheck, string? ipAddress, bool asCreator = false,
+        CancellationToken ct = default)
     {
         var gone = new SealedRevealResult(SealedRevealStatus.Gone);
         if (!IsWellFormedToken(token)) return gone;
@@ -420,6 +428,7 @@ public sealed class SealedLinkService
                 SealedRevealStatus.Revealed, link.Ciphertext, link.Iv,
                 ViewsLeft: link.MaxViews - link.ViewCount, ByCreator: true);
         }
+        if (asCreator) return new SealedRevealResult(SealedRevealStatus.NotCreator);
 
         // Taking the view and, on the last one, closing the link and dropping the
         // ciphertext is one statement: a request aborted in between cannot leave a

@@ -233,6 +233,7 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     check: toB64u(keys.linkCheck),
+                    asCreator: root.hasAttribute("data-creator"),
                     passphrase: keys.passphraseCheck ? toB64u(keys.passphraseCheck) : null,
                 }),
                 cache: "no-store",
@@ -254,6 +255,10 @@
                 return;
             }
             if (res.status === 403 && body.error === "locked") { show(root, "locked"); return; }
+            if (res.status === 409 && body.error === "not-creator") {
+                say(root, "You are no longer signed in as the person who created this link, so nothing was shown and no view was used. Sign in again and reload this page.");
+                return;
+            }
             if (!res.ok) { show(root, "gone"); return; }
 
             const plain = await crypto.subtle.decrypt(
