@@ -42,6 +42,7 @@ internal static class SealedEndpoints
                     ciphertext = Base64Url.EncodeToString(result.Ciphertext!),
                     iv = Base64Url.EncodeToString(result.Iv!),
                     viewsLeft = result.ViewsLeft,
+                    creator = result.ByCreator,
                 }),
                 SealedRevealStatus.WrongPassphrase => Results.Json(
                     new { error = "wrong-passphrase", attemptsLeft = result.AttemptsLeft },
