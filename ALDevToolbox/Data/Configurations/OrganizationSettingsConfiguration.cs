@@ -135,6 +135,9 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
         entity.Property(e => e.DefaultDeliveryWindowProductionEnd).HasColumnName("default_delivery_window_production_end");
         entity.Property(e => e.DefaultDeliveryWindowSandboxStart).HasColumnName("default_delivery_window_sandbox_start");
         entity.Property(e => e.DefaultDeliveryWindowSandboxEnd).HasColumnName("default_delivery_window_sandbox_end");
+        // How often the environment sweep runs for this org; 1440 is once a day.
+        entity.Property(e => e.EnvironmentRefreshIntervalMinutes)
+            .HasColumnName("environment_refresh_interval_minutes").IsRequired().HasDefaultValue(1440);
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.HasIndex(e => e.OrganizationId).IsUnique();
         entity.HasOne(e => e.Organization)

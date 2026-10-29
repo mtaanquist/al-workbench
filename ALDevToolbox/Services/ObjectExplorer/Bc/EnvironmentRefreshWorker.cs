@@ -30,8 +30,9 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         ILogger<EnvironmentRefreshWorker> logger,
         WorkerHeartbeatRegistry heartbeats,
         // Optional so a worker built by hand keeps compiling; production DI always
-        // supplies the singleton.
-        Operations.MaintenanceModeState? maintenance = null)
+        // supplies the singletons.
+        Operations.MaintenanceModeState? maintenance = null,
+        TimeProvider? clock = null)
         // One project is a token call plus two admin-center calls per environment, so 15
         // minutes is ample even for a customer with many sandboxes while still catching a
         // wedged job.
@@ -41,9 +42,11 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         _services = services;
         _logger = logger;
         _maintenance = maintenance;
+        _clock = clock ?? TimeProvider.System;
     }
 
     private readonly Operations.MaintenanceModeState? _maintenance;
+    private readonly TimeProvider _clock;
 
     /// <summary>
     /// A breath between one customer and the next. The sweep is a run of back-to-back
@@ -80,6 +83,22 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         var result = await connections.RefreshEnvironmentsUnattendedAsync(job.ProjectId, ct).ConfigureAwait(false);
         _runSolutions++;
         _runRequests += 2 + (result.IsSuccess ? 2 + 3 * result.EnvironmentCount : 0);
+
+        // Business Central asked us to slow down for this customer. The scheduled sweep
+        // leaves them alone until the wait has passed, however often it runs.
+        var pause = PauseBetweenSolutions;
+        if (result.RetryAfter is { } wait)
+        {
+            _queue.DeferUntil(job.ProjectId, _clock.GetUtcNow().UtcDateTime + wait);
+            _logger.LogWarning(
+                "Business Central asked us to wait {Wait} before asking about project {ProjectId} again; the scheduled refresh skips it until then.",
+                wait, job.ProjectId);
+            // And a longer breath before the next customer, in case the limit is on our
+            // side of the conversation (one app registration serves many customers)
+            // rather than theirs. Bounded, so one customer cannot hold up the rest.
+            var breath = wait < BcThrottleHandler.MaxWait ? wait : BcThrottleHandler.MaxWait;
+            if (breath > pause) pause = breath;
+        }
         if (result.IsSuccess)
         {
             _logger.LogInformation(
@@ -103,9 +122,9 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
             _runSolutions = 0;
             _runRequests = 0;
         }
-        else if (PauseBetweenSolutions > TimeSpan.Zero)
+        else if (pause > TimeSpan.Zero)
         {
-            await Task.Delay(PauseBetweenSolutions, ct).ConfigureAwait(false);
+            await Task.Delay(pause, ct).ConfigureAwait(false);
         }
     }
 

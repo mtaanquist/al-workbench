@@ -566,9 +566,9 @@ panel's **Refresh** re-reads past the cache for exactly that.
 The window is short on purpose. Nearly all the repeat traffic is one person expanding an
 environment, collapsing it, opening another and coming back; fifteen minutes collapses a
 working session into one fetch, where a longer TTL would mostly buy the *next* person
-tomorrow at a much worse staleness. It also matters that we honour no throttle: the BC
-clients have no `429`/`Retry-After` handling, so restraint in how often we ask is the only
-politeness we currently offer that API. The panel says how old its answer is rather than
+tomorrow at a much worse staleness. Restraint in how often we ask is the first politeness
+we offer that API; the second is that a throttled read is retried only after the
+`Retry-After` it named (see `environment-updates.md`, "Told to slow down"). The panel says how old its answer is rather than
 claiming freshness it does not have.
 
 There is still no background polling and no reconciler.
