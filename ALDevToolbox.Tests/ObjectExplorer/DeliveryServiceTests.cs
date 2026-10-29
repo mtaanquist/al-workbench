@@ -106,11 +106,90 @@ public sealed class DeliveryServiceTests : IDisposable
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
         await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
             .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Upgrading"));
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Upgrading" };
 
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
         var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironment"];
         error.Should().Contain("Upgrading", "the refusal names the status the consultant will see in Business Central");
+        _admin.Requested.Should().Equal(["Production"], "a refusing stored status is asked again before it turns anyone away");
+    }
+
+    [Fact]
+    public async Task ReleaseBuildNowAsync_does_not_ask_Business_Central_when_the_stored_status_is_active()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+
+        await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        _admin.Requested.Should().BeEmpty("only a refusing status is re-read; the run re-reads before uploading anyway");
+    }
+
+    /// <summary>A failed deployment whose environment was Preparing when last read.</summary>
+    private async Task<(Seed Seed, int FailedId)> FailedOnPreparingAsync()
+    {
+        var (seed, failedId) = await FailedReleaseAsync(new[] { "CRONUS Core" }, failOn: "CRONUS Core");
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Preparing"));
+        _admin.Requested.Clear();
+        return (seed, failedId);
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_rereads_a_Preparing_environment_and_deploys_once_it_is_active()
+    {
+        var (seed, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Active" };
+
+        var againId = await NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == againId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        _admin.Requested.Should().Equal(["Production"]);
+        var env = await read.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == seed.EnvironmentId);
+        env.Status.Should().Be("Active", "the environment's page shows what Business Central just said");
+        env.StatusFetchedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_still_refuses_an_environment_that_is_still_Preparing()
+    {
+        var (seed, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Preparing" };
+
+        var act = () => NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing right now").And.Contain("Wait for it to finish");
+        _admin.Requested.Should().Equal(["Production"]);
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.CountAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().Be(1, "nothing new was queued");
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_keeps_the_stored_refusal_when_Business_Central_cannot_be_asked()
+    {
+        var (_, failedId) = await FailedOnPreparingAsync();
+        _tokens.Throw = new BcApiException(null, "The Business Central client secret has expired.");
+
+        var act = () => NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing").And.Contain("couldn't be asked again just now");
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_says_so_when_the_environment_is_gone_from_Business_Central()
+    {
+        var (_, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = _ => null;
+
+        var act = () => NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("no longer has an environment called 'Production'");
     }
 
     [Fact]
