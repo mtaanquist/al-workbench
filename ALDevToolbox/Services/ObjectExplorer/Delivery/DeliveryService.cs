@@ -384,17 +384,33 @@ public sealed class DeliveryService
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(StatusRecheckTimeout);
 
+        BcDeliveryContext bc;
+        try
+        {
+            bc = await _tokens.AcquireDeliveryContextAsync(projectId, timeout.Token);
+        }
+        catch (BcApiException ex)
+        {
+            // The connection's own sentence (not set up, secret expired) says what to fix;
+            // waiting would not help, so it must not read as "try again".
+            _logger.LogWarning(ex, "Couldn't sign in to re-read environment {Env} (project {ProjectId}) before deploying.",
+                envName, projectId);
+            return ex.Message;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return CouldNotAsk();
+        }
+
         BcEnvironment? live;
         try
         {
-            var bc = await _tokens.AcquireDeliveryContextAsync(projectId, timeout.Token);
             live = await _admin.GetEnvironmentAsync(bc.AccessToken, applicationFamily, envName, timeout.Token);
         }
         catch (Exception ex) when (ex is BcApiException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
-            _logger.LogWarning("Couldn't re-read environment {Env} (project {ProjectId}) before deploying: {Message}.",
-                envName, projectId, ex.Message);
-            return storedRefusal + " Business Central couldn't be asked again just now, so this is the last status read. Try again in a moment.";
+            _logger.LogWarning(ex, "Couldn't re-read environment {Env} (project {ProjectId}) before deploying.", envName, projectId);
+            return CouldNotAsk();
         }
 
         if (live is null)
@@ -412,6 +428,9 @@ public sealed class DeliveryService
         _logger.LogInformation("Re-read environment {Env} (project {ProjectId}) before deploying: {Status}, {Outcome}.",
             envName, projectId, live.Status, refusal is null ? "deploying" : "still refused");
         return refusal;
+
+        string CouldNotAsk() =>
+            storedRefusal + " Business Central couldn't be asked again just now, so this is the last status read. Try again in a moment.";
     }
 
     /// <summary>

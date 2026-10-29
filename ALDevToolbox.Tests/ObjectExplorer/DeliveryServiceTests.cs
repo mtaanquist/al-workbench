@@ -143,7 +143,8 @@ public sealed class DeliveryServiceTests : IDisposable
         var (seed, failedId) = await FailedOnPreparingAsync();
         _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Active" };
 
-        var againId = await NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+        int againId;
+        await using (var ctx = _db.NewContext()) againId = await NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
 
         await using var read = _db.NewContext();
         (await read.OeProjectDeliveries.SingleAsync(d => d.Id == againId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
@@ -159,7 +160,8 @@ public sealed class DeliveryServiceTests : IDisposable
         var (seed, failedId) = await FailedOnPreparingAsync();
         _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Preparing" };
 
-        var act = () => NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing right now").And.Contain("Wait for it to finish");
@@ -169,15 +171,30 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ReleaseAgainAsync_keeps_the_stored_refusal_when_Business_Central_cannot_be_asked()
+    public async Task ReleaseAgainAsync_keeps_the_stored_refusal_when_Business_Central_does_not_answer()
+    {
+        var (_, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = _ => throw new BcApiException(null, "Couldn't reach the Admin Center API.");
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing").And.Contain("couldn't be asked again just now");
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_says_what_to_fix_when_the_connection_cannot_sign_in()
     {
         var (_, failedId) = await FailedOnPreparingAsync();
         _tokens.Throw = new BcApiException(null, "The Business Central client secret has expired.");
 
-        var act = () => NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing").And.Contain("couldn't be asked again just now");
+            .Which.Errors["ProjectEnvironment"].Should().Be("The Business Central client secret has expired.",
+                "waiting would never help, so the person is told what to fix rather than to try again");
     }
 
     [Fact]
@@ -186,7 +203,8 @@ public sealed class DeliveryServiceTests : IDisposable
         var (_, failedId) = await FailedOnPreparingAsync();
         _admin.OnGet = _ => null;
 
-        var act = () => NewService(_db.NewContext()).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors["ProjectEnvironment"].Should().Contain("no longer has an environment called 'Production'");
