@@ -521,7 +521,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         _logger.LogInformation("BC test connection succeeded for project {ProjectId}: {Count} environment(s).", projectId, environments.Count);
         return new BcConnectionTestResult(BcConnectionResult.Success, environments.Count,
-            environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.",
+            (environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.")
+            + (throttledFor is null ? "" : " Business Central asked us to slow down before every detail was read, so some show their previous answer."),
             throttledFor);
     }
 

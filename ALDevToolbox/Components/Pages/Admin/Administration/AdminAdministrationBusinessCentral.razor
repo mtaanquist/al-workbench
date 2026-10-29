@@ -84,7 +84,7 @@
             <div class="setting-list">
                 <SettingRow Name="Check environments">
                     <HintContent>
-                        Checking more often shows status changes and new update dates sooner. If Business Central asks us to slow down, that customer is left alone for as long as it asks.
+                        By default, environments are checked once a night. Checking more often shows status changes and new update dates sooner. If Business Central asks AL Workbench to wait, that customer's environments are checked again once the wait is over.
                     </HintContent>
                     <ChildContent>
                         <select id="org-bc-refresh-interval" class="input" style="max-width:260px" aria-label="Check environments"
@@ -366,7 +366,7 @@
             await OrgAdmin.SetEnvironmentRefreshIntervalAsync(_refreshInterval);
             _savedRefreshInterval = _refreshInterval;
             _refreshOk = _refreshInterval == EnvironmentRefreshInterval.DefaultMinutes
-                ? "Saved. Environments are checked once a day, at night."
+                ? "Saved. Environments are checked once a night."
                 : $"Saved. Environments are checked {EnvironmentRefreshInterval.Choices.First(c => c.Minutes == _refreshInterval).Label.ToLowerInvariant()}.";
         }
         catch (PlanValidationException ex)

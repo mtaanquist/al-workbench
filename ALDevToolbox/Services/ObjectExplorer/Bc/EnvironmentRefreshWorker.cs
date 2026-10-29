@@ -61,6 +61,14 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
     // and since when. Logged when the queue empties, so how long a night's sweep really
     // takes is a line in the log rather than an estimate.
     private int _runSolutions;
+    private int _runThrottleBreaths;
+
+    /// <summary>The longest a throttled customer is left out of the scheduled refresh.</summary>
+    internal static readonly TimeSpan MaxDeferral = TimeSpan.FromDays(1);
+
+    /// <summary>How many longer breaths after a throttled customer one run takes, at most.</summary>
+    internal const int MaxThrottleBreathsPerRun = 5;
+
     private int _runRequests;
     private long _runStarted;
 
@@ -87,8 +95,11 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         // Business Central asked us to slow down for this customer. The scheduled sweep
         // leaves them alone until the wait has passed, however often it runs.
         var pause = PauseBetweenSolutions;
-        if (result.RetryAfter is { } wait)
+        if (result.RetryAfter is { } asked)
         {
+            // A day at most: a nonsense Retry-After must not switch a customer off until
+            // the next restart.
+            var wait = asked > MaxDeferral ? MaxDeferral : asked;
             _queue.DeferUntil(job.ProjectId, _clock.GetUtcNow().UtcDateTime + wait);
             _logger.LogWarning(
                 "Business Central asked us to wait {Wait} before asking about project {ProjectId} again; the scheduled refresh skips it until then.",
@@ -96,8 +107,14 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
             // And a longer breath before the next customer, in case the limit is on our
             // side of the conversation (one app registration serves many customers)
             // rather than theirs. Bounded, so one customer cannot hold up the rest.
-            var breath = wait < BcThrottleHandler.MaxWait ? wait : BcThrottleHandler.MaxWait;
-            if (breath > pause) pause = breath;
+            // A few such breaths per run at most, so a registration throttled across the
+            // board costs minutes, not one per customer, before the morning jobs.
+            if (_runThrottleBreaths < MaxThrottleBreathsPerRun)
+            {
+                _runThrottleBreaths++;
+                var breath = wait < BcThrottleHandler.MaxWait ? wait : BcThrottleHandler.MaxWait;
+                if (breath > pause) pause = breath;
+            }
         }
         if (result.IsSuccess)
         {
@@ -121,6 +138,7 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
                 _runSolutions, _runRequests, System.Diagnostics.Stopwatch.GetElapsedTime(_runStarted));
             _runSolutions = 0;
             _runRequests = 0;
+            _runThrottleBreaths = 0;
         }
         else if (pause > TimeSpan.Zero)
         {

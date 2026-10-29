@@ -29,7 +29,7 @@ public static class EnvironmentRefreshInterval
         (360, "Every 6 hours"),
         (480, "Every 8 hours"),
         (720, "Every 12 hours"),
-        (DefaultMinutes, "Once a day, at night"),
+        (DefaultMinutes, "Once a night (default)"),
     ];
 
     public static bool IsAllowed(int minutes) => Choices.Any(c => c.Minutes == minutes);
