@@ -56,6 +56,16 @@ else
 {
     <AuthCard Title="Sign in with a link" FormAction="/auth/login/magic">
         <Sub>We'll email you a single-use link. No password needed.</Sub>
+        <Alerts>
+            @if (Error == "invalid")
+            {
+                @* A link that was already used or has expired lands here, so
+                   the message sits above the form that sends a new one. *@
+                <Alert Tone="AlertTone.Danger">
+                    <span>@(Message ?? "This sign-in link is no longer valid. Request a new one.")</span>
+                </Alert>
+            }
+        </Alerts>
         <ChildContent>
             <div class="auth__fields">
                 <div class="field">
@@ -78,4 +88,5 @@ else
 @code {
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
     [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
+    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
 }
