@@ -2259,6 +2259,65 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         verified.Should().BeNull("a sweep nobody asked for is not the consultant's own connection test");
     }
 
+    /// <summary>
+    /// Being told to slow down is neither a rejection nor a generic failure: the result
+    /// says so, in words, and carries the wait so the scheduled refresh can honour it.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_environment_list_reports_the_wait_it_was_given()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(10),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.Result.Should().Be(BcConnectionResult.Throttled);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(10));
+        result.Message.Should().Contain("slow down").And.Contain("10 minutes");
+    }
+
+    /// <summary>
+    /// Once Business Central has said slow down part-way through the detail reads, the
+    /// rest of that tenant's reads would only be refused too, so they are not sent. The
+    /// environment list itself was read, so the refresh still counts as a success.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_detail_read_stops_the_remaining_reads_and_reports_the_wait()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production"), new BcEnvironment("Sandbox", "Sandbox") },
+            OnUpdateSettings = _ => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(3),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.IsSuccess.Should().BeTrue("the environment list was read and saved");
+        result.EnvironmentCount.Should().Be(2);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(3));
+        admin.UpdateSettingsRequested.Should().ContainSingle("nothing more is asked of a tenant that said slow down");
+    }
+
     // ── The environment panel (live reads, never cached) ──────────────────
 
     /// <summary>Seeds a project with one environment and returns both ids.</summary>

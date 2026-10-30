@@ -457,6 +457,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh: true, ct);
         }
+        catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+        {
+            _logger.LogWarning("BC test connection: token step throttled for project {ProjectId}; asked to wait {Wait}.", projectId, wait);
+            return Throttled(wait);
+        }
         catch (BcApiException ex)
         {
             _logger.LogWarning("BC test connection: token step failed for project {ProjectId}: {Message}.", projectId, ex.Message);
@@ -468,6 +473,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         try
         {
             environments = await _adminClient.ListEnvironmentsAsync(token, ct);
+        }
+        catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+        {
+            _logger.LogWarning("BC test connection: environments call throttled for project {ProjectId}; asked to wait {Wait}.", projectId, wait);
+            return Throttled(wait);
         }
         // 401 and 403 mean different things here and are fixed in different places, so
         // they get different messages. Entra having issued a token (we got past the step
@@ -505,14 +515,24 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // onto, and so a failure here can never cost us the environment list itself.
         // A refresh in this scope that failed after reading leaves nothing for this one to announce.
         _scheduleChanges.Clear();
-        await MirrorBcEnvironmentDetailsAsync(project, token, ct);
+        var throttledFor = await MirrorBcEnvironmentDetailsAsync(project, token, ct);
         await _db.SaveChangesAsync(ct);
         await AnnounceScheduleChangesAsync();
 
         _logger.LogInformation("BC test connection succeeded for project {ProjectId}: {Count} environment(s).", projectId, environments.Count);
         return new BcConnectionTestResult(BcConnectionResult.Success, environments.Count,
-            environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.");
+            (environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.")
+            + (throttledFor is null ? "" : " Business Central asked us to slow down before every detail was read, so some show their previous answer."),
+            throttledFor);
     }
+
+    /// <summary>The result for a run Business Central asked to slow down, in words a consultant can act on.</summary>
+    private static BcConnectionTestResult Throttled(TimeSpan wait) =>
+        new(BcConnectionResult.Throttled, 0,
+            wait < TimeSpan.FromMinutes(2)
+                ? "Business Central asked us to slow down. Try again in a minute or two."
+                : $"Business Central asked us to slow down. Try again in about {Math.Ceiling(wait.TotalMinutes):N0} minutes.",
+            wait);
 
     /// <summary>
     /// The project's fetched environments (the delivery targets). Production first, then
@@ -548,7 +568,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <para>
     /// <b>Cached for <see cref="BcPanelCache.Ttl"/>.</b> These are four reads against
     /// Business Central, and re-issuing them every time a consultant expands a row is
-    /// traffic Microsoft's API does not need — especially as we honour no throttle. A
+    /// traffic Microsoft's API does not need. A
     /// window this short keeps the panel's promise of "what is true right now" while
     /// collapsing a working session's repeated opens into one fetch. Anything we write
     /// ourselves invalidates the entry (see <see cref="BcPanelCache.Invalidate"/>), so a
@@ -2942,8 +2962,13 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// stale rather than to empty. The two mirrors fail independently — a denied updates
     /// read still leaves a freshly-read window.
     /// </para>
+    /// <para>
+    /// Being told to slow down is the exception: the first throttled read ends the
+    /// mirror, because the remaining reads go to the same tenant and would only be
+    /// refused too. Returns how long Business Central asked us to wait, or null.
+    /// </para>
     /// </summary>
-    private async Task MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
+    private async Task<TimeSpan?> MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
     {
         var rows = await _db.OeProjectEnvironments
             .Where(e => e.ProjectId == project.Id && e.MissingSince == null)
@@ -2965,6 +2990,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             _logger.LogWarning(
                 "Couldn't read the storage figures for project {ProjectId}: {Message}.", project.Id, ex.Message);
+            if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
         }
 
         foreach (var row in rows)
@@ -2984,6 +3010,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the Business Central update window for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -2997,6 +3024,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the Business Central platform updates for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -3011,8 +3039,18 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the installed apps for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
         }
+        return null;
+    }
+
+    private TimeSpan StoppedMirror(int projectId, TimeSpan wait)
+    {
+        _logger.LogWarning(
+            "Business Central asked us to wait {Wait} for project {ProjectId}; the rest of its environment details keep their previous answers.",
+            wait, projectId);
+        return wait;
     }
 
     /// <summary>

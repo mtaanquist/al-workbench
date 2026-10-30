@@ -88,11 +88,31 @@ public sealed record SealedRevealResult(
 /// </summary>
 public sealed class SealedLinkService
 {
-    /// <summary>How long a link may live, in hours: an hour, a day, a week.</summary>
-    public static readonly IReadOnlyList<int> ExpiryChoices = [1, 24, 168];
+    /// <summary>How long a link may live, in hours: an hour, a day, three days, a week.</summary>
+    public static readonly IReadOnlyList<int> ExpiryChoices = [1, 24, 72, 168];
 
-    /// <summary>The expiry the form starts on.</summary>
-    public const int DefaultExpiryHours = 24;
+    /// <summary>
+    /// The expiry the form starts on. Three days rather than one, because a recipient
+    /// who is away for a day should not come back to a dead link (Mads, 2026-10-30).
+    /// </summary>
+    public const int DefaultExpiryHours = 72;
+
+    /// <summary>
+    /// How far from now an open link can be extended, in hours. Never further out than
+    /// the longest choice at creation, so extending keeps a link alive without making
+    /// any one moment's exposure longer than a new link's could be.
+    /// </summary>
+    public static readonly IReadOnlyList<int> ExtensionChoices = [24, 72, 168];
+
+    /// <summary>
+    /// The least an extension must add. Below this the choice changes nothing anyone
+    /// would notice, such as "a week from now" on a link made a minute ago for a week.
+    /// </summary>
+    public static readonly TimeSpan MinExtensionGain = TimeSpan.FromHours(1);
+
+    /// <summary>True when extending to <paramref name="hoursFromNow"/> from <paramref name="now"/> adds enough to be worth offering.</summary>
+    public static bool ExtendsEnough(DateTime expiresAt, DateTime now, int hoursFromNow) =>
+        now.AddHours(hoursFromNow) - expiresAt >= MinExtensionGain;
 
     /// <summary>The most times one link may be opened.</summary>
     public const int MaxViewsLimit = 5;
@@ -174,7 +194,7 @@ public sealed class SealedLinkService
 
         if (!ExpiryChoices.Contains(input.ExpiresInHours))
         {
-            errors["ExpiresInHours"] = "Pick when the link expires: in an hour, a day or a week.";
+            errors["ExpiresInHours"] = "Pick when the link expires: in an hour, a day, three days or a week.";
         }
         if (input.MaxViews < 1 || input.MaxViews > MaxViewsLimit)
         {
@@ -321,6 +341,80 @@ public sealed class SealedLinkService
         });
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation("Sealed link {LinkId} revoked by user {UserId}.", link.Id, userId);
+    }
+
+    /// <summary>
+    /// Keeps an open link working until <paramref name="hoursFromNow"/> hours from now.
+    /// The sender may extend their own links, an Admin anyone's. A link that has
+    /// already stopped working cannot come back: its secret is gone with it.
+    /// </summary>
+    public async Task ExtendAsync(int id, int hoursFromNow, CancellationToken ct = default)
+    {
+        var userId = RequireUserId();
+        var link = await _db.SealedLinks.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id, ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "That link no longer exists. Reload the page to see your links.",
+            });
+        if (link.CreatedByUserId != userId && !await IsAdminAsync(userId, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "Only the person who created this link, or an Admin, can extend it.",
+            });
+        }
+        if (!ExtensionChoices.Contains(hoursFromNow))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ExpiresInHours"] = "Pick how long to keep it working: a day, three days or a week.",
+            });
+        }
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var expiresAt = now.AddHours(hoursFromNow);
+        if (link.ClosedAt is not null || link.ExpiresAt <= now || link.ViewCount >= link.MaxViews)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "This link has already stopped working, so it can't be extended. Create a new one instead.",
+            });
+        }
+        if (!ExtendsEnough(link.ExpiresAt, now, hoursFromNow))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ExpiresInHours"] = "The link already works for longer than that.",
+            });
+        }
+
+        // Conditional, so a link that a reveal, a revoke or the sweep closed a moment
+        // ago stays closed instead of being given a new expiry with no secret behind it.
+        var extended = await _db.SealedLinks
+            .Where(l => l.Id == id && l.ClosedAt == null && l.ExpiresAt > now && l.ViewCount < l.MaxViews)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.ExpiresAt, expiresAt), ct);
+        if (extended == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "This link has already stopped working, so it can't be extended. Create a new one instead.",
+            });
+        }
+
+        _db.AuditLog.Add(new AuditLogEntry
+        {
+            Timestamp = now,
+            ChangedBy = await AuditActor.ResolveAsync(_db, userId, ct),
+            ChangedByUserId = userId,
+            OrganizationId = link.OrganizationId,
+            EntityType = AuditEntityType.SealedLink,
+            EntityId = link.Id,
+            Action = AuditAction.Updated,
+            EntityName = link.Label,
+        });
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation(
+            "Sealed link {LinkId} extended by user {UserId} to {ExpiresAt:o}.", link.Id, userId, expiresAt);
     }
 
     /// <summary>

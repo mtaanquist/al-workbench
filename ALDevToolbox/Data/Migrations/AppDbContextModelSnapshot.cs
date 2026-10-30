@@ -4850,6 +4850,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("entra_enabled");
 
+                    b.Property<int>("EnvironmentRefreshIntervalMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1440)
+                        .HasColumnName("environment_refresh_interval_minutes");
+
                     b.Property<string>("ExtensionPrefix")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")

@@ -323,6 +323,85 @@ public sealed class SealedLinkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_sender_can_extend_an_open_link_from_now_and_it_is_audited()
+    {
+        var alex = await SignInAsync("alex@cronus.example");
+        var token = await CreateAsync(Input(hours: 24));
+        var id = (await Service().ListAsync()).Single().Id;
+        _clock.Advance(TimeSpan.FromHours(20));
+
+        await Service().ExtendAsync(id, 72);
+
+        var link = await ReadLinkAsync();
+        link.ExpiresAt.Should().Be(Start.UtcDateTime.AddHours(20 + 72), "an extension counts from now, not from creation");
+        link.ClosedAt.Should().BeNull();
+        link.ViewCount.Should().Be(0);
+        link.MaxViews.Should().Be(1, "extending gives more time, not more views");
+        link.Ciphertext.Should().NotBeNull();
+        await using var ctx = _db.NewContext();
+        (await ctx.AuditLog.SingleAsync(a => a.EntityType == AuditEntityType.SealedLink && a.Action == AuditAction.Updated))
+            .ChangedByUserId.Should().Be(alex);
+
+        _clock.Advance(TimeSpan.FromHours(30));
+        SignOut();
+        (await Service().GetForRecipientAsync(token)).Should().NotBeNull("the link would have expired without the extension");
+    }
+
+    [Fact]
+    public async Task Extending_refuses_a_closed_link_a_shorter_time_and_a_choice_outside_the_list()
+    {
+        await SignInAsync("alex@cronus.example");
+        await CreateAsync(Input(hours: 168));
+        var id = (await Service().ListAsync()).Single().Id;
+
+        var shorter = () => Service().ExtendAsync(id, 72);
+        var odd = () => Service().ExtendAsync(id, 1000);
+        var same = () => Service().ExtendAsync(id, 168);
+        (await shorter.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ExpiresInHours");
+        (await odd.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ExpiresInHours");
+        (await same.Should().ThrowAsync<PlanValidationException>()).Which.Errors
+            .Should().ContainKey("ExpiresInHours", "a week from now on a fresh week-long link adds nothing");
+        (await ReadLinkAsync()).ExpiresAt.Should().Be(Start.UtcDateTime.AddHours(168), "a refused extension changes nothing");
+
+        _clock.Advance(TimeSpan.FromHours(169));
+        var expired = () => Service().ExtendAsync(id, 168);
+        (await expired.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+
+        await CreateAsync(Input(hours: 24));
+        var second = (await Service().ListAsync()).First().Id;
+        await Service().RevokeAsync(second);
+        var revoked = () => Service().ExtendAsync(second, 168);
+        (await revoked.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+    }
+
+    [Fact]
+    public async Task Only_the_sender_or_an_admin_can_extend()
+    {
+        await SignInAsync("alex@cronus.example");
+        await CreateAsync(Input(hours: 1));
+        var id = (await Service().ListAsync()).Single().Id;
+
+        await SignInAsync("kim@cronus.example");
+        var colleague = () => Service().ExtendAsync(id, 24);
+        (await colleague.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+
+        await SignInAsync("kim@fabrikam.example", UserRole.Admin, TestDb.OtherOrgId);
+        var otherOrgAdmin = () => Service().ExtendAsync(id, 24);
+        (await otherOrgAdmin.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+
+        await SignInAsync("admin@cronus.example", UserRole.Admin);
+        await Service().ExtendAsync(id, 24);
+        (await ReadLinkAsync()).ExpiresAt.Should().Be(Start.UtcDateTime.AddHours(24));
+    }
+
+    [Fact]
+    public void New_links_default_to_three_days()
+    {
+        SealedLinkService.DefaultExpiryHours.Should().Be(72);
+        SealedLinkService.ExpiryChoices.Should().Contain(SealedLinkService.DefaultExpiryHours);
+    }
+
+    [Fact]
     public async Task Revoking_a_link_that_has_already_closed_keeps_why_it_closed()
     {
         await SignInAsync("alex@cronus.example");

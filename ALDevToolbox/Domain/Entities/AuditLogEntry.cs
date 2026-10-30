@@ -95,7 +95,7 @@ public enum AuditEntityType
     Organization,
 
     /// <summary>
-    /// A Sealed link created or revoked. Written by <c>SealedLinkService</c> rather than
+    /// A Sealed link created, extended or revoked. Written by <c>SealedLinkService</c> rather than
     /// the interceptor: the row changes on every open, and those are kept with the link
     /// for its sender instead. Named by the sender's note. See <c>.design/sealed.md</c>.
     /// </summary>
