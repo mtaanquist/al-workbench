@@ -193,7 +193,7 @@ public sealed class McpToolTests : IDisposable
     [Fact]
     public async Task GetRecipe_cuts_a_file_too_large_for_one_answer_and_reads_on_from_an_offset()
     {
-        var huge = string.Concat(Enumerable.Range(0, 50_000).Select(i => (char)('a' + i % 26)));
+        var huge = string.Concat(Enumerable.Range(0, 70_000).Select(i => (char)('a' + i % 26)));
         int recipeId;
         await using (var ctx = _db.NewContext())
         {
@@ -210,13 +210,19 @@ public sealed class McpToolTests : IDisposable
         first.Truncated.Should().BeTrue();
         var cut = first.Files[0].Content!.Length;
         huge.Should().StartWith(first.Files[0].Content);
-        first.Note.Should().Contain($"cut after {cut} of 50000").And.Contain($"offset {cut}");
+        first.Note.Should().Contain($"cut at character {cut} of 70000").And.Contain($"offset {cut}");
 
-        var rest = await tools.GetAsync(recipeId, path: "Huge.al", offset: cut);
-        rest.Files[0].Content.Should().Be(huge[cut..]);
+        // A second read is cut too, and its note still counts in the whole file (#1527).
+        var middle = await tools.GetAsync(recipeId, path: "Huge.al", offset: cut);
+        var reached = cut + middle.Files[0].Content!.Length;
+        middle.Files[0].Content.Should().Be(huge[cut..reached]);
+        middle.Note.Should().Contain($"cut at character {reached} of 70000").And.Contain($"offset {reached}");
+
+        var rest = await tools.GetAsync(recipeId, path: "Huge.al", offset: reached);
+        rest.Files[0].Content.Should().Be(huge[reached..]);
         rest.Truncated.Should().BeFalse();
 
-        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Huge.al", offset: 60_000))
+        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Huge.al", offset: 80_000))
             .Should().ThrowAsync<McpException>().WithMessage("*offset*");
     }
 
@@ -933,7 +939,7 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateWorkspace_returns_inline_base64_zip_with_sha256()
+    public async Task GenerateWorkspace_returns_a_download_link_to_the_zip_with_its_sha256()
     {
         await SeedDefaultTemplateAsync();
 
@@ -963,6 +969,27 @@ public sealed class McpToolTests : IDisposable
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant().Should().Be(result.Sha256);
         using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
         zip.Entries.Should().Contain(e => e.FullName.EndsWith(".code-workspace"));
+    }
+
+    [Fact]
+    public async Task GenerateWorkspace_says_so_when_the_download_store_is_full()
+    {
+        await SeedDefaultTemplateAsync();
+        using var full = new GeneratedDownloadStore(TimeProvider.System, maxHeldBytes: 1);
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewWorkspaceTools(ctx, downloads: full).GenerateWorkspaceAsync(new ProjectPlanInput(
+            TemplateKey: "runtime-test",
+            WorkspaceName: "CRONUS Customer",
+            ExtensionPrefix: "CRN",
+            Brief: "Brief",
+            Description: "Description",
+            ApplicationVersion: "24.0.0.0",
+            RuntimeVersion: "15",
+            CoreIdRangeFrom: 90000,
+            CoreIdRangeTo: 90999));
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("too many generated archives");
     }
 
     [Fact]
@@ -1642,7 +1669,8 @@ public sealed class McpToolTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private WorkspaceTools NewWorkspaceTools(Data.AppDbContext ctx, IOptions<McpOptions>? options = null)
+    private WorkspaceTools NewWorkspaceTools(
+        Data.AppDbContext ctx, IOptions<McpOptions>? options = null, GeneratedDownloadStore? downloads = null)
     {
         var templates = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
         var modules = new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
@@ -1660,7 +1688,7 @@ public sealed class McpToolTests : IDisposable
         // The download link belongs to whoever generated it, so a generating test needs a user.
         _db.OrgContext.CurrentUserId ??= GeneratingUserId;
         return new WorkspaceTools(templates, modules, catalog, generation, delivery: null!, repositories: null!,
-            _downloads, _db.OrgContext, options ?? Options);
+            downloads ?? _downloads, _db.OrgContext, options ?? Options);
     }
 
     private const int GeneratingUserId = 4242;

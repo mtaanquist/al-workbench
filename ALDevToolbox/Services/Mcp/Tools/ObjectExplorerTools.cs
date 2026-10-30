@@ -34,7 +34,6 @@ public sealed class ObjectExplorerTools
     private const int MaxObjectMatches = 100;
     private const int MaxProcedureMatches = 75;
     private const int MaxContentMatches = 60;
-    private const int MaxContentSnippetLength = 300;
     private const int MaxReferenceRows = 50;
     private const int MaxProcedureCalls = 100;
     private const int MaxTranslationMatches = 50;
@@ -233,7 +232,7 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_content", ReadOnly = true)]
-    [Description("Searches AL source content across a BC release for a free-text query. Returns the line containing the hit, cut at 300 characters, at most 3 lines per file and 60 lines in all; Truncated and Note say whether more were left out, so make the query more specific or pass moduleId to narrow it. The query must be at least 3 characters (a shorter term can't be trigram-indexed and returns no results).")]
+    [Description("Searches AL source content across a BC release for a free-text query. Returns the line containing the hit, cut at 200 characters, at most 3 lines per file and 60 lines in all; Truncated and Note say whether more were left out, so make the query more specific or pass moduleId to narrow it. The query must be at least 3 characters (a shorter term can't be trigram-indexed and returns no results).")]
     public async Task<CappedRows<ReleaseContentMatch>> SearchContentAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Free-text search query, at least 3 characters. Matched literally (case-insensitive substring) against .al source bodies.")] string query,
@@ -244,11 +243,8 @@ public sealed class ObjectExplorerTools
         // The service caps files, not lines: one past the cap in files is enough to
         // know whether more lines matched than are returned.
         var rows = await _search.SearchContentInReleaseAsync(releaseId, query, moduleId, MaxContentMatches + 1, 3, ct);
-        // Snippet is whatever the line carries; cap to keep responses bounded.
-        var trimmed = rows.Select(r => r.Snippet.Length > MaxContentSnippetLength
-            ? r with { Snippet = r.Snippet[..MaxContentSnippetLength] + "..." }
-            : r).ToList();
-        return CappedRows<ReleaseContentMatch>.From(trimmed, MaxContentMatches, "lines", "ordered by module, then file",
+        // The service already cuts each snippet at 200 characters.
+        return CappedRows<ReleaseContentMatch>.From(rows, MaxContentMatches, "lines", "ordered by module, then file",
             "Make the query more specific or pass moduleId to narrow the search.");
     }
 

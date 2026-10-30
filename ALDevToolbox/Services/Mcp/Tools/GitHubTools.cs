@@ -79,9 +79,9 @@ public sealed class GitHubTools
         try
         {
             var access = await _repositories.GetAccessAsync(ct);
-            var repositories = await _repositories.ListAccessibleAsync(ct);
+            var listing = await _repositories.ListAccessibleWithTruncationAsync(ct);
             var needle = search?.Trim();
-            var matched = repositories
+            var matched = listing.Repositories
                 .Where(r => string.IsNullOrEmpty(needle) || r.FullName.Contains(needle, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             var cap = McpCatalogueLimit.Clamp(limit);
@@ -93,10 +93,18 @@ public sealed class GitHubTools
                     .Select(r => new RepositorySummary(
                         r.FullName, r.DefaultBranch, r.IsPrivate, r.Description, r.HtmlUrl, r.CloneUrl))
                     .ToList(),
-                Truncated: truncated,
-                Note: truncated
-                    ? $"Showing the first {cap} of {matched.Count} repositories (ordered by name); more were left out. Pass search to narrow the list, or raise limit."
-                    : null);
+                Truncated: truncated || listing.Truncated,
+                Note: string.Join(" ", new[]
+                {
+                    truncated
+                        ? $"Showing the first {cap} of {matched.Count} repositories (ordered by name); more were left out. Pass search to narrow the list, or raise limit."
+                        : null,
+                    // GitHub lists an installation's repositories only so far; past that a
+                    // search that finds nothing has not looked everywhere.
+                    listing.Truncated
+                        ? $"The organisation has more repositories on GitHub than this server reads, so a repository past the first {GitHubAppClient.MaxInstallationRepositories} by GitHub's order may be missing here."
+                        : null,
+                }.Where(n => n is not null)) is { Length: > 0 } note ? note : null);
         }
         catch (GitHubApiException ex)
         {
