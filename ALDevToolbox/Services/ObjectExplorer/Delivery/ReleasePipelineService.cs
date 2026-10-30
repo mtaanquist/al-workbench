@@ -711,9 +711,11 @@ public sealed class ReleasePipelineService
         }
 
         // Target environment: must belong to the same project, must still be there, and
-        // must be in a state that can take an install. The status is the cached one — the
-        // live re-read happens when a delivery actually runs — so this is the same refusal
-        // the user would hit later, just earlier and while they can still change it.
+        // must not be in a state it will never leave on its own (being removed, failed).
+        // A busy one (Preparing, mid-update) is accepted, as the editor's hint promises: it
+        // takes installs again by itself, and the status here is only the cached one - a
+        // new environment reads as Preparing until the next refresh, long after it is up.
+        // Each deployment checks the status again, live when the cached one refuses.
         var environment = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == input.ProjectEnvironmentId && e.ProjectId == input.ProjectId)
             .Select(e => new { e.Name, e.Type, e.Status, Missing = e.MissingSince != null, e.UpdateWindowStart, e.UpdateWindowEnd })
@@ -727,7 +729,8 @@ public sealed class ReleasePipelineService
             errors["ProjectEnvironmentId"] =
                 $"'{environment.Name}' is no longer present in Business Central. Refresh the environments on the solution's Business Central page, then come back.";
         }
-        else if (BcEnvironmentStatus.RefusalMessage(environment.Name, environment.Status) is { } statusRefusal)
+        else if (BcEnvironmentStatus.Classify(environment.Status) != BcEnvironmentReadiness.Busy
+                 && BcEnvironmentStatus.RefusalMessage(environment.Name, environment.Status) is { } statusRefusal)
         {
             errors["ProjectEnvironmentId"] = statusRefusal;
         }

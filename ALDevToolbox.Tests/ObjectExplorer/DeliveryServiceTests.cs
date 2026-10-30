@@ -3219,6 +3219,44 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ApproveProposalAsync_rereads_a_Preparing_environment_and_approves_once_it_is_active()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        var proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Preparing"));
+
+        await using (var approve = _db.NewContext()) await NewService(approve).ApproveProposalAsync(proposedId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == proposedId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        (await read.OeProjectEnvironments.SingleAsync(e => e.Id == seed.EnvironmentId)).Status.Should().Be("Active");
+        _admin.Requested.Should().Equal(["Production"]);
+    }
+
+    [Fact]
+    public async Task ApproveProposalAsync_does_not_ask_Business_Central_about_a_proposal_that_is_no_longer_waiting()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        var proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+        await ctx.OeProjectDeliveries.Where(d => d.Id == proposedId)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed));
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Preparing"));
+
+        await using var approve = _db.NewContext();
+        var act = () => NewService(approve).ApproveProposalAsync(proposedId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Delivery");
+        _admin.Requested.Should().BeEmpty("the customer's credential is not spent on a deployment nobody can approve");
+        _tokens.Acquired.Should().Be(0);
+    }
+
+    [Fact]
     public async Task ApproveProposalAsync_schedules_it_as_an_ordinary_release_run_by_the_approver()
     {
         await using var ctx = _db.NewContext();

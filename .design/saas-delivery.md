@@ -254,7 +254,10 @@ It is checked twice, and the second check is the one that matters:
    (a new one, or one a failed deployment just re-read) otherwise kept refusing "Deploy again" and
    "Deploy now" until the next refresh, long after it was up. Only a refusing status is re-read, so an
    ordinary deployment costs nothing extra; when the re-read fails, the cached refusal stands and says
-   it is the last status read.
+   it is the last status read. Approving a prepared deployment takes its step-up and checks it is still
+   waiting before this re-read, so a deployment nobody can approve never spends the customer's
+   credential. Saving a deployment pipeline refuses only an environment that will not recover on its
+   own (being removed, failed); a busy one is accepted, since each deployment checks again.
 2. **At claim time**, by re-reading the single environment (`GET .../environments/{name}`) after the
    claim and before the first upload. A delivery scheduled at 09:00 for 22:00 was fine when it was
    scheduled; an update that landed at 20:00 is invisible to check 1. The fresh status is written back
