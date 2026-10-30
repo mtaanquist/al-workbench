@@ -284,10 +284,12 @@ app). The **New build** action lets the user pick which to build:
   release browser, the org-wide A/B compare picker, and any other org-wide release dropdown or
   search scope. Audit `ObjectExplorerService` listings, the global compare picker, and any
   `WHERE kind …` enumeration, and exclude project releases from the global ones.
-  **One deliberate exception:** the `/object-explorer` Third-party tab surfaces each pipeline's
-  *latest ready* build release (`ObjectExplorerService.ListLatestPipelineBuildReleasesAsync` — one
-  row per pipeline, grouped under the project's name next to the manual third-party publishers) so
-  a pipeline's current objects are findable without opening its project first. Older builds remain
+  **One deliberate exception:** the `/object-explorer` Solutions tab (between Microsoft and
+  Third-party) surfaces each pipeline's *latest ready* build release
+  (`ObjectExplorerService.ListLatestPipelineBuildReleasesAsync` — one table row per pipeline,
+  sorted by solution then pipeline) so a pipeline's current objects are findable without opening
+  its project first. It is a table, not cards, because it grows with the number of customers. The
+  page's search box looks across every tab at once and groups the matches by tab. Older builds remain
   Artifacts-only, and MCP `list_releases` still excludes all project releases.
 - **Comparing two builds of the same project is kept** — it's genuinely useful — but scoped to that
   project. Artifacts offers a "Compare builds" picker listing only *this project's* builds;

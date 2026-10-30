@@ -19,7 +19,7 @@ namespace ALDevToolbox.Tests.Components;
 /// listed, and so is a feed package that did carry source.
 ///
 /// <para>Named user: a BC consultant opening the Third-party tab to look through a
-/// vendor's code.</para>
+/// vendor's code, or looking for a customer's own code by the customer's name.</para>
 /// </summary>
 public sealed class ReleasesBrowserViewTests : IDisposable
 {
@@ -70,6 +70,106 @@ public sealed class ReleasesBrowserViewTests : IDisposable
             cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Third-party"))
                 .QuerySelector(".pill-tab__count")!.TextContent.Trim().Should().Be("2");
         });
+    }
+
+    [Fact]
+    public async Task Solution_builds_have_their_own_tab_between_Microsoft_and_Third_party()
+    {
+        await SeedAsync("Continia Banking 28.6.0.0", files: 4, dedupKey: null);
+        await SeedPipelineBuildAsync("CRONUS Denmark", "main");
+
+        var cut = _ctx.Render<ReleasesBrowserView>();
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Should().NotBeEmpty());
+
+        cut.FindAll(".pill-tab").Select(t => t.QuerySelector("span")!.TextContent)
+            .Should().StartWith(new[] { "Microsoft", "Solutions", "Third-party" });
+
+        cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Third-party")).Click();
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("Continia Banking");
+            cut.Markup.Should().NotContain("CRONUS Denmark", "a solution's build is not a third-party app");
+        });
+
+        cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Solutions")).Click();
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find("table.oe-solutions tbody tr");
+            row.TextContent.Should().Contain("CRONUS Denmark").And.Contain("main");
+            cut.Markup.Should().NotContain("Continia Banking");
+        });
+    }
+
+    [Fact]
+    public async Task Search_looks_across_every_category_at_once()
+    {
+        await SeedAsync("Denmark Toolkit 1.0.0.0", files: 4, dedupKey: null);
+        await SeedPipelineBuildAsync("CRONUS Denmark", "main");
+        await SeedAsync("Continia Banking 28.6.0.0", files: 4, dedupKey: null);
+
+        var cut = _ctx.Render<ReleasesBrowserView>();
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Should().NotBeEmpty());
+
+        // The page opens on Microsoft, which holds neither match.
+        cut.Find("input[type=search]").Input("denmark");
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".oe-group__head .section-label").Select(h => h.TextContent)
+                .Should().Equal("Solutions", "Third-party");
+            cut.Markup.Should().Contain("Denmark Toolkit").And.Contain("CRONUS Denmark");
+            cut.Markup.Should().NotContain("Continia Banking");
+            cut.FindAll(".pill-tab.is-active").Should().BeEmpty("the results are not one tab's");
+            cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Solutions"))
+                .QuerySelector(".pill-tab__count")!.TextContent.Trim().Should().Be("1");
+        });
+    }
+
+    private async Task SeedPipelineBuildAsync(string solution, string pipelineName)
+    {
+        await using var db = _db.NewContext();
+        var project = new OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Name = solution,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        db.OeProjects.Add(project);
+        await db.SaveChangesAsync();
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = project.Id,
+            Name = pipelineName,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        var release = new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = $"{solution} on BC 28.1",
+            Kind = "project",
+            Status = "ready",
+            BcVersion = "28.1",
+            SourceFileCount = 12,
+            ImportedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        db.OePipelines.Add(pipeline);
+        db.OeReleases.Add(release);
+        await db.SaveChangesAsync();
+        db.OeProjectBuilds.Add(new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = project.Id,
+            PipelineId = pipeline.Id,
+            ReleaseId = release.Id,
+            Status = ProjectBuildStatus.Ready,
+            StartedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task SeedAsync(string label, int files, string? dedupKey)
