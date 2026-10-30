@@ -34,6 +34,12 @@ public sealed class ArtifactsTools
     /// <summary>How many compiler errors <c>get_solution_build</c> spells out; the rest are counted in <c>ErrorCount</c>.</summary>
     internal const int MaxBuildErrors = 10;
 
+    /// <summary>How many changelog commits per repository <c>get_solution_build</c> spells out; the rest are counted in a summary row.</summary>
+    internal const int MaxChangelogCommits = 20;
+
+    private const int DefaultSolutionLimit = 50;
+    private const int DefaultPipelineLimit = 25;
+
     private readonly ArtifactService _artifacts;
     private readonly ReleaseComparisonService _comparison;
     private readonly ProjectService _projects;
@@ -46,38 +52,47 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "list_solutions", ReadOnly = true)]
-    [Description("Lists the solutions you can see in the organisation — each points at one or more Git repositories that get compiled into downloadable .app files. Returns each solution's id, name, short name (the abbreviation used in extension names, may be empty), owner, repository count, a summary of its newest build (status, BC version), its visibility ('Public', 'ReadOnly' or 'Private'), and its last production delivery (when it last reached the customer's production environment: finish time, build id, deployment pipeline id, and status - 'deployed', or 'handed_off' when Business Central accepted it to install in a later update window; null when it never has). Private solutions you are not on the team for are not listed. Use the id with list_solution_builds.")]
-    public async Task<IReadOnlyList<ProjectArtifactsRow>> ListProjectsAsync(
+    [Description("Lists the solutions you can see in the organisation — each points at one or more Git repositories that get compiled into downloadable .app files. Returns each solution's id, name, short name (the abbreviation used in extension names, may be empty), owner, repository count, a summary of its newest build (status, BC version), its visibility ('Public', 'ReadOnly' or 'Private'), and its last production delivery (when it last reached the customer's production environment: finish time, build id, deployment pipeline id, and status - 'deployed', or 'handed_off' when Business Central accepted it to install in a later update window; null when it never has). Private solutions you are not on the team for are not listed. Returns the first 50 unless you raise limit; Truncated and Note say whether more were left out, so pass search to narrow it. Use the id with list_solution_builds.")]
+    public async Task<CappedRows<ProjectArtifactsRow>> ListProjectsAsync(
         [Description("Optional substring to filter by solution name, short name, owner, or repository name.")] string? search = null,
+        [Description(McpCatalogueLimit.Description + " Default 50.")] int limit = DefaultSolutionLimit,
         CancellationToken ct = default)
     {
         var rows = await _artifacts.ListProjectsAsync(search, ct);
         // The web list keeps a locked, name-only row so a project doesn't appear
         // to vanish for a human reading /projects. An agent has no such
         // confusion to spare — drop them entirely.
-        return rows.Where(r => !r.IsLocked).ToList();
+        var visible = rows.Where(r => !r.IsLocked).ToList();
+        return CappedRows<ProjectArtifactsRow>.From(visible, McpCatalogueLimit.Clamp(limit), "solutions", "ordered by name",
+            "Pass search (a customer, short name or repository name) to narrow the list, or raise limit.");
     }
 
     [McpServerTool(Name = "list_solution_builds", ReadOnly = true)]
-    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit.")]
+    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit; a failure message is cut at 300 characters, and get_solution_build has the whole of it.")]
     public async Task<IReadOnlyList<BuildRow>> ListProjectBuildsAsync(
         [Description("Solution name or numeric id (from list_solutions).")] string solutionNameOrId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
         CancellationToken ct = default)
     {
         var projectId = await _projects.ResolveProjectAsync(solutionNameOrId, ct);
-        return await _artifacts.ListBuildsForProjectAsync(projectId, McpListLimit.Clamp(limit), ct);
+        var rows = await _artifacts.ListBuildsForProjectAsync(projectId, McpListLimit.Clamp(limit), ct);
+        return ShortenFailures(rows);
     }
 
     [McpServerTool(Name = "list_pipelines", ReadOnly = true)]
-    [Description("Lists the pipelines you can see in the organisation. A pipeline is a named build flow under a solution that compiles a chosen subset of the solution's extensions (a solution can have several). Returns each pipeline's id, name, its solution, owner, a summary of its newest build (status, BC version), and its nightly preview check: previewCheck says whether it is on, previewChecks holds the newest result per upcoming version (bcTarget 'next_minor' or 'next_major', outcome 'passed'/'failed'/'running', the exact bcArtifactVersion, and the buildId to pass to get_solution_build for the errors), and previewCheckBlocked says why the check is paused, when it is. autoVersion says whether its builds add their build number to the third part of each app's version (28.2.0.0 in app.json is built as 28.2.4812.0 in build 4812), so the versions in its builds differ from app.json by design. Preview check builds are check-only and can't be deployed; the newest build summary leaves them out. disabled is true when someone disabled the pipeline: it does not build, on request or on its own, until a person enables it again in the web UI. Pipelines under a private solution you are not on the team for are not listed. Use the id with list_pipeline_builds.")]
-    public async Task<IReadOnlyList<PipelineArtifactsRow>> ListPipelinesAsync(
+    [Description("Lists the pipelines you can see in the organisation. A pipeline is a named build flow under a solution that compiles a chosen subset of the solution's extensions (a solution can have several). Returns each pipeline's id, name, its solution, owner, a summary of its newest build (status, BC version), and its nightly preview check: previewCheck says whether it is on, previewChecks holds the newest result per upcoming version (bcTarget 'next_minor' or 'next_major', outcome 'passed'/'failed'/'running', the exact bcArtifactVersion, and the buildId to pass to get_solution_build for the errors), and previewCheckBlocked says why the check is paused, when it is. autoVersion says whether its builds add their build number to the third part of each app's version (28.2.0.0 in app.json is built as 28.2.4812.0 in build 4812), so the versions in its builds differ from app.json by design. Preview check builds are check-only and can't be deployed; the newest build summary leaves them out. disabled is true when someone disabled the pipeline: it does not build, on request or on its own, until a person enables it again in the web UI. Pipelines under a private solution you are not on the team for are not listed. Returns the first 25 unless you raise limit; Truncated and Note say whether more were left out, so pass search to narrow it. Use the id with list_pipeline_builds.")]
+    public async Task<CappedRows<PipelineArtifactsRow>> ListPipelinesAsync(
         [Description("Optional substring to filter by pipeline name, solution name, or owner.")] string? search = null,
-        CancellationToken ct = default) =>
-        await _artifacts.ListPipelinesAsync(search, ct);
+        [Description(McpCatalogueLimit.Description + " Default 25.")] int limit = DefaultPipelineLimit,
+        CancellationToken ct = default)
+    {
+        var rows = await _artifacts.ListPipelinesAsync(search, ct);
+        return CappedRows<PipelineArtifactsRow>.From(rows, McpCatalogueLimit.Clamp(limit), "pipelines", "ordered by solution",
+            "Pass search (a solution or pipeline name) to narrow the list, or raise limit.");
+    }
 
     [McpServerTool(Name = "list_pipeline_builds", ReadOnly = true)]
-    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit.")]
+    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit; a failure message is cut at 300 characters, and get_solution_build has the whole of it.")]
     public async Task<IReadOnlyList<BuildRow>> ListPipelineBuildsAsync(
         [Description("Pipeline id (from list_pipelines).")] int pipelineId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
@@ -85,7 +100,7 @@ public sealed class ArtifactsTools
     {
         try
         {
-            return await _artifacts.ListBuildsAsync(pipelineId, McpListLimit.Clamp(limit), ct: ct);
+            return ShortenFailures(await _artifacts.ListBuildsAsync(pipelineId, McpListLimit.Clamp(limit), ct: ct));
         }
         catch (ProjectAccessDeniedException)
         {
@@ -138,7 +153,7 @@ public sealed class ArtifactsTools
             StartedByName: detail.StartedByName,
             ReleaseId: detail.ReleaseId,
             RepoCommits: detail.RepoCommits,
-            Changelog: detail.Changelog,
+            Changelog: CapChangelog(detail.Changelog),
             Apps: apps,
             DownloadAllPath: apps.Count > 0 ? $"/artifacts/build/{buildId}/all" : null,
             RawLogPath: detail.Logs.Count > 0 ? $"/artifacts/build/{buildId}/log" : null,
@@ -183,6 +198,25 @@ public sealed class ArtifactsTools
     /// </summary>
     private static McpException NotFound(string message) => new(message);
 
+    private static List<BuildRow> ShortenFailures(IEnumerable<BuildRow> rows) =>
+        rows.Select(r => r with { FailureMessage = McpListLimit.ShortenFailure(r.FailureMessage, "get_solution_build") }).ToList();
+
+    /// <summary>
+    /// The first commits of each repository's changelog, with a summary row (no
+    /// hash, as the service's own notes have) counting the rest. A long gap
+    /// between builds ran to 100 commits per repository (#1511).
+    /// </summary>
+    internal static IReadOnlyList<ChangelogGroup> CapChangelog(IReadOnlyList<ChangelogGroup> groups) =>
+        groups.Select(g => g.Commits.Count <= MaxChangelogCommits
+            ? g
+            : g with
+            {
+                Commits = g.Commits.Take(MaxChangelogCommits)
+                    .Append(new ChangelogRow(string.Empty,
+                        $"{g.Commits.Count - MaxChangelogCommits} more commits are not shown; the build page has the full changelog.",
+                        string.Empty, null))
+                    .ToList(),
+            }).ToList();
 }
 
 /// <summary>One build's detail for the <c>get_solution_build</c> MCP tool, with download paths for its deliverables.</summary>

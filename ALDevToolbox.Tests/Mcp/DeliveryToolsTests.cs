@@ -64,9 +64,26 @@ public sealed class DeliveryToolsTests : IDisposable
         }
 
         await using var read = _db.NewContext();
-        var rows = await NewTools(read).ListReleasePipelinesAsync();
+        var rows = (await NewTools(read).ListReleasePipelinesAsync()).Rows;
 
         rows.Should().ContainSingle(r => r.Name == "CRONUS App → Production" && r.EnvironmentName == "Production");
+    }
+
+    [Fact]
+    public async Task List_deployment_pipelines_narrows_by_search_and_limit()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        (await tools.ListReleasePipelinesAsync(search: "production")).Rows.Should().ContainSingle();
+        (await tools.ListReleasePipelinesAsync(search: "nowhere")).Rows.Should().BeEmpty();
+        var cut = await tools.ListReleasePipelinesAsync(limit: 0);
+        cut.Rows.Should().HaveCount(1, "a limit below one still returns one row");
     }
 
     [Fact]
@@ -81,7 +98,7 @@ public sealed class DeliveryToolsTests : IDisposable
         }
 
         await using var read = _db.NewContext();
-        (await NewTools(read).ListReleasePipelinesAsync()).Should().NotContain(r => r.Id == seed.ReleasePipelineId);
+        (await NewTools(read).ListReleasePipelinesAsync()).Rows.Should().NotContain(r => r.Id == seed.ReleasePipelineId);
     }
 
     [Fact]
@@ -457,7 +474,7 @@ public sealed class DeliveryToolsTests : IDisposable
         await using (var read = _db.NewContext())
         {
             var tools = NewTools(read);
-            (await tools.ListReleasePipelinesAsync()).Should().NotContain(r => r.Id == seed.ReleasePipelineId);
+            (await tools.ListReleasePipelinesAsync()).Rows.Should().NotContain(r => r.Id == seed.ReleasePipelineId);
             (await ((Func<Task>)(() => tools.ListDeliveriesAsync(seed.ReleasePipelineId)))
                 .Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("not found");
             await ((Func<Task>)(() => tools.ListReleasePipelinesAsync(seed.ProjectId)))
@@ -468,7 +485,7 @@ public sealed class DeliveryToolsTests : IDisposable
         await using (var read = _db.NewContext())
         {
             var tools = NewTools(read);
-            (await tools.ListReleasePipelinesAsync()).Should().ContainSingle(r => r.Id == seed.ReleasePipelineId);
+            (await tools.ListReleasePipelinesAsync()).Rows.Should().ContainSingle(r => r.Id == seed.ReleasePipelineId);
             (await tools.ListDeliveriesAsync(seed.ReleasePipelineId)).Should().BeEmpty();
         }
     }
