@@ -346,6 +346,34 @@ public sealed class DeliveryToolsTests : IDisposable
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("999999");
     }
 
+    [Fact]
+    public async Task List_deliveries_reads_further_back_from_the_oldest_deployment_returned()
+    {
+        Seed seed;
+        var ids = new List<int>();
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" });
+        }
+        for (var i = 0; i < 3; i++)
+        {
+            await using var ctx = _db.NewContext();
+            ids.Add((await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId);
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+        var newest = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: 1);
+        newest.Select(d => (d.Id, d.Number)).Should().Equal((ids[2], 3));
+        var older = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: 1, beforeDeploymentId: newest[^1].Id);
+        older.Select(d => (d.Id, d.Number)).Should().Equal((ids[1], 2));
+        var oldest = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: 5, beforeDeploymentId: older[^1].Id);
+        oldest.Select(d => (d.Id, d.Number)).Should().Equal((ids[0], 1));
+        (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, beforeDeploymentId: ids[0])).Should().BeEmpty();
+        (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, beforeDeploymentId: 999_999))
+            .Should().BeEmpty("that deployment is not this pipeline's");
+    }
+
     // ── GitHub releases as an artifact source (#632) ──────────────────────
 
     [Fact]
