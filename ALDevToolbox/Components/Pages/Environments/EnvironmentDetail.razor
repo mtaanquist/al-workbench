@@ -775,9 +775,52 @@
                                 }
                                 else
                                 {
+                                    var pickable = _canManage ? updatesShown.Where(u => UpdateProgress(panel, u) is null).Select(u => u.AppId).ToList() : new List<Guid>();
+                                    var picked = PickedUpdates(panel);
+                                    @* Several updates booked for one slot (the operations team's "these
+                                       tonight"): tick them, then book them together. The ticks survive a
+                                       search, like the Environments list's; the bar counts the ones
+                                       that can still be booked. *@
+                                    @if (picked.Count > 0)
+                                    {
+                                        <div class="card__body env-detail__bulk">
+                                            <div class="bulk-bar" role="region" aria-label="Update several apps" aria-live="polite">
+                                                <span class="bulk-bar__summary">@PickedSummary(picked, pickable)</span>
+                                                <div class="bulk-bar__actions">
+                                                    <button type="button" class="btn btn--sm" disabled="@_settingSaving" @onclick="() => UpdatePickedAsync(panel)">
+                                                        <Icon Name="calendar-clock" Width="14" Height="14" />
+                                                        <span>@(picked.Count == 1 ? "Book 1 update..." : $"Book {picked.Count} updates...")</span>
+                                                    </button>
+                                                    <button type="button" class="btn btn--sm" @onclick="() => _pickedUpdates.Clear()">
+                                                        <Icon Name="x" Width="14" Height="14" />
+                                                        <span>Clear selection</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    }
                                     <table class="data-table data-table--edge u-compact">
                                         <thead>
                                             <tr>
+                                                @if (_canManage)
+                                                {
+                                                    <th class="data-table__col-check">
+                                                        @if (pickable.Count > 0)
+                                                        {
+                                                            var allPicked = pickable.All(_pickedUpdates.Contains);
+                                                            var somePicked = !allPicked && pickable.Any(_pickedUpdates.Contains);
+                                                            <label class="check@(somePicked ? " is-indeterminate" : "")" aria-label="Select every update shown">
+                                                                <input type="checkbox" checked="@allPicked"
+                                                                       @onchange="e => PickUpdates(pickable, e.Value is true)" />
+                                                                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                            </label>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="u-sr">Select</span>
+                                                        }
+                                                    </th>
+                                                }
                                                 <th class="data-table__col-state" scope="col"><span class="u-sr">State</span></th>
                                                 <th scope="col">App</th>
                                                 <th scope="col">Publisher</th>
@@ -795,7 +838,22 @@
                                                 var ready = up.Requirements.Count == 0;
                                                 var progress = UpdateProgress(panel, up);
                                                 var rowState = progress is not null ? "is-running" : UpdateRowClass(up);
-                                                <tr class="@rowState">
+                                                var rowPicked = progress is null && _pickedUpdates.Contains(up.AppId);
+                                                <tr class="@(rowState + (rowPicked ? " is-selected" : ""))">
+                                                    @if (_canManage)
+                                                    {
+                                                        @* Nothing to tick on an update already on its way: booking it
+                                                           again would only be refused. *@
+                                                        <td class="data-table__col-check">
+                                                            @if (progress is null)
+                                                            {
+                                                                <label class="check" aria-label="@($"Select {up.Name}")">
+                                                                    <input type="checkbox" checked="@rowPicked" @onchange="e => PickUpdate(up.AppId, e.Value is true)" />
+                                                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                                </label>
+                                                            }
+                                                        </td>
+                                                    }
                                                     <td class="data-table__col-state">
                                                         @if (progress is not null)
                                                         {
@@ -1027,6 +1085,22 @@
    slot. The gentle answer is the default - an app update can interrupt whoever is
    working in it. *@
 <ConfirmDialog @ref="_updateConfirm" Wide="true" ConfirmDisabled="@(!_updateWhen.IsValid)">
+    @if (_updatePicked.Count > 0)
+    {
+        <div class="env-detail__alongside">
+            <p class="env-detail__when-legend">These will be updated, in this order</p>
+            <ul class="env-detail__alongside-list">
+                @foreach (var app in _updatePicked)
+                {
+                    <li>
+                        <span class="env-detail__alongside-name">@app.Name</span>
+                        <span class="u-muted env-detail__alongside-pub">@app.Publisher</span>
+                        <span class="u-num env-detail__mono env-detail__alongside-ver">to @app.Version</span>
+                    </li>
+                }
+            </ul>
+        </div>
+    }
     @if (_updateAlongside.Count > 0)
     {
         <div class="env-detail__alongside">
@@ -1109,6 +1183,16 @@
 
     /// <summary>What the app in the update dialog waits for, and so what moves with it. Empty for a ready app.</summary>
     private IReadOnlyList<BcAppUpdateRequirement> _updateAlongside = Array.Empty<BcAppUpdateRequirement>();
+
+    /// <summary>The apps the update dialog books when several were ticked, in the order they go. Empty for one app's own Update.</summary>
+    private IReadOnlyList<BcAvailableAppUpdate> _updatePicked = Array.Empty<BcAvailableAppUpdate>();
+
+    /// <summary>
+    /// The ticked waiting updates. Kept through a search, like the Environments list's
+    /// ticks; one that has since been booked or has gone from the list simply stops
+    /// counting (see <see cref="PickedUpdates"/>).
+    /// </summary>
+    private readonly HashSet<Guid> _pickedUpdates = new();
     private string _cadence = BcAppUpdateCadence.Default;
     private string _targetVersion = string.Empty;
     private bool _settingSaving;
@@ -1945,6 +2029,7 @@
     private async Task UpdateAppAsync(BcAvailableAppUpdate update)
     {
         if (_updateConfirm is null) return;
+        _updatePicked = Array.Empty<BcAvailableAppUpdate>();
         _updateAlongside = update.Requirements;
         await _updateWhen.ResetAsync(Zone, _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, _env.DeliveryWindowDays, Row.TimeZone,
             _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana);
@@ -1978,6 +2063,86 @@
     }
 
     private static string AppCount(int count) => count == 1 ? "1 other app" : $"{count} other apps";
+
+    private void PickUpdate(Guid appId, bool on)
+    {
+        if (on) _pickedUpdates.Add(appId);
+        else _pickedUpdates.Remove(appId);
+    }
+
+    /// <summary>The header box: ticks or unticks every update shown that can be booked, and leaves the rest alone.</summary>
+    private void PickUpdates(IEnumerable<Guid> shown, bool on)
+    {
+        foreach (var id in shown) PickUpdate(id, on);
+    }
+
+    /// <summary>The ticked updates that can still be booked, in the table's order: still waiting, and nothing on its way for them.</summary>
+    private List<BcAvailableAppUpdate> PickedUpdates(BcEnvironmentPanel panel) => _pickedUpdates.Count == 0
+        ? new()
+        : panel.AvailableUpdates.Where(u => _pickedUpdates.Contains(u.AppId) && UpdateProgress(panel, u) is null).ToList();
+
+    /// <summary>"3 selected", or "3 selected, 1 shown" when a search hides some of them.</summary>
+    private static string PickedSummary(List<BcAvailableAppUpdate> picked, List<Guid> shown)
+    {
+        var onScreen = picked.Count(p => shown.Contains(p.AppId));
+        return onScreen == picked.Count ? $"{picked.Count} selected" : $"{picked.Count} selected, {onScreen} shown";
+    }
+
+    /// <summary>
+    /// Books every ticked update for one slot. The dialog lists them in the order they
+    /// will go - an app another ticked app waits for first, the order the service books
+    /// them in - and then the apps they bring along that nobody ticked, so nothing moves
+    /// that was not on screen when the person agreed.
+    /// </summary>
+    private async Task UpdatePickedAsync(BcEnvironmentPanel panel)
+    {
+        if (_updateConfirm is null) return;
+        var picked = PickedUpdates(panel);
+        if (picked.Count == 0) return;
+        if (picked.Count == 1)
+        {
+            await UpdateAppAsync(picked[0]);
+            return;
+        }
+
+        var ordered = DependencyOrder.Sort(picked,
+            u => u.AppId.ToString(),
+            u => u.Requirements.Where(r => r.AppId is not null).Select(r => r.AppId!.Value.ToString()));
+        var pickedIds = picked.Select(p => p.AppId).ToHashSet();
+        _updatePicked = ordered;
+        _updateAlongside = picked.SelectMany(p => p.Requirements)
+            .Where(r => r.AppId is not { } id || !pickedIds.Contains(id))
+            .DistinctBy(r => r.AppId?.ToString() ?? r.Name)
+            .ToList();
+        await _updateWhen.ResetAsync(Zone, _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, _env.DeliveryWindowDays, Row.TimeZone,
+            _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana);
+        var others = _updateAlongside.Count;
+        var what = $"{picked.Count} apps";
+
+        var confirmed = await _updateConfirm.OpenAsync(
+            Row.IsProduction
+                ? $"Update {what} on {Row.EnvironmentName}, a production environment?"
+                : $"Update {what} on {Row.EnvironmentName}?",
+            $"Each will go to the version Business Central has waiting, one after another, in {Row.ProjectName}'s Business Central. An app another one waits for goes first, and if one fails, the apps that wait for it are left alone."
+            + (others == 0 ? " " : $" They wait for {AppCount(others)}, so Business Central will install or update those as well, each to the newest version this environment supports. ")
+            + "Once installed, none of it can be rolled back from here.",
+            $"Book {picked.Count} updates", "btn--danger");
+        if (!confirmed) return;
+
+        var timing = _updateWhen.Timing;
+        var at = _updateWhen.At;
+        var customerZone = _updateWhen.CustomerTimeZone;
+        var picks = picked.Select(p => new AppUpdatePick(p.AppId, p.Version,
+            p.Requirements.Where(r => r.AppId is not null).Select(r => r.AppId!.Value).ToList())).ToList();
+        UploadAppOutcome? outcome = null;
+        var booked = await RunSettingWriteAsync("bulk-update",
+            async () => outcome = await Connection.BookAppUpdatesAsync(Row.ProjectId, Id, picks, timing, at),
+            $"Couldn't book the updates. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
+            () => InstallTimingPicker.BookedWhenPhrase(outcome!, customerZone, Zone) is { } when
+                ? $"{what} will be updated on {Row.EnvironmentName} {when}, one after another. Until then you can cancel any of them or start them early under Scheduled installs."
+                : $"{what} will start updating on {Row.EnvironmentName} shortly, one after another. Follow them under Scheduled installs.");
+        if (booked) _pickedUpdates.Clear();
+    }
 
     // ── Uploading an app ────────────────────────────────────────────────
 
@@ -2119,9 +2284,11 @@
         var batch = BatchPlace(booked) is not null;
         var update = booked.Kind == UpgradeActionKind.UpdateApp;
         var confirmed = await _confirm.OpenAsync(
-            update ? $"Update {name} now?" : batch ? $"Install {name} and the apps booked with it now?" : $"Install {name} now?",
+            update
+                ? batch ? $"Update {name} and the apps booked with it now?" : $"Update {name} now?"
+                : batch ? $"Install {name} and the apps booked with it now?" : $"Install {name} now?",
             (batch
-                ? $"They were booked for {BookedSlotText(booked.ExecuteAfter)} and install one after another. Installing them now may interrupt anyone working in {Row.EnvironmentName}."
+                ? $"They were booked for {BookedSlotText(booked.ExecuteAfter)} and {(update ? "update" : "install")} one after another. {(update ? "Updating" : "Installing")} them now may interrupt anyone working in {Row.EnvironmentName}."
                 : update
                     ? $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Updating it now may interrupt anyone working in {Row.EnvironmentName}."
                     : $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}."),
@@ -2132,7 +2299,9 @@
             () => UpgradeActions.RunBookedInstallNowAsync(booked.Id),
             update ? $"Couldn't start the update of {name}." : $"Couldn't start the install of {name}.",
             () => update
-                ? $"{name} will start updating on {Row.EnvironmentName} shortly."
+                ? batch
+                    ? $"{name} and the apps booked with it will start updating on {Row.EnvironmentName} shortly."
+                    : $"{name} will start updating on {Row.EnvironmentName} shortly."
                 : batch
                 ? $"{name} and the apps booked with it will start installing on {Row.EnvironmentName} within a minute."
                 : $"{name} will start installing on {Row.EnvironmentName} within a minute.");
@@ -2146,12 +2315,14 @@
     {
         if (_confirm is null) return;
         var name = BookedName(booked);
-        var others = BatchPlace(booked) is null ? "" : " The other apps booked with it still install; any that needs it will be refused by Business Central.";
         var update = booked.Kind == UpgradeActionKind.UpdateApp;
+        var others = BatchPlace(booked) is null ? ""
+            : update ? " The other apps booked with it still update; one that waits for it takes it along."
+            : " The other apps booked with it still install; any that needs it will be refused by Business Central.";
         var confirmed = await _confirm.OpenAsync(
             update ? "Call off this update?" : "Call off this install?",
             update
-                ? $"{name} won't be updated to {booked.TargetVersion} on {Row.EnvironmentName}. To update it later, use Update under Available updates again."
+                ? $"{name} won't be updated to {booked.TargetVersion} on {Row.EnvironmentName}. To update it later, use Update under AppSource updates waiting again.{others}"
                 : $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.{others}",
             update ? "Call off the update" : "Call off the install");
         if (!confirmed) return;

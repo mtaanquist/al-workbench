@@ -541,7 +541,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         rows.Should().HaveCount(2);
         rows[0].ClassList.Should().Contain("is-published");
         rows[0].QuerySelector(".status-pill")!.TextContent.Should().Be("Ready");
-        rows[0].Children[1].TextContent.Should().Be("Continia Core");
+        rows[0].Children[2].TextContent.Should().Be("Continia Core", "after the tick box and the state");
         rows[1].ClassList.Should().Contain("is-queued");
         rows[1].QuerySelector(".status-pill")!.TextContent.Should().Be("Waits for 1");
         rows[1].QuerySelectorAll(".tag").Select(t => t.TextContent).Should().Equal("Continia Core");
@@ -569,6 +569,68 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             cut.FindAll(".env-detail__alongside-list li").Select(li => li.Children[0].TextContent)
                 .Should().Equal("Continia Core"));
         cut.Markup.Should().Contain("and 1 other app it waits for");
+    }
+
+    /// <summary>
+    /// The operations team books several updates for one slot: tick them (or every one
+    /// shown from the header), then book them together. The dialog lists them in the
+    /// order they will go - the app another waits for first - and a prerequisite that was
+    /// ticked is not listed again as something extra.
+    /// </summary>
+    [Fact]
+    public async Task Ticking_several_updates_books_them_together_with_the_app_another_waits_for_first()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId, "apps");
+
+        cut.FindAll(".bulk-bar").Should().BeEmpty("nothing is ticked yet");
+        cut.WaitForAssertion(() => cut.Find("table.u-compact thead input[type=checkbox]").Change(true));
+
+        cut.WaitForAssertion(() => cut.Find(".bulk-bar__summary").TextContent.Should().Be("2 selected"));
+        cut.FindAll("table.u-compact tbody tr.is-selected").Should().HaveCount(2);
+        cut.WaitForAssertion(() => cut.FindAll(".bulk-bar button")[0].Click());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Update 2 apps on Production"));
+        cut.FindAll(".env-detail__alongside-list li").Select(li => li.Children[0].TextContent)
+            .Should().Equal(new[] { "Continia Core", "Continia Connector App" },
+                "Continia Core is ticked, so it goes first and is not listed again as an app that comes along");
+        cut.Markup.Should().Contain("Book 2 updates");
+    }
+
+    [Fact]
+    public async Task An_update_already_booked_has_no_tick_box_and_is_not_counted()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = projectId,
+                EnvironmentId = envId,
+                Kind = UpgradeActionKind.UpdateApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedBy = "Anna Jensen <anna@example.com>",
+                RequestedAt = DateTime.UtcNow,
+                ExecuteAfter = DateTime.UtcNow.AddHours(6),
+                BcAppId = CoreId,
+                AppName = "Continia Core",
+                TargetVersion = "28.5.0.363410",
+                PrerequisiteAppIds = new List<Guid>(),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Update booked here"));
+        var rows = cut.FindAll("table.u-compact tbody tr");
+        rows[0].QuerySelector("input[type=checkbox]").Should().BeNull("booking it again would only be refused");
+        rows[1].QuerySelector("input[type=checkbox]").Should().NotBeNull();
+        cut.WaitForAssertion(() => cut.Find("table.u-compact thead input[type=checkbox]").Change(true));
+        cut.WaitForAssertion(() => cut.Find(".bulk-bar__summary").TextContent.Should().Be("1 selected"));
     }
 
     /// <summary>
@@ -922,7 +984,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId, "apps");
 
-        var core = cut.FindAll("table.u-compact tbody tr").Single(r => r.Children[1].TextContent == "Continia Core");
+        var core = cut.FindAll("table.u-compact tbody tr").Single(r => r.Children[2].TextContent == "Continia Core");
         core.QuerySelector(".status-pill")!.TextContent.Should().Be("Updating");
         var button = core.QuerySelector(".data-table__actions button")!;
         button.TextContent.Trim().Should().Be("Updating...");

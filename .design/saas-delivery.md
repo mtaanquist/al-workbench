@@ -638,6 +638,24 @@ that names the environment and says what the click does there:
   booked upload. The `UpdateApp` rows written before #1001 are records only, already
   `Sent`, with what moved in `Outcome`; the history still reads them as "Updated an
   AppSource app".
+
+  **Several updates can be booked together.** The operations team plans an evening's
+  updates as a set, so the waiting list has a tick box on every row that can still be
+  booked (nothing already updating, scheduled or booked) and one in the header for every
+  row shown; the ticks survive a search, as the Environments list's do. "Book N
+  updates..." opens the same dialog, which lists the ticked apps in the order they will
+  go and then the prerequisites nobody ticked. `BookAppUpdatesAsync` (which the single
+  booking is one pick of) holds every app to the single booking's rules - read once,
+  all or nothing - and writes one `UpdateApp` row per app in a batch, in
+  `DependencyOrder`: an app another ticked app waits for goes first, so by the time
+  the dependent is sent Business Central no longer lists it as waiting. Within the
+  batch the "one booking per app" rule allows the overlap; against other bookings it
+  holds. The worker sends the batch like an upload batch, one install per sweep, each
+  after the one before has finished, and Install now moves the whole batch. A failed
+  update stops only the rows that list it among their prerequisites ("wasn't updated,
+  because X, which it waits for, wasn't updated"); unrelated apps in the batch still
+  go, since an upload batch's "anything before it may be what it needed" does not apply
+  when the dependencies are known.
 - **Uploading apps** - `.app` files another company built, for which there is no pipeline
   here. Several may be chosen at once: each manifest is read on the spot
   (`AppPackageReader.TryReadManifestAsync`) and the apps are put in dependency order with

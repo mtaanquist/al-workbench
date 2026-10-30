@@ -306,17 +306,19 @@ public sealed class UpgradeActionWorker : BackgroundService
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        // A row in a multi-app upload waits its turn: the one before it must have
-        // finished installing (the sweep runs them in order, so within one sweep it
-        // has), and if that one failed this one is not tried - its dependency may be the
-        // very thing that did not go in. A cancelled predecessor is the person's choice
-        // and does not stop the rest.
+        // A row in a batch - a multi-app upload, or several AppSource updates booked
+        // together - waits its turn: the one before it must have finished installing
+        // (the sweep runs them in order, so within one sweep it has), and if that one
+        // failed this one is not tried - its dependency may be the very thing that did
+        // not go in. An upload cannot tell which of the files before it it needs, so any
+        // failure stops it; an update can, so only a failed app it waits for does. A
+        // cancelled predecessor is the person's choice and does not stop the rest.
         if (action.BatchId is { } batch && action.BatchOrder is { } order)
         {
             var earlier = await db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.BatchId == batch && a.BatchOrder < order)
                 .OrderBy(a => a.BatchOrder)
-                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.ConfirmationDue })
+                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.AppName, a.BcAppId, a.ConfirmationDue })
                 .ToListAsync(ct).ConfigureAwait(false);
             // One Business Central accepted but nobody saw finish is asked about before
             // its dependents go, so a failure found that way still stops them. The sweep
@@ -335,11 +337,22 @@ public sealed class UpgradeActionWorker : BackgroundService
             {
                 return RunOutcome.Skipped;
             }
-            if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed) is { } blocked)
+            var waitsFor = action.Kind == UpgradeActionKind.UpdateApp
+                ? await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                    .Where(a => a.Id == action.Id)
+                    .Select(a => a.PrerequisiteAppIds)
+                    .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? new List<Guid>()
+                : null;
+            if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed
+                    && (waitsFor is null || (e.BcAppId is { } failedApp && waitsFor.Contains(failedApp)))) is { } blocked)
             {
+                var blockedName = blocked.PackageFileName ?? blocked.AppName ?? "the app";
                 _logger.LogInformation(
-                    "Upload booking {ActionId} ({FileName}) is not tried: {Blocked} before it in the same batch failed.",
-                    action.Id, action.Label, blocked.PackageFileName);
+                    "Booked install {ActionId} ({FileName}) is not tried: {Blocked} before it in the same batch failed.",
+                    action.Id, action.Label, blockedName);
+                var skippedOutcome = waitsFor is null
+                    ? $"{action.Label} wasn't installed, because {blockedName} before it in the same upload didn't install."
+                    : $"{action.Label} wasn't updated, because {blockedName}, which it waits for, wasn't updated.";
                 var skippedAt = _clock.GetUtcNow().UtcDateTime;
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
@@ -347,8 +360,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                         .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
                         .SetProperty(a => a.SentAt, skippedAt)
                         .SetProperty(a => a.PackageContent, (byte[]?)null)
-                        .SetProperty(a => a.Outcome,
-                            $"{action.Label} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
+                        .SetProperty(a => a.Outcome, skippedOutcome),
                         ct).ConfigureAwait(false);
                 if (skipped == 0) return RunOutcome.Skipped;
                 await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);

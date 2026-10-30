@@ -1323,6 +1323,70 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Apps.Updated.Select(u => u.AppId).Should().Equal(CoreAppId, otherAppId);
     }
 
+    // Several updates booked together (the operations team's "these tonight"): one
+    // batch, the app another waits for first, and a failure stops only its dependents.
+
+    private static readonly Guid BankingAppId = Guid.NewGuid();
+
+    /// <summary>Continia Core waiting for Continia System Application, and an unrelated Continia Banking.</summary>
+    private void WaitingThree() => _f.Apps.OnAvailable = () => new[]
+    {
+        new BcAvailableAppUpdate(CoreAppId, "Continia Core", "Continia Software", "28.5.0.1", new[] { SystemApp() }),
+        new BcAvailableAppUpdate(BankingAppId, "Continia Banking", "Continia Software", "28.5.0.2", Array.Empty<BcAppUpdateRequirement>()),
+        new BcAvailableAppUpdate(SystemAppId, "Continia System Application", "Continia Software", "28.5.0.0", Array.Empty<BcAppUpdateRequirement>()),
+    };
+
+    /// <summary>Books Core, Banking and System Application together, in that (wrong) order, as the owner.</summary>
+    private async Task BookThreeAsync(int projectId, int environmentId)
+    {
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using var ctx = _f.Db.NewContext();
+        await _f.Connections(ctx).BookAppUpdatesAsync(projectId, environmentId, new[]
+            {
+                new AppUpdatePick(CoreAppId, "28.5.0.1", new[] { SystemAppId }),
+                new AppUpdatePick(BankingAppId, "28.5.0.2", Array.Empty<Guid>()),
+                new AppUpdatePick(SystemAppId, "28.5.0.0", Array.Empty<Guid>()),
+            },
+            ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime, _f.Clock.GetUtcNow().AddHours(12));
+    }
+
+    [Fact]
+    public async Task Updates_booked_together_go_one_at_a_time_with_the_app_another_waits_for_first()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        WaitingThree();
+        await BookThreeAsync(projectId, envId);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None))
+            .Should().Be(1, "one install per sweep, whether booked alone or together");
+        await SweepUntilQuietAsync();
+
+        _f.Apps.Updated.Select(u => u.AppId).Should().Equal(new[] { SystemAppId, CoreAppId, BankingAppId },
+            "Core waits for System Application, so that goes first; Banking keeps its place after Core");
+    }
+
+    [Fact]
+    public async Task A_failed_update_in_a_batch_stops_only_the_apps_that_wait_for_it()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        WaitingThree();
+        await BookThreeAsync(projectId, envId);
+        _f.Apps.OnOperationStatus = name => name == $"update {SystemAppId}" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await SweepUntilQuietAsync();
+
+        _f.Apps.Updated.Select(u => u.AppId).Should().Equal(new[] { SystemAppId, BankingAppId },
+            "Core waits for the app that failed; Banking does not, so it still goes");
+        await using var read = _f.Db.NewContext();
+        var core = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.BcAppId == CoreAppId);
+        core.Status.Should().Be(UpgradeActionStatus.Failed);
+        core.Outcome.Should().Be("Continia Core wasn't updated, because Continia System Application, which it waits for, wasn't updated.");
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.BcAppId == BankingAppId))
+            .Status.Should().Be(UpgradeActionStatus.Sent);
+    }
+
     [Fact]
     public async Task An_update_the_workbench_could_not_see_finish_is_recorded_as_sent_unconfirmed()
     {
