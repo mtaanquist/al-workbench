@@ -129,6 +129,24 @@ public sealed class GitHubToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task The_list_narrows_by_search_and_says_when_the_limit_cut_it()
+    {
+        await ReadyAsync();
+        var names = new[] { $"{OrgLogin}/shop-a", $"{OrgLogin}/shop-b", $"{OrgLogin}/other" };
+        var (tools, ctx) = NewTools(ListableApi(granted: names, visible: names));
+        await using var _ = ctx;
+
+        var searched = await tools.ListRepositoriesAsync(search: "SHOP");
+        searched.Repositories.Select(r => r.FullName).Should().Equal($"{OrgLogin}/shop-a", $"{OrgLogin}/shop-b");
+        searched.Truncated.Should().BeFalse();
+
+        var cut = await tools.ListRepositoriesAsync(limit: 1);
+        cut.Repositories.Should().ContainSingle();
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("1 of 3");
+    }
+
+    [Fact]
     public async Task An_unlinked_caller_is_offered_nothing_and_told_what_to_connect()
     {
         await ConfigureDeploymentAsync();

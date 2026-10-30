@@ -125,11 +125,14 @@ public sealed class EnvironmentRefreshSchedulerTests : IDisposable
         var id = await SeedProjectAsync("CRONUS A/S", tenant: Guid.NewGuid(), clientId: "client-abc", secret: "cipher");
         await SetIntervalAsync(60);
         var (scheduler, queue) = NewScheduler();
+        // The slots sit a random few minutes past the hour; counted from the slot itself,
+        // a poll five minutes later cannot land in the next hour's.
+        DateTime Slot(int hour, int minute) => At(21, hour, minute) + scheduler.StartOffset;
 
-        (await scheduler.SweepDueAsync(At(21, 12, 0), default)).Should().Be(1);
+        (await scheduler.SweepDueAsync(Slot(12, 0), default)).Should().Be(1);
         queue.Complete(id);
-        (await scheduler.SweepDueAsync(At(21, 12, 5), default)).Should().Be(0, "this hour's run has happened");
-        (await scheduler.SweepDueAsync(At(21, 13, 0), default)).Should().Be(1, "the next hour asks again");
+        (await scheduler.SweepDueAsync(Slot(12, 5), default)).Should().Be(0, "this hour's run has happened");
+        (await scheduler.SweepDueAsync(Slot(13, 0), default)).Should().Be(1, "the next hour asks again");
     }
 
     [Fact]

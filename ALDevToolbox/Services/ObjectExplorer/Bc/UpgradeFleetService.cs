@@ -66,8 +66,9 @@ public sealed class UpgradeFleetService
     /// is looking for when it gets there.</para>
     /// </summary>
     /// <param name="includeSoftDeleted">Keep environments the customer has deleted but can still restore.</param>
+    /// <param name="projectId">Only this solution's environments; null for the whole fleet.</param>
     public async Task<List<UpgradeFleetRow>> ListFleetAsync(
-        bool includeSoftDeleted = false, CancellationToken ct = default)
+        bool includeSoftDeleted = false, int? projectId = null, CancellationToken ct = default)
     {
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
@@ -80,6 +81,10 @@ public sealed class UpgradeFleetService
         if (!includeSoftDeleted)
         {
             query = query.Where(EnvironmentQueries.NotSoftDeleted);
+        }
+        if (projectId is { } pid)
+        {
+            query = query.Where(e => e.ProjectId == pid);
         }
 
         var rows = await query
@@ -185,9 +190,9 @@ public sealed class UpgradeFleetService
     /// the two halves cannot disagree about which environments exist.
     /// </summary>
     public async Task<List<EnvironmentDetailRow>> ListFleetDetailsAsync(
-        bool includeSoftDeleted = false, CancellationToken ct = default)
+        bool includeSoftDeleted = false, int? projectId = null, CancellationToken ct = default)
     {
-        var fleet = await ListFleetAsync(includeSoftDeleted, ct).ConfigureAwait(false);
+        var fleet = await ListFleetAsync(includeSoftDeleted, projectId, ct).ConfigureAwait(false);
         if (fleet.Count == 0) return [];
 
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);

@@ -1246,6 +1246,18 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   the same visibility join), `ProjectCustomerInfoService.ListCustomersKnownByAsync` (the
   "which customers does Anne know" direction), and `DeliveryFeedService` (deliveries across
   solutions; the page reads one deployment pipeline at a time).
+- **Bounded answers (#1509).** An assistant client refuses a response much past a few tens
+  of thousands of characters, and a fleet of 165 environments ran well past that. So
+  `list_environments`, `list_upgrades`, `list_planned_upgrades`, `get_upgrade` and
+  `list_recent_deployments` each take a `limit` (25 by default, at most 50; for
+  `list_recent_deployments` 20 and 50, down from 50 and 200) and say in `truncated` and
+  `note` when it left rows out and how to narrow them. `list_upgrades` takes the solution, type and
+  next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
+  solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
+  solution and cuts long failure messages, which `list_deployments` keeps whole.
+  `get_environment` leaves Microsoft's own apps out of the installed list unless asked, and
+  says how many it left out. The solution filter narrows the fleet query itself; the other
+  filters run over the visible fleet in memory, which is one row per environment.
 
 ## Suggested phasing
 
