@@ -442,19 +442,12 @@ internal static class AccountAuthEndpoints
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("MagicLogin");
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
             var token = form["Token"].ToString();
             if (string.IsNullOrEmpty(token))
             {
                 ctx.Response.Redirect("/login/magic");
-                return;
-            }
-            // A stale form (tab left open across a key rotation) goes back to the
-            // confirmation page for a fresh one rather than a plain-text 400; the
-            // token is untouched, so pressing Sign in again works.
-            if (!await antiforgery.IsRequestValidAsync(ctx))
-            {
-                ctx.Response.Redirect($"/login/magic/confirm?token={Uri.EscapeDataString(token)}");
                 return;
             }
             try

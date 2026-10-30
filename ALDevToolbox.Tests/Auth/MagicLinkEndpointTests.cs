@@ -82,15 +82,14 @@ public sealed class MagicLinkEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task A_post_without_the_page_form_goes_back_to_the_page_and_leaves_the_link_usable()
+    public async Task A_post_without_the_page_form_is_refused_and_leaves_the_link_usable()
     {
         var token = await IssueTokenAsync("forged@cronus.example");
 
         using var forged = await _factory.CreateClient().PostAsync("/auth/login/magic/consume",
             new FormUrlEncodedContent([new KeyValuePair<string, string>("Token", token)]));
 
-        forged.StatusCode.Should().Be(HttpStatusCode.Redirect);
-        forged.Headers.Location!.OriginalString.Should().Be($"/login/magic/confirm?token={Uri.EscapeDataString(token)}");
+        forged.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         SetsAuthCookie(forged).Should().BeFalse();
 
         using var signIn = await SignInAsync(_factory.CreateClient(), token);
