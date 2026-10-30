@@ -25,7 +25,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// malformed". So each refusal is asserted for its own status, not merely for
 /// not-success.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GitHubWebhookEndpointTests : IDisposable
 {
     private const string Secret = "swordfish";

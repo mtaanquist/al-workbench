@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// hand it back that way, so a <c>da-DK.xlf</c> full of Danish declared
 /// <c>target-language="en-US"</c> and AL ignored it (#1250).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class TranslatorExportEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";

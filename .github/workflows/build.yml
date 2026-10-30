@@ -95,6 +95,12 @@ jobs:
       # ALDT_TEST_POSTGRES_CONNECTION when set and skips spinning up its own
       # Testcontainers container — faster than booting Docker-inside-Docker on
       # a runner that already provides Postgres.
+      #
+      # The data directory sits on tmpfs: TestDb clones a template database
+      # per test class, and on a disk-backed directory each clone took
+      # 340-560 ms against 35-40 ms in memory. That alone cut the suite from
+      # about 29 to 22 minutes (#1535). The data is thrown away anyway, and
+      # dropped clones free their space, so the mount stays small.
       postgres:
         image: postgres:18-alpine
         env:
@@ -104,6 +110,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
+          --tmpfs /var/lib/postgresql:rw
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s

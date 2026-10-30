@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// <c>ZipArchive</c> does on its own; these tests unzip what actually came
 /// back, so a body that only starts out as a ZIP fails them.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class CookbookDownloadEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";

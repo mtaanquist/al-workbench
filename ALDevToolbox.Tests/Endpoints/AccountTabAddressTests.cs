@@ -15,7 +15,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// that only carry a result code, settle on that address with the rest of the query
 /// kept. Through the real routing and prerender, which is where the redirect happens.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class AccountTabAddressTests : IDisposable
 {
     private const string Email = "consultant@cronus.example";

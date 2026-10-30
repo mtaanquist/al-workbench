@@ -25,7 +25,6 @@ namespace ALDevToolbox.Tests.OAuth;
 /// form left open past the window. Declining needs no confirmation. See
 /// ".design/auth-and-audit.md", "Step-up for sensitive tools".
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class OAuthConsentStepUpTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

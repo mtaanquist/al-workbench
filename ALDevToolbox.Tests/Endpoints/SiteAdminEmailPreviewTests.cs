@@ -14,7 +14,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// The email preview tab and its "Send to me" button (issue #1030), through
 /// the real auth and antiforgery stack.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SiteAdminEmailPreviewTests : IDisposable
 {
     private const string AdminEmail = "siteadmin@cronus.example";

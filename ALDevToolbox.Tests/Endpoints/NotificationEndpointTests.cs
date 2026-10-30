@@ -15,7 +15,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// <c>InAppNotificationServiceTests</c>; these pin what the endpoints add on
 /// top: who may call them, the antiforgery check, and where they redirect.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class NotificationEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";

@@ -23,7 +23,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// and the reveal answer without an account, loading the page spends nothing, the
 /// reveal is never cached, and the sender's page still needs a sign-in.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SealedEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

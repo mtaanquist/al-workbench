@@ -20,7 +20,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// them by their <c>[Authorize]</c> attribute, and <c>/site-admin</c> has its
 /// own role guard in <see cref="SiteAdminRoleMetadataTests"/>.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class EndpointAuthorizationMetadataTests : IDisposable
 {
     private const string LegacyRedirect = "legacy redirect to the renamed route, which carries its own guard; reads nothing";

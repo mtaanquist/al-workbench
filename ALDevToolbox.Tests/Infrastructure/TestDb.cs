@@ -891,7 +891,10 @@ internal sealed class PostgresHost
             return new PostgresHost(fromEnv, container: null);
         }
 
+        // Data directory on tmpfs, as in CI: the per-class template clone is
+        // about ten times faster in memory than on disk (#1535).
         var container = new PostgreSqlBuilder("postgres:18-alpine")
+            .WithTmpfsMount("/var/lib/postgresql")
             .Build();
         container.StartAsync().GetAwaiter().GetResult();
         return new PostgresHost(container.GetConnectionString(), container);

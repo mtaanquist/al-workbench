@@ -27,7 +27,6 @@ namespace ALDevToolbox.Tests.Mcp;
 /// only when that approval was made with a second factor, and a tool nobody
 /// marked still reaches the tool.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class McpRequestFilterTests : IDisposable
 {
     private readonly TestDb _db = new();

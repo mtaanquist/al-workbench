@@ -79,10 +79,10 @@ public sealed class ReleasesBrowserViewTests : IDisposable
         await SeedPipelineBuildAsync("CRONUS Denmark", "main");
 
         var cut = _ctx.Render<ReleasesBrowserView>();
-        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Should().NotBeEmpty());
-
-        cut.FindAll(".pill-tab").Select(t => t.QuerySelector("span")!.TextContent)
-            .Should().StartWith(new[] { "Microsoft", "Solutions", "Third-party" });
+        // The Solutions tab comes from a later load than the first tabs, so a
+        // single look after "any tab is there" can catch it missing (#1535).
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Select(t => t.QuerySelector("span")!.TextContent)
+            .Should().StartWith(new[] { "Microsoft", "Solutions", "Third-party" }));
 
         cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Third-party")).Click();
         cut.WaitForAssertion(() =>

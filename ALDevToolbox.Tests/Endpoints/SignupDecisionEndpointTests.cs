@@ -14,7 +14,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// click, or a second admin on a page they loaded earlier - lands back on the
 /// users page with the reason, not on the error page (#1260).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SignupDecisionEndpointTests : IDisposable
 {
     private const string AdminEmail = "admin@cronus.example";

@@ -16,7 +16,6 @@ namespace ALDevToolbox.Tests.Mcp;
 /// the endpoint takes the user and organisation from the signed-in principal, not from
 /// anything in the request.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GeneratedDownloadEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
