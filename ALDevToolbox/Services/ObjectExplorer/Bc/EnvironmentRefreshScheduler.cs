@@ -64,6 +64,9 @@ public sealed class EnvironmentRefreshScheduler : PolledScheduler
     internal static readonly TimeSpan MaxStartOffset = TimeSpan.FromMinutes(40);
     private readonly TimeSpan _startOffset;
 
+    /// <summary>This process's offset, so a test can line its clock up with the slots.</summary>
+    internal TimeSpan StartOffset => _startOffset;
+
     public EnvironmentRefreshScheduler(
         IServiceProvider services,
         EnvironmentRefreshQueue queue,
