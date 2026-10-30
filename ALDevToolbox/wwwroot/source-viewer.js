@@ -2113,9 +2113,11 @@ function renderReferencesPanel(root, session, fileId, editorId) {
         notice.setAttribute("role", "status");
         // "Where set" filters the rows in hand, so on a cut list it can miss
         // writes past the cap; say so where the switch is offered.
-        notice.textContent = session.results.some(r => r.usage)
-            ? `Showing the first ${count.toLocaleString()} matches, so "Where set" may miss some. Use the filter box below to narrow the list.`
-            : `Showing the first ${count.toLocaleString()} matches. Use the filter box below to narrow the list.`;
+        notice.textContent = builtInCalls
+            ? `Showing the first ${count.toLocaleString()} calls, so the counts per method are partial. Use the filter box below to narrow the list.`
+            : session.results.some(r => r.usage)
+                ? `Showing the first ${count.toLocaleString()} matches, so "Where set" may miss some. Use the filter box below to narrow the list.`
+                : `Showing the first ${count.toLocaleString()} matches. Use the filter box below to narrow the list.`;
         section.appendChild(notice);
     }
 

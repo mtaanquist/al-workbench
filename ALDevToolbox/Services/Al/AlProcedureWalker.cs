@@ -879,7 +879,9 @@ internal sealed class AlProcedureWalker
         }
 
         var target = _state.Ctx.Resolver.ResolveTypeByName(nameTok.Value, kindTok.Value);
-        if (target is null) return;
+        // The resolver falls back to any kind; a Page:: literal that only
+        // matched a same-named table must not land on the table.
+        if (target is null || !string.Equals(target.Kind, kindTok.Value, StringComparison.OrdinalIgnoreCase)) return;
         _state.EmitSystemReference(new ExtractedSystemReference(
             Line: memberTok.Line,
             Column: memberTok.Column,

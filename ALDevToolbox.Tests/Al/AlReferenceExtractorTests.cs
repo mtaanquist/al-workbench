@@ -2596,6 +2596,24 @@ public sealed class AlReferenceExtractorTests
     }
 
     [Fact]
+    public void A_static_dispatch_is_not_recorded_on_an_object_of_another_kind()
+    {
+        // The type lookup falls back to any kind, so a Page:: literal whose
+        // page is not visible can find the table of the same name instead.
+        var resolver = MakeResolver();
+        resolver.AddType("Company Information", new AlTypeRef(BaseAppId, "table", 79, "Company Information"));
+        const string src = """
+            procedure Foo()
+            begin
+                Page.RunModal(Page::"Company Information");
+            end;
+            """;
+        var result = AlReferenceExtractor.Extract(src, OwnerCodeunit(resolver));
+
+        result.SystemReferences.Should().BeEmpty();
+    }
+
+    [Fact]
     public void A_static_dispatch_is_a_built_in_call_on_the_object_it_names()
     {
         // Page.RunModal(Page::"Customer Card") opens the page as surely as

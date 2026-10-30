@@ -85,6 +85,25 @@ public sealed class BuiltInCallsTests : IDisposable
     }
 
     [Fact]
+    public async Task A_variable_named_after_its_table_lists_the_calls_on_the_table()
+    {
+        // Gadget: Record Gadget, like Customer: Record Customer, is the usual
+        // AL spelling; the type name must not resolve back to the variable.
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var (fileId, lines) = await SetterFileAsync(read, releaseId);
+        var line = Array.FindIndex(lines, l => l.Contains("Gadget.Modify")) + 1;
+        var column = lines[line - 1].IndexOf("Gadget", StringComparison.Ordinal) + 2;
+
+        var session = await NewSessions(read).CreateSystemReferencesAtPositionAsync(fileId, line, column, "owner");
+
+        session.Should().NotBeNull();
+        session!.TargetName.Should().Be("Gadget");
+        session.Results.Should().ContainSingle().Which.MemberName.Should().Be("Modify");
+    }
+
+    [Fact]
     public async Task A_name_that_is_not_an_object_finds_nothing()
     {
         var releaseId = await ImportAsync();
@@ -129,6 +148,13 @@ public sealed class BuiltInCallsTests : IDisposable
                     ReferenceSourceFileName = "src/Thing.Table.al",
                     Fields = new object[] { new { Id = 1, Name = "No.", TypeDefinition = new { Name = "Code[20]" } } },
                 },
+                new
+                {
+                    Id = 50102,
+                    Name = "Gadget",
+                    ReferenceSourceFileName = "src/Gadget.Table.al",
+                    Fields = new object[] { new { Id = 1, Name = "No.", TypeDefinition = new { Name = "Code[20]" } } },
+                },
             },
             Pages = new object[]
             {
@@ -164,6 +190,15 @@ public sealed class BuiltInCallsTests : IDisposable
                     }
                 }
                 """,
+            ["src/Gadget.Table.al"] = """
+                table 50102 Gadget
+                {
+                    fields
+                    {
+                        field(1; "No."; Code[20]) { }
+                    }
+                }
+                """,
             ["src/ThingCard.Page.al"] = """
                 page 50110 "CRONUS Thing Card"
                 {
@@ -177,7 +212,10 @@ public sealed class BuiltInCallsTests : IDisposable
                         ThingRec: Record "CRONUS Thing";
 
                     procedure Run()
+                    var
+                        Gadget: Record Gadget;
                     begin
+                        Gadget.Modify();
                         ThingRec.Insert();
                         ThingRec.Get('A');
                         Page.RunModal(Page::"CRONUS Thing Card", ThingRec);

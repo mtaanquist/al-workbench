@@ -187,28 +187,28 @@ public sealed class ReferenceSessionService
                 {
                     return null;
                 }
+                if (viewReleaseId is { } view && view != meta.ReleaseId && !await SeedVisibleAsync(view, ct))
+                {
+                    return null;
+                }
                 return await StoreSystemReferencesAsync(
                     viewReleaseId ?? meta.ReleaseId, appId, type.TargetObjectKind,
                     type.TargetObjectId, type.TargetObjectName, ownerKey, ct);
             case ResolutionTarget.LocalVariable local:
                 // A variable declared in this file, local or global: its
-                // declared type names the object. Resolve that name the way a
-                // click on it would.
-                var typeName = Services.Al.AlGoToDefinitionLocator.ResolveVariableType(meta.Content, local.Name);
-                if (string.IsNullOrEmpty(typeName)) return null;
-                var byType = await _resolver.ResolveAsync(new ResolverContext(
-                    FileId: fileId,
-                    ReleaseId: meta.ReleaseId,
-                    Line: line,
-                    Column: column,
-                    Word: typeName,
-                    LeftQualifier: null,
-                    LeftOperator: null,
-                    FileContent: meta.Content), ct);
-                return byType?.Target is ResolutionTarget.CatalogObject typeObject
-                    ? await CreateSystemReferencesFromObjectAsync(
-                        typeObject.ObjectId, ownerKey, viewReleaseId ?? meta.ReleaseId, ct)
-                    : null;
+                // declared type names the object, looked up by kind and name
+                // so a page cannot stand in for the table of the same name.
+                if (Services.Al.AlGoToDefinitionLocator.ResolveVariableObjectType(meta.Content, local.Name)
+                    is not { } declared)
+                {
+                    return null;
+                }
+                var typeObject = await ChainObjectResolution.ResolveObjectAsync(
+                    _db, meta.ReleaseId, declared.Name, declared.Kind, objectId: null, ct);
+                return typeObject is null
+                    ? null
+                    : await CreateSystemReferencesFromObjectAsync(
+                        typeObject.Id, ownerKey, viewReleaseId ?? meta.ReleaseId, ct);
             default:
                 return null;
         }

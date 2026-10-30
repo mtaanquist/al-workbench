@@ -171,6 +171,9 @@ public sealed class RawSqlBaselineTests
             new(StringComparer.Ordinal)
             {
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/ObjectExplorerService.cs"] = ["ResolveChainObjectAsync"],
+                // Seeded with the clicked file's release, read through the filter behind SeedVisibleAsync.
+                ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceSessionService.cs"] =
+                    ["CreateSystemReferencesAtPositionAsync"],
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceResolver.cs"] =
                     ["ResolveExtractedReferenceAtAsync", "ResolveMemberSymbolAsync", "ResolveObjectByNameAsync"],
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/SourceViewerService.cs"] = ["GoToDefinitionAsync"],

@@ -645,11 +645,11 @@ public sealed class CalImportService
     private async Task ResolveSystemReferenceIdsAsync(long moduleId, CancellationToken ct)
     {
         await _db.Database.ExecuteSqlRawAsync(
-            "UPDATE oe_module_system_references r SET target_object_id = o.object_id " +
+            "UPDATE oe_module_system_references r SET target_object_id = o.object_id, target_object_name = o.name " +
             "FROM oe_module_objects o " +
             "WHERE r.module_id = {0} AND o.module_id = {0} " +
             "AND r.target_object_id IS NULL AND r.target_object_name <> '' " +
-            "AND o.name = r.target_object_name AND o.kind = r.target_object_kind",
+            "AND lower(o.name) = lower(r.target_object_name) AND o.kind = r.target_object_kind",
             new object[] { moduleId }, ct).ConfigureAwait(false);
     }
 
