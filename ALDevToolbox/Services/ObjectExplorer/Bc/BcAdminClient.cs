@@ -525,7 +525,10 @@ public sealed class BcAdminClient : IBcAdminClient
                 action, environmentName, response.StatusCode, detail.Length > 0 ? detail : "(no error body)");
             throw new BcApiException(response.StatusCode, describeFailure is null
                 ? $"The Admin Center API returned {(int)response.StatusCode}. {detail}".TrimEnd()
-                : describeFailure(response.StatusCode, body));
+                : describeFailure(response.StatusCode, body))
+            {
+                RetryAfter = BcThrottleHandler.RequestedWait(response, TimeProvider.System.GetUtcNow()),
+            };
         }
     }
 
