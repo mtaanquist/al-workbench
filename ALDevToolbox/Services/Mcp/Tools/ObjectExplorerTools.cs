@@ -49,7 +49,7 @@ public sealed class ObjectExplorerTools
     private static readonly string[] ReleaseListKinds = ["first_party", "third_party", "cal", "solution"];
 
     [McpServerTool(Name = "list_releases", ReadOnly = true)]
-    [Description("Lists the releases you can search with the other Object Explorer tools - the same list the Releases page shows. That is Microsoft's Business Central releases (kind 'first_party'), third-party apps ('third_party'), legacy C/AL TXT imports ('cal'), and the newest ready build of each solution's build pipeline ('solution'), which is where a customer's own extensions are: pass the customer or solution name as search to find them, and use the id (every build of a solution shares one label). Releases still importing or whose import failed are left out. Returns each release's id, label (e.g. 'BC 28.1'), kind, BC version, publisher, the release it was layered on, the solution and pipeline for a solution build, and IsPrerelease - true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run. Ordered Microsoft and other imported releases first, newest BC version first, then the solution builds by solution name; returns the first 50 unless you raise limit, and Truncated and Note say what was left out, so pass search or kind rather than paging. For an older build of a solution, use list_solution_builds and pass its releaseId.")]
+    [Description("Lists the releases you can search with the other Object Explorer tools - the same list the Releases page shows. That is Microsoft's Business Central releases (kind 'first_party'), third-party apps ('third_party'), legacy C/AL TXT imports ('cal'), and the newest ready build of each solution's build pipeline ('solution'), which is where a customer's own extensions are: pass the customer or solution name as search to find them, and use the id, since builds of one solution on the same BC version share a label. Releases still importing or whose import failed are left out. Returns each release's id, label (e.g. 'BC 28.1'), kind, BC version, publisher, the release it was layered on, the solution and pipeline for a solution build, and IsPrerelease - true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run. Ordered Microsoft and other imported releases first, newest BC version first, then the solution builds by solution name; returns the first 50 unless you raise limit, and Truncated and Note say what was left out, so pass search or kind rather than paging. For an older build of a solution, use list_solution_builds and pass its releaseId.")]
     public async Task<ReleaseListResult> ListReleasesAsync(
         [Description("Optional case-insensitive substring of the release label, publisher, BC version, solution name or pipeline name: a customer's name finds their solution's build, 'Continia' that vendor's apps, '28.5' one version. Null lists every release up to limit.")] string? search = null,
         [Description("Optional kind: 'first_party' (Microsoft), 'third_party', 'cal' or 'solution'. Null lists every kind.")] string? kind = null,
@@ -82,8 +82,19 @@ public sealed class ObjectExplorerTools
         return new ReleaseListResult(
             matched.Take(cap).ToList(),
             truncated,
-            truncated ? TruncationNote(matched, cap) : null);
+            truncated ? TruncationNote(matched, cap) : NoMatchNote(matched, search));
     }
+
+    /// <summary>
+    /// The next step when a search finds nothing. The name an agent was given is
+    /// often a short name or a repository name, which list_solutions matches and
+    /// this list does not.
+    /// </summary>
+    private static string? NoMatchNote(List<ReleaseSummary> matched, string? search) =>
+        matched.Count == 0 && !string.IsNullOrWhiteSpace(search)
+            ? $"No release matches '{search.Trim()}'. If that is a customer, call list_solutions with it as search "
+              + "(it also matches short names and repository names), then list_solution_builds for the releaseId of its builds."
+            : null;
 
     /// <summary>
     /// The Releases page's search: a substring of label, publisher, BC version,

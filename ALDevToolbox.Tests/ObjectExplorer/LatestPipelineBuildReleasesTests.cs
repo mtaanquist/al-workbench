@@ -164,6 +164,11 @@ public sealed class LatestPipelineBuildReleasesTests : IDisposable
         row.Kind.Should().Be("solution");
         row.SolutionName.Should().Be("CRONUS Denmark");
         row.PipelineName.Should().Be("main");
+
+        // A name that matches nothing says where to look next, not just nothing.
+        var none = await NewTools(read).ListReleasesAsync(search: "CRN");
+        none.Rows.Should().BeEmpty();
+        none.Note.Should().Contain("list_solutions");
     }
 
     [Fact]
