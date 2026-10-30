@@ -136,6 +136,7 @@ Email change for a user is performed by another admin (not by the user themselve
 - `AuthService.TryLoginAsync` returns `LoginOutcome.MfaRequired` once the password verifies and the user has any 2FA enrolled. `LastLoginAt` and the login-success row in `login_attempts` are deferred to `AuthService.CompleteMfaAsync`, called by the challenge endpoint after the second factor verifies.
 - The intermediate "password OK, 2FA pending" state lives in a short-lived signed cookie (`alwb_mfa`, 10 min, `IDataProtector` purpose `ALDevToolbox.MfaPending`). No server-side session table.
 - Magic-link login deliberately bypasses 2FA — the mailbox itself is treated as a second factor.
+- The emailed link opens a confirmation page (`/login/magic/confirm`); only its Sign in button's POST spends the token. Mail scanners (Outlook Safe Links, Defender) and chat link previews fetch links before the person clicks, so a GET that signed in let them use the link up and receive the session cookie (#1500). No GET in a sign-in flow may spend a single-use token.
 
 ## Step-up for sensitive tools
 

@@ -210,7 +210,15 @@ public class ObjectExplorerService
                 PipelineName: b.Pipeline!.Name))
             .ToListAsync(ct);
 
-        rows.Sort((a, b) => string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase));
+        // Pipeline, then id, break ties so two pipelines of one solution keep one
+        // order: list_releases cuts this list at a limit.
+        rows.Sort((a, b) =>
+        {
+            var byProject = string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase);
+            if (byProject != 0) return byProject;
+            var byPipeline = string.Compare(a.PipelineName, b.PipelineName, StringComparison.OrdinalIgnoreCase);
+            return byPipeline != 0 ? byPipeline : a.Id.CompareTo(b.Id);
+        });
         return rows;
     }
 

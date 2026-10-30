@@ -288,7 +288,10 @@ app). The **New build** action lets the user pick which to build:
   *latest ready* build release (`ObjectExplorerService.ListLatestPipelineBuildReleasesAsync` — one
   row per pipeline, grouped under the project's name next to the manual third-party publishers) so
   a pipeline's current objects are findable without opening its project first. Older builds remain
-  Artifacts-only, and MCP `list_releases` still excludes all project releases.
+  Artifacts-only. MCP `list_releases` lists the same latest-per-pipeline builds, as kind
+  `solution` with the solution and pipeline named, so an agent asked about a customer finds that
+  customer's code in the Object Explorer rather than going to GitHub for it; older builds are
+  reached through `list_solution_builds`.
 - **Comparing two builds of the same project is kept** — it's genuinely useful — but scoped to that
   project. Artifacts offers a "Compare builds" picker listing only *this project's* builds;
   selecting two reuses `ReleaseComparisonService.CompareReleases` on the underlying Release ids and
