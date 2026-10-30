@@ -86,14 +86,30 @@ public sealed class BcThrottleHandlerTests
         waits.Should().Equal(BcThrottleHandler.DefaultWait);
     }
 
+    /// <summary>
+    /// A long wait is not shortened to suit us: trying again after a minute when asked
+    /// for thirty would be ignoring the answer. It is handed back for the caller to carry.
+    /// </summary>
     [Fact]
-    public async Task A_wait_longer_than_a_minute_is_capped_so_one_customer_cannot_stall_the_sweep()
+    public async Task A_wait_longer_than_a_minute_is_not_cut_short_but_handed_back()
     {
-        var (client, _, waits) = Build(Throttled(TimeSpan.FromMinutes(30)), new HttpResponseMessage(HttpStatusCode.OK));
+        var (client, inner, waits) = Build(Throttled(TimeSpan.FromMinutes(30)), new HttpResponseMessage(HttpStatusCode.OK));
 
-        await client.SendAsync(Get());
+        var response = await client.SendAsync(Get());
 
-        waits.Should().Equal(BcThrottleHandler.MaxWait);
+        response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        inner.Seen.Should().ContainSingle("nothing is sent before the time Business Central named");
+        waits.Should().BeEmpty("one customer's long wait must not hold up the caller either");
+    }
+
+    [Fact]
+    public void The_wait_asked_for_is_reported_uncapped_for_the_clients_to_carry()
+    {
+        BcThrottleHandler.RequestedWait(Throttled(TimeSpan.FromMinutes(30)), Now).Should().Be(TimeSpan.FromMinutes(30));
+        BcThrottleHandler.RequestedWait(Throttled(), Now).Should().Be(BcThrottleHandler.DefaultWait);
+        BcThrottleHandler.RequestedWait(ThrottledUntil(Now.AddMinutes(2)), Now).Should().Be(TimeSpan.FromMinutes(2));
+        BcThrottleHandler.RequestedWait(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable), Now).Should().BeNull();
+        BcThrottleHandler.RequestedWait(new HttpResponseMessage(HttpStatusCode.Forbidden), Now).Should().BeNull();
     }
 
     [Fact]

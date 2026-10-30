@@ -498,6 +498,58 @@ public sealed class OrganizationAdminService
     }
 
     /// <summary>
+    /// How often, in minutes, the background sweep asks Business Central about this
+    /// organisation's environments. A value that is not one of
+    /// <see cref="ObjectExplorer.Bc.EnvironmentRefreshInterval.Choices"/> reads as the
+    /// default, the same way the scheduler reads it.
+    /// </summary>
+    public async Task<int> GetEnvironmentRefreshIntervalAsync(CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        var minutes = await _db.OrganizationSettings.AsNoTracking()
+            .Where(s => s.OrganizationId == orgId)
+            .Select(s => (int?)s.EnvironmentRefreshIntervalMinutes)
+            .FirstOrDefaultAsync(ct);
+        return (int)ObjectExplorer.Bc.EnvironmentRefreshInterval.Normalise(minutes).TotalMinutes;
+    }
+
+    /// <summary>
+    /// Sets how often the background sweep asks Business Central about this
+    /// organisation's environments. Only the values on
+    /// <see cref="ObjectExplorer.Bc.EnvironmentRefreshInterval.Choices"/> are accepted;
+    /// anything else is refused under <c>EnvironmentRefreshInterval</c>. Takes effect at
+    /// the scheduler's next poll. Audited through the interceptor like the other settings
+    /// columns. See <c>.design/environment-updates.md</c> ("Freshness").
+    /// </summary>
+    public async Task SetEnvironmentRefreshIntervalAsync(int minutes, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        if (!ObjectExplorer.Bc.EnvironmentRefreshInterval.IsAllowed(minutes))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["EnvironmentRefreshInterval"] = "Choose one of the listed intervals.",
+            });
+        }
+
+        var row = await _db.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
+        if (row is null)
+        {
+            row = new OrganizationSettings { OrganizationId = orgId };
+            _db.OrganizationSettings.Add(row);
+        }
+        else if (row.EnvironmentRefreshIntervalMinutes == minutes)
+        {
+            return;
+        }
+        row.EnvironmentRefreshIntervalMinutes = minutes;
+        row.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _config.InvalidateCache(orgId);
+        _logger.LogInformation("Org {OrgId} set environment_refresh_interval_minutes = {Minutes}.", orgId, minutes);
+    }
+
+    /// <summary>
     /// The current org's per-tool state for Administration → Tools: whether MCP
     /// is on, and the stored disabled-tool set (kept whole, including tools that
     /// are hidden site-wide, so a later site re-enable keeps this org's choice).

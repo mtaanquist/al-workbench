@@ -2259,6 +2259,65 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         verified.Should().BeNull("a sweep nobody asked for is not the consultant's own connection test");
     }
 
+    /// <summary>
+    /// Being told to slow down is neither a rejection nor a generic failure: the result
+    /// says so, in words, and carries the wait so the scheduled refresh can honour it.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_environment_list_reports_the_wait_it_was_given()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(10),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.Result.Should().Be(BcConnectionResult.Throttled);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(10));
+        result.Message.Should().Contain("slow down").And.Contain("10 minutes");
+    }
+
+    /// <summary>
+    /// Once Business Central has said slow down part-way through the detail reads, the
+    /// rest of that tenant's reads would only be refused too, so they are not sent. The
+    /// environment list itself was read, so the refresh still counts as a success.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_detail_read_stops_the_remaining_reads_and_reports_the_wait()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production"), new BcEnvironment("Sandbox", "Sandbox") },
+            OnUpdateSettings = _ => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(3),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.IsSuccess.Should().BeTrue("the environment list was read and saved");
+        result.EnvironmentCount.Should().Be(2);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(3));
+        admin.UpdateSettingsRequested.Should().ContainSingle("nothing more is asked of a tenant that said slow down");
+    }
+
     // ── The environment panel (live reads, never cached) ──────────────────
 
     /// <summary>Seeds a project with one environment and returns both ids.</summary>
@@ -2580,6 +2639,112 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var prerequisiteAlone = () => svc.BookAppUpdateAsync(projectId, envId, systemApp, "28.5.0.0", UploadAppTiming.Now);
         (await prerequisiteAlone.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
             .Should().Contain("Continia Core").And.Contain("Cancel that booking");
+    }
+
+    // Several updates booked together (the operations team's "these tonight").
+
+    private static FakeAppManagementClient AppsWithThreeWaiting(Guid systemApp, Guid banking) => new()
+    {
+        OnAvailable = () => new[]
+        {
+            new BcAvailableAppUpdate(WaitingAppId, "Continia Core", "Continia Software", "28.5.0.1",
+                new[] { new BcAppUpdateRequirement(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", "update") }),
+            new BcAvailableAppUpdate(banking, "Continia Banking", "Continia Software", "28.5.0.2", Array.Empty<BcAppUpdateRequirement>()),
+            new BcAvailableAppUpdate(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", Array.Empty<BcAppUpdateRequirement>()),
+        },
+    };
+
+    [Fact]
+    public async Task Several_app_updates_are_booked_as_one_batch_with_the_app_another_waits_for_first()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+        var slot = _clock.GetUtcNow().AddHours(8);
+
+        await using var ctx = _db.NewContext();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps).BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(WaitingAppId, "28.5.0.1", new[] { systemApp }),
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(systemApp, "28.5.0.0", Array.Empty<Guid>()),
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+        }, UploadAppTiming.AtTime, slot);
+
+        outcome.Count.Should().Be(3, "an app picked twice is booked once");
+        outcome.RunsAtUtc.Should().Be(slot.UtcDateTime);
+        apps.Updated.Should().BeNull("the worker sends them, never the page request");
+
+        await using var read = _db.NewContext();
+        var rows = await read.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == envId).OrderBy(a => a.BatchOrder).ToListAsync();
+        rows.Select(r => r.BcAppId).Should().Equal(new Guid?[] { systemApp, WaitingAppId, banking },
+            "Core waits for System Application, so that goes first; the others keep the order they were picked in");
+        rows.Select(r => r.BatchOrder).Should().Equal(0, 1, 2);
+        rows.Select(r => r.BatchId).Distinct().Should().ContainSingle().Which.Should().NotBeNull();
+        rows.Should().OnlyContain(r => r.Kind == UpgradeActionKind.UpdateApp && r.Status == UpgradeActionStatus.Pending);
+        rows.Select(r => r.ExecuteAfter).Distinct().Should().ContainSingle()
+            .Which.Should().BeCloseTo(slot.UtcDateTime, TimeSpan.FromMilliseconds(1), "all three wait for the one slot");
+        rows[1].PrerequisiteAppIds.Should().Equal(systemApp);
+    }
+
+    [Fact]
+    public async Task One_app_of_several_that_cannot_be_booked_books_none_of_them()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+
+        var gone = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(Guid.NewGuid(), "1.0.0.0", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await gone.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("one of the apps you picked");
+
+        var unagreed = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(WaitingAppId, "28.5.0.1", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await unagreed.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("Continia System Application");
+
+        var none = () => svc.BookAppUpdatesAsync(projectId, envId, Array.Empty<AppUpdatePick>(), UploadAppTiming.Now);
+        (await none.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("App");
+
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId))
+            .Should().BeFalse("nothing is booked when any app is refused");
+    }
+
+    [Fact]
+    public async Task Several_app_updates_are_refused_when_one_is_already_booked()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        await svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime,
+            _clock.GetUtcNow().AddHours(8), new[] { systemApp });
+
+        var again = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(systemApp, "28.5.0.0", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
+            .Should().Contain("Continia Core").And.Contain("one of these apps");
+
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().CountAsync(a => a.EnvironmentId == envId)).Should().Be(1);
     }
 
     [Fact]
