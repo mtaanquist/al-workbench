@@ -251,6 +251,41 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// list_releases takes no release, but it lists each pipeline's newest build,
+    /// and a Private solution's build must stay out of that list for anyone
+    /// outside its team. The hidden release is restamped as a build's own kind so
+    /// it is listed through the pipeline path alone, the one this guards.
+    /// </summary>
+    [Fact]
+    public async Task List_releases_lists_a_private_solutions_build_only_to_a_member()
+    {
+        var fixture = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeReleases.Where(r => r.Id == fixture.HiddenReleaseId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Kind, "project"));
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var outsider = await NewTools(ctx).ListReleasesAsync(search: "CRONUS Denmark");
+            outsider.Rows.Should().BeEmpty("a non-member must not learn the Private solution's build exists");
+            outsider.Truncated.Should().BeFalse();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var member = await NewTools(ctx).ListReleasesAsync(search: "CRONUS Denmark");
+            var row = member.Rows.Should().ContainSingle().Subject;
+            row.Id.Should().Be(fixture.HiddenReleaseId);
+            row.Kind.Should().Be("solution");
+            row.SolutionName.Should().Be("CRONUS Denmark");
+        }
+    }
+
     [Fact]
     public async Task A_symbolId_from_a_private_projects_release_is_served_to_a_member()
     {
