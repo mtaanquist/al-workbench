@@ -410,14 +410,29 @@ public sealed class ArtifactService
     /// <paramref name="limit"/> keeps it to the newest few (#1138): a pipeline that builds
     /// on every push gathers thousands, and the page re-reads this while a build runs.
     /// <paramref name="includePreview"/> false leaves the nightly preview check's builds out.
+    /// <paramref name="beforeBuildId"/> starts after that build, for reading further back (#1526).
     /// </summary>
     public async Task<List<BuildRow>> ListBuildsAsync(
-        int pipelineId, int? limit = null, bool includePreview = true, CancellationToken ct = default)
+        int pipelineId, int? limit = null, bool includePreview = true, CancellationToken ct = default, int? beforeBuildId = null)
     {
         await EnsureCanViewPipelineAsync(pipelineId, ct);
         var builds = _db.OeProjectBuilds.AsNoTracking().Where(b => b.PipelineId == pipelineId);
         if (!includePreview) builds = builds.Where(b => b.BcTarget == ProjectBuildTarget.Current);
-        return await ListBuildsCoreAsync(builds, limit, ct);
+        return await ListBuildsCoreAsync(await OlderThanAsync(builds, beforeBuildId, ct), limit, ct);
+    }
+
+    /// <summary>
+    /// The builds of <paramref name="builds"/> that come after <paramref name="beforeBuildId"/>
+    /// in the history's order (newest first), or none when that build is not among them.
+    /// The order is by start time, so the cursor is too, with the id as tie-break.
+    /// </summary>
+    private static async Task<IQueryable<OeProjectBuild>> OlderThanAsync(
+        IQueryable<OeProjectBuild> builds, int? beforeBuildId, CancellationToken ct)
+    {
+        if (beforeBuildId is not { } id) return builds;
+        var anchor = await builds.Where(b => b.Id == id).Select(b => (DateTime?)b.StartedAt).FirstOrDefaultAsync(ct);
+        if (anchor is not { } startedAt) return builds.Where(_ => false);
+        return builds.Where(b => b.StartedAt < startedAt || (b.StartedAt == startedAt && b.Id < id));
     }
 
     /// <summary>One of a pipeline's builds as the history lists it, or null when it isn't that pipeline's.</summary>
@@ -482,12 +497,15 @@ public sealed class ArtifactService
 
     /// <summary>
     /// A project's builds across its pipelines, newest first, at most <paramref name="limit"/>
-    /// when given — the MCP <c>list_solution_builds</c> surface.
+    /// when given — the MCP <c>list_solution_builds</c> surface. <paramref name="beforeBuildId"/>
+    /// starts after that build, as on <see cref="ListBuildsAsync"/>.
     /// </summary>
-    public async Task<List<BuildRow>> ListBuildsForProjectAsync(int projectId, int? limit = null, CancellationToken ct = default)
+    public async Task<List<BuildRow>> ListBuildsForProjectAsync(
+        int projectId, int? limit = null, CancellationToken ct = default, int? beforeBuildId = null)
     {
         await _access.EnsureCanViewAsync(projectId, ct);
-        return await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking().Where(b => b.ProjectId == projectId), limit, ct);
+        var builds = _db.OeProjectBuilds.AsNoTracking().Where(b => b.ProjectId == projectId);
+        return await ListBuildsCoreAsync(await OlderThanAsync(builds, beforeBuildId, ct), limit, ct);
     }
 
     /// <summary>

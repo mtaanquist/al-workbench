@@ -13,7 +13,7 @@ App folders are relative to `ALDevToolbox/`.
 | Folder                       | What goes there                                                              |
 |------------------------------|------------------------------------------------------------------------------|
 | `Components/Pages/`          | Routable pages (one `.razor` per route). A tool with more than a page or two gets its own subfolder — `Pages/Upgrades/` is the Business Central platform-update fleet page. |
-| `Components/Layout/`         | Shell layout, sidebar, top bar, reconnect modal.                             |
+| `Components/Layout/`         | Shell layout, sidebar, top bar, reconnect modal, and the link-preview tags in the page head. |
 | `Components/Email/`          | The emails: `EmailLayout`, `EmailParagraph`, `EmailButton`, `EmailCode`, the `EmailTheme` token values, one component per email, and `EmailPreviews` (sample data for the SiteAdmin preview tab). Rendered by `Services/Email/`, never routed. See `.design/email.md`. |
 | `Components/Shared/`         | Reusable components (`SettingRow`, `AuthCard`, `ConfirmDialog`, `DependencyPicker`, `AuditHistoryPanel`, `EnvironmentActivityFeed`, ...). Check here before building a new control. |
 | `Components/Shared/Archetypes/` | The page frame, one component per handoff structure: `PageHead`, `EmptyState`, `LoadingBlock`, `FilterBar`, the page frames `ListPage`, `DetailPage`, `EditPage`, `GeneratorPage` and `LauncherPage`, plus the content archetypes `DocsPage`, `SetupSteps` / `SetupStep` and `ErrorPage`. Pages compose these instead of copying the markup — see "Page archetypes" below. |
@@ -86,6 +86,7 @@ When you add a new file, match the folder. Resist creating top-level folders —
 - `saas-delivery.md` — publishing a build to a Business Central SaaS environment: the BC connection, deployment pipelines (the `OeReleasePipeline` entity), deployments (`OeProjectDelivery`), and the two update windows.
 - `environment-updates.md` — the Upgrades fleet page: the team-scoped grant, the mirrored next platform update, the two date writes, and the actions-and-history table behind them.
 - `ui-design.md` — page layout, copy, components to factor out.
+- `sealed.md` — Sealed, the one-time secret links: the browser-side encryption, what the server keeps, the recipient's anonymous half and its fence crossing.
 - `bcquality.md` — the mirrored BCQuality knowledge base: ingest, schema, refresh policy, and the two MCP tools over it.
 - `github-integration.md` — the GitHub App: which credential acts (installation vs the user's link), the schema, and the four features built on them.
 - `github-integration-phase2.md` — phase 2 of the GitHub integration (#626-#633): repository discovery, repository standards, recipe delivery, Releases, the pull-request compile gate, translation-memory ingest, dependency drift, and the MCP twins.
@@ -109,6 +110,7 @@ subsystem, start here rather than in `domain-model.md`:
 | Translations and the translation memory (`oe_module_translations`, memory tables) | `object-explorer.md` (the translations section)  |
 | Cookbook recipes                                                       | `cookbook.md`                                               |
 | BCQuality mirror                                                       | `bcquality.md`                                              |
+| Sealed links (`sealed_links`, `sealed_link_events`)                    | `sealed.md`                                                 |
 | MCP OAuth clients, tokens, grants                                      | `mcp-oauth.md`                                              |
 | System settings, backups, off-site storage                             | `deployment.md`                                             |
 | GitHub App installation, per-user account link, repository writes      | `github-integration.md`                                     |

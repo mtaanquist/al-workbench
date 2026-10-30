@@ -32,9 +32,9 @@ public sealed class ObjectExplorerServiceTests : IDisposable
 
     private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
+            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 
     private ProjectAccess NewAccess(Data.AppDbContext ctx) => new(ctx, _db.OrgContext);
 
@@ -1855,7 +1855,9 @@ public sealed class ObjectExplorerServiceTests : IDisposable
         result.Truncated.Should().BeTrue();
         result.Note.Should().Contain("first 1").And.Contain("Narrow it.");
 
-        ALDevToolbox.Services.Mcp.Tools.ReferenceSearchResult.From(all, all.Count, "Narrow it.")
+        // A small slice, so the character budget (#1524) cannot be what cuts it.
+        var two = all.Take(2).ToList();
+        ALDevToolbox.Services.Mcp.Tools.ReferenceSearchResult.From(two, two.Count, "Narrow it.")
             .Truncated.Should().BeFalse("an exactly-fitting result is not cut");
     }
 
@@ -2055,7 +2057,7 @@ public sealed class ObjectExplorerServiceTests : IDisposable
         // Narrowing to a method that wasn't called returns nothing.
         var modifyHits = await refs.FindSystemReferencesAsync(releaseId, new FindSystemReferencesQuery(
             TargetAppId: appId, TargetObjectKind: "table", TargetObjectId: 99000,
-            TargetObjectName: "Acme", SystemMethodName: "Modify"));
+            TargetObjectName: "Acme", SystemMethodNames: ["Modify"]));
         modifyHits.Should().BeEmpty();
     }
 

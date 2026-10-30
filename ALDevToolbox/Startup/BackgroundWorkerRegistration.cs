@@ -61,6 +61,9 @@ public static class BackgroundWorkerRegistration
         // repository against its solution's environment again, then opens the update
         // pull requests of the solutions that asked for that (#1104).
         services.AddHostedService<ALDevToolbox.Services.GitHub.DependencyDriftScheduler>();
+        // Daily refresh of the modules copied from a GitHub repository, for the
+        // repositories that send no pushes (#1415).
+        services.AddHostedService<ALDevToolbox.Services.Templates.ModuleSourceRefreshScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
@@ -73,6 +76,9 @@ public static class BackgroundWorkerRegistration
         // Sends the daily and weekly notification digests, and drops items that
         // waited too long. See .design/notifications.md.
         services.AddHostedService<ALDevToolbox.Services.Notifications.NotificationDigestScheduler>();
+        // Closes expired Sealed links, tells senders theirs were opened, and deletes
+        // closed ones after a month. See .design/sealed.md.
+        services.AddHostedService<ALDevToolbox.Services.Sealed.SealedLinkScheduler>();
         // Adds each newly shipped Business Central release wave to every org's
         // application-version catalogue, read daily off the Microsoft symbol feed.
         services.AddHostedService<ALDevToolbox.Services.Templates.ApplicationVersionSyncScheduler>();

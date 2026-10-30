@@ -161,13 +161,12 @@ public class ObjectExplorerService
     /// <summary>
     /// The newest ready build's Release for each pipeline — the one exception to
     /// "project builds stay out of the Object Explorer" (see
-    /// <see cref="ListReleasesAsync"/>): the Third-party tab on
+    /// <see cref="ListReleasesAsync"/>): the Solutions tab on
     /// <c>/object-explorer</c> shows the latest ready build per pipeline so a
     /// pipeline's current objects are findable without going through the
     /// Artifacts tool first. Older builds stay Artifacts-only. One row per
     /// pipeline, <see cref="ReleaseListItem.PipelineName"/> and
-    /// <see cref="ReleaseListItem.ProjectName"/> filled for the card's context
-    /// line. See <c>.design/artifacts.md</c>.
+    /// <see cref="ReleaseListItem.ProjectName"/> filled for the tab's table. See <c>.design/artifacts.md</c>.
     /// </summary>
     public async Task<List<ReleaseListItem>> ListLatestPipelineBuildReleasesAsync(CancellationToken ct = default)
     {
@@ -210,7 +209,15 @@ public class ObjectExplorerService
                 PipelineName: b.Pipeline!.Name))
             .ToListAsync(ct);
 
-        rows.Sort((a, b) => string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase));
+        // Pipeline, then id, break ties so two pipelines of one solution keep one
+        // order: list_releases cuts this list at a limit.
+        rows.Sort((a, b) =>
+        {
+            var byProject = string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase);
+            if (byProject != 0) return byProject;
+            var byPipeline = string.Compare(a.PipelineName, b.PipelineName, StringComparison.OrdinalIgnoreCase);
+            return byPipeline != 0 ? byPipeline : a.Id.CompareTo(b.Id);
+        });
         return rows;
     }
 

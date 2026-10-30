@@ -248,6 +248,11 @@ public sealed class BcArtifactService
     /// </summary>
     public async Task<BcArtifactDownload> DownloadArtifactSetAsync(string applicationUrl, CancellationToken ct = default)
     {
+        // A queued or retried import carries the URL it was resolved with, which
+        // may name a Front Door host Microsoft (or BC_ARTIFACT_CDN_HOST) has since
+        // rotated; the trust check only knows the current names (#1428), so move
+        // it onto those before vetting it.
+        applicationUrl = BcArtifactIndex.ToCdnUrl(applicationUrl);
         var appZip = await DownloadZipAsync(applicationUrl, ct).ConfigureAwait(false);
         string? platformZip = null;
         try

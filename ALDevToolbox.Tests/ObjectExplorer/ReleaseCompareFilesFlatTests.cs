@@ -105,6 +105,30 @@ public sealed class ReleaseCompareFilesFlatTests : IDisposable
     }
 
     /// <summary>
+    /// The path filter runs inside the scan, before the cap, so a narrow question
+    /// reaches files the unfiltered cut would never have examined. It used to run
+    /// on the first rows of the cut only, and "Second.al" sorts last (#1510).
+    /// </summary>
+    [Fact]
+    public async Task Flat_compare_filters_by_path_before_the_cap()
+    {
+        var (leftId, rightId) = await SeedFixtureAsync(changedModuleCount: 1);
+
+        await using var read = _db.NewContext();
+        var comparison = NewComparison(read);
+
+        (await comparison.CompareReleaseFilesFlatAsync(leftId, rightId, take: 2))
+            .Should().NotContain(r => r.Path == "src/Second.al", "without a filter it lies past the cut");
+
+        var narrowed = await comparison.CompareReleaseFilesFlatAsync(leftId, rightId, take: 2, pathPattern: "SECOND");
+        narrowed.Select(r => r.Path).Should().Equal("src/Second.al");
+
+        (await comparison.CompareReleaseFilesFlatAsync(leftId, rightId, take: null, pathPattern: "modified"))
+            .Should().ContainSingle().Which.Status.Should().Be("modified",
+                "a changed module's pairs are filtered the same way as whole added or removed modules");
+    }
+
+    /// <summary>
     /// An amend can put a newer version of an app beside the old one in the same
     /// release. Compare used to throw on the duplicate app id; it now compares the
     /// higher version, and the chain queries pick the same module (#1224). The

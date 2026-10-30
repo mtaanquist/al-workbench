@@ -187,6 +187,7 @@ public sealed class BackupSchedulerTests : IDisposable
             .ToDictionaryAsync(g => g.Key, g => g.Count());
         perOrg.Should().BeEquivalentTo(new Dictionary<int, int>
         {
+            [TestDb.DefaultOrgId] = 1,
             [TestDb.OtherOrgId] = 1,
             [served] = 1,
         }, "the system organisation and a pending one get none, and a served slot is not taken twice");

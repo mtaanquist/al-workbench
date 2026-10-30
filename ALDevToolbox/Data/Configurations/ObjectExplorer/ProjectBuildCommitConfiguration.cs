@@ -17,6 +17,7 @@ internal sealed class ProjectBuildCommitConfiguration : IEntityTypeConfiguration
         entity.Property(e => e.ShortHash).HasColumnName("short_hash").HasMaxLength(64).IsRequired();
         entity.Property(e => e.Message).HasColumnName("message").IsRequired();
         entity.Property(e => e.Author).HasColumnName("author").HasMaxLength(250).IsRequired();
+        entity.Property(e => e.AuthorEmail).HasColumnName("author_email").HasMaxLength(320);
         entity.Property(e => e.CommittedAt).HasColumnName("committed_at");
         entity.Property(e => e.Ordering).HasColumnName("ordering").IsRequired();
 

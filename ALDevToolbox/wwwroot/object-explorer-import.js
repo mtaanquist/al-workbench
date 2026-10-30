@@ -61,8 +61,8 @@
             submit.disabled = true;
             submit.classList.add("btn--loading");
         }
-        if (submitLabel) submitLabel.textContent = "Importing…";
-        if (label) label.textContent = "Uploading…";
+        if (submitLabel) submitLabel.textContent = "Importing...";
+        if (label) label.textContent = "Uploading...";
         if (hint) hint.textContent = "";
         if (bar) bar.value = 0;
         if (pct) pct.textContent = "0%";
@@ -76,7 +76,7 @@
         const isBackground = hasUrl || hasFolderZip;
 
         function switchToIngesting() {
-            if (label) label.textContent = isBackground ? "Queuing…" : "Ingesting…";
+            if (label) label.textContent = isBackground ? "Queuing..." : "Ingesting...";
             if (pct) pct.textContent = "";
             // Removing the value attribute puts <progress> into its
             // indeterminate (animated) state — we have no byte signal for

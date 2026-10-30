@@ -110,7 +110,7 @@ public sealed class GitHubAccessService
     private static readonly TimeSpan RefreshBefore = TimeSpan.FromMinutes(5);
 
     /// <summary>The advisory-lock namespace for refreshing one user's token pair, keyed per user id ("GHRT").</summary>
-    private const int TokenRefreshLockClass = 0x47_48_52_54;
+    internal const int TokenRefreshLockClass = 0x47_48_52_54;
 
     /// <summary>
     /// How long one answer about what a person may see is reused.

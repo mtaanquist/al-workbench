@@ -29,12 +29,12 @@ public sealed class TranslationImportServiceTests : IDisposable
 
     private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
+            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 
     private TranslationImportService NewTranslator(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
+        new(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 
     /// <summary>
     /// Seeds a release containing the Microsoft OIOUBL <c>.app</c> fixture
@@ -405,6 +405,63 @@ public sealed class TranslationImportServiceTests : IDisposable
         await using var read = _db.NewContext();
         (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == moduleId && t.LanguageCode == "da-DK"))
             .Should().BeFalse("nothing was written");
+    }
+
+    /// <summary>
+    /// Both uploads are writes keyed by ids the caller sends. A release and module that
+    /// exist, in another organisation, and that the ZIP would match by name: the only
+    /// thing between them and this organisation's admin is the tenant boundary.
+    /// </summary>
+    [Fact]
+    public async Task Uploads_against_another_organisations_release_or_module_are_refused_and_write_nothing()
+    {
+        int releaseId;
+        long moduleId;
+        await using (var seed = _db.NewContext())
+        {
+            var release = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeRelease
+            {
+                OrganizationId = TestDb.OtherOrgId, Label = "Fabrikam release", Kind = "first_party", Status = "ready",
+                DedupKey = Guid.NewGuid().ToString(), ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            seed.OeReleases.Add(release);
+            await seed.SaveChangesAsync();
+            var module = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeModule
+            {
+                OrganizationId = TestDb.OtherOrgId, ReleaseId = release.Id, AppId = Guid.NewGuid(), Name = "OIOUBL",
+                Publisher = "Microsoft", Version = "26.0.0.0", CreatedAt = DateTime.UtcNow,
+            };
+            seed.OeModules.Add(module);
+            await seed.SaveChangesAsync();
+            (releaseId, moduleId) = (release.Id, module.Id);
+        }
+
+        await using var ctx = _db.NewContext();
+        await using (var xlf = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf")))
+        {
+            var single = () => NewTranslator(ctx).ImportSingleAsync(releaseId, moduleId, xlf, "OIOUBL.daDK.xlf");
+            (await single.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ModuleId"]
+                .Should().Be($"Module {moduleId} does not belong to release {releaseId}.");
+        }
+
+        var zipBuffer = new MemoryStream();
+        using (var archive = new ZipArchive(zipBuffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = archive.CreateEntry("OIOUBL.daDK.xlf");
+            await using var es = entry.Open();
+            await using var src = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+            await src.CopyToAsync(es);
+        }
+        zipBuffer.Position = 0;
+        var zip = () => NewTranslator(ctx).ImportZipAsync(releaseId, zipBuffer);
+        (await zip.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleaseId"]
+            .Should().Be($"Release {releaseId} does not exist in this organisation.");
+
+        // Reading past the filter on purpose: the rows would carry this organisation's
+        // id but the other one's module.
+        await using var read = _db.NewContext();
+        (await read.OeModuleTranslations.IgnoreQueryFilters().AsNoTracking().AnyAsync(t => t.ModuleId == moduleId))
+            .Should().BeFalse("nothing was written against the other organisation's module");
     }
 
     private static int FindSignature(byte[] bytes, uint signature)

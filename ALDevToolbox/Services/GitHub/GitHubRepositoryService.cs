@@ -112,14 +112,22 @@ public sealed class GitHubRepositoryService
     /// </summary>
     /// <exception cref="GitHubApiException">GitHub refused to list them.</exception>
     /// <exception cref="GitHubAppNotConfiguredException">The deployment's App registration is gone or unreadable.</exception>
-    public async Task<IReadOnlyList<GitHubRepositorySummary>> ListAccessibleAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<GitHubRepositorySummary>> ListAccessibleAsync(CancellationToken ct = default) =>
+        (await ListAccessibleWithTruncationAsync(ct)).Repositories;
+
+    /// <summary>
+    /// <see cref="ListAccessibleAsync"/>, plus whether GitHub's listing stopped before the
+    /// end of the installation's repositories, so a search that finds nothing can say the
+    /// repository may be past that point rather than not there (#1527).
+    /// </summary>
+    public async Task<GitHubInstallationRepositories> ListAccessibleWithTruncationAsync(CancellationToken ct = default)
     {
         var userId = RequireUserId();
         var access = await GetAccessAsync(ct);
-        if (!access.IsReady) return [];
+        if (!access.IsReady) return new([], false);
 
         var installationId = (await _connection.GetStatusAsync(ct)).InstallationId;
-        if (installationId is null) return [];
+        if (installationId is null) return new([], false);
 
         var token = await _github.GetInstallationTokenAsync(installationId.Value, ct);
         var listing = await _github.ListInstallationRepositoriesAsync(token, ct);
@@ -135,7 +143,7 @@ public sealed class GitHubRepositoryService
         _logger.LogInformation(
             "Offering {OfferedCount} of the installation's {RepositoryCount} repositories to user {UserId}.",
             offered.Count, all.Count, userId);
-        return offered;
+        return new GitHubInstallationRepositories(offered, listing.Truncated);
     }
 
     /// <summary>

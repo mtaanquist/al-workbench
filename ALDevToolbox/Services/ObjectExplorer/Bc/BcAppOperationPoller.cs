@@ -78,6 +78,21 @@ public static class BcAppOperationPoller
                 }
                 continue;
             }
+            catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+            {
+                // Told to wait longer than the HTTP handler sits out. Asking again on the
+                // usual beat would only be refused again until the run of errors gave up on
+                // an install Business Central is still running, so wait what it asked, up
+                // to the deadline, without counting it as a failed poll.
+                var left = deadline - DateTime.UtcNow;
+                if (left <= TimeSpan.Zero)
+                {
+                    return BcAppOperationResult.Unconfirmed("Business Central was still installing the app when the workbench stopped waiting, so the install wasn't confirmed here.");
+                }
+                var pause = wait > pollDelay ? wait : pollDelay;
+                await Task.Delay(pause < left ? pause : left, ct).ConfigureAwait(false);
+                continue;
+            }
             catch (BcApiException) when (++consecutiveErrors < MaxConsecutivePollErrors)
             {
                 // A throttled or briefly unavailable read says nothing about the install,

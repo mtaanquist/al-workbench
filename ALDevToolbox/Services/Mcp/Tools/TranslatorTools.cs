@@ -47,13 +47,13 @@ public sealed class TranslatorTools
         [Description("Optional kind filter: caption, tooltip, label, option, instructional, other.")] string? kind = null,
         [Description("Optional substring match on the provenance/origin (e.g. 'Base Application').")] string? origin = null,
         [Description("Include soft-removed entries (default false).")] bool includeRemoved = false,
-        [Description("Max results (1-100, default 25).")] int maxResults = 25,
+        [Description("Max results (1-50, default 25). Raise it only when the entry you need is not in the first 25.")] int maxResults = 25,
         CancellationToken ct = default)
     {
         var res = await _memory.SearchAsync(new MemorySearchQuery(
             query, sourceLanguage, targetLanguage,
             string.IsNullOrWhiteSpace(kind) ? null : kind,
-            origin, includeRemoved, 0, Math.Clamp(maxResults, 1, 100), CountTotal: false), ct);
+            origin, includeRemoved, 0, Math.Clamp(maxResults, 1, 50), CountTotal: false), ct);
         return res.Items.Select(e => new TranslationMemoryHit(
             e.Id, e.SourceLanguage, e.TargetLanguage, e.SourceText, e.TargetText,
             e.Kind, e.Origin, e.Score, e.HitCount, e.IsDeleted,

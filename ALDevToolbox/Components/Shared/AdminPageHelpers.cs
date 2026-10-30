@@ -132,6 +132,7 @@ public static class AdminPageHelpers
         AuditEntityType.GitHubRepository => "GitHub repository",
         // British spelling, as everywhere else a reader sees it.
         AuditEntityType.Organization => "Organisation",
+        AuditEntityType.SealedLink => "Sealed link",
         _ => type.ToString(),
     };
 

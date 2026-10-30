@@ -1,0 +1,7 @@
+/*
+    Scoped chrome for the module list. A module copied from GitHub whose last
+    update failed (#1415) is flagged in the warning tone, so it stands out
+    without hovering.
+*/
+.ml-tag--warn { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning); }
+.tag { white-space: nowrap; }

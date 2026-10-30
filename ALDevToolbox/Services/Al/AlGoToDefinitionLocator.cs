@@ -125,6 +125,40 @@ public static class AlGoToDefinitionLocator
             : match.Groups["u"].Value;
     }
 
+    private static readonly Regex VariableObjectTypeRegex = new(
+        @"^\s*:\s*(?<kw>Record|Codeunit|Page|TestPage|Report|Query|XmlPort)\s+" +
+        @"(?<n>(?:(?:""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)*(?:""[^""]+""|[A-Za-z_][A-Za-z0-9_]*))",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// The object a variable is declared as: its kind (<c>table</c> for a
+    /// <c>Record</c>) and name, the last segment of a namespaced type. Unlike
+    /// <see cref="ResolveVariableType"/> it keeps the kind, so a table and a
+    /// page that share a name cannot be confused, and it never sends the type
+    /// name back through a resolver that would find the variable again when
+    /// the two are spelled alike (<c>Customer: Record Customer</c>).
+    /// </summary>
+    public static (string Kind, string Name)? ResolveVariableObjectType(string fileContent, string variableName)
+    {
+        if (string.IsNullOrEmpty(fileContent) || string.IsNullOrEmpty(variableName)) return null;
+        var escaped = Regex.Escape(variableName);
+        foreach (Match decl in Regex.Matches(fileContent, $@"(?<![A-Za-z0-9_""]){escaped}(?=\s*:)", RegexOptions.IgnoreCase))
+        {
+            var match = VariableObjectTypeRegex.Match(fileContent[(decl.Index + decl.Length)..Math.Min(fileContent.Length, decl.Index + decl.Length + 300)]);
+            if (!match.Success) continue;
+            var full = match.Groups["n"].Value;
+            var last = Regex.Match(full, @"(?:""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)$").Value.Trim('"');
+            var kind = match.Groups["kw"].Value.ToLowerInvariant() switch
+            {
+                "record" => "table",
+                "testpage" => "page",
+                var k => k,
+            };
+            return (kind, last);
+        }
+        return null;
+    }
+
     // AL object keywords that can appear before a type name in a var
     // declaration. Captured so the reference classifier can distinguish a
     // var of type `Codeunit "HttpClient"` (real object reference) from a

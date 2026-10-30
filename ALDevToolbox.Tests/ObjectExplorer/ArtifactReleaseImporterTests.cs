@@ -52,13 +52,13 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
-        var management = new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+        var management = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
         return new ArtifactReleaseImporter(
             artifacts, importer, queue, persistedJobs, management, ctx, _db.OrgContext, _clock,
             NullLogger<ArtifactReleaseImporter>.Instance);
@@ -312,6 +312,29 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
         await using var read = _db.NewContext();
         (await read.OeReleases.SingleAsync(r => r.Id == fresh.Id)).DeletedAt.Should().BeNull();
+    }
+
+    [Theory]
+    // An hour either side of the refresh age: the boundary is the constant, not a month.
+    [InlineData(-1, false)]
+    [InlineData(1, true)]
+    public async Task ImportPreviewsAsync_replaces_an_older_build_only_once_it_is_past_the_refresh_age(
+        int hoursPastRefreshAge, bool replaced)
+    {
+        await using var ctx = _db.NewContext();
+        var preview = Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk", prerelease: true,
+            bcVersion: "29.0.55000.0",
+            importedAt: DateTime.UtcNow - ArtifactReleaseImporter.PreviewRefreshAge - TimeSpan.FromHours(hoursPastRefreshAge));
+        var current = Release("Business Central 30.0 (DK) Preview", "bc-insider:30.0:dk",
+            prerelease: true, bcVersion: "30.0.55227.0");
+        ctx.OeReleases.AddRange(preview, current);
+        await ctx.SaveChangesAsync();
+
+        var outcomes = await NewImporter(ctx, new ReleaseImportQueue(), withInsider: true).ImportPreviewsAsync("dk");
+
+        outcomes[0].Status.Should().Be(replaced ? ArtifactImportStatus.Replaced : ArtifactImportStatus.AlreadyImported);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.SingleAsync(r => r.Id == preview.Id)).DeletedAt.HasValue.Should().Be(replaced);
     }
 
     [Fact]

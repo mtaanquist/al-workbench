@@ -5,6 +5,7 @@ using static ALDevToolbox.Endpoints.EndpointHelpers;
 using ALDevToolbox.Services.Templates;
 using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.Mcp;
 
 namespace ALDevToolbox.Endpoints;
 
@@ -12,6 +13,18 @@ internal static class GenerationEndpoints
 {
     public static IEndpointRouteBuilder MapGenerationEndpoints(this IEndpointRouteBuilder app)
     {
+        // The ZIP a generate_* MCP tool made, fetched by the person who asked for it
+        // (#1508). The store answers someone else's token exactly as a missing one.
+        app.MapGet(GeneratedDownloadStore.PathPrefix + "{token}",
+            (string token, HttpContext ctx, GeneratedDownloadStore downloads, IOrganizationContext org) =>
+            {
+                var file = downloads.Get(token, org.CurrentOrganizationId, org.CurrentUserId);
+                if (file is null) return Results.NotFound();
+                // Kept out of the browser's disk cache, which outlives the link and the session.
+                ctx.Response.Headers.CacheControl = "no-store";
+                return Results.File(file.Content, "application/zip", file.FileName);
+            }).RequireAuthorization();
+
         // File download endpoint for the New Workspace flow. Requires a
         // signed-in user — anonymous access to the generators stopped with M13.
         app.MapPost("/generate/workspace", async (HttpContext ctx, GenerationService gen, ApplicationVersionService versions, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>

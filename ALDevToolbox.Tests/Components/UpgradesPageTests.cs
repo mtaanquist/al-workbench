@@ -27,7 +27,11 @@ namespace ALDevToolbox.Tests.Components;
 /// glyph for state, and the row's commands - history first - in one trailing menu
 /// rather than as buttons inside data cells, which is what #805 got wrong.</para>
 /// </summary>
-public sealed class UpgradesPageTests : IDisposable
+// UpgradesPage.SearchDebounce is a static the page reads when it is built: the classes
+// that render the page share one collection so that one class's wait never reaches
+// another's page mid-test.
+[Collection("UpgradesPage.SearchDebounce")]
+public sealed class UpgradesPageTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -84,12 +88,15 @@ public sealed class UpgradesPageTests : IDisposable
         _db.OrgContext.CurrentUserId = AdminUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         // A test that set a real wait must not hand it to a page in another test class.
         UpgradesPage.SearchDebounce = TimeSpan.Zero;
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -465,6 +472,10 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
         UpgradesPage.SearchDebounce = TimeSpan.FromMilliseconds(300);
+        // The wait runs on this clock, so the pause is one the test makes, not one the
+        // machine's load decides.
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
 
         var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
@@ -472,10 +483,15 @@ public sealed class UpgradesPageTests : IDisposable
         cut.Find(".cmdbar__search input").Input("f");
         cut.Find(".cmdbar__search input").Input("fa");
         cut.Find(".cmdbar__search input").Input("fab");
-
+        // The last keystroke has been handled, so its wait is set, once the box shows it.
         cut.WaitForAssertion(() =>
             cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab"));
+        clock.PendingTimers.Should().Be(1, "each keystroke drops the wait of the one before");
+        clock.Advance(TimeSpan.FromMilliseconds(299));
+        clock.PendingTimers.Should().Be(1, "the typing has not paused for the whole wait yet");
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");
@@ -483,6 +499,31 @@ public sealed class UpgradesPageTests : IDisposable
             rows[0].QuerySelector("td.upg-customer a")!.TextContent.Should().Be("Fabrikam Norway");
         }, TimeSpan.FromSeconds(5));
         cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab");
+    }
+
+    /// <summary>
+    /// After a refresh the page re-reads on its own clock, so the answers that come in
+    /// show up without a reload, and the re-reading stops once its few minutes are up.
+    /// </summary>
+    [Fact]
+    public async Task After_a_refresh_the_table_re_reads_on_the_page_clock_and_then_stops()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().ContainSingle());
+        cut.WaitForAssertion(() => BarButton(cut, "Refresh").Click());
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(1, "the refresh sets the re-read going"));
+
+        await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
+        clock.Advance(TimeSpan.FromSeconds(20));
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2),
+            TimeSpan.FromSeconds(5));
+
+        clock.Advance(TimeSpan.FromMinutes(3));
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(0, "a page left open must not re-read forever"));
     }
 
     // ── The solution's short name (#966) ───────────────────────────────

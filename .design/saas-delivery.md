@@ -249,7 +249,15 @@ a status Microsoft adds later shouldn't silently stop every deployment.
 It is checked twice, and the second check is the one that matters:
 
 1. **At scheduling**, against the cached status, as a field-keyed validation error so it lands next to
-   the environment on the form.
+   the environment on the form. A cached status that refuses is asked again first (the same single
+   `GET`), with the answer written back to the row: an environment the last read caught `Preparing`
+   (a new one, or one a failed deployment just re-read) otherwise kept refusing "Deploy again" and
+   "Deploy now" until the next refresh, long after it was up. Only a refusing status is re-read, so an
+   ordinary deployment costs nothing extra; when the re-read fails, the cached refusal stands and says
+   it is the last status read. Approving a prepared deployment takes its step-up and checks it is still
+   waiting before this re-read, so a deployment nobody can approve never spends the customer's
+   credential. Saving a deployment pipeline refuses only an environment that will not recover on its
+   own (being removed, failed); a busy one is accepted, since each deployment checks again.
 2. **At claim time**, by re-reading the single environment (`GET .../environments/{name}`) after the
    claim and before the first upload. A delivery scheduled at 09:00 for 22:00 was fine when it was
    scheduled; an update that landed at 20:00 is invisible to check 1. The fresh status is written back
@@ -376,6 +384,7 @@ the naming suggested.
 | `schema_sync_mode` | `text` | App Management `syncMode`: `Add` (default, safe) or `ForceSync` (can drop columns — gate behind a confirm). Note the missing space: the retired API spelled it `Force Sync`, so stored values were migrated too. |
 | `prepare_release_on_new_build` | `bool` | #934. Off by default. When on, a new successful build of the source build pipeline **prepares** a release through this pipeline - a `proposed` delivery - and a person approves or dismisses it (see *Prepared releases* below). Nothing is ever approved on its own. Ignored (saved as false) for a pipeline that installs GitHub releases. |
 | `deploy_without_approval` / `deploy_without_approval_by_user_id` | `bool` / `int?` | #1096. Off by default. With the prepare setting on and a sandbox target, a new build is deployed without approval, as that user. See *Deploying to a sandbox without approval*. |
+| `disabled_at` / `archived_at` | `timestamptz?` | #1131 / #1466. A disabled pipeline deploys nothing and its waiting deployments are set aside. Only a disabled pipeline can be **archived**: it stays disabled, leaves the active lists (deployment pipelines list, dashboard, palette, `list_deployment_pipelines`), frees its name, and no longer blocks deleting its build pipeline, while its page and deployment history stay reachable ("Show archived" on the list). Restoring brings it back disabled, refused while another pipeline has its name. Anyone who manages the solution may do either. Archiving replaced deleting a deployment pipeline, which lost its history; `deleted_at` is still set on ones deleted before that and when the solution is deleted. |
 | `restrict_branch` / `allowed_branch` | `bool` / `text?` | Only deploy builds made from `allowed_branch` (null is the repositories' default branch). See *Which branch may reach an environment* below. Ignored (saved off) for a pipeline that installs GitHub releases. |
 | `default_publish_time` | `time?` | **Superseded by the target environment's update window** (§1 → *Update window*) as the schedule prefill, and likely droppable. Keep only as a per-pipeline override when one deployment pipeline must default to a different time than its environment's window. The execution model is unchanged: the real schedule is always a concrete date+time per delivery (`OeProjectDelivery.scheduled_for`, §4) — the window/`default_publish_time` only seed the picker. **As built (CRUD slice):** the column was *not* added — there is no scheduling in the CRUD slice to prefill, and the per-environment update window (phase 3) is the intended source. Add it back only if a per-pipeline override turns out to be needed. |
 
@@ -565,9 +574,9 @@ panel's **Refresh** re-reads past the cache for exactly that.
 The window is short on purpose. Nearly all the repeat traffic is one person expanding an
 environment, collapsing it, opening another and coming back; fifteen minutes collapses a
 working session into one fetch, where a longer TTL would mostly buy the *next* person
-tomorrow at a much worse staleness. It also matters that we honour no throttle: the BC
-clients have no `429`/`Retry-After` handling, so restraint in how often we ask is the only
-politeness we currently offer that API. The panel says how old its answer is rather than
+tomorrow at a much worse staleness. Restraint in how often we ask is the first politeness
+we offer that API; the second is that a throttled read is retried only after the
+`Retry-After` it named (see `environment-updates.md`, "Told to slow down"). The panel says how old its answer is rather than
 claiming freshness it does not have.
 
 There is still no background polling and no reconciler.
@@ -637,6 +646,25 @@ that names the environment and says what the click does there:
   booked upload. The `UpdateApp` rows written before #1001 are records only, already
   `Sent`, with what moved in `Outcome`; the history still reads them as "Updated an
   AppSource app".
+
+  **Several updates can be booked together.** The operations team plans an evening's
+  updates as a set, so the waiting list has a tick box on every row that can still be
+  booked (nothing already updating, scheduled or booked) and one in the header for every
+  row shown; the ticks survive a search, as the Environments list's do. "Book N
+  updates..." opens the same dialog, which lists the ticked apps in the order they will
+  go and then the prerequisites nobody ticked. `BookAppUpdatesAsync` (which the single
+  booking is one pick of) holds every app to the single booking's rules - read once,
+  all or nothing - and writes one `UpdateApp` row per app in a batch, in
+  `DependencyOrder`: an app another ticked app waits for goes first, so by the time
+  the dependent is sent Business Central no longer lists it as waiting. Within the
+  batch the "one booking per app" rule allows the overlap; against other bookings it
+  holds. The worker sends the batch like an upload batch, one install per sweep, each
+  after the one before has finished, and Install now moves the whole batch. A failed
+  update stops only the rows that list it among their prerequisites ("wasn't updated,
+  because X, which it waits for, wasn't updated"), or that share a prerequisite with
+  it, since asking for that app again would fail the same way; unrelated apps in the batch still
+  go, since an upload batch's "anything before it may be what it needed" does not apply
+  when the dependencies are known.
 - **Uploading apps** - `.app` files another company built, for which there is no pipeline
   here. Several may be chosen at once: each manifest is read on the spot
   (`AppPackageReader.TryReadManifestAsync`) and the apps are put in dependency order with
@@ -787,7 +815,16 @@ onboarding copy so nobody discovers it by reading the code.
 ### Deployment schedules, and the two rules around them
 
 `Immediate` installs as soon as BC accepts the upload. The other schedules hand the app to Business
-Central to install later, which changes what a delivery can promise:
+Central to install later, which changes what a delivery can promise.
+`Immediate` is not offered as a *pipeline's* schedule (#1471): installing right away is a choice for
+one deployment, so a new pipeline starts on the delivery window and the service refuses `Immediate`
+for a new pipeline or a change to it. Pipelines saved with it before that keep it until someone picks
+another time. On a delivery-window pipeline, **Now** in the Deploy dialog is that choice. On a pipeline
+that waits for the next minor or major update, Now only moves the upload, so the dialog offers
+**Install right away instead of waiting for the update**: that deployment is sent as `Immediate` and
+the pipeline keeps its schedule. It is what a first install and a build with several apps need.
+
+The other schedules' effects on a delivery:
 
 - **`handed_off`** is a terminal delivery state meaning *BC accepted this and will install it on its
   own schedule*. It is not "succeeded" — we never saw the install happen — and it is not "still
@@ -1212,6 +1249,24 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   the same visibility join), `ProjectCustomerInfoService.ListCustomersKnownByAsync` (the
   "which customers does Anne know" direction), and `DeliveryFeedService` (deliveries across
   solutions; the page reads one deployment pipeline at a time).
+- **Bounded answers (#1509).** An assistant client refuses a response much past a few tens
+  of thousands of characters, and a fleet of 165 environments ran well past that. So
+  `list_environments`, `list_upgrades`, `list_planned_upgrades`, `get_upgrade` and
+  `list_recent_deployments` each take a `limit` (25 by default, at most 50; for
+  `list_recent_deployments` 20 and 50, down from 50 and 200) and say in `truncated` and
+  `note` when it left rows out and how to narrow them. `list_upgrades` takes the solution, type and
+  next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
+  solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
+  solution and cuts long failure messages. `list_deployments` cuts them too (#1525), and
+  with a `deploymentId` returns that one deployment with every message whole. Long
+  histories page back instead of growing the limit: `list_deployments` takes a
+  `beforeDeploymentId`, and `list_pipeline_builds` / `list_solution_builds` a
+  `beforeBuildId`, each returning the rows older than that one (#1526).
+  `get_environment` leaves Microsoft's own apps out of the installed list unless asked, and
+  says how many it left out. The solution filter narrows the fleet query itself; the other
+  filters run over the visible fleet in memory, which is one row per environment. Each of
+  these lists also stops at the shared character budget (#1524, see `object-explorer.md`,
+  "Bounded MCP answers"), so a page of long rows still fits one answer.
 
 ## Suggested phasing
 

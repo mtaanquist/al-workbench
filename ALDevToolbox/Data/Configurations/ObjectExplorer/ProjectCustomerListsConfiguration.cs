@@ -40,11 +40,12 @@ internal sealed class ProjectPersonConfiguration : IEntityTypeConfiguration<OePr
         entity.Property(e => e.OrganizationId).HasColumnName("organization_id").IsRequired();
         entity.Property(e => e.ProjectId).HasColumnName("project_id").IsRequired();
         entity.Property(e => e.UserId).HasColumnName("user_id").IsRequired();
-        entity.Property(e => e.Role).HasColumnName("role").HasConversion<string>().HasMaxLength(30).IsRequired();
+        entity.PrimitiveCollection(e => e.Roles).HasColumnName("roles").IsRequired()
+            .ElementType().HasConversion<string>().HasMaxLength(30);
         entity.Property(e => e.Areas).HasColumnName("areas").HasMaxLength(250);
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
 
-        // One row per person per solution; their role and areas are edited, not stacked.
+        // One row per person per solution; their roles and areas are edited, not stacked.
         entity.HasIndex(e => new { e.ProjectId, e.UserId }).IsUnique();
         // Covers the cascade when a user is removed.
         entity.HasIndex(e => e.UserId);

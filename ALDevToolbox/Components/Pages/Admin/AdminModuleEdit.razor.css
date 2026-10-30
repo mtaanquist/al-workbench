@@ -1,0 +1,19 @@
+/*
+    Scoped chrome for the module editor's "Where the files come from" card
+    (#1415). The two choices are the design system's .module-card selection
+    cards; only the marker, the status line and the left-out list are local.
+*/
+
+/* A one-of-two choice: the marker goes round, as a radio does everywhere else
+   in the app (see ProjectDetailAccess.razor.css for the same reasoning). */
+.ms-choice { border: 0; margin: 0; padding: 0; }
+.ms-choice .module-card__check { border-radius: var(--r-pill); }
+
+.ms-status { display: grid; gap: var(--space-2); }
+.ms-status p { margin: 0; }
+.ms-status__line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin: 0; font-size: var(--text-sm); color: var(--ink-2); }
+.ms-status__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+
+.ms-skipped { font-size: var(--text-sm); color: var(--ink-3); }
+.ms-skipped summary { cursor: pointer; color: var(--ink-2); }
+.ms-skipped ul { margin: var(--space-2) 0 0; padding-left: var(--space-5); display: grid; gap: var(--space-1); }

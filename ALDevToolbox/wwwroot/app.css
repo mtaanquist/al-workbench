@@ -400,6 +400,10 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 .cust-list__version { font-family: var(--font-mono); font-size: var(--text-sm); }
 .cust-list__actions { display: flex; gap: var(--space-1); }
 @container (max-width: 720px) { .cust-list__row { grid-template-columns: minmax(0, 1fr); } }
+/* A colleague's roles on the customer: one question, several answers, as a borderless fieldset. */
+.cust-roles { margin: 0; padding: 0; border: 0; min-width: 0; }
+.cust-roles__legend { padding: 0; margin-bottom: var(--space-1); }
+.cust-roles__options { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
 .cust-notes { display: grid; gap: var(--space-4); }
 .cust-notes__editor { display: grid; gap: var(--space-4); }
 .cust-notes__label { margin: 0 0 var(--space-1); font-size: var(--text-xs); font-weight: var(--fw-semibold); letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }

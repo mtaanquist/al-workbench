@@ -167,8 +167,9 @@ else
     /// <summary>
     /// A permission in the words the person approving it would use. The raw
     /// scope name ("offline_access") is an OAuth protocol identifier and means
-    /// nothing to them; an unrecognised one falls back to itself rather than
-    /// being hidden, because an unexplained permission must still be visible.
+    /// nothing to them. Only <see cref="OAuthEndpoints.SupportedScopes"/> reach
+    /// here - anything else was dropped above and is never granted - so a scope
+    /// added there without words here fails loudly instead of being shown raw.
     /// </summary>
     private static (string Name, string Blurb) PermissionFor(string scope) => scope switch
     {
@@ -176,6 +177,7 @@ else
             "List templates, generate workspaces, search Object Explorer, look up recipes."),
         "offline_access" => ("Stay signed in",
             "Keeps working between sessions, so it doesn't ask you to approve this again every hour."),
-        _ => (scope, "This permission is not one AL Workbench recognises."),
+        _ => throw new System.Diagnostics.UnreachableException(
+            $"Supported scope '{scope}' has no wording on the consent page."),
     };
 }

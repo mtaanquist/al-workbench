@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -76,6 +77,9 @@ public sealed class ProjectAccessTests : IDisposable
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
         return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
     }
+
+    private ProjectDiscoveryService Discovery(AppDbContext ctx) => new(
+        ctx, _db.OrgContext, Access(ctx), _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
 
     private TeamService Teams(AppDbContext ctx) => new(ctx, _db.OrgContext, NullLogger<TeamService>.Instance);
 
@@ -456,11 +460,29 @@ public sealed class ProjectAccessTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Asks <see cref="ProjectAccess.CanManageAsync"/> as <paramref name="userId"/>, and
+    /// checks that the list form (<see cref="ProjectAccess.ManageProjectPredicate"/>, run
+    /// as a query the way the fleet and freshness pages run it) gives the same answer, so
+    /// every row of the manage matrix also holds the two in step.
+    /// </summary>
     private async Task<bool> CanManageAsAsync(int projectId, int userId, bool siteAdmin = false)
     {
         ActAs(userId, siteAdmin);
         await using var ctx = _db.NewContext();
-        return await Svc(ctx).CanManageAsync(projectId);
+        var canManage = await Svc(ctx).CanManageAsync(projectId);
+        (await ManageableProjectIdsAsync(ctx)).Contains(projectId).Should().Be(
+            canManage, $"the list form has to agree with CanManageAsync for user {userId} (siteAdmin={siteAdmin})");
+        return canManage;
+    }
+
+    private async Task<List<int>> ManageableProjectIdsAsync(AppDbContext ctx)
+    {
+        var snapshot = await Access(ctx).GetSnapshotAsync();
+        return await ctx.OeProjects.AsNoTracking()
+            .Where(ProjectAccess.ManageProjectPredicate(snapshot))
+            .Select(p => p.Id)
+            .ToListAsync();
     }
 
     // ── View matrix ─────────────────────────────────────────────────────
@@ -516,6 +538,7 @@ public sealed class ProjectAccessTests : IDisposable
 
         (await access.CanViewAsync(projectId)).Should().BeFalse();
         (await access.CanManageAsync(projectId, OwnerUserId)).Should().BeFalse();
+        (await ManageableProjectIdsAsync(ctx)).Should().BeEmpty("the list form of manage grants nobody nothing too");
         (await access.CanDeleteAsync(OwnerUserId)).Should().BeFalse();
     }
 
@@ -545,6 +568,8 @@ public sealed class ProjectAccessTests : IDisposable
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
             await ((Func<Task>)(() => artifacts.ListBuildsForProjectAsync(projectId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
+            await ((Func<Task>)(() => Discovery(ctx).GetDiscoveryAsync(projectId)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
 
             // The picker list omits it rather than refusing — a name you can't act
             // on is only in the way of choosing one you can.
@@ -557,6 +582,7 @@ public sealed class ProjectAccessTests : IDisposable
         {
             (await Svc(ctx).GetProjectAsync(projectId)).Should().NotBeNull();
             (await Artifacts(ctx).GetProjectHeaderAsync(projectId))!.Name.Should().Be("CRONUS Denmark");
+            (await Discovery(ctx).GetDiscoveryAsync(projectId)).Should().NotBeNull();
             (await Svc(ctx).ListProjectsAsync()).Should().ContainSingle();
         }
 
@@ -875,6 +901,62 @@ public sealed class ProjectAccessTests : IDisposable
         await using var ctx = _db.NewContext();
         (await Svc(ctx).GetProjectAsync(projectId)).Should().NotBeNull();
         (await Artifacts(ctx).ListProjectsAsync()).Should().ContainSingle().Which.IsLocked.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The list form of release visibility (<see cref="ProjectAccess.VisibleReleasePredicate"/>)
+    /// walks two links from a release to its solution. Every other list test reaches it
+    /// through a build; this one has only the import job that brought the release in, so
+    /// the second half of the predicate is the only thing that can hide it.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AllLevels))]
+    public async Task The_releases_list_hides_a_release_linked_only_through_its_import_job(ProjectVisibility visibility)
+    {
+        var projectId = await SeedProjectAsync();
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        if (visibility != ProjectVisibility.Public)
+        {
+            await SetAccessAsOwnerAsync(projectId, visibility, teamId);
+        }
+        int releaseId;
+        await using (var seed = _db.NewContext())
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS Denmark on BC 26.0", BcVersion = "26.0",
+                DedupKey = Guid.NewGuid().ToString(), Kind = OeRelease.ProjectBuildKind, Status = "ready",
+                ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+            };
+            seed.OeReleases.Add(release);
+            await seed.SaveChangesAsync();
+            seed.OeImportJobs.Add(new OeImportJob
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = release.Id, ProjectId = projectId,
+                Kind = "project_build", Status = "done", CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+            releaseId = release.Id;
+        }
+
+        foreach (var (userId, siteAdmin, expected) in new (int, bool, bool)[]
+        {
+            (PlainUserId, false, visibility != ProjectVisibility.Private),
+            (TeamMemberUserId, false, true),
+            (OwnerUserId, false, true),
+            (AdminUserId, false, true),
+            (PlainUserId, true, true),
+        })
+        {
+            ActAs(userId, siteAdmin);
+            await using var ctx = _db.NewContext();
+            var explorer = new ObjectExplorerService(
+                ctx, new ReferenceQueryService(ctx, Access(ctx), _db.OrgContext, NullLogger<ReferenceQueryService>.Instance),
+                Access(ctx), NullLogger<ObjectExplorerService>.Instance);
+            var rows = await explorer.ListReleasesAsync(includeProjectBuilds: true);
+            rows.Any(r => r.Id == releaseId).Should().Be(
+                expected, $"user {userId} (siteAdmin={siteAdmin}) on a {visibility} solution");
+        }
     }
 
     // ── Environment-update axis (issue #657) ────────────────────────────

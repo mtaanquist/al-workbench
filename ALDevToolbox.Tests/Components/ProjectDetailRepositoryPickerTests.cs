@@ -36,7 +36,7 @@ namespace ALDevToolbox.Tests.Components;
 /// user) is left with exactly the field they had before rather than with
 /// machinery they cannot use.</para>
 /// </summary>
-public sealed class ProjectDetailRepositoryPickerTests : IDisposable
+public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
 {
     private const int OwnerUserId = 9640;
     private const long InstallationId = 42;
@@ -124,10 +124,13 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
         return _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 

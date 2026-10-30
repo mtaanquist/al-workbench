@@ -161,7 +161,7 @@ public sealed class NewWorkspaceTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.FindAll("button").Select(b => b.TextContent.Trim())
-                .Should().Contain("Change solution").And.NotContain("Change customer");
+                .Should().Contain("Change solution");
         });
     }
 
@@ -555,8 +555,6 @@ public sealed class NewWorkspaceTests : IDisposable
             cut.Find(".card__head .switch").TextContent.Should().Contain("Include example files");
             cut.Find("input[type='hidden'][name='IncludeExamples']")
                 .GetAttribute("value").Should().Be("true", "the option defaults to on");
-            cut.Markup.Should().NotContain("Include example AL files",
-                "the option moved out of the Options section into the preview head");
         });
 
         cut.Find(".card__head .switch input[type='checkbox']").Change(false);

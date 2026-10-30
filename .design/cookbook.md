@@ -101,11 +101,18 @@ longer holds for this source.
 
 Tools live in `Services/Mcp/Tools/CookbookTools.cs`:
 
-- `search_recipes(query, includeDeprecated?)` — fuzzy ILIKE over title /
+- `search_recipes(query, includeDeprecated?, limit?)` — fuzzy ILIKE over title /
   description / keywords. Returns a `RecipeSummary` per match including
-  the type string.
-- `get_recipe(id)` — returns the full payload; each file's `Path` already
-  joins `RelativePath` and `FileName`.
+  the type string: 25 by default, at most 50, ordered by title, with
+  `truncated` and `note` when more matched. A description is cut at 300
+  characters; keywords are kept whole (#1512).
+- `get_recipe(id, path?, offset?)` — the recipe and its files; each file's
+  `Path` already joins `RelativePath` and `FileName`. Bodies come back in
+  order while they fit about 30,000 characters together with the recipe's
+  own text; a file past that is listed with a null body, and a single file
+  too large for one answer is cut. `path` names a file or a folder to read,
+  and `offset` continues a cut file from where the note says it stopped
+  (#1512).
 - `get_cookbook_guidance()` — returns the org's authored Markdown
   conventions (from `organization_settings.cookbook_guidance`), a
   built-in dictionary describing what each `RecipeType` means, **and a

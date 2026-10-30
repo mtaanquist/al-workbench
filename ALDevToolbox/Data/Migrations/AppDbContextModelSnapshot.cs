@@ -884,6 +884,46 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
 
+                    b.Property<DateTime?>("SourceCheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("source_checked_at");
+
+                    b.Property<string>("SourceCommitSha")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("source_commit_sha");
+
+                    b.Property<string>("SourceDependenciesJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("source_dependencies_json");
+
+                    b.Property<string>("SourceError")
+                        .HasColumnType("text")
+                        .HasColumnName("source_error");
+
+                    b.Property<DateTime?>("SourceFetchedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("source_fetched_at");
+
+                    b.Property<string>("SourcePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("source_path");
+
+                    b.Property<string>("SourceRef")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("source_ref");
+
+                    b.Property<string>("SourceRepository")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("source_repository");
+
+                    b.Property<string>("SourceSkippedJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("source_skipped_json");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
@@ -2950,6 +2990,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(250)")
                         .HasColumnName("author");
 
+                    b.Property<string>("AuthorEmail")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("author_email");
+
                     b.Property<DateTime?>("CommittedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("committed_at");
@@ -3876,11 +3921,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
 
-                    b.Property<string>("Role")
+                    b.PrimitiveCollection<string[]>("Roles")
                         .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("role");
+                        .HasColumnType("character varying(30)[]")
+                        .HasColumnName("roles");
 
                     b.Property<int>("UserId")
                         .HasColumnType("integer")
@@ -4206,6 +4250,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("allowed_branch");
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("archived_at");
+
                     b.Property<string>("ArtifactSource")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -4311,7 +4359,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId")
                         .HasDatabaseName("ix_oe_release_pipelines_project");
 
-                    b.ToTable("oe_release_pipelines", (string)null);
+                    b.ToTable("oe_release_pipelines", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_oe_release_pipelines_archived_is_disabled", "archived_at IS NULL OR disabled_at IS NOT NULL");
+                        });
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeRepositoryBranchHead", b =>
@@ -4798,6 +4849,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false)
                         .HasColumnName("entra_enabled");
+
+                    b.Property<int>("EnvironmentRefreshIntervalMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1440)
+                        .HasColumnName("environment_refresh_interval_minutes");
 
                     b.Property<string>("ExtensionPrefix")
                         .HasMaxLength(50)
@@ -5683,6 +5740,148 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("runtime_template_root_folders", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<byte[]>("Ciphertext")
+                        .HasColumnType("bytea")
+                        .HasColumnName("ciphertext");
+
+                    b.Property<DateTime?>("ClosedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("closed_at");
+
+                    b.Property<string>("ClosedReason")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("closed_reason");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int>("CreatedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("created_by_user_id");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<int>("FailedPassphraseAttempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("failed_passphrase_attempts");
+
+                    b.Property<byte[]>("Iv")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("iv");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("label");
+
+                    b.Property<byte[]>("LinkCheckHash")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("link_check_hash");
+
+                    b.Property<bool>("LockoutNotified")
+                        .HasColumnType("boolean")
+                        .HasColumnName("lockout_notified");
+
+                    b.Property<int>("MaxViews")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_views");
+
+                    b.Property<int>("NotifiedViewCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("notified_view_count");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<byte[]>("PassphraseCheckHash")
+                        .HasColumnType("bytea")
+                        .HasColumnName("passphrase_check_hash");
+
+                    b.Property<byte[]>("PassphraseSalt")
+                        .HasColumnType("bytea")
+                        .HasColumnName("passphrase_salt");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("token");
+
+                    b.Property<int>("ViewCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("view_count");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.HasIndex("OrganizationId", "ExpiresAt");
+
+                    b.HasIndex("OrganizationId", "CreatedByUserId", "CreatedAt");
+
+                    b.ToTable("sealed_links", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLinkEvent", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("IpAddress")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("ip_address");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("kind");
+
+                    b.Property<DateTime>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int>("SealedLinkId")
+                        .HasColumnType("integer")
+                        .HasColumnName("sealed_link_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("SealedLinkId", "OccurredAt");
+
+                    b.ToTable("sealed_link_events", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.SignupRequest", b =>
                 {
                     b.Property<int>("Id")
@@ -6089,12 +6288,12 @@ namespace ALDevToolbox.Data.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("TargetText"), "gin");
                     NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("TargetText"), new[] { "gin_trgm_ops" });
 
-                    b.HasIndex("OrganizationId", "Score", "HitCount")
-                        .IsDescending(false, true, true)
-                        .HasDatabaseName("ix_translation_memory_rank");
-
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash")
                         .HasDatabaseName("ix_translation_memory_lookup");
+
+                    b.HasIndex("OrganizationId", "Score", "HitCount", "LastSeenAt", "Id")
+                        .IsDescending(false, true, true, true, true)
+                        .HasDatabaseName("ix_translation_memory_rank");
 
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash", "TargetHash")
                         .IsUnique()
@@ -8834,6 +9033,42 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("RuntimeTemplate");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLink", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
+                        .WithMany()
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CreatedByUser");
+
+                    b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLinkEvent", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.SealedLink", "SealedLink")
+                        .WithMany("Events")
+                        .HasForeignKey("SealedLinkId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SealedLink");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.SignupRequest", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
@@ -9248,6 +9483,11 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("RootFolders");
 
                     b.Navigation("WorkspaceExtensions");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLink", b =>
+                {
+                    b.Navigation("Events");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.Team", b =>

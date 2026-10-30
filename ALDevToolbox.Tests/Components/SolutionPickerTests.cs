@@ -8,6 +8,7 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Bunit;
 using Bunit.TestDoubles;
+using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -75,6 +76,19 @@ public sealed class SolutionPickerTests : IDisposable
         _db.Dispose();
     }
 
+    /// <summary>
+    /// Focuses the box and types into it, waiting out each handler - the
+    /// focus load, then the debounced reload - before returning. Dispatching
+    /// without waiting raced those two loads, and the render that ends the
+    /// typing handler could land between a test finding the input and pressing
+    /// a key on it, which leaves bUnit holding a detached element.
+    /// </summary>
+    private static async Task TypeAsync(IRenderedComponent<SolutionPicker> cut, string text)
+    {
+        await cut.Find("input").FocusAsync(new FocusEventArgs());
+        await cut.Find("input").InputAsync(new ChangeEventArgs { Value = text });
+    }
+
     private async Task SeedSolutionAsync(string name, string? shortName = null, Guid? tenantId = null)
     {
         await using var seed = _db.NewContext();
@@ -111,8 +125,7 @@ public sealed class SolutionPickerTests : IDisposable
         await SeedSolutionAsync("Jorgensen Mobler");
 
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS");
+        await TypeAsync(cut, "CRONUS");
 
         cut.WaitForAssertion(() =>
         {
@@ -129,8 +142,7 @@ public sealed class SolutionPickerTests : IDisposable
         var created = false;
 
         var cut = RenderPicker(onCreate: b => created = b);
-        cut.Find("input").Focus();
-        cut.Find("input").Input("Jorgensen Mobler");
+        await TypeAsync(cut, "Jorgensen Mobler");
 
         cut.WaitForAssertion(() =>
         {
@@ -155,11 +167,10 @@ public sealed class SolutionPickerTests : IDisposable
     /// be able to start a workspace, and the create row is the whole affordance.
     /// </summary>
     [Fact]
-    public void With_no_solutions_at_all_the_create_row_is_the_only_row()
+    public async Task With_no_solutions_at_all_the_create_row_is_the_only_row()
     {
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS A/S");
+        await TypeAsync(cut, "CRONUS A/S");
 
         cut.WaitForAssertion(() =>
         {
@@ -175,8 +186,7 @@ public sealed class SolutionPickerTests : IDisposable
         await SeedSolutionAsync("CRONUS Denmark");
 
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("cronus denmark");
+        await TypeAsync(cut, "cronus denmark");
 
         cut.WaitForAssertion(() =>
             cut.FindAll("[role='option']").Should().ContainSingle()
@@ -191,15 +201,14 @@ public sealed class SolutionPickerTests : IDisposable
         SolutionOption? picked = null;
 
         var cut = RenderPicker(onSelected: s => picked = s);
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS");
+        await TypeAsync(cut, "CRONUS");
         cut.WaitForAssertion(() => cut.FindAll("[role='option']").Should().HaveCount(2));
 
-        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "ArrowDown" });
+        await cut.Find("input").KeyDownAsync(new KeyboardEventArgs { Key = "ArrowDown" });
         cut.WaitForAssertion(() =>
             cut.Find("input").GetAttribute("aria-activedescendant").Should().NotBeNullOrEmpty(
                 "the highlighted row has to be announced to a screen reader"));
-        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Enter" });
+        await cut.Find("input").KeyDownAsync(new KeyboardEventArgs { Key = "Enter" });
 
         cut.WaitForAssertion(() => picked!.Name.Should().Be("CRONUS Denmark"));
         picked!.ShortName.Should().Be("CRO");
@@ -211,11 +220,10 @@ public sealed class SolutionPickerTests : IDisposable
         await SeedSolutionAsync("CRONUS Denmark");
 
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS");
+        await TypeAsync(cut, "CRONUS");
         cut.WaitForAssertion(() => cut.FindAll("[role='option']").Should().NotBeEmpty());
 
-        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Escape" });
+        await cut.Find("input").KeyDownAsync(new KeyboardEventArgs { Key = "Escape" });
 
         cut.WaitForAssertion(() => cut.FindAll("[role='option']").Should().BeEmpty());
         cut.Find("input").GetAttribute("value").Should().Be("CRONUS");
@@ -230,8 +238,7 @@ public sealed class SolutionPickerTests : IDisposable
     {
         var created = true;
         var cut = RenderPicker(onCreate: b => created = b);
-        cut.Find("input").Focus();
-        cut.Find("input").Input("Jorgensen Mobler");
+        await TypeAsync(cut, "Jorgensen Mobler");
         cut.WaitForAssertion(() => cut.FindAll("[role='option']").Should().ContainSingle());
         await cut.InvokeAsync(() => cut.Find("[role='option']").Click());
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("will be added when you create the repository"));
@@ -255,8 +262,7 @@ public sealed class SolutionPickerTests : IDisposable
         await SeedSolutionAsync("CRONUS Denmark");
 
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS");
+        await TypeAsync(cut, "CRONUS");
 
         cut.WaitForAssertion(() =>
             cut.FindAll("[role='option']")[0].TextContent.Should().Contain("Not set up yet"));
@@ -272,8 +278,7 @@ public sealed class SolutionPickerTests : IDisposable
         for (var i = 1; i <= 10; i++) await SeedSolutionAsync($"CRONUS {i:00}");
 
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS");
+        await TypeAsync(cut, "CRONUS");
 
         cut.WaitForAssertion(() =>
         {
@@ -288,8 +293,7 @@ public sealed class SolutionPickerTests : IDisposable
         await SeedSolutionAsync("CRONUS Denmark", "CRO");
 
         var cut = RenderPicker();
-        cut.Find("input").Focus();
-        cut.Find("input").Input("CRONUS");
+        await TypeAsync(cut, "CRONUS");
         cut.WaitForAssertion(() => cut.FindAll("[role='option']").Should().NotBeEmpty());
         await cut.InvokeAsync(() => cut.FindAll("[role='option']")[0].Click());
 

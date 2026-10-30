@@ -4,6 +4,8 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
@@ -79,7 +81,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task Export_teaches_the_memory_only_the_units_that_were_edited()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
+        var exports = new FinishedExports();
+        using var factory = CountingExports(exports);
         using var client = await SignInAsync(factory);
         var danish = Generated
             .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
@@ -93,16 +96,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
 
         await ExportAsync(client, danish, "da-DK");
 
-        // Learning runs after the download has been sent, so give it a moment.
-        List<string> learned = [];
-        for (var attempt = 0; attempt < 50; attempt++)
-        {
-            await using var ctx = _db.NewContext();
-            learned = ctx.TranslationMemory.Select(e => e.SourceText).ToList();
-            if (learned.Count > 0) break;
-            await Task.Delay(100);
-        }
-        learned.Should().Equal("Amount");
+        await exports.UntilAsync(1);
+        Learned().Should().Equal("Amount");
     }
 
     /// <summary>
@@ -114,7 +109,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task Export_teaches_the_memory_only_the_edits_the_editor_marks_as_new()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
+        var exports = new FinishedExports();
+        using var factory = CountingExports(exports);
         using var client = await SignInAsync(factory);
         var danish = Generated
             .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
@@ -133,15 +129,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
             learn: """["Table 1 - Field 3 - Property Caption"]""");
 
         exported.Should().Contain("Beloeb", "the file still carries every edit");
-        List<string> learned = [];
-        for (var attempt = 0; attempt < 50; attempt++)
-        {
-            await using var ctx = _db.NewContext();
-            learned = ctx.TranslationMemory.Select(e => e.SourceText).ToList();
-            if (learned.Count > 0) break;
-            await Task.Delay(100);
-        }
-        learned.Should().Equal("Posting Date");
+        await exports.UntilAsync(1);
+        Learned().Should().Equal("Posting Date");
     }
 
     /// <summary>A caller that sends no list (an older page) still teaches every edit.</summary>
@@ -149,12 +138,14 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task Export_without_a_learn_list_teaches_every_edit()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
+        var exports = new FinishedExports();
+        using var factory = CountingExports(exports);
         using var client = await SignInAsync(factory);
 
         await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited);
 
-        (await LearnedSourcesAsync(expected: 2)).Should().BeEquivalentTo("Amount", "Posting Date");
+        await exports.UntilAsync(1);
+        Learned().Should().BeEquivalentTo("Amount", "Posting Date");
     }
 
     /// <summary>
@@ -165,17 +156,68 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task A_malformed_learn_list_still_downloads_and_teaches_nothing()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
+        var exports = new FinishedExports();
+        using var factory = CountingExports(exports);
         using var client = await SignInAsync(factory);
 
         var exported = await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited, learn: "{not a list");
         exported.Should().Contain("Beloeb").And.Contain("Bogfoeringsdato");
 
-        // A second, well-formed export is the marker: once it has been learned,
-        // the first one has long had its chance.
+        // A second, well-formed export shows that learning still works. Learning runs
+        // after each download is sent, so wait until both requests have finished it
+        // rather than for the first row: the first export's could land after the
+        // second's in any order (#1439).
         await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited,
             learn: """["Table 1 - Field 3 - Property Caption"]""");
-        (await LearnedSourcesAsync(expected: 1)).Should().Equal("Posting Date");
+        await exports.UntilAsync(2);
+        Learned().Should().Equal("Posting Date");
+    }
+
+    /// <summary>The real host, counting the exports that have finished learning.</summary>
+    private EndpointFactory CountingExports(FinishedExports exports) =>
+        new(_db, services => services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter>(exports));
+
+    /// <summary>What the memory holds; read once every export has finished learning.</summary>
+    private List<string> Learned()
+    {
+        using var ctx = _db.NewContext();
+        return ctx.TranslationMemory.Select(e => e.SourceText).ToList();
+    }
+
+    /// <summary>
+    /// Counts the export requests that have run to the end, learning included: the
+    /// endpoint learns after the download is sent but before it returns, so a test
+    /// that waits for a row instead can read before a late write lands (#1439).
+    /// </summary>
+    private sealed class FinishedExports : Microsoft.AspNetCore.Hosting.IStartupFilter
+    {
+        private readonly SemaphoreSlim _finished = new(0);
+
+        public async Task UntilAsync(int count)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                (await _finished.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken))
+                    .Should().BeTrue("every export finishes learning");
+            }
+        }
+
+        public Action<IApplicationBuilder> Configure(
+            Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use(async (context, inner) =>
+            {
+                try
+                {
+                    await inner();
+                }
+                finally
+                {
+                    if (context.Request.Path == "/api/translator/export") _finished.Release();
+                }
+            });
+            next(app);
+        };
     }
 
     private static readonly string TwoUnitDanish = Generated
@@ -191,20 +233,6 @@ public sealed class TranslatorExportEndpointTests : IDisposable
         {"Table 1 - Field 2 - Property Caption":{"t":"Beloeb","s":"translated"},
          "Table 1 - Field 3 - Property Caption":{"t":"Bogfoeringsdato","s":"translated"}}
         """;
-
-    /// <summary>Learning runs after the download has been sent, so wait for it.</summary>
-    private async Task<List<string>> LearnedSourcesAsync(int expected)
-    {
-        List<string> learned = [];
-        for (var attempt = 0; attempt < 50; attempt++)
-        {
-            await using var ctx = _db.NewContext();
-            learned = ctx.TranslationMemory.Select(e => e.SourceText).ToList();
-            if (learned.Count >= expected) break;
-            await Task.Delay(100);
-        }
-        return learned;
-    }
 
     // ---- helpers -----------------------------------------------------------
 

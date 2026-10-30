@@ -178,7 +178,7 @@ public sealed class PipelinesDashboardService
             : new PipelinesLastBuild(newest.Id, newest.PipelineId, pipelineById[newest.PipelineId].Name, newest.Branch, newest.StartedAt);
 
         // ── Deployment side ────────────────────────────────────────────────────
-        var targets = await _releases.ListReleasePipelineOverviewAsync(ct);
+        var targets = await _releases.ListReleasePipelineOverviewAsync(ct: ct);
 
         var deploymentsToday = targets.Count == 0
             ? 0
@@ -285,7 +285,7 @@ public sealed class PipelinesDashboardService
             // one never became a deployment, so it is not something that happened.
             var liveById = targets.Where(t => t.LiveDelivery is not null)
                 .ToDictionary(t => t.LiveDelivery!.DeliveryId, t => t.LiveDelivery!);
-            var deliveries = await _feed.ListRecentAsync(null, null, ActivityRows * 2, ct);
+            var deliveries = await _feed.ListRecentAsync(null, null, ActivityRows * 2, ct: ct);
             foreach (var d in deliveries.Where(d => d.Status != ProjectDeliveryStatus.Dismissed))
             {
                 var kind = d.Status switch

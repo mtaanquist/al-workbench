@@ -410,8 +410,8 @@ public sealed class AccountService
 
     /// <summary>
     /// The signed-in person's own account row, their organisation, and whether
-    /// that organisation offers Microsoft sign-in — what the Account page opens
-    /// with.
+    /// that organisation offers Microsoft sign-in or requires it — what the
+    /// Account page opens with.
     /// </summary>
     /// <remarks>
     /// Runs inside the organisation query filter. The page used to read these
@@ -426,17 +426,36 @@ public sealed class AccountService
 
         var organization = await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == user.OrganizationId, ct);
-        var entraEnabled = await _db.OrganizationSettings.AsNoTracking()
-            .AnyAsync(s => s.OrganizationId == user.OrganizationId && s.EntraEnabled, ct);
+        var settings = await _db.OrganizationSettings.AsNoTracking()
+            .Where(s => s.OrganizationId == user.OrganizationId)
+            .Select(s => new { s.EntraEnabled, s.LocalLoginPolicy })
+            .FirstOrDefaultAsync(ct);
+        // The same rule as AuthService.IsLocalLoginDisabledAsync, read inside
+        // the filter: a SiteAdmin keeps their password as break-glass.
+        var passwordSignInDisabled = !user.IsSiteAdmin
+            && settings?.LocalLoginPolicy == Domain.ValueObjects.LocalLoginPolicy.EntraOnly;
 
-        return new AccountOverview(user, organization, entraEnabled);
+        return new AccountOverview(user, organization, settings?.EntraEnabled == true, passwordSignInDisabled);
     }
 
-    /// <summary>Self-service password change. Verifies the current password before applying the new one.</summary>
+    /// <summary>
+    /// Self-service password change. Verifies the current password before applying the new one,
+    /// and refuses members of a Microsoft-only organisation (SiteAdmins excepted).
+    /// </summary>
     public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default)
     {
         // Filtered: the signed-in user's own row is in their own organisation.
         var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
+        // A Microsoft-only organisation refuses password sign-in, so a password
+        // set now would only come back to life if the policy were relaxed later
+        // (#1455). SiteAdmins keep theirs as break-glass, as at sign-in.
+        if (await _auth.IsLocalLoginDisabledAsync(user, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Password"] = "Your organisation signs in with Microsoft, so there is no password to change here. Use \"Sign in with Microsoft\" instead.",
+            });
+        }
         if (!_auth.VerifyPassword(currentPassword, user.PasswordHash))
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
@@ -629,5 +648,10 @@ public sealed class AccountService
     }
 }
 
-/// <summary>What the Account page needs about the signed-in person up front.</summary>
-public sealed record AccountOverview(User User, Organization? Organization, bool OrganizationEntraEnabled);
+/// <summary>
+/// What the Account page needs about the signed-in person up front.
+/// <c>PasswordSignInDisabled</c> is true when their organisation only allows
+/// Microsoft sign-in and they are not a SiteAdmin, so there is no password to change.
+/// </summary>
+public sealed record AccountOverview(
+    User User, Organization? Organization, bool OrganizationEntraEnabled, bool PasswordSignInDisabled);

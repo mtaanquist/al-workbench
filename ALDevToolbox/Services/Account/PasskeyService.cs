@@ -105,9 +105,10 @@ public sealed class PasskeyService
         int userId, CancellationToken ct = default)
     {
         AssertConfigured();
-        // Fence category 4 (explicitly scoped user-id lookup): both reads pinned to the
-        // signed-in user's id.
+        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId,
+        // the signed-in user's id.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
+        // Same category 4 read, pinned to p.UserId == userId.
         var existing = await _db.UserPasskeys.IgnoreQueryFilters()
             .Where(p => p.UserId == userId)
             .Select(p => p.CredentialId)

@@ -11,7 +11,9 @@ update dates; the message design is `email.md`.
 Agreed with the maintainer on 2026-10-03:
 
 - **Recipients** are the person who triggered or owns the thing, and for a solution's own
-  events the people who follow it. No organisation-wide broadcasts.
+  events the people who follow it. No organisation-wide broadcasts. Builds and deployments
+  go to the solution's followers by their role on its People list (Mads, 2026-10-27, #1463;
+  see "Following a solution"), not to whoever created the pipeline.
 - **State changes only.** A pipeline that fails every night sends one email when it starts
   failing and one when it works again, not one per night.
 - **Each person chooses per category**, like GitHub: whether it shows in the app (on or
@@ -20,6 +22,9 @@ Agreed with the maintainer on 2026-10-03:
   for everyone without a backfill. Solutions is the exception: its email starts Off. People
   follow a solution without asking (the owner and its People list), so its email is opt-in
   to avoid suddenly mailing a whole team (Mads, 2026-10-03); it still shows in the app.
+  Builds and Deployments stay on Immediately even though they now go to followers too:
+  those are filtered by role, so each reaches the people who look after that part of the
+  solution, and that is the point of sending them (Mads, 2026-10-27).
 - **Customer-facing email is out of scope.** These emails go to colleagues only.
 
 ## Categories
@@ -30,6 +35,7 @@ Agreed with the maintainer on 2026-10-03:
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 | Upgrades | A change someone scheduled on an environment ran, failed or could not be confirmed; an environment someone is to check on a planned upgrade reached the target version (ready to check) | #1046, #1047 |
 | Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
+| Sealed links you send | A Sealed link you created was opened, or locked after too many wrong passphrases (see `sealed.md`) | |
 
 ## How it works
 
@@ -119,8 +125,19 @@ build is marked ready or failed.
   working, as it does on the pipeline page.
 - **Skipped:** pull request builds (GitHub shows the result on the pull request) and builds
   outside a pipeline (GitHub release imports).
-- **Recipients:** the person the build ran as (whoever pressed Build, or whoever had the
-  nightly check on when it was queued) and the pipeline's creator.
+- **Recipients:** whoever pressed Build, for a manual build, and the solution's followers
+  who develop it (Developers, Architects, and followers with no role; see "Following a
+  solution"). A build on push or a nightly check runs as whoever last saved the pipeline,
+  who did not start it, so that person hears only if they follow it like anyone else. With
+  nobody left (everyone with those roles unfollowed), the solution's owner is told.
+- **Commit authors** (#1464): the authors of the build's commits hear too, whatever their
+  role or follow choice. Those are the commits since the pipeline's last successful build,
+  so they include what broke it and, once it works again, what fixed it. An author is
+  matched by the email Git recorded: to an account with that address, or, for GitHub's
+  private `id+login@users.noreply.github.com` address, to whoever linked that GitHub
+  account. Nobody is guessed at by name; an author who matches no one is skipped. Nightly
+  checks leave them out: those fail because Business Central moved, not because of a
+  commit. Builds from before author emails were kept have none to match.
 - **Access is re-checked** on every notification (see "Who can see it" below).
 - The email shows the failed extensions (or the build's own message when it failed as a
   whole) and links to the build on the pipeline page; the digest entry carries the first
@@ -146,18 +163,23 @@ untouched, so it applies again if access comes back.
 `DeploymentNotifier` is called from three places:
 
 - After a build prepared deployments waiting for approval (release import worker), with the
-  ids it prepared. Goes to the solution's owner and the deployment pipeline's creator,
-  marked urgent, so a digest choice still gets it straight away (Off still stops it).
+  ids it prepared. Goes to the solution's followers who look after deployments (Project
+  leaders, Consultants, and followers with no role), marked urgent, so a digest choice
+  still gets it straight away (Off still stops it).
 - After a run the delivery worker claimed ends deployed, accepted by Business Central for a
-  scheduled install, or failed. Goes to the person it ran as (who started it, or who
-  approved a prepared one), or the pipeline's creator when nobody did. A run that found the
+  scheduled install, or failed. Goes to the same followers and to the person it ran as (who
+  started it, approved a prepared one or last rescheduled it). One deployed without
+  approval runs as whoever turned that option on, who did nothing this time, so they hear
+  only as a follower; so does someone whose lost access refused it (#1125). A run that found the
   deployment already claimed sends nothing, so nothing is announced twice. A run cut off by a
   shutdown saves its failure and is announced then, on a short grace of its own, since the
   check after the restart only fails deployments still in progress and passes over it (#1179).
 - After the delivery scheduler fails deployments a restart cut off, for each one: the
   person behind it needs to hear about that failure as much as any other.
 
-Each deployment is its own event, so there is no "only on change" rule here.
+Each deployment is its own event, so there is no "only on change" rule here. When no
+follower is left to tell, the solution's owner is, so a deployment is never announced to
+no one.
 
 ## Upgrades (#1046)
 
@@ -199,7 +221,14 @@ A solution's own events (Business Central update dates, #1049) go to its followe
 owner and the people on the solution's People list follow by default, without a stored
 row, so someone added to the list later starts following with nothing to backfill. Anyone
 who can see a solution can follow it from the Follow button in its header, and anyone can
-stop; stopping stores a row that overrides the default. A follower who can no longer see a
+stop; stopping stores a row that overrides the default.
+
+Builds and deployments go to followers by their roles on the People list, where someone
+can hold several (#1462): Developers and Architects hear about builds and nightly checks,
+Project leaders and Consultants about deployments. A follower not on the list (the owner,
+someone who pressed Follow) has no role to filter by and hears about both; to hear about
+only one, they add themselves to the list with the matching role. Business Central update
+dates go to every follower whatever their role. A follower who can no longer see a
 Private solution (taken off its team) is left out of its notifications but keeps the
 choice, so it applies again if access comes back. Disabled accounts are left out.
 

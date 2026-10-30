@@ -38,9 +38,9 @@ public sealed class OrganizationIdentityTests : IDisposable
         // renames refreshes it, and both share this fixture's cache.
         var branding = _db.NewOrganizationBrandingService(ctx);
 
-        // Prime the cache with the seeded "Default" name.
+        // Prime the cache with the seeded "Tenant" name.
         var before = await svc.GetOrganizationNameAsync(TestDb.DefaultOrgId);
-        before.Should().Be("Default");
+        before.Should().Be("Tenant");
 
         await branding.RenameOrganizationAsync("Renamed Co");
 
@@ -94,7 +94,7 @@ public sealed class OrganizationIdentityTests : IDisposable
         try
         {
             var name = await svc.GetOrganizationNameAsync(TestDb.DefaultOrgId);
-            name.Should().Be("Default");
+            name.Should().Be("Tenant");
         }
         finally
         {
