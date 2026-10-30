@@ -1819,6 +1819,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         DateTimeOffset? at = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(picks);
+        if (picks.GroupBy(p => p.AppId).Any(g => g.Select(p => p.TargetVersion?.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+        {
+            throw Validation("App", "The same app was picked twice with different versions. Refresh and pick again.");
+        }
         var distinct = picks.DistinctBy(p => p.AppId).ToList();
         if (distinct.Count == 0)
         {

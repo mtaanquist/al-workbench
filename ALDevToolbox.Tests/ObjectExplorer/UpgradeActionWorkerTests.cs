@@ -1388,6 +1388,35 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_updates_sharing_an_unticked_prerequisite_stop_after_the_first_fails()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        _f.Apps.OnAvailable = () => new[]
+        {
+            new BcAvailableAppUpdate(CoreAppId, "Continia Core", "Continia Software", "28.5.0.1", new[] { SystemApp() }),
+            new BcAvailableAppUpdate(BankingAppId, "Continia Banking", "Continia Software", "28.5.0.2", new[] { SystemApp() }),
+        };
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Connections(ctx).BookAppUpdatesAsync(projectId, envId, new[]
+                {
+                    new AppUpdatePick(CoreAppId, "28.5.0.1", new[] { SystemAppId }),
+                    new AppUpdatePick(BankingAppId, "28.5.0.2", new[] { SystemAppId }),
+                },
+                ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime, _f.Clock.GetUtcNow().AddHours(12));
+        _f.Apps.OnOperationStatus = _ => BcAppOperationStatus.Failed;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await SweepUntilQuietAsync();
+
+        _f.Apps.Updated.Select(u => u.AppId).Should().Equal(new[] { CoreAppId },
+            "Banking would ask for the same prerequisite that just failed");
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.BcAppId == BankingAppId))
+            .Outcome.Should().Contain("both of them wait for");
+    }
+
+    [Fact]
     public async Task An_update_the_workbench_could_not_see_finish_is_recorded_as_sent_unconfirmed()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();

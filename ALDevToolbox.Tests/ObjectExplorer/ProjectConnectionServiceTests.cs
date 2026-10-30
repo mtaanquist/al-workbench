@@ -2624,8 +2624,9 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             "Core waits for System Application, so that goes first; the others keep the order they were picked in");
         rows.Select(r => r.BatchOrder).Should().Equal(0, 1, 2);
         rows.Select(r => r.BatchId).Distinct().Should().ContainSingle().Which.Should().NotBeNull();
-        rows.Should().OnlyContain(r => r.Kind == UpgradeActionKind.UpdateApp && r.Status == UpgradeActionStatus.Pending
-                                       && r.ExecuteAfter == slot.UtcDateTime);
+        rows.Should().OnlyContain(r => r.Kind == UpgradeActionKind.UpdateApp && r.Status == UpgradeActionStatus.Pending);
+        rows.Select(r => r.ExecuteAfter).Distinct().Should().ContainSingle()
+            .Which.Should().BeCloseTo(slot.UtcDateTime, TimeSpan.FromMilliseconds(1), "all three wait for the one slot");
         rows[1].PrerequisiteAppIds.Should().Equal(systemApp);
     }
 

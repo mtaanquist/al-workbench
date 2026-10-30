@@ -318,7 +318,7 @@ public sealed class UpgradeActionWorker : BackgroundService
             var earlier = await db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.BatchId == batch && a.BatchOrder < order)
                 .OrderBy(a => a.BatchOrder)
-                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.AppName, a.BcAppId, a.ConfirmationDue })
+                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.AppName, a.BcAppId, a.PrerequisiteAppIds, a.ConfirmationDue })
                 .ToListAsync(ct).ConfigureAwait(false);
             // One Business Central accepted but nobody saw finish is asked about before
             // its dependents go, so a failure found that way still stops them. The sweep
@@ -343,8 +343,13 @@ public sealed class UpgradeActionWorker : BackgroundService
                     .Select(a => a.PrerequisiteAppIds)
                     .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? new List<Guid>()
                 : null;
+            // An update also stops when one before it failed while bringing along an app
+            // this one waits for too: asking Business Central for the same app again
+            // would only fail the same way.
             if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed
-                    && (waitsFor is null || (e.BcAppId is { } failedApp && waitsFor.Contains(failedApp)))) is { } blocked)
+                    && (waitsFor is null
+                        || (e.BcAppId is { } failedApp && waitsFor.Contains(failedApp))
+                        || (e.PrerequisiteAppIds != null && e.PrerequisiteAppIds.Any(waitsFor.Contains)))) is { } blocked)
             {
                 var blockedName = blocked.PackageFileName ?? blocked.AppName ?? "the app";
                 _logger.LogInformation(
@@ -352,7 +357,9 @@ public sealed class UpgradeActionWorker : BackgroundService
                     action.Id, action.Label, blockedName);
                 var skippedOutcome = waitsFor is null
                     ? $"{action.Label} wasn't installed, because {blockedName} before it in the same upload didn't install."
-                    : $"{action.Label} wasn't updated, because {blockedName}, which it waits for, wasn't updated.";
+                    : blocked.BcAppId is { } blockedApp && waitsFor.Contains(blockedApp)
+                    ? $"{action.Label} wasn't updated, because {blockedName}, which it waits for, wasn't updated."
+                    : $"{action.Label} wasn't updated, because the update of {blockedName} before it failed, and it brings along an app both of them wait for.";
                 var skippedAt = _clock.GetUtcNow().UtcDateTime;
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
