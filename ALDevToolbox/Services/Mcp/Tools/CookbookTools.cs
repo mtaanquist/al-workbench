@@ -45,10 +45,19 @@ public sealed class CookbookTools
     public static readonly TimeSpan GuidanceTokenLifetime = TimeSpan.FromMinutes(30);
 
     private const int DefaultRecipeLimit = 25;
-    private const int MaxRecipeLimit = 100;
+    private const int MaxRecipeLimit = 50;
 
-    /// <summary>How many characters of file bodies one get_recipe answer carries (#1512).</summary>
-    internal const int MaxRecipeContentLength = 40_000;
+    /// <summary>A search row's description is cut here; get_recipe has the whole one (#1512).</summary>
+    internal const int MaxSummaryDescriptionLength = 300;
+
+    /// <summary>
+    /// How many characters of recipe text and file bodies one get_recipe answer carries
+    /// (#1512), leaving room for JSON escaping under what an assistant client accepts.
+    /// </summary>
+    internal const int MaxRecipeAnswerLength = 30_000;
+
+    /// <summary>The least room file bodies get, however long the recipe's own text is.</summary>
+    private const int MinRecipeContentLength = 10_000;
 
     private readonly RecipeService _recipes;
     private readonly AppDbContext _db;
@@ -113,11 +122,12 @@ public sealed class CookbookTools
         "Searches the caller's organisation Cookbook by free-text query (title, description, keywords). " +
         "Returns lightweight summaries with the recipe Type (Snippet, Pattern, or Module) — search itself " +
         "ignores type; the type field is for the agent to post-filter. Returns at most 25 by default, in title order; " +
-        "Truncated and Note say whether more matched, so use a more specific query. Use get_recipe to fetch the files.")]
+        "Truncated and Note say whether more matched, so use a more specific query. A description longer than 300 characters " +
+        "is cut here; get_recipe has the whole one, and the files.")]
     public async Task<CappedRows<RecipeSummary>> SearchAsync(
         [Description("Search text. Matches against title, description, and keywords. Pass an empty string to list everything, up to the limit.")] string query,
         [Description("If true, also return recipes that have been marked deprecated. Defaults to false.")] bool includeDeprecated = false,
-        [Description("How many to return. Default 25, at least 1, at most 100.")] int limit = DefaultRecipeLimit,
+        [Description("How many to return. Default 25, at least 1, at most 50.")] int limit = DefaultRecipeLimit,
         CancellationToken ct = default)
     {
         var cap = Math.Clamp(limit, 1, MaxRecipeLimit);
@@ -130,7 +140,9 @@ public sealed class CookbookTools
             .Select(g => new { RecipeId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.RecipeId, x => x.Count, ct);
         var summaries = rows.Select(s => new RecipeSummary(
-            s.Id, s.Title, s.Description, s.Keywords,
+            s.Id, s.Title,
+            s.Description.Length > MaxSummaryDescriptionLength ? s.Description[..MaxSummaryDescriptionLength] + "..." : s.Description,
+            s.Keywords,
             s.Type.ToString(),
             s.Deprecated,
             counts.TryGetValue(s.Id, out var c) ? c : 0,
@@ -142,10 +154,11 @@ public sealed class CookbookTools
     }
 
     [McpServerTool(Name = "get_recipe", ReadOnly = true)]
-    [Description("Returns the content of a recipe (each file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). File bodies come back in order until about 40,000 characters; a file past that is listed with its path and a null body, and Truncated and Note say so. Fetch those by passing path (a file's Path, or a folder to get the files under it). Use search_recipes to find candidate ids.")]
+    [Description("Returns the content of a recipe (each file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). File bodies come back in order while they fit in one answer (about 30,000 characters with the recipe's text); a file past that is listed with its path and a null body, and a single file too large for one answer is cut. Truncated and Note say which, and how to read the rest: pass path (a file's Path, or a folder to get the files under it), and offset to continue a cut file. Use search_recipes to find candidate ids.")]
     public async Task<RecipeDetail> GetAsync(
         [Description("Recipe id from search_recipes.")] int id,
         [Description("Optional file Path, or a folder, to return only those files, e.g. 'Setup/SetupTable.al' or 'Setup'.")] string? path = null,
+        [Description("Optional character offset into the one file path names, to continue a file that was cut. Default 0.")] int offset = 0,
         CancellationToken ct = default)
     {
         var row = await _recipes.GetAsync(id, ct);
@@ -167,40 +180,57 @@ public sealed class CookbookTools
                 throw new McpException($"Recipe {id} has no file or folder '{path}'. Call get_recipe without path to see its files.");
             }
         }
+        if (offset != 0)
+        {
+            if (files.Count != 1 || offset < 0 || offset >= files[0].Content.Length)
+            {
+                throw new McpException("offset needs path to name one file, and must lie inside that file's body.");
+            }
+            files = [(files[0].Path, files[0].Content[offset..])];
+        }
 
-        var (dtos, left) = FitFiles(files, MaxRecipeContentLength);
+        // The recipe's own text rides in the same answer, so it comes off the budget.
+        var metadata = row.Title.Length + row.Description.Length + row.Keywords.Length + (row.Instructions?.Length ?? 0);
+        var budget = Math.Max(MinRecipeContentLength, MaxRecipeAnswerLength - metadata);
+        var fit = FitFiles(files, budget);
+
+        var notes = new List<string>();
+        if (fit.LeftOut > 0)
+            notes.Add($"{fit.LeftOut} of {fit.Files.Count} files are listed without their body to keep the answer short. Call get_recipe again with path set to one of those files' Path to read it.");
+        if (fit.CutAt is { } cutAt)
+            notes.Add($"{fit.Files[0].Path} was cut after {cutAt} of {files[0].Content.Length} characters. Call get_recipe again with path set to it and offset {offset + cutAt} to read on.");
         return new RecipeDetail(
             row.Id, row.Title, row.Description, row.Keywords,
             row.Type.ToString(),
             row.Deprecated,
-            dtos,
+            fit.Files,
             row.Instructions,
             row.MinimumApplicationVersion?.Name,
             row.MinimumApplicationVersion?.Application,
             row.EstimatedValueHours,
-            Truncated: left > 0,
-            Note: left > 0
-                ? $"{left} of {dtos.Count} files are listed without their body to keep the answer short. Call get_recipe again with path set to a file's Path, or to its folder, to read them."
-                : null);
+            Truncated: notes.Count > 0,
+            Note: notes.Count > 0 ? string.Join(" ", notes) : null);
     }
 
     /// <summary>
     /// Keeps file bodies in order while they fit in <paramref name="budget"/> characters and
     /// lists the rest by path alone. The first body is always kept, cut at the budget if it
-    /// must be, so a call for one large file still answers.
+    /// must be, so a call for one large file still answers; <c>CutAt</c> says where.
     /// </summary>
-    internal static (List<RecipeFileDto> Files, int LeftOut) FitFiles(
+    internal static (List<RecipeFileDto> Files, int LeftOut, int? CutAt) FitFiles(
         IReadOnlyList<(string Path, string Content)> files, int budget)
     {
         var result = new List<RecipeFileDto>(files.Count);
         var used = 0;
         var leftOut = 0;
+        int? cutAt = null;
         foreach (var (filePath, content) in files)
         {
             if (result.Count == 0 && content.Length > budget)
             {
-                result.Add(new RecipeFileDto(filePath, content[..budget] + "\n... (cut; the file is longer than one answer can carry)"));
+                result.Add(new RecipeFileDto(filePath, content[..budget]));
                 used = budget;
+                cutAt = budget;
             }
             else if (used + content.Length <= budget)
             {
@@ -213,7 +243,7 @@ public sealed class CookbookTools
                 leftOut++;
             }
         }
-        return (result, leftOut);
+        return (result, leftOut, cutAt);
     }
 
     [McpServerTool(Name = "get_cookbook_guidance", ReadOnly = true)]
