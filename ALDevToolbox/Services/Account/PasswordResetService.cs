@@ -30,6 +30,9 @@ public sealed class PasswordResetService
     public const string MicrosoftOnlyMessage =
         "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page.";
 
+    /// <summary>Shown when a sign-in link is spent, expired, or no longer belongs to an active account.</summary>
+    public const string MagicLinkInvalidMessage = "This sign-in link is no longer valid. Request a new one.";
+
     private readonly AppDbContext _db;
     private readonly AuthService _auth;
     private readonly TimeProvider _clock;
@@ -294,17 +297,17 @@ public sealed class PasswordResetService
             .FirstOrDefaultAsync(ct);
         if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This sign-in link is no longer valid. Request a new one." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MagicLinkInvalidMessage });
         }
         if (row.User.Status != UserStatus.Active)
         {
             // Defensive: status may have changed between issue and consume.
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This sign-in link is no longer valid. Request a new one." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MagicLinkInvalidMessage });
         }
         // The org may have gone Microsoft-only between issue and consume.
         if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MicrosoftOnlyMessage });
         }
         // Single use, claimed with a conditional update: of two requests
         // carrying the same link, one signs in. #1208
@@ -313,7 +316,7 @@ public sealed class PasswordResetService
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
         if (claimed == 0)
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This sign-in link is no longer valid. Request a new one." });
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = MagicLinkInvalidMessage });
         }
         row.ConsumedAt = now;
         row.User.LastLoginAt = now;
@@ -333,4 +336,18 @@ public static class ResetPasswordReasons
 
     /// <summary>The organisation signs in with Microsoft only.</summary>
     public const string MicrosoftOnly = "TokenMicrosoftOnly";
+}
+
+/// <summary>
+/// Why a sign-in link was refused, as the magic-link endpoint redirects with it.
+/// A code rather than the message, so the page's card cannot be made to say
+/// anything by editing the URL; <c>/login/magic</c> holds the copy for each.
+/// </summary>
+public static class MagicLinkReasons
+{
+    /// <summary>The link is spent, expired, or no longer belongs to an active account.</summary>
+    public const string InvalidLink = "invalid";
+
+    /// <summary>The organisation signs in with Microsoft only.</summary>
+    public const string MicrosoftOnly = "microsoft-only";
 }
