@@ -58,6 +58,8 @@ public sealed class GitHubTools
     /// <summary>The suffix the AL compiler gives the generated source file.</summary>
     private const string SourceFileSuffix = ".g.xlf";
 
+    private const int DefaultRepositoryLimit = 50;
+
     [McpServerTool(Name = "list_repositories", ReadOnly = true)]
     [Description(
         "Lists the GitHub repositories you can act on: the ones in the GitHub organisation your " +
@@ -65,20 +67,34 @@ public sealed class GitHubTools
         "offered, and every other tool that takes a repository accepts only what this one lists. " +
         "When the list is empty because something is not set up yet - no GitHub organisation connected, " +
         "or your own GitHub account not connected - the answer says which, in a sentence you can pass " +
-        "on to the person.")]
-    public async Task<RepositoryListResult> ListRepositoriesAsync(CancellationToken ct = default)
+        "on to the person. Returns the first 50 by name unless you raise limit; truncated and note say " +
+        "whether more were left out, so pass search to narrow it.")]
+    public async Task<RepositoryListResult> ListRepositoriesAsync(
+        [Description("Optional case-insensitive substring of the repository's name, e.g. a customer name.")] string? search = null,
+        [Description(McpCatalogueLimit.Description + " Default 50.")] int limit = DefaultRepositoryLimit,
+        CancellationToken ct = default)
     {
         try
         {
             var access = await _repositories.GetAccessAsync(ct);
             var repositories = await _repositories.ListAccessibleAsync(ct);
+            var needle = search?.Trim();
+            var matched = repositories
+                .Where(r => string.IsNullOrEmpty(needle) || r.FullName.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var cap = McpCatalogueLimit.Clamp(limit);
+            var truncated = matched.Count > cap;
             return new RepositoryListResult(
                 Readiness: access.Readiness.ToString(),
                 Guidance: GuidanceFor(access.Readiness),
-                Repositories: repositories
+                Repositories: matched.Take(cap)
                     .Select(r => new RepositorySummary(
                         r.FullName, r.DefaultBranch, r.IsPrivate, r.Description, r.HtmlUrl, r.CloneUrl))
-                    .ToList());
+                    .ToList(),
+                Truncated: truncated,
+                Note: truncated
+                    ? $"Showing the first {cap} of {matched.Count} repositories (ordered by name); more were left out. Pass search to narrow the list, or raise limit."
+                    : null);
         }
         catch (GitHubApiException ex)
         {
