@@ -65,7 +65,8 @@ public sealed class GitHubTools
         "offered, and every other tool that takes a repository accepts only what this one lists. " +
         "When the list is empty because something is not set up yet - no GitHub organisation connected, " +
         "or your own GitHub account not connected - the answer says which, in a sentence you can pass " +
-        "on to the person.")]
+        "on to the person. To read or search a customer's code, use list_releases with the customer's " +
+        "name as search instead: a solution's built code is searchable there, and a repository is not.")]
     public async Task<RepositoryListResult> ListRepositoriesAsync(CancellationToken ct = default)
     {
         try
