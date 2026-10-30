@@ -110,6 +110,55 @@ public sealed class TranslatorRepositorySaveTests
         learn.Should().BeEquivalentTo(new Dictionary<string, string> { ["b"] = "Bogfoeringsdato" });
     }
 
+    /// <summary>
+    /// #1540, after a refresh: a restore does not reconnect to the repository, so
+    /// the browser's session record has to say where the file came from, or the
+    /// restored export would teach the memory unattributed pairs after all. This
+    /// reads the record the way the page does, from the shape loadMeta returns.
+    /// </summary>
+    [Fact]
+    public void A_restored_session_opened_from_a_repository_still_teaches_the_memory_nothing()
+    {
+        var meta = RestoredMeta("""
+            {"fileName":"App.da-DK.xlf","sourceLang":"en-US","targetLang":"da-DK",
+             "edits":{"a":{"t":"Beloeb","s":"translated"}},"learned":null,
+             "repo":{"repository":"cronus/private-app","path":"App/Translations/App.da-DK.xlf"}}
+            """);
+
+        TranslatorPage.RestoredFromRepository(meta).Should().BeTrue();
+        TranslatorPage.ExportLearning(
+                new Dictionary<string, TargetEdit> { ["a"] = new("Beloeb", "translated") },
+                new Dictionary<string, string>(),
+                openedFromRepository: TranslatorPage.RestoredFromRepository(meta))
+            .Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("""{"fileName":"App.da-DK.xlf","edits":{},"repo":null}""")]
+    [InlineData("""{"fileName":"App.da-DK.xlf","edits":{}}""")] // saved before the origin was recorded
+    public void A_restored_session_of_a_file_from_elsewhere_is_not_tied_to_a_repository(string json) =>
+        TranslatorPage.RestoredFromRepository(RestoredMeta(json)).Should().BeFalse();
+
+    /// <summary>
+    /// The browser half of the restore: the record keeps the origin a file was
+    /// opened with and hands it back with the rest of the session.
+    /// </summary>
+    [Fact]
+    public void The_browser_session_record_keeps_and_returns_the_repository_origin()
+    {
+        var js = File.ReadAllText(ALDevToolbox.Tests.Infrastructure.RepoRoot.Combine(
+            "ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
+
+        js.Should().Contain("putBaseStream(fileName, sourceLang, targetLang, streamRef, repo)")
+            .And.Contain("repo: repo || null")
+            .And.Contain("repo: rec.repo || null");
+    }
+
+    // Blazor's JS interop deserialises with the web defaults.
+    private static TranslatorPage.SessionMeta RestoredMeta(string json) =>
+        System.Text.Json.JsonSerializer.Deserialize<TranslatorPage.SessionMeta>(
+            json, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+
     private static TranslatorPage.UnitVm Unit(string id, string target, string state) => new()
     {
         Id = id,

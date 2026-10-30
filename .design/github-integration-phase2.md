@@ -1003,7 +1003,8 @@ suggestions without anyone uploading anything.
   Translator save to a repository records that repository too (#1324), so a pull
   request that is never merged - and so never read by the ingest - does not leave its
   pairs visible to everyone. "Export a copy" of a file opened from a repository teaches
-  the memory nothing (#1540): the export endpoint has no repository to attach, so its
+  the memory nothing (#1540), also after a page reload, because the browser's session
+  record keeps the file's repository and path: the export endpoint has no repository to attach, so its
   pairs would be visible to everyone; Save to repository and the ingest of a copy
   committed by hand learn the same units with the repository named. Pairs saved before
   #1324 are not backfilled (their

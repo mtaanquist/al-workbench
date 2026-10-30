@@ -838,7 +838,7 @@ else
         public bool Dirty { get; set; }
     }
 
-    private sealed class EditDto
+    internal sealed class EditDto
     {
         [JsonPropertyName("t")] public string T { get; set; } = string.Empty;
         [JsonPropertyName("s")] public string? S { get; set; }
@@ -850,17 +850,36 @@ else
         [JsonPropertyName("savedAt")] public long SavedAt { get; set; }
     }
 
-    private sealed class SessionMeta
+    internal sealed class SessionMeta
     {
         [JsonPropertyName("fileName")] public string FileName { get; set; } = string.Empty;
         [JsonPropertyName("sourceLang")] public string? SourceLang { get; set; }
         [JsonPropertyName("targetLang")] public string? TargetLang { get; set; }
         [JsonPropertyName("edits")] public Dictionary<string, EditDto> Edits { get; set; } = new();
         [JsonPropertyName("learned")] public LearnedDto? Learned { get; set; }
+        /// <summary>Where a file opened from a repository came from; null for any other file (#1540).</summary>
+        [JsonPropertyName("repo")] public RepositoryOriginDto? Repo { get; set; }
     }
 
+    /// <summary>The repository and path a session's file was opened from, as the browser keeps it.</summary>
+    internal sealed class RepositoryOriginDto
+    {
+        [JsonPropertyName("repository")] public string Repository { get; set; } = string.Empty;
+        [JsonPropertyName("path")] public string Path { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Whether a restored session's file was opened from a repository. A restore
+    /// does not reconnect to the repository, so Save to repository is not
+    /// offered, but the export still must not teach the translation memory
+    /// pairs with no repository attached (#1540). A session saved before the
+    /// origin was recorded has none and restores as a file from elsewhere.
+    /// </summary>
+    internal static bool RestoredFromRepository(SessionMeta meta) =>
+        !string.IsNullOrEmpty(meta.Repo?.Repository);
+
     /// <summary>What each unit last taught the translation memory, per scope (#1343).</summary>
-    private sealed class LearnedDto
+    internal sealed class LearnedDto
     {
         [JsonPropertyName("local")] public Dictionary<string, string> Local { get; set; } = new();
         [JsonPropertyName("repository")] public Dictionary<string, string> Repository { get; set; } = new();
@@ -966,6 +985,11 @@ else
     // for an uploaded file, and that null is what decides which Save button the
     // toolbar shows.
     private RepositoryTranslationSource? _repoSource;
+
+    // A session restored from the browser whose file was opened from a
+    // repository. The restore does not bring _repoSource back, so this is what
+    // keeps its export from teaching the memory unattributed pairs (#1540).
+    private bool _restoredFromRepository;
 
     // The file exactly as the repository has it. Held for the life of the
     // session because the byte-faithful merge runs against it: the download
@@ -1358,6 +1382,7 @@ else
             }
 
             LoadParsed(meta.FileName, parsed);
+            _restoredFromRepository = RestoredFromRepository(meta);
             if (!string.IsNullOrEmpty(meta.TargetLang)) _targetLang = meta.TargetLang!;
 
             // If the session was opened with a writable handle, it survives in
@@ -1430,6 +1455,7 @@ else
     private void ForgetRepositorySource()
     {
         _repoSource = null;
+        _restoredFromRepository = false;
         _repoOriginalXml = null;
         _repoGeneratedPath = null;
         _pullRequest = null;
@@ -1538,11 +1564,13 @@ else
 
             // The browser keeps the verbatim original too, so "Export a copy"
             // and a refresh work on a repository file exactly as they do on an
-            // uploaded one.
+            // uploaded one - except that the memory learns nothing from the
+            // export, before or after a refresh (#1540).
             if (_module is not null)
             {
                 using var dotNetStream = new DotNetStreamReference(new MemoryStream(bytes), leaveOpen: false);
-                await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, dotNetStream);
+                await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, dotNetStream,
+                    RepositoryOrigin(_repoSource));
             }
             await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
         }
@@ -1629,7 +1657,8 @@ else
             // overlay is what the export merges.
             using (var saved = new DotNetStreamReference(new MemoryStream(Encoding.UTF8.GetBytes(xml)), leaveOpen: false))
             {
-                await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, saved);
+                await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, saved,
+                    RepositoryOrigin(_repoSource));
             }
             // Edits typed while the save was in flight are not in that base,
             // so they go back into the overlay a refresh restores from - as does
@@ -2330,8 +2359,12 @@ else
     {
         var posted = JsonSerializer.Deserialize<Dictionary<string, EditDto>>(editsJson) ?? new();
         return ExportLearning(posted.ToDictionary(e => e.Key, e => new TargetEdit(e.Value.T, e.Value.S)),
-            _learnedLocally, openedFromRepository: _repoSource is not null);
+            _learnedLocally, openedFromRepository: _repoSource is not null || _restoredFromRepository);
     }
+
+    /// <summary>What the browser's session record keeps of <paramref name="source"/>, so a restore knows (#1540).</summary>
+    private static RepositoryOriginDto RepositoryOrigin(RepositoryTranslationSource source) =>
+        new() { Repository = source.Repository.FullName, Path = source.Path };
 
     /// <summary>
     /// What a download or an in-place save should teach the translation memory.

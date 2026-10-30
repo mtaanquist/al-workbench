@@ -67,11 +67,13 @@ async function putRec(rec) {
 
 // Called once when a file is opened. The original XML arrives as a
 // DotNetStreamReference so multi-MB files don't hit the interop arg limit.
-// Resets the edit overlay.
-export async function putBaseStream(fileName, sourceLang, targetLang, streamRef) {
+// Resets the edit overlay. `repo` ({ repository, path }) is where a file opened
+// from a repository came from, null otherwise: a restored session has to know,
+// so its export still teaches the translation memory nothing (#1540).
+export async function putBaseStream(fileName, sourceLang, targetLang, streamRef, repo) {
     const buf = await streamRef.arrayBuffer();
     const originalXml = new TextDecoder("utf-8").decode(buf);
-    await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {} });
+    await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null });
 }
 
 // Debounced incremental edit save (for resume). `editsJson` is the full overlay;
@@ -113,6 +115,7 @@ export async function loadMeta() {
         targetLang: rec.targetLang || null,
         edits: rec.edits || {},
         learned: rec.learned || null,
+        repo: rec.repo || null,
     };
 }
 
