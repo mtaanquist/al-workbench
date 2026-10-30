@@ -1530,6 +1530,59 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
+    public void Capped_rows_stop_at_the_character_budget_when_the_rows_are_long()
+    {
+        // 30 rows of 1,000 characters each is past the budget long before the cap of 50 (#1524).
+        var rows = Enumerable.Range(1, 30).Select(i => new string('x', 1_000)).ToList();
+
+        var cut = CappedRows<string>.From(rows, cap: 50, "lines", "in line order", "Narrow it.");
+
+        cut.Rows.Count.Should().BeLessThan(30).And.BeGreaterThan(0);
+        cut.Rows.Sum(r => r.Length + 3).Should().BeLessThanOrEqualTo(McpAnswerBudget.Characters);
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Be($"Showing the first {cut.Rows.Count} lines (in line order); the rest would make the answer too long to read in one go. Narrow it.");
+    }
+
+    [Fact]
+    public void The_character_budget_always_keeps_one_row()
+    {
+        McpAnswerBudget.Fit([new string('x', 50_000), "short"], cap: 10).Should().Be(1,
+            "an answer that matched something never comes back empty");
+        McpAnswerBudget.Fit(Array.Empty<string>(), cap: 10).Should().Be(0);
+    }
+
+    [Fact]
+    public void An_outline_of_long_signatures_stops_at_the_character_budget()
+    {
+        var signature = "procedure OnBeforePostSalesDoc(var SalesHeader: Record \"Sales Header\"; CommitIsSuppressed: Boolean; PreviewMode: Boolean; var HideProgressWindow: Boolean; var IsHandled: Boolean; var CalledBy: Integer)";
+        var symbols = Enumerable.Range(1, 150)
+            .Select(i => new ObjectSymbolRow(i, "event_publisher", $"OnBeforePost{i}", signature, null, null, i))
+            .ToList();
+        var outline = new ObjectOutline(1, "codeunit", 80, "Sales-Post", 1, "Microsoft", null, null, 1, symbols);
+
+        var result = ObjectOutlineResult.From(outline, memberKind: null, namePattern: null, cap: 150);
+
+        result.Outline.Symbols.Count.Should().BeLessThan(150);
+        result.TotalSymbols.Should().Be(150);
+        result.Truncated.Should().BeTrue();
+        result.Note.Should().Contain($"first {result.Outline.Symbols.Count} of 150");
+    }
+
+    [Fact]
+    public void An_outline_member_kind_may_be_written_with_a_space()
+    {
+        var symbols = new List<ObjectSymbolRow>
+        {
+            new(1, "local_procedure", "Helper", null, null, null, 1),
+            new(2, "procedure", "Run", null, null, null, 2),
+        };
+        var outline = new ObjectOutline(1, "codeunit", 80, "CRONUS Post", 1, "CRONUS", null, null, 1, symbols);
+
+        ObjectOutlineResult.From(outline, memberKind: "local procedure", namePattern: null, cap: 10)
+            .Outline.Symbols.Select(sym => sym.Name).Should().Equal("Helper");
+    }
+
+    [Fact]
     public async Task GetObjectOutline_throws_McpException_for_unknown_object()
     {
         var releaseId = await SeedDkCoreReleaseAsync();

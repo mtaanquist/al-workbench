@@ -243,10 +243,12 @@ public sealed class DeliverTools
 
         var cap = Math.Clamp(limit, 1, MaxFleetLimit);
         var rows = fleet.Take(cap + 1).ToList();
-        var truncated = rows.Count > cap;
+        // The fleet row is near enough the answer's row to measure the budget by (#1524).
+        var shown = McpAnswerBudget.Fit(rows, cap);
+        var truncated = rows.Count > shown;
         // When the cut falls inside a solution, its group would read as complete; say so.
-        var partial = truncated && rows[cap].ProjectId == rows[cap - 1].ProjectId ? rows[cap].ProjectName : null;
-        if (truncated) rows.RemoveAt(cap);
+        var partial = truncated && rows[shown].ProjectId == rows[shown - 1].ProjectId ? rows[shown].ProjectName : null;
+        if (truncated) rows.RemoveRange(shown, rows.Count - shown);
         var pending = (await _upgradeActions.ListPendingAsync(ct)).ToLookup(a => a.EnvironmentId);
 
         // ListFleetAsync already orders by solution, Production first, then name - the
@@ -271,7 +273,7 @@ public sealed class DeliverTools
                     r.FetchedAt)).ToList()))
             .ToList();
         return new UpgradeListResult(groups, truncated, truncated
-            ? $"Showing the first {cap} environments (ordered by solution, Production first); more were left out"
+            ? $"Showing the first {shown} environments (ordered by solution, Production first); more were left out"
               + (partial is null ? "." : $", including more of {partial}'s.")
               + " Pass solution, type or nextUpdateBefore to narrow the list."
             : null);
@@ -357,9 +359,10 @@ public sealed class DeliverTools
                 l.Environment.EnvironmentFetchedAt,
                 l.Environment.FetchedAt))
             .ToList();
-        var truncated = matching.Count > cap;
+        lines = lines.Take(McpAnswerBudget.Fit(lines, cap)).ToList();
+        var truncated = matching.Count > lines.Count;
         return new PlannedUpgradeDetail(ToPlannedSummary(detail.Upgrade), lines, truncated, truncated
-            ? $"Showing the first {cap} of {matching.Count} environments; more were left out. Pass state or solution to narrow the list."
+            ? $"Showing the first {lines.Count} of {matching.Count} environments; more were left out. Pass state or solution to narrow the list."
             : null);
     }
 
