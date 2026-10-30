@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
@@ -159,11 +162,47 @@ public sealed class RecipeSuggestionService
     }
 
     /// <summary>
+    /// A fingerprint of everything approval copies into the recipe: the
+    /// metadata and the ordered files. The review page takes it from the
+    /// version it rendered and hands it back to <see cref="ApproveAsync"/>,
+    /// because the submitter may still edit a pending suggestion (agents
+    /// revising their own suggestion is the documented workflow) and the
+    /// suggestion has no version column a stale approval would trip over.
+    /// Each field is length-prefixed so moving text between fields still
+    /// changes the result.
+    /// </summary>
+    public static string ContentFingerprint(RecipeSuggestion suggestion)
+    {
+        var sb = new StringBuilder();
+        void Add(string? value) => sb.Append(value?.Length ?? -1).Append(':').Append(value).Append('|');
+
+        Add(suggestion.Title);
+        Add(suggestion.Description);
+        Add(suggestion.Keywords);
+        Add(suggestion.Type.ToString());
+        Add(suggestion.Instructions);
+        Add(suggestion.MinimumApplicationVersionId?.ToString(CultureInfo.InvariantCulture));
+        Add(suggestion.EstimatedValueHours?.ToString(CultureInfo.InvariantCulture));
+        foreach (var f in suggestion.Files.OrderBy(f => f.Ordering).ThenBy(f => f.Id))
+        {
+            Add(f.RelativePath);
+            Add(f.FileName);
+            Add(f.Content);
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+    }
+
+    /// <summary>
     /// Promotes a pending suggestion to a real <see cref="Recipe"/>. Runs
     /// inside a transaction so the recipe, its files, and the suggestion's
     /// decision columns either all land or none do.
+    /// <paramref name="reviewedFingerprint"/> is the
+    /// <see cref="ContentFingerprint"/> of the version the reviewer read;
+    /// approval is refused when the suggestion has changed since, so nothing
+    /// unreviewed reaches the Cookbook.
     /// </summary>
-    public async Task<Recipe> ApproveAsync(int suggestionId, CancellationToken ct = default)
+    public async Task<Recipe> ApproveAsync(int suggestionId, string reviewedFingerprint, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         var deciderId = RequireUserId();
@@ -181,6 +220,21 @@ public sealed class RecipeSuggestionService
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Decision"] = $"Suggestion is already {suggestion.Decision.ToString().ToLowerInvariant()}.",
+            });
+        }
+
+        if (!string.Equals(ContentFingerprint(suggestion), reviewedFingerprint, StringComparison.Ordinal))
+        {
+            // The context is circuit-scoped in Blazor Server and a later
+            // tracking query does not refresh an entity it already holds:
+            // drop it so the next attempt reads the suggestion as it is now.
+            _db.ChangeTracker.Clear();
+            _logger.LogInformation(
+                "Refused to approve recipe suggestion {SuggestionId}: it changed after the reviewer opened it.",
+                suggestionId);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Suggestion"] = "This suggestion was changed after you opened it. Review the latest version, then approve again.",
             });
         }
 

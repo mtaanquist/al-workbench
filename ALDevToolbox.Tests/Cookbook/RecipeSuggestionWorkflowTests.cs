@@ -111,7 +111,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         Recipe recipe;
         await using (var ctx = _db.NewContext())
         {
-            recipe = await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            recipe = await ApproveAsReviewedAsync(ctx, suggestionId);
         }
 
         await using var verify = _db.NewContext();
@@ -158,7 +158,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         _db.OrgContext.CurrentUserId = admin.Id;
 
         await using var ctx2 = _db.NewContext();
-        Func<Task> act = () => NewSuggestionService(ctx2).ApproveAsync(suggestionId);
+        Func<Task> act = () => ApproveAsReviewedAsync(ctx2, suggestionId);
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("Title");
 
@@ -195,7 +195,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var recipe = await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            var recipe = await ApproveAsReviewedAsync(ctx, suggestionId);
             recipe.Title.Should().Be("Reborn");
         }
 
@@ -232,7 +232,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         int recipeId;
         await using (var ctx = _db.NewContext())
         {
-            recipeId = (await NewSuggestionService(ctx).ApproveAsync(suggestionId)).Id;
+            recipeId = (await ApproveAsReviewedAsync(ctx, suggestionId)).Id;
         }
 
         await using var read = _db.NewContext();
@@ -327,7 +327,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         Recipe recipe;
         await using (var ctx = _db.NewContext())
         {
-            recipe = await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            recipe = await ApproveAsReviewedAsync(ctx, suggestionId);
         }
 
         await using var verify = _db.NewContext();
@@ -361,7 +361,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         _db.OrgContext.CurrentUserId = admin.Id;
         await using (var ctx = _db.NewContext())
         {
-            if (approveFirst) await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            if (approveFirst) await ApproveAsReviewedAsync(ctx, suggestionId);
             else await NewSuggestionService(ctx).RejectAsync(suggestionId, "first");
         }
 
@@ -396,11 +396,11 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            await ApproveAsReviewedAsync(ctx, suggestionId);
         }
 
         await using var ctx2 = _db.NewContext();
-        Func<Task> act = () => NewSuggestionService(ctx2).ApproveAsync(suggestionId);
+        Func<Task> act = () => ApproveAsReviewedAsync(ctx2, suggestionId);
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("Decision");
     }
@@ -507,7 +507,7 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         _db.OrgContext.CurrentUserId = admin.Id;
         await using (var ctx = _db.NewContext())
         {
-            await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            await ApproveAsReviewedAsync(ctx, suggestionId);
         }
 
         _db.OrgContext.CurrentUserId = user.Id;
@@ -605,6 +605,108 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
 
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("Id");
+    }
+
+    [Fact]
+    public async Task Approve_refuses_when_the_submitter_changed_the_suggestion_after_it_was_opened()
+    {
+        var user = await SeedUserAsync(userId: 730);
+        _db.OrgContext.CurrentUserId = user.Id;
+
+        int suggestionId;
+        await using (var ctx = _db.NewContext())
+        {
+            suggestionId = await NewSuggestionService(ctx).SubmitAsync(new RecipeSuggestionInput(
+                "Reviewed Version", "Body.", "", RecipeType.Snippet,
+                new[] { new RecipeFileInput("A.al", "// what the reviewer read") }));
+        }
+
+        var admin = await SeedUserAsync(userId: 731, display: "Admin", role: UserRole.Admin);
+        _db.OrgContext.CurrentUserId = admin.Id;
+        await using var reviewCtx = _db.NewContext();
+        var reviewer = NewSuggestionService(reviewCtx);
+        var opened = await reviewer.GetAsync(suggestionId);
+        var reviewedFingerprint = RecipeSuggestionService.ContentFingerprint(opened!);
+
+        // The submitter's agent revises the files while the reviewer reads.
+        _db.OrgContext.CurrentUserId = user.Id;
+        await using (var ctx = _db.NewContext())
+        {
+            await NewSuggestionService(ctx).UpdateAsync(suggestionId, new RecipeSuggestionInput(
+                "Reviewed Version", "Body.", "", RecipeType.Snippet,
+                new[] { new RecipeFileInput("A.al", "// nobody reviewed this") }));
+        }
+
+        _db.OrgContext.CurrentUserId = admin.Id;
+        Func<Task> act = () => reviewer.ApproveAsync(suggestionId, reviewedFingerprint);
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Suggestion");
+
+        await using (var verify = _db.NewContext())
+        {
+            (await verify.RecipeSuggestions.SingleAsync(s => s.Id == suggestionId))
+                .Decision.Should().Be(RecipeSuggestionDecision.Pending);
+            (await verify.Recipes.AnyAsync(r => r.Title == "Reviewed Version"))
+                .Should().BeFalse("nothing unreviewed may reach the Cookbook");
+        }
+
+        // Reloading and approving what is there now goes through, on the same
+        // (circuit-scoped) context, and publishes the version that was reloaded.
+        var reloaded = await reviewer.GetAsync(suggestionId);
+        var recipe = await reviewer.ApproveAsync(suggestionId, RecipeSuggestionService.ContentFingerprint(reloaded!));
+
+        await using var final = _db.NewContext();
+        (await final.Recipes.Include(r => r.Files).SingleAsync(r => r.Id == recipe.Id))
+            .Files.Should().ContainSingle(f => f.Content == "// nobody reviewed this");
+    }
+
+    [Fact]
+    public void Content_fingerprint_changes_with_any_copied_field_but_not_with_review_state()
+    {
+        RecipeSuggestion Make() => new()
+        {
+            Title = "T", Description = "D", Keywords = "k", Type = RecipeType.Snippet,
+            Instructions = "I", MinimumApplicationVersionId = 3, EstimatedValueHours = 1.5m,
+            Files = { new RecipeSuggestionFile { Ordering = 0, RelativePath = "src", FileName = "A.al", Content = "x" } },
+        };
+        var baseline = RecipeSuggestionService.ContentFingerprint(Make());
+
+        var decided = Make();
+        decided.Decision = RecipeSuggestionDecision.Rejected;
+        decided.DecisionNote = "note";
+        RecipeSuggestionService.ContentFingerprint(decided).Should().Be(baseline);
+
+        var variants = new Action<RecipeSuggestion>[]
+        {
+            s => s.Title = "T2",
+            s => s.Description = "D2",
+            s => s.Keywords = "k2",
+            s => s.Type = RecipeType.Pattern,
+            s => s.Instructions = null,
+            s => s.MinimumApplicationVersionId = 4,
+            s => s.EstimatedValueHours = 2m,
+            s => s.Files[0].RelativePath = "",
+            s => s.Files[0].FileName = "B.al",
+            s => s.Files[0].Content = "y",
+            s => s.Files.Add(new RecipeSuggestionFile { Ordering = 1, FileName = "C.al" }),
+            // Moving text from one field to the next must not collide.
+            s => { s.Title = "TD"; s.Description = ""; },
+        };
+        foreach (var change in variants)
+        {
+            var s = Make();
+            change(s);
+            RecipeSuggestionService.ContentFingerprint(s).Should().NotBe(baseline);
+        }
+    }
+
+    private async Task<Recipe> ApproveAsReviewedAsync(ALDevToolbox.Data.AppDbContext ctx, int suggestionId)
+    {
+        // What the review page does: approve the version it loaded and rendered.
+        var svc = NewSuggestionService(ctx);
+        var opened = await svc.GetAsync(suggestionId);
+        return await svc.ApproveAsync(suggestionId,
+            opened is null ? string.Empty : RecipeSuggestionService.ContentFingerprint(opened));
     }
 
     private RecipeSuggestionService NewSuggestionService(ALDevToolbox.Data.AppDbContext ctx) =>
