@@ -38,7 +38,7 @@ public sealed class CustomerModuleService
     {
         var modules = await _db.CustomerModules.AsNoTracking().ToListAsync(ct);
         var typed = await _db.OeProjectModules.AsNoTracking()
-            .Where(m => m.Project!.DeletedAt == null)
+            .Where(m => OnPremisesProjectIds().Contains(m.ProjectId))
             .Select(m => new { m.ModuleId, m.ProjectId })
             .ToListAsync(ct);
         var installed = await MatchInstalledAsync(modules, OnlineProjectIds(), ct);
@@ -230,8 +230,11 @@ public sealed class CustomerModuleService
         var module = await _db.CustomerModules.AsNoTracking().FirstOrDefaultAsync(m => m.Id == moduleId, ct);
         if (module is null) return [];
 
+        // Typed rows only count for an on-premises solution: one that moved online keeps
+        // its old rows, but its card reads the environment and no longer shows them.
         var ids = await _db.OeProjectModules.AsNoTracking()
-            .Where(m => m.ModuleId == moduleId).Select(m => m.ProjectId).ToListAsync(ct);
+            .Where(m => m.ModuleId == moduleId && OnPremisesProjectIds().Contains(m.ProjectId))
+            .Select(m => m.ProjectId).ToListAsync(ct);
         // The one environment the card reads from, matched the way the card matches, so
         // the filter never lists a customer whose card does not show the module - such
         // as one that only has it on a sandbox next to production (#1515).
@@ -324,6 +327,13 @@ public sealed class CustomerModuleService
         _db.OeProjects.AsNoTracking()
             .Where(p => p.DeletedAt == null
                 && (p.HostingType == null || p.HostingType == ProjectHostingType.MicrosoftCloud))
+            .Select(p => p.Id);
+
+    /// <summary>The on-premises, not deleted solutions: the ones whose modules are typed in.</summary>
+    private IQueryable<int> OnPremisesProjectIds() =>
+        _db.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null
+                && p.HostingType != null && p.HostingType != ProjectHostingType.MicrosoftCloud)
             .Select(p => p.Id);
 
     /// <summary>

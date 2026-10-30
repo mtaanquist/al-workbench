@@ -396,8 +396,8 @@ public sealed class CustomerModuleServiceTests : IDisposable
 
     /// <summary>
     /// A catalogue entry without an app id is matched by name and publisher on the card,
-    /// so the filter and the count find it the same way, and a solution that has it both
-    /// typed and installed is counted once.
+    /// so the filter and the count find it the same way. A typed row left on a solution
+    /// that has since moved online does not count: its card reads the environment.
     /// </summary>
     [Fact]
     public async Task The_module_filter_and_count_match_by_name_and_count_each_solution_once()
@@ -408,13 +408,15 @@ public sealed class CustomerModuleServiceTests : IDisposable
         var otherPublisher = await SeedSolutionAsync("CRONUS Sweden", ProjectHostingType.MicrosoftCloud);
         await SeedEnvironmentAsync(otherPublisher, "Production", "Production", (Guid.NewGuid(), "ForNAV", "CRONUS International", "1.0.0.0"));
         var onPrem = await SeedSolutionAsync("CRONUS Norway", ProjectHostingType.CustomerHardware);
+        var movedOnline = await SeedSolutionAsync("CRONUS Finland", ProjectHostingType.MicrosoftCloud);
+        await SeedEnvironmentAsync(movedOnline, "Production", "Production", (Guid.NewGuid(), "Base Application", "Microsoft", "25.3.0.0"));
         await using (var seed = _db.NewContext())
         {
-            // A typed row left on a solution that has since moved online, next to the read one.
-            seed.OeProjectModules.Add(new OeProjectModule
-            {
-                OrganizationId = TestDb.DefaultOrgId, ProjectId = online, ModuleId = fornav, CreatedAt = DateTime.UtcNow,
-            });
+            // Typed rows left from before these two solutions moved online: one next to the
+            // installed app, one with nothing installed.
+            seed.OeProjectModules.AddRange(
+                new OeProjectModule { OrganizationId = TestDb.DefaultOrgId, ProjectId = online, ModuleId = fornav, CreatedAt = DateTime.UtcNow },
+                new OeProjectModule { OrganizationId = TestDb.DefaultOrgId, ProjectId = movedOnline, ModuleId = fornav, CreatedAt = DateTime.UtcNow });
             await seed.SaveChangesAsync();
         }
 
@@ -422,8 +424,12 @@ public sealed class CustomerModuleServiceTests : IDisposable
         var svc = Svc(ctx);
         await svc.SaveSolutionModuleAsync(onPrem, null, new SolutionModuleInput(fornav, "8.1", null));
 
+        (await svc.GetSolutionModulesAsync(movedOnline)).Modules.Should().BeEmpty();
         (await svc.ListProjectIdsWithModuleAsync(fornav)).Should().BeEquivalentTo([online, onPrem]);
         (await svc.ListCatalogAsync()).Single().Solutions.Should().Be(2);
+        (await svc.GetModuleAcrossSolutionsAsync(fornav, [online, onPrem, otherPublisher, movedOnline]))
+            .Where(h => h.Module is not null).Select(h => h.ProjectId)
+            .Should().BeEquivalentTo([online, onPrem], "the per-solution read agrees with the filter");
     }
 
     [Fact]
