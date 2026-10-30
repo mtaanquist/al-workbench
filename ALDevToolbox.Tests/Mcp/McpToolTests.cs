@@ -71,7 +71,7 @@ public sealed class McpToolTests : IDisposable
         await using var ctx2 = _db.NewContext();
         var tools = NewCookbookTools(ctx2);
 
-        var rows = await tools.SearchAsync(query: "posting");
+        var rows = (await tools.SearchAsync(query: "posting")).Rows;
 
         rows.Should().ContainSingle();
         rows[0].Title.Should().Be("Posting Validation Override");
@@ -101,6 +101,75 @@ public sealed class McpToolTests : IDisposable
         detail.Type.Should().Be("Snippet");
         detail.Files.Should().HaveCount(2);
         detail.Files.Select(f => f.Path).Should().Contain(new[] { "a.al", "sub/b.al" });
+    }
+
+    [Fact]
+    public async Task SearchRecipes_stops_at_the_limit_in_title_order_and_says_so()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS C"));
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS A"));
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS B"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        var cut = await tools.SearchAsync(query: "cronus", limit: 2);
+        cut.Rows.Select(r => r.Title).Should().Equal("CRONUS A", "CRONUS B");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 2 recipes");
+
+        var whole = await tools.SearchAsync(query: "cronus", limit: 3);
+        whole.Rows.Should().HaveCount(3);
+        whole.Truncated.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetRecipe_lists_files_past_the_budget_by_path_and_fetches_them_by_path()
+    {
+        var big = new string('x', CookbookTools.MaxRecipeContentLength / 2 + 1);
+        int recipeId;
+        await using (var ctx = _db.NewContext())
+        {
+            var s = RecipeBuilder.Default("Large module", type: RecipeType.Module)
+                .WithFile("Setup.al", big, relativePath: "Setup")
+                .WithFile("SetupPage.al", big, relativePath: "Setup")
+                .WithFile("Events.al", "// small", relativePath: "Events");
+            ctx.Recipes.Add(s);
+            await ctx.SaveChangesAsync();
+            recipeId = s.Id;
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        var whole = await tools.GetAsync(recipeId);
+        whole.Files.Select(f => f.Path).Should().Equal("Setup/Setup.al", "Setup/SetupPage.al", "Events/Events.al");
+        whole.Files[0].Content.Should().Be(big);
+        whole.Files[1].Content.Should().BeNull("the second large body does not fit");
+        whole.Files[2].Content.Should().Be("// small", "a later file that still fits is kept");
+        whole.Truncated.Should().BeTrue();
+        whole.Note.Should().Contain("1 of 3 files").And.Contain("path");
+
+        var one = await tools.GetAsync(recipeId, path: "setup/setuppage.al");
+        one.Files.Should().ContainSingle().Which.Content.Should().Be(big);
+        one.Truncated.Should().BeFalse();
+
+        (await tools.GetAsync(recipeId, path: "Events/")).Files.Select(f => f.Path).Should().Equal("Events/Events.al");
+        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Nowhere"))
+            .Should().ThrowAsync<McpException>().WithMessage("*no file or folder*");
+    }
+
+    [Fact]
+    public void A_recipe_file_larger_than_the_budget_is_cut_rather_than_left_out()
+    {
+        var (files, leftOut) = CookbookTools.FitFiles([("Huge.al", new string('x', 50))], budget: 10);
+
+        files.Should().ContainSingle().Which.Content.Should().StartWith(new string('x', 10)).And.Contain("(cut;");
+        leftOut.Should().Be(0);
     }
 
     [Fact]

@@ -44,6 +44,12 @@ public sealed class CookbookTools
     /// </summary>
     public static readonly TimeSpan GuidanceTokenLifetime = TimeSpan.FromMinutes(30);
 
+    private const int DefaultRecipeLimit = 25;
+    private const int MaxRecipeLimit = 100;
+
+    /// <summary>How many characters of file bodies one get_recipe answer carries (#1512).</summary>
+    internal const int MaxRecipeContentLength = 40_000;
+
     private readonly RecipeService _recipes;
     private readonly AppDbContext _db;
     private readonly RecipeSuggestionService _suggestions;
@@ -106,21 +112,24 @@ public sealed class CookbookTools
     [Description(
         "Searches the caller's organisation Cookbook by free-text query (title, description, keywords). " +
         "Returns lightweight summaries with the recipe Type (Snippet, Pattern, or Module) — search itself " +
-        "ignores type; the type field is for the agent to post-filter. Use get_recipe to fetch the files.")]
-    public async Task<IReadOnlyList<RecipeSummary>> SearchAsync(
-        [Description("Search text. Matches against title, description, and keywords. Pass an empty string to list everything.")] string query,
+        "ignores type; the type field is for the agent to post-filter. Returns at most 25 by default, in title order; " +
+        "Truncated and Note say whether more matched, so use a more specific query. Use get_recipe to fetch the files.")]
+    public async Task<CappedRows<RecipeSummary>> SearchAsync(
+        [Description("Search text. Matches against title, description, and keywords. Pass an empty string to list everything, up to the limit.")] string query,
         [Description("If true, also return recipes that have been marked deprecated. Defaults to false.")] bool includeDeprecated = false,
+        [Description("How many to return. Default 25, at least 1, at most 100.")] int limit = DefaultRecipeLimit,
         CancellationToken ct = default)
     {
-        var rows = await _recipes.SearchAsync(query, includeDeprecated, ct);
-        if (rows.Count == 0) return Array.Empty<RecipeSummary>();
+        var cap = Math.Clamp(limit, 1, MaxRecipeLimit);
+        var rows = await _recipes.SearchAsync(query, includeDeprecated, cap + 1, ct);
+        if (rows.Count == 0) return new CappedRows<RecipeSummary>(Array.Empty<RecipeSummary>(), false, null);
         var ids = rows.Select(r => r.Id).ToList();
         var counts = await _db.RecipeFiles.AsNoTracking()
             .Where(f => ids.Contains(f.RecipeId))
             .GroupBy(f => f.RecipeId)
             .Select(g => new { RecipeId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.RecipeId, x => x.Count, ct);
-        return rows.Select(s => new RecipeSummary(
+        var summaries = rows.Select(s => new RecipeSummary(
             s.Id, s.Title, s.Description, s.Keywords,
             s.Type.ToString(),
             s.Deprecated,
@@ -128,12 +137,15 @@ public sealed class CookbookTools
             s.MinimumApplicationVersion?.Name,
             s.MinimumApplicationVersion?.Application,
             s.EstimatedValueHours)).ToList();
+        return CappedRows<RecipeSummary>.From(summaries, cap, "recipes", "ordered by title",
+            "Use a more specific query to narrow the search.");
     }
 
     [McpServerTool(Name = "get_recipe", ReadOnly = true)]
-    [Description("Returns the full content of a recipe (every file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). Use search_recipes to find candidate ids.")]
+    [Description("Returns the content of a recipe (each file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). File bodies come back in order until about 40,000 characters; a file past that is listed with its path and a null body, and Truncated and Note say so. Fetch those by passing path (a file's Path, or a folder to get the files under it). Use search_recipes to find candidate ids.")]
     public async Task<RecipeDetail> GetAsync(
         [Description("Recipe id from search_recipes.")] int id,
+        [Description("Optional file Path, or a folder, to return only those files, e.g. 'Setup/SetupTable.al' or 'Setup'.")] string? path = null,
         CancellationToken ct = default)
     {
         var row = await _recipes.GetAsync(id, ct);
@@ -141,17 +153,67 @@ public sealed class CookbookTools
         {
             throw new McpException($"Recipe {id} not found, or not visible to your organisation.");
         }
+
+        var files = row.Files.OrderBy(f => f.Ordering)
+            .Select(f => (Path: string.IsNullOrEmpty(f.RelativePath) ? f.FileName : f.RelativePath + "/" + f.FileName, f.Content))
+            .ToList();
+        var wanted = path?.Trim().Trim('/');
+        if (!string.IsNullOrEmpty(wanted))
+        {
+            files = files.Where(f => string.Equals(f.Path, wanted, StringComparison.OrdinalIgnoreCase)
+                                     || f.Path.StartsWith(wanted + "/", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (files.Count == 0)
+            {
+                throw new McpException($"Recipe {id} has no file or folder '{path}'. Call get_recipe without path to see its files.");
+            }
+        }
+
+        var (dtos, left) = FitFiles(files, MaxRecipeContentLength);
         return new RecipeDetail(
             row.Id, row.Title, row.Description, row.Keywords,
             row.Type.ToString(),
             row.Deprecated,
-            row.Files.OrderBy(f => f.Ordering).Select(f => new RecipeFileDto(
-                string.IsNullOrEmpty(f.RelativePath) ? f.FileName : f.RelativePath + "/" + f.FileName,
-                f.Content)).ToList(),
+            dtos,
             row.Instructions,
             row.MinimumApplicationVersion?.Name,
             row.MinimumApplicationVersion?.Application,
-            row.EstimatedValueHours);
+            row.EstimatedValueHours,
+            Truncated: left > 0,
+            Note: left > 0
+                ? $"{left} of {dtos.Count} files are listed without their body to keep the answer short. Call get_recipe again with path set to a file's Path, or to its folder, to read them."
+                : null);
+    }
+
+    /// <summary>
+    /// Keeps file bodies in order while they fit in <paramref name="budget"/> characters and
+    /// lists the rest by path alone. The first body is always kept, cut at the budget if it
+    /// must be, so a call for one large file still answers.
+    /// </summary>
+    internal static (List<RecipeFileDto> Files, int LeftOut) FitFiles(
+        IReadOnlyList<(string Path, string Content)> files, int budget)
+    {
+        var result = new List<RecipeFileDto>(files.Count);
+        var used = 0;
+        var leftOut = 0;
+        foreach (var (filePath, content) in files)
+        {
+            if (result.Count == 0 && content.Length > budget)
+            {
+                result.Add(new RecipeFileDto(filePath, content[..budget] + "\n... (cut; the file is longer than one answer can carry)"));
+                used = budget;
+            }
+            else if (used + content.Length <= budget)
+            {
+                result.Add(new RecipeFileDto(filePath, content));
+                used += content.Length;
+            }
+            else
+            {
+                result.Add(new RecipeFileDto(filePath, null));
+                leftOut++;
+            }
+        }
+        return (result, leftOut);
     }
 
     [McpServerTool(Name = "get_cookbook_guidance", ReadOnly = true)]

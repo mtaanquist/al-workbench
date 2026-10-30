@@ -72,9 +72,11 @@ public sealed class RecipeService
     /// returns every active recipe. Soft-deleted rows are always excluded;
     /// deprecated rows are excluded unless <paramref name="includeDeprecated"/> is set.
     /// Recipe type is deliberately NOT part of the search expression — the
-    /// browser uses it as a post-filter chip-row instead.
+    /// browser uses it as a post-filter chip-row instead. <paramref name="take"/>
+    /// stops the read after that many rows, in title order; null reads them all.
     /// </summary>
-    public async Task<List<Recipe>> SearchAsync(string? query, bool includeDeprecated = false, CancellationToken ct = default)
+    public async Task<List<Recipe>> SearchAsync(
+        string? query, bool includeDeprecated = false, int? take = null, CancellationToken ct = default)
     {
         var trimmed = (query ?? string.Empty).Trim();
         var rows = _db.Recipes
@@ -99,9 +101,8 @@ public sealed class RecipeService
                 || EF.Functions.ILike(s.Keywords, pattern, "\\"));
         }
 
-        return await rows
-            .OrderBy(s => s.Title)
-            .ToListAsync(ct);
+        var ordered = rows.OrderBy(s => s.Title).ThenBy(s => s.Id);
+        return await (take is { } n ? ordered.Take(n) : ordered).ToListAsync(ct);
     }
 
     /// <summary>

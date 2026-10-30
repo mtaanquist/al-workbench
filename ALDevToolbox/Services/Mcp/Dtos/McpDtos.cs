@@ -339,7 +339,8 @@ public sealed record RecipeSummary(
     string? MinimumApplication = null,
     decimal? EstimatedValueHours = null);
 
-public sealed record RecipeFileDto(string Path, string Content);
+/// <summary>One recipe file; Content is null when it did not fit in the answer (get_recipe's Note says how to fetch it).</summary>
+public sealed record RecipeFileDto(string Path, string? Content);
 
 public sealed record RecipeDetail(
     int Id,
@@ -352,7 +353,9 @@ public sealed record RecipeDetail(
     string? Instructions = null,
     string? MinimumApplicationVersionName = null,
     string? MinimumApplication = null,
-    decimal? EstimatedValueHours = null);
+    decimal? EstimatedValueHours = null,
+    bool Truncated = false,
+    string? Note = null);
 
 /// <summary>
 /// One file body submitted as part of a <see cref="SuggestRecipeInput"/>.
