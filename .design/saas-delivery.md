@@ -249,7 +249,12 @@ a status Microsoft adds later shouldn't silently stop every deployment.
 It is checked twice, and the second check is the one that matters:
 
 1. **At scheduling**, against the cached status, as a field-keyed validation error so it lands next to
-   the environment on the form.
+   the environment on the form. A cached status that refuses is asked again first (the same single
+   `GET`), with the answer written back to the row: an environment the last read caught `Preparing`
+   (a new one, or one a failed deployment just re-read) otherwise kept refusing "Deploy again" and
+   "Deploy now" until the next refresh, long after it was up. Only a refusing status is re-read, so an
+   ordinary deployment costs nothing extra; when the re-read fails, the cached refusal stands and says
+   it is the last status read.
 2. **At claim time**, by re-reading the single environment (`GET .../environments/{name}`) after the
    claim and before the first upload. A delivery scheduled at 09:00 for 22:00 was fine when it was
    scheduled; an update that landed at 20:00 is invisible to check 1. The fresh status is written back
@@ -566,9 +571,9 @@ panel's **Refresh** re-reads past the cache for exactly that.
 The window is short on purpose. Nearly all the repeat traffic is one person expanding an
 environment, collapsing it, opening another and coming back; fifteen minutes collapses a
 working session into one fetch, where a longer TTL would mostly buy the *next* person
-tomorrow at a much worse staleness. It also matters that we honour no throttle: the BC
-clients have no `429`/`Retry-After` handling, so restraint in how often we ask is the only
-politeness we currently offer that API. The panel says how old its answer is rather than
+tomorrow at a much worse staleness. Restraint in how often we ask is the first politeness
+we offer that API; the second is that a throttled read is retried only after the
+`Retry-After` it named (see `environment-updates.md`, "Told to slow down"). The panel says how old its answer is rather than
 claiming freshness it does not have.
 
 There is still no background polling and no reconciler.

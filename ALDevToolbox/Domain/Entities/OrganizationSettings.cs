@@ -327,5 +327,13 @@ public class OrganizationSettings
     /// <summary>End of <see cref="DefaultDeliveryWindowSandboxStart"/>'s window; may wrap past midnight.</summary>
     public TimeOnly? DefaultDeliveryWindowSandboxEnd { get; set; }
 
+    /// <summary>
+    /// How often, in minutes, the background sweep asks Business Central about every
+    /// solution's environments. One of <c>EnvironmentRefreshInterval.Choices</c>, each of
+    /// which divides a day, so every choice still runs at the quiet hour the morning jobs
+    /// read from. Defaults to once a day.
+    /// </summary>
+    public int EnvironmentRefreshIntervalMinutes { get; set; } = 1440;
+
     public DateTime UpdatedAt { get; set; }
 }

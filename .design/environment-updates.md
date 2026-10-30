@@ -82,8 +82,8 @@ found nothing** — "nothing is scheduled" and "we never asked" are different fa
 page says which it has.
 
 Four things fill it. A consultant's Refresh on the project's Business Central tab; a
-nightly sweep (`EnvironmentRefreshScheduler`, a fixed quiet UTC hour, `DeliveryScheduler`'s
-shape) that offers every BC-connected project to the in-process
+scheduled sweep (`EnvironmentRefreshScheduler`, `DeliveryScheduler`'s shape, once a night in a
+quiet UTC hour unless the organisation chose more often - see "How often" below) that offers every BC-connected project to the in-process
 `EnvironmentRefreshQueue`/`Worker` pair so the fleet is fresh each morning without anyone
 opening a project; and the page's own **Refresh** command, which feeds
 the same queue so a sweep and a hand-triggered refresh coalesce. Rather than telling the
@@ -135,9 +135,24 @@ can do is be unhurried and do as we are told.
   drawn once per process), because everything else in the world fires at 03:00 sharp.
 - *Told to slow down, it slows down.* `BcThrottleHandler`, on the shared Business Central
   HTTP client, retries a **read** answered with 429 (or a 503 that names a wait) once,
-  after the `Retry-After` it was given, capped at a minute. A write is never re-sent on
-  our own initiative. Still throttled after that is an ordinary failed read: the customer
-  keeps last night's mirror.
+  after the `Retry-After` it was given, when that is a minute or less. A longer wait is
+  never cut short: the answer is handed back as it is, and the clients carry the wait on
+  the `BcApiException` they throw. A write is never re-sent on our own initiative. The
+  refresh stops at the first throttled read for that customer (the rest would go to the
+  same tenant), the worker records the wait on `EnvironmentRefreshQueue` and breathes up
+  to a minute before the next customer, and the sweep skips that customer until the wait
+  has passed - however often the organisation has asked for sweeps. The wait is held in
+  memory, like the queue's dedupe gate; a restart forgets it at the cost of one more
+  refusal. A person's own Refresh is not held back by it: they are told Business Central
+  asked us to slow down, and for how long.
+- *How often.* Once a night by default. An organisation admin can choose more often on
+  Administration → Business Central (`organization_settings.environment_refresh_interval_minutes`),
+  from a closed list between every fifteen minutes and every twelve hours. Every choice
+  divides a day and runs are counted from the quiet hour plus the start offset, so whatever
+  is chosen one run still lands there, before the 05:00 jobs that read the result
+  (`DependencyDriftScheduler`'s automatic update pull requests). A run whose slot was missed
+  by more than an hour (or by the interval, when shorter) is not made up; the next slot comes
+  round. A stored value not on the list runs as once a night.
 - *A watched update is read on its own.* The Upgrades page's watch after Start update reads
   one environment twice every ten seconds, bounded to ten environments a tick and slower above
   that, and only until the update ends or 45 minutes pass - see "The page".
