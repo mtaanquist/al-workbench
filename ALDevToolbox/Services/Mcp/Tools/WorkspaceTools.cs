@@ -14,8 +14,9 @@ namespace ALDevToolbox.Services.Mcp.Tools;
 /// <summary>
 /// MCP tools that wrap <see cref="TemplateService"/>, <see cref="ModuleService"/>,
 /// <see cref="CatalogService"/>, and <see cref="GenerationService"/>.
-/// Read tools return summaries; <c>generate_*</c> returns the workspace
-/// ZIP inline as base64 (see <see cref="WorkspaceResult"/>).
+/// Read tools return summaries; <c>generate_*</c> returns a short-lived
+/// download link to the ZIP (see <see cref="WorkspaceResult"/> and
+/// <see cref="GeneratedDownloadStore"/>).
 /// </summary>
 [McpServerToolType]
 public sealed class WorkspaceTools
@@ -26,6 +27,8 @@ public sealed class WorkspaceTools
     private readonly GenerationService _generation;
     private readonly GitHubExtensionDeliveryService _delivery;
     private readonly GitHubWorkspaceRepositoryService _repositories;
+    private readonly GeneratedDownloadStore _downloads;
+    private readonly IOrganizationContext _orgContext;
     private readonly McpOptions _options;
 
     public WorkspaceTools(
@@ -35,6 +38,8 @@ public sealed class WorkspaceTools
         GenerationService generation,
         GitHubExtensionDeliveryService delivery,
         GitHubWorkspaceRepositoryService repositories,
+        GeneratedDownloadStore downloads,
+        IOrganizationContext orgContext,
         IOptions<McpOptions> options)
     {
         _templates = templates;
@@ -43,6 +48,8 @@ public sealed class WorkspaceTools
         _generation = generation;
         _delivery = delivery;
         _repositories = repositories;
+        _downloads = downloads;
+        _orgContext = orgContext;
         _options = options.Value;
     }
 
@@ -129,7 +136,7 @@ public sealed class WorkspaceTools
     }
 
     [McpServerTool(Name = "generate_workspace", ReadOnly = false, Idempotent = false)]
-    [Description("Generates a new BC workspace as a ZIP. Pass the template key from list_templates, the workspace details, and the Core ID range. The ZIP is returned inline as base64-encoded contentBase64 alongside its file name, size, and SHA-256. Set createRepository to also create a repository for it in your organisation's connected GitHub organisation and commit the generated files to it, or open a pull request holding them when that organisation only allows changes to the default branch through one; when the organisation has Solutions enabled, that repository is also registered on a solution, either the one solutionId names or a new one named after the customer. The repository also gets test and staging branches, and a solution it is the only repository on gets a build pipeline per branch.")]
+    [Description("Generates a new BC workspace as a ZIP. Pass the template key from list_templates, the workspace details, and the Core ID range. The result gives the ZIP's file name, size and SHA-256, and a downloadPath the user appends to the app's base URL to fetch it while signed in as themselves; the link works for 30 minutes and only for the person who generated it, and an app restart ends it early, so generate again if it has gone. The bytes are not returned inline. Set createRepository to also create a repository for it in your organisation's connected GitHub organisation and commit the generated files to it, or open a pull request holding them when that organisation only allows changes to the default branch through one; when the organisation has Solutions enabled, that repository is also registered on a solution, either the one solutionId names or a new one named after the customer. The repository also gets test and staging branches, and a solution it is the only repository on gets a build pipeline per branch.")]
     public async Task<WorkspaceResult> GenerateWorkspaceAsync(
         ProjectPlanInput plan,
         [Description("Optional. A repository name (no owner - it is created in the GitHub organisation your organisation has connected, and nowhere else). When set, the repository is created and the generated files are committed to it; createdRepository in the result carries its link. When the GitHub organisation only allows changes to the default branch through a pull request, the files are put in one instead and createdRepository.pullRequestUrl says where. You have to be a member of that GitHub organisation.")]
@@ -179,7 +186,7 @@ public sealed class WorkspaceTools
     }
 
     [McpServerTool(Name = "generate_extension", ReadOnly = false, Idempotent = false)]
-    [Description("Generates a single standalone BC extension as a ZIP. Pass the template key from list_templates, the extension details, its app ID range, publisher, and any optional dependencies. The ZIP is returned inline as base64-encoded contentBase64. Set addToRepository to also add the extension to one of your organisation's GitHub repositories as a pull request.")]
+    [Description("Generates a single standalone BC extension as a ZIP. Pass the template key from list_templates, the extension details, its app ID range, publisher, and any optional dependencies. The result gives a downloadPath the user appends to the app's base URL to fetch the ZIP, as generate_workspace describes; the bytes are not returned inline. Set addToRepository to also add the extension to one of your organisation's GitHub repositories as a pull request.")]
     public async Task<WorkspaceResult> GenerateExtensionAsync(
         StandaloneExtensionPlanInput plan,
         [Description("Optional. A repository as 'owner/name'. When set, the extension is committed to a new branch there and a pull request is opened for it, in your name and never onto the repository's default branch; addedToRepository in the result carries the pull request. A repository holding a solution is joined as that solution, as add_extension_to_repository describes. Only repositories in the GitHub organisation your organisation has connected, and that you can open on GitHub yourself, are accepted.")]
@@ -218,63 +225,59 @@ public sealed class WorkspaceTools
     }
 
     /// <summary>
-    /// The result for the add-to-repository path: the pull request, plus the
-    /// same ZIP that went into it.
-    ///
-    /// <para>An oversized ZIP is reported as no ZIP rather than as a failure.
-    /// The pull request already exists by this point, and swallowing that to
-    /// complain about a size cap would leave the caller unaware of a change
-    /// they made.</para>
+    /// The result for the add-to-repository path: the pull request, and the size and
+    /// hash of the ZIP that went into it. No download link: the pull request holds the
+    /// files, and the bytes are not repeated.
     /// </summary>
-    private WorkspaceResult BuildDeliveredResult(GitHubExtensionDelivery delivered)
-    {
-        var bytes = delivered.Archive;
-        var inline = bytes.Length <= _options.MaxWorkspaceBytes;
-        return new WorkspaceResult(
-            FileName: delivered.ArchiveFileName,
-            ContentBase64: inline ? Convert.ToBase64String(bytes) : string.Empty,
-            SizeBytes: bytes.Length,
-            Sha256: Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
-            AddedToRepository: RepositoryDeliveryResult.From(delivered));
-    }
+    private static WorkspaceResult BuildDeliveredResult(GitHubExtensionDelivery delivered) => new(
+        FileName: delivered.ArchiveFileName,
+        DownloadPath: null,
+        DownloadExpiresAt: null,
+        SizeBytes: delivered.Archive.Length,
+        Sha256: Sha256Of(delivered.Archive),
+        AddedToRepository: RepositoryDeliveryResult.From(delivered));
 
     /// <summary>
-    /// The result for the create-a-repository path: the repository, plus the
-    /// same ZIP whose files are in it.
-    ///
-    /// <para>An oversized ZIP is reported as no ZIP rather than as a failure,
-    /// for the same reason as above: the repository already exists by this
-    /// point, and failing over a size cap would leave the caller unaware of
-    /// something they created.</para>
+    /// The result for the create-a-repository path: the repository, and the size and
+    /// hash of the ZIP whose files were committed to it. No download link, as above.
     /// </summary>
-    private WorkspaceResult BuildCreatedResult(GitHubWorkspaceRepository created)
-    {
-        var bytes = created.Archive;
-        var inline = bytes.Length <= _options.MaxWorkspaceBytes;
-        return new WorkspaceResult(
-            FileName: created.ArchiveFileName,
-            ContentBase64: inline ? Convert.ToBase64String(bytes) : string.Empty,
-            SizeBytes: bytes.Length,
-            Sha256: Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
-            CreatedRepository: RepositoryCreationResult.From(created));
-    }
+    private static WorkspaceResult BuildCreatedResult(GitHubWorkspaceRepository created) => new(
+        FileName: created.ArchiveFileName,
+        DownloadPath: null,
+        DownloadExpiresAt: null,
+        SizeBytes: created.Archive.Length,
+        Sha256: Sha256Of(created.Archive),
+        CreatedRepository: RepositoryCreationResult.From(created));
 
+    /// <summary>
+    /// Keeps the archive for the caller and returns the link to it. The size cap still
+    /// applies: the store holds the bytes in memory until the link expires.
+    /// </summary>
     private WorkspaceResult BuildResult(GeneratedArchive archive)
     {
         var bytes = archive.Stream.ToArray();
         if (bytes.Length > _options.MaxWorkspaceBytes)
         {
             throw new McpException(
-                $"Generated workspace is {bytes.Length} bytes which exceeds the MCP server's MaxWorkspaceBytes ({_options.MaxWorkspaceBytes}). " +
-                "Generate from the web UI for a download, or ask a SiteAdmin to raise the cap.");
+                $"The generated ZIP is {bytes.Length} bytes, more than the {_options.MaxWorkspaceBytes} this server hands out. " +
+                "Generate it from the web UI instead, or ask a SiteAdmin to raise the cap.");
         }
-        var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var orgId = _orgContext.CurrentOrganizationId
+            ?? throw new McpException("No organisation in scope; call this from an authenticated MCP session.");
+        var userId = _orgContext.CurrentUserId
+            ?? throw new McpException("No user in scope; call this from an authenticated MCP session.");
+        var link = _downloads.Put(orgId, userId, archive.FileName, bytes)
+            ?? throw new McpException(
+                "The server is holding too many generated archives to keep this one. Try again in a few minutes, or have it written to a GitHub repository instead.");
         return new WorkspaceResult(
             FileName: archive.FileName,
-            ContentBase64: Convert.ToBase64String(bytes),
+            DownloadPath: link.DownloadPath,
+            DownloadExpiresAt: link.ExpiresAt,
             SizeBytes: bytes.Length,
-            Sha256: sha);
+            Sha256: Sha256Of(bytes));
     }
+
+    private static string Sha256Of(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static string FormatErrors(IReadOnlyDictionary<string, string> errors) =>
         string.Join("; ", errors.Select(kv => $"{kv.Key}: {kv.Value}"));

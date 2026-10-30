@@ -599,12 +599,18 @@ one that matches how the file arrived.
 ## MCP parity
 
 - `generate_workspace` gains the create-repository option (#622). It returns the
-  repository *and* the ZIP whose files are in it, for the same reason
-  `generate_extension` does.
+  repository, with the size and hash of the ZIP whose files are in it.
 - `generate_extension` gains the add-to-repository option (#623). It returns the
-  pull request *and* the ZIP that went into it - generating a second time would
-  mint different extension GUIDs, so a download offered beside the pull request
-  has to be those same bytes.
+  pull request, with the size and hash of the ZIP that went into it.
+- Since #1508 neither returns the ZIP's bytes: base64 made a typical workspace too
+  large for an assistant's answer. Without a repository the result carries a
+  `downloadPath` instead, kept by `GeneratedDownloadStore` for 30 minutes and served
+  only to the user who generated it, in their organisation, from a signed-in
+  browser. The store holds at most 256 MB of archives at once and refuses a new one
+  past that, so a retry loop cannot fill the app's memory. The bytes are held
+  rather than regenerated on fetch because generating a second time would mint
+  different extension GUIDs. With a repository there is no link: the repository or
+  pull request holds the files.
 - Both resolve the repository through the same service the pages use, so the access
   gate is inherited rather than re-implemented in the tool class - see the resolver
   rule in PROJECT.md.
