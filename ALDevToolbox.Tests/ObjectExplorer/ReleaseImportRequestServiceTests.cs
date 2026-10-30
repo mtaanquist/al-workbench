@@ -230,6 +230,82 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         return await read.OeReleases.AsNoTracking().Where(r => r.Id == releaseId).Select(r => r.Status).SingleAsync();
     }
 
+    // ── Backfilling every release never waits on the queue (#1542) ───────
+
+    [Fact]
+    public async Task Backfilling_every_release_returns_at_once_on_a_full_queue_and_feeds_the_jobs_in_the_background()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseIds = await SeedReadyReleasesAsync(ctx, 20);
+        // Sixteen jobs fill the queue; the request used to wait here for a
+        // worker to finish a whole backfill before it could write the next.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+            NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
+        using var request = new CancellationTokenSource();
+
+        var queued = await NewService(ctx, queue, lifetime: lifetime)
+            .QueueBackfillAllAsync(releaseIds, request.Token)
+            .WaitAsync(TimeSpan.FromSeconds(30));
+
+        queued.Should().Be(20);
+        await using (var read = _db.NewContext())
+        {
+            var rows = await read.OeImportJobs.AsNoTracking()
+                .Where(j => j.Kind == "backfill_system_references").ToListAsync();
+            rows.Select(j => j.ReleaseId).Should().BeEquivalentTo(releaseIds);
+            rows.Should().OnlyContain(j => j.Status == "queued");
+        }
+
+        // The tab closing does not stop the feed: it runs until shutdown.
+        await request.CancelAsync();
+        var drained = new List<ReleaseImportJob>();
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (drained.Count(j => j.ReleaseId != int.MaxValue) < 20 && DateTime.UtcNow < deadline)
+        {
+            if (queue.Reader.TryRead(out var job)) drained.Add(job);
+            else await Task.Delay(10);
+        }
+        drained.Where(j => j.ReleaseId != int.MaxValue).Select(j => j.ReleaseId)
+            .Should().Equal(releaseIds, "every backfill reaches the queue once room frees up, in order");
+        drained.Where(j => j.ReleaseId != int.MaxValue)
+            .Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill && j.JobRowId > 0);
+        lifetime.StopApplication();
+    }
+
+    [Fact]
+    public async Task Backfilling_every_release_again_skips_the_releases_whose_backfill_is_still_pending()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseIds = await SeedReadyReleasesAsync(ctx, 3);
+        var queue = new ReleaseImportQueue();
+        var service = NewService(ctx, queue);
+        (await service.QueueBackfillAllAsync(releaseIds.Take(2).ToList())).Should().Be(2);
+
+        var queued = await service.QueueBackfillAllAsync(releaseIds);
+
+        queued.Should().Be(1, "the first two are still queued");
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
+            .Should().Be(3);
+    }
+
+    private static async Task<List<int>> SeedReadyReleasesAsync(Data.AppDbContext ctx, int count)
+    {
+        var now = DateTime.UtcNow;
+        var releases = Enumerable.Range(1, count).Select(i => new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = $"BC 2{i}.0 (DK)", Kind = "first_party", Status = "ready",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        }).ToList();
+        ctx.OeReleases.AddRange(releases);
+        await ctx.SaveChangesAsync();
+        return releases.Select(r => r.Id).OrderBy(id => id).ToList();
+    }
+
     // ── C/AL TXT wins, and decides the kind server-side ──────────────────
 
     [Fact]
@@ -441,7 +517,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
     private void Track(string tempPath) => _tempPaths.Add(tempPath);
 
     private ReleaseImportRequestService NewService(
-        Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null, ReleaseIngests? ingests = null)
+        Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null, ReleaseIngests? ingests = null,
+        Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
         var translations = new TranslationImportService(
             ctx, _db.OrgContext,
@@ -468,7 +545,10 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
         return new ReleaseImportRequestService(
             importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds,
-            new ProjectAccess(ctx, _db.OrgContext));
+            new ProjectAccess(ctx, _db.OrgContext),
+            lifetime ?? new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+                NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance),
+            NullLogger<ReleaseImportRequestService>.Instance);
     }
 
     private async Task SetAllowlistAsync(string hosts)

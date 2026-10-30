@@ -42,14 +42,20 @@ internal static class ResumedImportJobs
 
         if (imports.Count == 0) return;
         lifetime.ApplicationStarted.Register(() =>
-            _ = EnqueueAllAsync(queue, imports, logger, lifetime.ApplicationStopping));
+            _ = EnqueueAllAsync(queue, imports, logger, "resumed after restart", lifetime.ApplicationStopping));
     }
 
-    /// <summary>Writes <paramref name="jobs"/> in order, waiting whenever the queue is full. Never throws.</summary>
+    /// <summary>
+    /// Writes <paramref name="jobs"/> in order, waiting whenever the queue is full. Never
+    /// throws. Also the feeder behind the bulk system-reference backfill (#1542), which
+    /// must not hold a request while the queue drains. <paramref name="purpose"/> only
+    /// labels the log lines.
+    /// </summary>
     internal static async Task EnqueueAllAsync(
         ReleaseImportQueue queue,
         IReadOnlyList<ReleaseImportJob> jobs,
         ILogger logger,
+        string purpose,
         CancellationToken ct)
     {
         try
@@ -58,15 +64,16 @@ internal static class ResumedImportJobs
             {
                 await queue.EnqueueAsync(job, ct).ConfigureAwait(false);
             }
-            logger.LogInformation("Resumed {Count} release import(s) after restart.", jobs.Count);
+            logger.LogInformation("Queued {Count} release import(s), {Purpose}.", jobs.Count, purpose);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Shutting down; the rows are still queued and the next start resumes them.
+            // Shutting down; the rows are still queued and the next start's reconcile
+            // picks them up (resumes an import, marks a backfill failed to re-trigger).
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Resuming {Count} release import(s) after restart failed.", jobs.Count);
+            logger.LogError(ex, "Queuing {Count} release import(s), {Purpose}, failed.", jobs.Count, purpose);
         }
     }
 }

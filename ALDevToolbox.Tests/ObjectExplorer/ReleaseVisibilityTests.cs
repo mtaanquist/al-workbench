@@ -1035,7 +1035,9 @@ public sealed class ReleaseVisibilityTests : IDisposable
         var downloads = new DvdDownloadService(
             new NoDownloads(), _db.NewSystemSettingsService(ctx), NullLogger<DvdDownloadService>.Instance);
         return new ReleaseImportRequestService(
-            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds, Access(ctx));
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds, Access(ctx),
+            new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance),
+            NullLogger<ReleaseImportRequestService>.Instance);
     }
 
     /// <summary>How the release a retry acts on was last imported.</summary>

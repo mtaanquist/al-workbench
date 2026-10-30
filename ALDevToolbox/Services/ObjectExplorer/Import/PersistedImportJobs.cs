@@ -282,6 +282,21 @@ public sealed class PersistedImportJobs
     }
 
     /// <summary>
+    /// The releases of the current organisation (EF query filter) that already have a
+    /// system-reference backfill queued or running, so the bulk backfill does not
+    /// queue the same release twice (#1542).
+    /// </summary>
+    public async Task<HashSet<int>> ListReleasesWithActiveBackfillAsync(CancellationToken ct = default)
+    {
+        var ids = await _db.OeImportJobs.AsNoTracking()
+            .Where(j => j.Kind == "backfill_system_references" && (j.Status == "queued" || j.Status == "running"))
+            .Select(j => j.ReleaseId)
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false);
+        return ids.ToHashSet();
+    }
+
+    /// <summary>
     /// Returns the most recent import job for a Release (org-scoped via the EF
     /// query filter), or <see langword="null"/> when none exists. The retry path
     /// uses it to reuse the original source: a <c>url</c> job's

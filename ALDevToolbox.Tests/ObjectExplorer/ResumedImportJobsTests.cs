@@ -67,7 +67,7 @@ public sealed class ResumedImportJobsTests
     {
         var queue = new ReleaseImportQueue();
         using var stopping = new CancellationTokenSource();
-        var run = ResumedImportJobs.EnqueueAllAsync(queue, Jobs(20), NullLogger.Instance, stopping.Token);
+        var run = ResumedImportJobs.EnqueueAllAsync(queue, Jobs(20), NullLogger.Instance, "resumed after restart", stopping.Token);
 
         // Sixteen fit; the seventeenth waits for a reader that never comes.
         run.IsCompleted.Should().BeFalse();
