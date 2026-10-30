@@ -232,6 +232,35 @@ public sealed class ArtifactsToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task List_builds_reads_further_back_from_the_oldest_build_returned()
+    {
+        int projectId;
+        var ids = new List<int>();
+        var start = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            for (var i = 0; i < 6; i++)
+            {
+                ids.Add(await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, start.AddHours(-i)));
+            }
+            // Two builds started in the same instant are told apart by id (#1526).
+            ids.Add(await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, start.AddHours(-5)));
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var newest = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3);
+        newest.Select(b => b.Id).Should().Equal(ids[0], ids[1], ids[2]);
+        var older = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3, beforeBuildId: newest[^1].Id);
+        older.Select(b => b.Id).Should().Equal(ids[3], ids[4], ids[6]);
+        var oldest = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3, beforeBuildId: older[^1].Id);
+        oldest.Select(b => b.Id).Should().Equal(ids[5]);
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", beforeBuildId: 999_999)).Should().BeEmpty("that build is not this solution's");
+    }
+
+    [Fact]
     public async Task List_solutions_stops_at_the_limit_and_says_how_to_narrow_it()
     {
         await using (var ctx = _db.NewContext())

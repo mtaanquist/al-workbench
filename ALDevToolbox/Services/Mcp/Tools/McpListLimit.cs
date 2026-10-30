@@ -11,7 +11,7 @@ internal static class McpListLimit
 {
     public const int Default = 20;
     public const int Max = 50;
-    public const string Description = "How many to return, newest first. Default 20, at least 1, at most 50. Raise it when the build you need is older than the oldest one returned.";
+    public const string Description = "How many to return, newest first. Default 20, at least 1, at most 50.";
 
     /// <summary>How long a failure message may run in a list row; get_solution_build has the whole message.</summary>
     public const int MaxListFailureMessage = 300;
