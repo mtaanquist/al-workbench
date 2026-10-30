@@ -126,10 +126,13 @@ public sealed class EnvironmentRefreshSchedulerTests : IDisposable
         await SetIntervalAsync(60);
         var (scheduler, queue) = NewScheduler();
 
-        (await scheduler.SweepDueAsync(At(21, 12, 0), default)).Should().Be(1);
+        // The scheduler starts each slot up to MaxStartOffset (40 min) past the hour, at
+        // random. Sweeping after that keeps all three calls in the slots they name
+        // whatever offset it drew; 12:00 and 12:05 straddled a slot for offsets 1-5.
+        (await scheduler.SweepDueAsync(At(21, 12, 45), default)).Should().Be(1);
         queue.Complete(id);
-        (await scheduler.SweepDueAsync(At(21, 12, 5), default)).Should().Be(0, "this hour's run has happened");
-        (await scheduler.SweepDueAsync(At(21, 13, 0), default)).Should().Be(1, "the next hour asks again");
+        (await scheduler.SweepDueAsync(At(21, 12, 50), default)).Should().Be(0, "this hour's run has happened");
+        (await scheduler.SweepDueAsync(At(21, 13, 45), default)).Should().Be(1, "the next hour asks again");
     }
 
     [Fact]
