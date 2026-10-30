@@ -30,25 +30,24 @@ public sealed class CustomerModuleService
 
     // ── The catalogue ───────────────────────────────────────────────────
 
-    /// <summary>The catalogue by name, with how many solutions have each module either way.</summary>
+    /// <summary>
+    /// The catalogue by name, with how many solutions have each module either way - each
+    /// solution counted once, and an online one only for what its card shows.
+    /// </summary>
     public async Task<List<CatalogModule>> ListCatalogAsync(CancellationToken ct = default)
     {
         var modules = await _db.CustomerModules.AsNoTracking().ToListAsync(ct);
         var typed = await _db.OeProjectModules.AsNoTracking()
-            .Where(m => m.Project!.DeletedAt == null)
-            .GroupBy(m => m.ModuleId)
-            .Select(g => new { ModuleId = g.Key, Count = g.Select(m => m.ProjectId).Distinct().Count() })
-            .ToDictionaryAsync(g => g.ModuleId, g => g.Count, ct);
-        var appIds = modules.Where(m => m.AppId is not null).Select(m => m.AppId!.Value).ToList();
-        var installed = await _db.OeEnvironmentApps.AsNoTracking()
-            .Where(a => appIds.Contains(a.AppId) && a.Environment!.Project!.DeletedAt == null)
-            .GroupBy(a => a.AppId)
-            .Select(g => new { AppId = g.Key, Count = g.Select(a => a.Environment!.ProjectId).Distinct().Count() })
-            .ToDictionaryAsync(g => g.AppId, g => g.Count, ct);
+            .Where(m => OnPremisesProjectIds().Contains(m.ProjectId))
+            .Select(m => new { m.ModuleId, m.ProjectId })
+            .ToListAsync(ct);
+        var installed = await MatchInstalledAsync(modules, OnlineProjectIds(), ct);
 
         return modules
             .Select(m => new CatalogModule(m.Id, m.Name, m.Publisher, m.AppId,
-                typed.GetValueOrDefault(m.Id) + (m.AppId is { } id ? installed.GetValueOrDefault(id) : 0)))
+                typed.Where(t => t.ModuleId == m.Id).Select(t => t.ProjectId)
+                    .Concat(installed.GetValueOrDefault(m.Id) ?? [])
+                    .Distinct().Count()))
             .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
@@ -159,18 +158,8 @@ public sealed class CustomerModuleService
             return new SolutionModules(false, Sorted(typed), null, null, catalogCount);
         }
 
-        // Production first; a solution with only sandboxes still has something to show.
-        // A deleted environment is never the one read from: its app list is whatever was
-        // installed on the day it was deleted, which is not what the customer has now.
-        var environments = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(EnvironmentQueries.NotSoftDeleted)
-            .Where(e => e.ProjectId == projectId && e.MissingSince == null)
-            .Select(e => new { e.Id, e.Name, e.Type })
-            .ToListAsync(ct);
-        var chosen = environments
-            .OrderByDescending(e => string.Equals(e.Type, "Production", StringComparison.OrdinalIgnoreCase))
-            .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+        var chosen = (await ChooseEnvironmentsAsync(_db.OeProjects.Where(p => p.Id == projectId).Select(p => p.Id), ct))
+            .GetValueOrDefault(projectId);
         if (chosen is null) return new SolutionModules(true, [], null, null, catalogCount);
 
         var apps = await _db.OeEnvironmentApps.AsNoTracking().Where(a => a.EnvironmentId == chosen.Id).ToListAsync(ct);
@@ -241,19 +230,16 @@ public sealed class CustomerModuleService
         var module = await _db.CustomerModules.AsNoTracking().FirstOrDefaultAsync(m => m.Id == moduleId, ct);
         if (module is null) return [];
 
+        // Typed rows only count for an on-premises solution: one that moved online keeps
+        // its old rows, but its card reads the environment and no longer shows them.
         var ids = await _db.OeProjectModules.AsNoTracking()
-            .Where(m => m.ModuleId == moduleId).Select(m => m.ProjectId).ToListAsync(ct);
-        if (module.AppId is { } appId)
-        {
-            // The same environments the card reads from, so the filter and the card
-            // cannot disagree about which customers have a module.
-            var live = _db.OeProjectEnvironments.AsNoTracking()
-                .Where(EnvironmentQueries.NotSoftDeleted)
-                .Where(e => e.MissingSince == null);
-            ids.AddRange(await _db.OeEnvironmentApps.AsNoTracking()
-                .Where(a => a.AppId == appId && live.Any(e => e.Id == a.EnvironmentId))
-                .Select(a => a.Environment!.ProjectId).ToListAsync(ct));
-        }
+            .Where(m => m.ModuleId == moduleId && OnPremisesProjectIds().Contains(m.ProjectId))
+            .Select(m => m.ProjectId).ToListAsync(ct);
+        // The one environment the card reads from, matched the way the card matches, so
+        // the filter never lists a customer whose card does not show the module - such
+        // as one that only has it on a sandbox next to production (#1515).
+        var installed = await MatchInstalledAsync([module], OnlineProjectIds(), ct);
+        ids.AddRange(installed.GetValueOrDefault(module.Id) ?? []);
         return ids.ToHashSet();
     }
 
@@ -288,19 +274,7 @@ public sealed class CustomerModuleService
                 .Select(m => new { m.ProjectId, Row = new SolutionModule(m.Id, m.ModuleId, m.Module!.Name, m.Module.Publisher, m.Version, m.Note, null) })
                 .ToListAsync(ct);
 
-        // The same environment GetSolutionModulesAsync reads from: production
-        // first, then by name, never one that is deleted or missing.
-        var environments = await _db.OeProjectEnvironments.AsNoTracking()
-                .Where(EnvironmentQueries.NotSoftDeleted)
-                .Where(e => onlineIds.Contains(e.ProjectId) && e.MissingSince == null)
-                .Select(e => new { e.Id, e.ProjectId, e.Name, e.Type })
-                .ToListAsync(ct);
-        var chosen = environments
-            .GroupBy(e => e.ProjectId)
-            .ToDictionary(g => g.Key, g => g
-                .OrderByDescending(e => string.Equals(e.Type, "Production", StringComparison.OrdinalIgnoreCase))
-                .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
-                .First());
+        var chosen = await ChooseEnvironmentsAsync(_db.OeProjects.Where(p => onlineIds.Contains(p.Id)).Select(p => p.Id), ct);
         var chosenIds = chosen.Values.Select(e => e.Id).ToList();
 
         var fetched = await _db.OeEnvironmentApps.AsNoTracking()
@@ -328,7 +302,7 @@ public sealed class CustomerModuleService
                 continue;
             }
 
-            if (!chosen.TryGetValue(project.Id, out var environment))
+            if (chosen.GetValueOrDefault(project.Id) is not { } environment)
             {
                 result.Add(new ModuleHolding(project.Id, true, null, null, null));
                 continue;
@@ -341,6 +315,74 @@ public sealed class CustomerModuleService
                 fetched.TryGetValue(environment.Id, out var at) ? at : null));
         }
         return result;
+    }
+
+    // ── Which environment an online solution is read from ──────────────
+
+    /// <summary>The environment an online solution's modules are read from.</summary>
+    private sealed record ReadEnvironment(int Id, int ProjectId, string Name);
+
+    /// <summary>The online, not deleted solutions, as a query to compose into others.</summary>
+    private IQueryable<int> OnlineProjectIds() =>
+        _db.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null
+                && (p.HostingType == null || p.HostingType == ProjectHostingType.MicrosoftCloud))
+            .Select(p => p.Id);
+
+    /// <summary>The on-premises, not deleted solutions: the ones whose modules are typed in.</summary>
+    private IQueryable<int> OnPremisesProjectIds() =>
+        _db.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null
+                && p.HostingType != null && p.HostingType != ProjectHostingType.MicrosoftCloud)
+            .Select(p => p.Id);
+
+    /// <summary>
+    /// For each of the given solutions, the one environment its modules are read from:
+    /// production first, so a solution with only sandboxes still has something to show,
+    /// then by name. A deleted or missing environment is never the one read from: its app
+    /// list is whatever was installed on the day it went, not what the customer has now.
+    /// The card, the Solutions list filter and the catalogue counts all go through here so
+    /// they cannot disagree about which customers have a module (#1515).
+    /// </summary>
+    private async Task<Dictionary<int, ReadEnvironment>> ChooseEnvironmentsAsync(IQueryable<int> projectIds, CancellationToken ct)
+    {
+        var environments = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(EnvironmentQueries.NotSoftDeleted)
+            .Where(e => projectIds.Contains(e.ProjectId) && e.MissingSince == null)
+            .Select(e => new { e.Id, e.ProjectId, e.Name, e.Type })
+            .ToListAsync(ct);
+        return environments
+            .GroupBy(e => e.ProjectId)
+            .ToDictionary(g => g.Key, g => g
+                .OrderByDescending(e => string.Equals(e.Type, "Production", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(e => new ReadEnvironment(e.Id, e.ProjectId, e.Name))
+                .First());
+    }
+
+    /// <summary>
+    /// For each catalogue module, the given solutions whose read environment has it
+    /// installed. Only the apps that could match are loaded: by the modules' app ids, or
+    /// their names for an entry without one; the publisher check stays with the matcher.
+    /// </summary>
+    private async Task<Dictionary<int, List<int>>> MatchInstalledAsync(
+        IReadOnlyCollection<CustomerModule> modules, IQueryable<int> projectIds, CancellationToken ct)
+    {
+        if (modules.Count == 0) return [];
+        var chosen = await ChooseEnvironmentsAsync(projectIds, ct);
+        var chosenIds = chosen.Values.Select(e => e.Id).ToList();
+        var appIds = modules.Where(m => m.AppId is not null).Select(m => m.AppId!.Value).ToList();
+        var names = modules.Where(m => m.AppId is null).Select(m => m.Name.ToLower()).ToList();
+        var apps = await _db.OeEnvironmentApps.AsNoTracking()
+            .Where(a => chosenIds.Contains(a.EnvironmentId)
+                && (appIds.Contains(a.AppId) || names.Contains(a.Name.ToLower())))
+            .ToListAsync(ct);
+        var byEnvironment = apps.ToLookup(a => a.EnvironmentId);
+
+        return modules.ToDictionary(m => m.Id, m => chosen.Values
+            .Where(e => MatchApp(m, byEnvironment[e.Id]) is not null)
+            .Select(e => e.ProjectId)
+            .ToList());
     }
 
     /// <summary>A catalogue entry's app among an environment's: by app id, or by name and publisher.</summary>
