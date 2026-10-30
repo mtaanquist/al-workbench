@@ -303,6 +303,49 @@ public sealed class DeliveryToolsTests : IDisposable
         rows[0].Apps.Should().ContainSingle(a => a.AppName == "CRONUS Core");
     }
 
+    [Fact]
+    public async Task List_deliveries_cuts_long_messages_and_reads_one_deployment_whole()
+    {
+        Seed seed;
+        int first, second;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" });
+            first = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            second = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        // Business Central's schema-sync errors run to thousands of characters (#1525).
+        var longMessage = "The field 'CRONUS Amount' cannot be removed. " + new string('x', 2_000);
+        await using (var ctx = _db.NewContext())
+        {
+            var delivery = await ctx.OeProjectDeliveries.SingleAsync(d => d.Id == first);
+            delivery.FailureMessage = longMessage;
+            foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == first).ToListAsync())
+                result.Message = longMessage;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+        var listed = (await tools.ListDeliveriesAsync(seed.ReleasePipelineId)).Single(d => d.Id == first);
+        listed.FailureMessage!.Length.Should().BeLessThan(500);
+        listed.FailureMessage.Should().Contain("list_deployments with deploymentId has the whole message");
+        listed.Apps.Should().OnlyContain(a => a.Message!.Length < 500);
+
+        var one = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: first);
+        one.Should().ContainSingle();
+        one[0].FailureMessage.Should().Be(longMessage);
+        one[0].Apps.Should().OnlyContain(a => a.Message == longMessage);
+        one[0].Number.Should().Be(1, "it keeps its place in the pipeline's history");
+        (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: second)).Single().Number.Should().Be(2);
+
+        var act = () => tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: 999_999);
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("999999");
+    }
+
     // ── GitHub releases as an artifact source (#632) ──────────────────────
 
     [Fact]
