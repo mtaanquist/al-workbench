@@ -716,8 +716,8 @@
         if (_view != was && Running)
         {
             // The tabs are held during a run, but the address can still change (back, a
-            // typed link). The run is using the circuit's database context, so the switch
-            // waits for it to end rather than reading alongside it.
+            // typed link). The run owns the Fleet view's rows and is using the circuit's
+            // database context, so the switch waits for it to end.
             _view = was;
             _viewChangePending = true;
             return;
@@ -848,8 +848,12 @@
         Nav.NavigateTo("/upgrades?" + string.Join("&", parts));
     }
 
-    private async Task LoadAsync() =>
+    private async Task LoadAsync()
+    {
+        // A view read still out is older than this one, and must not put its rows back.
+        _viewLoads++;
         ShowLoaded(await Fleet.ListFleetAsync(), await Actions.ListPendingAsync());
+    }
 
     /// <summary>
     /// The same read as <see cref="LoadAsync"/>, on a DI scope of its own, for the poll:
