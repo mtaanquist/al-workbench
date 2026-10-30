@@ -3,13 +3,16 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Tools;
+using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Mcp;
 using ALDevToolbox.Services.Sealed;
 using ALDevToolbox.Services.Tools;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -23,6 +26,8 @@ namespace ALDevToolbox.Tests.Endpoints;
 [Collection(EndpointFactoryCollection.Name)]
 public sealed class SealedEndpointTests : IDisposable
 {
+    private const string Password = "correct horse battery staple";
+
     private readonly TestDb _db = new();
     private readonly EndpointFactory _factory;
 
@@ -119,21 +124,86 @@ public sealed class SealedEndpointTests : IDisposable
         response.Headers.Location!.ToString().Should().Contain("login");
     }
 
+    [Fact]
+    public async Task The_signed_in_creator_can_open_their_own_link_without_spending_the_view()
+    {
+        var (token, check, email) = await CreateLinkWithSenderAsync();
+        using var creator = await SignInAsync(email);
+
+        var html = await creator.GetStringAsync($"/s/{token}");
+        using var mine = await creator.PostAsJsonAsync($"/api/sealed/{token}/reveal", new { check });
+
+        html.Should().Contain("This is a link you created").And.Contain("data-creator=\"true\"");
+        mine.StatusCode.Should().Be(HttpStatusCode.OK);
+        using (var doc = JsonDocument.Parse(await mine.Content.ReadAsStringAsync()))
+        {
+            doc.RootElement.GetProperty("creator").GetBoolean().Should().BeTrue();
+            doc.RootElement.GetProperty("viewsLeft").GetInt32().Should().Be(1);
+        }
+
+        using var recipient = _factory.CreateClient(handleCookies: false);
+        (await recipient.GetStringAsync($"/s/{token}")).Should().Contain("sent you a secret").And.NotContain("data-creator");
+        using var theirs = await recipient.PostAsJsonAsync($"/api/sealed/{token}/reveal", new { check });
+        theirs.StatusCode.Should().Be(HttpStatusCode.OK, "the creator's look left the one view for the recipient");
+        using (var doc = JsonDocument.Parse(await theirs.Content.ReadAsStringAsync()))
+        {
+            doc.RootElement.GetProperty("creator").GetBoolean().Should().BeFalse();
+            doc.RootElement.GetProperty("viewsLeft").GetInt32().Should().Be(0);
+        }
+    }
+
+    private async Task<(string Token, string Check, string Email)> CreateLinkWithSenderAsync()
+    {
+        var email = $"alex{Guid.NewGuid():N}@cronus.example";
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Users.Add(new User
+            {
+                OrganizationId = TestDb.DefaultOrgId, Email = email, DisplayName = "Alex Hansen",
+                PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+                Role = UserRole.User, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var (token, check) = await CreateLinkAsync(senderEmail: email);
+        return (token, check, email);
+    }
+
+    private async Task<HttpClient> SignInAsync(string email)
+    {
+        var client = _factory.CreateClient();
+        using var page = await client.GetAsync("/login");
+        var match = Regex.Match(await page.Content.ReadAsStringAsync(),
+            """name="__RequestVerificationToken"[^>]*value="([^"]+)""");
+        match.Success.Should().BeTrue("the sign-in page must carry an antiforgery token");
+        using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["Email"] = email, ["Password"] = Password, ["__RequestVerificationToken"] = match.Groups[1].Value,
+        }));
+        login.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        return client;
+    }
+
     private sealed class McpOff : IMcpAvailability
     {
         public bool IsEnabled => false;
     }
 
-    private async Task<(string Token, string Check)> CreateLinkAsync(bool withPassphrase = false)
+    private async Task<(string Token, string Check)> CreateLinkAsync(bool withPassphrase = false, string? senderEmail = null)
     {
         await using var ctx = _db.NewContext();
-        var user = new User
+        var user = senderEmail is null ? null : await ctx.Users.SingleAsync(u => u.Email == senderEmail);
+        if (user is null)
         {
-            OrganizationId = TestDb.DefaultOrgId, Email = $"alex{Guid.NewGuid():N}@cronus.example", DisplayName = "Alex Hansen",
-            PasswordHash = "x", Role = UserRole.User, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
-        };
-        ctx.Users.Add(user);
-        await ctx.SaveChangesAsync();
+            user = new User
+            {
+                OrganizationId = TestDb.DefaultOrgId, Email = $"alex{Guid.NewGuid():N}@cronus.example", DisplayName = "Alex Hansen",
+                PasswordHash = "x", Role = UserRole.User, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            };
+            ctx.Users.Add(user);
+            await ctx.SaveChangesAsync();
+        }
         _db.OrgContext.CurrentUserId = user.Id;
 
         var check = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32));
