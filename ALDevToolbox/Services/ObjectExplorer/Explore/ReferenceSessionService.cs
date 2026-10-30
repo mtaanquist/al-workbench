@@ -134,19 +134,100 @@ public sealed class ReferenceSessionService
         if (head is null) return null;
 
         var seedReleaseId = viewReleaseId ?? head.ReleaseId;
-        var query = new FindSystemReferencesQuery(
-            TargetAppId: head.AppId,
-            TargetObjectKind: head.Kind,
-            TargetObjectId: head.ObjectId,
-            TargetObjectName: head.Name);
-
         if (!await SeedAndTargetVisibleAsync(seedReleaseId, head.ReleaseId, ct)) return null;
-        var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, ct: ct);
-        var label = head.ObjectId is { } oid
-            ? $"system references to {head.Kind} {oid} {head.Name}"
-            : $"system references to {head.Kind} {head.Name}";
+        return await StoreSystemReferencesAsync(
+            seedReleaseId, head.AppId, head.Kind, head.ObjectId, head.Name, ownerKey, ct);
+    }
 
-        return Store(label, seedReleaseId, results, ownerKey, head.Name);
+    /// <summary>
+    /// "Find built-in calls" from a right-click anywhere in the code: the name
+    /// under the cursor is resolved the way Find references resolves it, and
+    /// the calls are listed for the object it names - a table or page name
+    /// directly, or a record or page variable through its declared type
+    /// (<c>Customer</c> in <c>Customer.Insert()</c>). Null when the name is
+    /// neither, so the viewer can say what to right-click instead.
+    /// </summary>
+    public async Task<ReferenceSession?> CreateSystemReferencesAtPositionAsync(
+        long fileId, int line, int column, string ownerKey,
+        int? viewReleaseId = null, CancellationToken ct = default)
+    {
+        var meta = await _db.OeModuleFiles.AsNoTracking()
+            .Where(f => f.Id == fileId)
+            .Select(f => new { Content = f.FileContent!.Content, ReleaseId = f.Module!.ReleaseId })
+            .SingleOrDefaultAsync(ct);
+        if (meta is null) return null;
+        if (!await SeedVisibleAsync(meta.ReleaseId, ct)) return null;
+
+        var click = Services.Al.AlGoToDefinitionLocator.Inspect(meta.Content, line, column);
+        if (click is null || string.IsNullOrEmpty(click.Word)) return null;
+
+        var resolution = await _resolver.ResolveAsync(new ResolverContext(
+            FileId: fileId,
+            ReleaseId: meta.ReleaseId,
+            Line: line,
+            Column: column,
+            Word: click.Word,
+            LeftQualifier: click.LeftContext.Qualifier,
+            LeftOperator: click.LeftContext.Operator,
+            FileContent: meta.Content), ct);
+
+        switch (resolution?.Target)
+        {
+            case ResolutionTarget.CatalogObject catalog:
+                return await CreateSystemReferencesFromObjectAsync(
+                    catalog.ObjectId, ownerKey, viewReleaseId ?? meta.ReleaseId, ct);
+            case ResolutionTarget.GlobalVariable variable:
+                var type = await _db.OeModuleVariables.AsNoTracking()
+                    .Where(v => v.Id == variable.VariableId)
+                    .Select(v => new { v.TargetAppId, v.TargetObjectKind, v.TargetObjectId, v.TargetObjectName })
+                    .SingleOrDefaultAsync(ct);
+                if (type?.TargetAppId is not { } appId
+                    || string.IsNullOrEmpty(type.TargetObjectKind)
+                    || string.IsNullOrEmpty(type.TargetObjectName))
+                {
+                    return null;
+                }
+                return await StoreSystemReferencesAsync(
+                    viewReleaseId ?? meta.ReleaseId, appId, type.TargetObjectKind,
+                    type.TargetObjectId, type.TargetObjectName, ownerKey, ct);
+            case ResolutionTarget.LocalVariable local:
+                // A variable declared in this file, local or global: its
+                // declared type names the object. Resolve that name the way a
+                // click on it would.
+                var typeName = Services.Al.AlGoToDefinitionLocator.ResolveVariableType(meta.Content, local.Name);
+                if (string.IsNullOrEmpty(typeName)) return null;
+                var byType = await _resolver.ResolveAsync(new ResolverContext(
+                    FileId: fileId,
+                    ReleaseId: meta.ReleaseId,
+                    Line: line,
+                    Column: column,
+                    Word: typeName,
+                    LeftQualifier: null,
+                    LeftOperator: null,
+                    FileContent: meta.Content), ct);
+                return byType?.Target is ResolutionTarget.CatalogObject typeObject
+                    ? await CreateSystemReferencesFromObjectAsync(
+                        typeObject.ObjectId, ownerKey, viewReleaseId ?? meta.ReleaseId, ct)
+                    : null;
+            default:
+                return null;
+        }
+    }
+
+    private async Task<ReferenceSession> StoreSystemReferencesAsync(
+        int seedReleaseId, Guid appId, string kind, int? objectId, string name,
+        string ownerKey, CancellationToken ct)
+    {
+        var query = new FindSystemReferencesQuery(
+            TargetAppId: appId,
+            TargetObjectKind: kind,
+            TargetObjectId: objectId,
+            TargetObjectName: name);
+        var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, ct: ct);
+        var label = objectId is { } oid
+            ? $"built-in calls on {kind} {oid} {name}"
+            : $"built-in calls on {kind} {name}";
+        return Store(label, seedReleaseId, results, ownerKey, name, kind: "built_in_calls");
     }
 
     /// <summary>
@@ -468,7 +549,7 @@ public sealed class ReferenceSessionService
 
     private ReferenceSession Store(
         string label, int releaseId, IReadOnlyList<ReferenceMatch> results, string ownerKey,
-        string targetName)
+        string targetName, string kind = "references")
     {
         // The query methods fetch up to MaxReferenceMatches + 1 rows; if we got
         // more than the cap, trim to the cap and flag the session truncated so
@@ -483,7 +564,7 @@ public sealed class ReferenceSessionService
         }
 
         var token = Guid.NewGuid().ToString("N");
-        var session = new ReferenceSession(token, label, releaseId, results, truncated, targetName);
+        var session = new ReferenceSession(token, label, releaseId, results, truncated, targetName, kind);
         _cache.Set(
             CacheKey(token),
             new CachedSession(session, ownerKey),

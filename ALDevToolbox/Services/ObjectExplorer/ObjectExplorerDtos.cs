@@ -287,14 +287,15 @@ public sealed record FindReferencesQuery(
 /// <summary>
 /// Query envelope for <c>FindSystemReferencesAsync</c> — the receiver object
 /// triplet (same matching as <see cref="FindReferencesQuery"/>), optionally
-/// narrowed to a single built-in method (<c>Insert</c>, <c>Modify</c>, …).
+/// narrowed to some built-in methods (<c>Insert</c>, <c>Modify</c>, …),
+/// matched without regard to case since C/AL writes them in capitals.
 /// </summary>
 public sealed record FindSystemReferencesQuery(
     Guid TargetAppId,
     string TargetObjectKind,
     int? TargetObjectId,
     string TargetObjectName,
-    string? SystemMethodName = null);
+    IReadOnlyList<string>? SystemMethodNames = null);
 
 /// <summary>
 /// One reference matched by <c>FindReferencesAsync</c>. Carries enough
@@ -546,7 +547,10 @@ public sealed record ReferenceSession(
     // "BlockCustomer"), where TargetLabel is the whole sentence fragment
     // ("references to table 36 Sales Header"). The panel heading wants the
     // short form; the log line and the close button's tooltip want the long one.
-    string TargetName = "");
+    string TargetName = "",
+    // "references", or "built_in_calls" for a Find built-in calls search: the
+    // panel heads and filters the two differently.
+    string Kind = "references");
 
 /// <summary>
 /// One row in the source-viewer outline's "Using" or "Used by" sections (#148).

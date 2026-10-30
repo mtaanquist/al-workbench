@@ -44,6 +44,22 @@ public sealed class CalReferenceExtractorTests
     }
 
     [Fact]
+    public void A_static_dispatch_is_a_system_call_on_the_object_it_names()
+    {
+        // PAGE.RUNMODAL(PAGE::"Customer List",Cust) opens that page; the name
+        // is resolved to an id at import, as for the literal reference itself.
+        var result = CalReferenceExtractor.Extract(
+            "BEGIN PAGE.RUNMODAL(PAGE::\"Customer List\",Cust); REPORT.RUN(206); CODEUNIT.RUN(CODEUNIT::80); END;",
+            Scope());
+
+        result.SystemReferences.Should().ContainSingle(r => r.MemberName == "RUNMODAL"
+            && r.TargetKind == "page" && r.TargetId == null && r.TargetName == "Customer List");
+        result.SystemReferences.Should().ContainSingle(r => r.MemberName == "RUN"
+            && r.TargetKind == "codeunit" && r.TargetId == 80);
+        result.References.Should().Contain(r => r.ReferenceKind == "property_object" && r.TargetName == "Customer List");
+    }
+
+    [Fact]
     public void Paren_less_builtin_is_a_system_method_call()
     {
         // `SalesSetup.GET;` is a call, not a field read — classic C/AL drops

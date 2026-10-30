@@ -1277,6 +1277,8 @@ function initOne(root) {
                     return onFindReferences(args[0]);
                 case "OnFindSystemReferences":
                     return mintObjectSystemSession(args[0]);
+                case "OnFindSystemReferencesAt":
+                    return onFindSystemReferencesAt(args[0], args[1]);
                 case "OnFindMemberReferences":
                     return mintMemberSession(args[0]);
                 case "OnFindReferencesAt":
@@ -1371,6 +1373,8 @@ function initOne(root) {
         folding: !isCompare,
         procedures,
         dotNetRef: jsBridge,
+        // This host answers "Find built-in calls" (OnFindSystemReferences*).
+        builtInCalls: true,
         // VS Code-style status bar at the bottom of the editor. Shows
         // cursor line/col, total lines, selection size when a range is
         // active, and — when the cursor sits inside a procedure — the
@@ -1519,7 +1523,7 @@ function initOne(root) {
             sysItem.type = "button";
             sysItem.className = "source-viewer__outline-menu-item";
             sysItem.setAttribute("role", "menuitem");
-            sysItem.textContent = "Find built-in calls (Insert, Modify, SetRange...)";
+            sysItem.textContent = "Find built-in calls";
             sysItem.addEventListener("click", async () => {
                 close(false);
                 await mintObjectSystemSession(objectId);
@@ -1575,7 +1579,7 @@ function initOne(root) {
 
     async function mintObjectSystemSession(objectId) {
         clearNotice();
-        busyStart("Searching system references...");
+        busyStart("Searching built-in calls...");
         try {
             const res = await fetch(
                 withFrom(`/api/object-explorer/system-references/sessions/from-object/${objectId}`),
@@ -1588,6 +1592,30 @@ function initOne(root) {
             applyReferenceSession(session);
         } catch (err) {
             console.warn("system-references from-object failed:", err);
+            showNotice("Couldn't reach the server.");
+        } finally {
+            busyEnd();
+        }
+    }
+
+    async function onFindSystemReferencesAt(line, column) {
+        clearNotice();
+        busyStart("Searching built-in calls...");
+        try {
+            const res = await fetch(
+                withFrom(`/api/object-explorer/system-references/sessions/at-position?fileId=${fileId}&line=${line}&column=${column}`),
+                { credentials: "same-origin" });
+            if (res.status === 204 || res.status === 404) {
+                showNotice("Built-in calls are found for an object. Right-click the name of a table, page, report or codeunit, or a variable of one.");
+                return;
+            }
+            if (!res.ok) {
+                showNotice("Couldn't look up built-in calls (server error).");
+                return;
+            }
+            applyReferenceSession(await res.json());
+        } catch (err) {
+            console.warn("Find built-in calls at position failed:", err);
             showNotice("Couldn't reach the server.");
         } finally {
             busyEnd();
@@ -1942,6 +1970,11 @@ const SEARCH_ICON_SVG =
     '<svg class="search__icon" viewBox="0 0 24 24" width="15" height="15" fill="none" ' +
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>';
+// The caret on the built-in calls method picker. Pinned against
+// Resources/Icons/chevron-down.svg.
+const SELECT_CARET_ICON_SVG =
+    '<svg class="select-wrap__caret" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 // The tick in the references panel's "Hide temporary records" box. Pinned
 // against Resources/Icons/check.svg.
 const CHECK_ICON_SVG =
@@ -2044,9 +2077,10 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     section.className = "pane__sec";
     panel.appendChild(section);
 
+    const builtInCalls = session.kind === "built_in_calls";
     const heading = document.createElement("div");
     heading.className = "pane__sec-h sv-sec-h";
-    heading.append("References to ");
+    heading.append(builtInCalls ? "Built-in calls on " : "References to ");
     heading.appendChild(sectionName(session.targetName || "this name"));
     const countChip = document.createElement("span");
     countChip.className = "pane__count";
@@ -2088,7 +2122,9 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     if (count === 0) {
         const p = document.createElement("p");
         p.className = "u-muted source-viewer__panel-empty";
-        p.textContent = "No references found in this release or the apps it depends on.";
+        p.textContent = builtInCalls
+            ? "No calls to Insert, Modify, Get, Run or the other built-in methods on this object in this release or the apps it depends on."
+            : "No references found in this release or the apps it depends on.";
         section.appendChild(p);
         return;
     }
@@ -2116,6 +2152,12 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     const hasUsage = session.results.some(r => r.usage);
     if (hasUsage) {
         tools.appendChild(buildUsageFilter(session.results.some(r => r.isTemporary)));
+    }
+    // Built-in calls: pick one method (Insert, Modify, RunModal...) when the
+    // list holds more than one.
+    if (builtInCalls) {
+        const methodFilter = buildMethodFilter(session.results);
+        if (methodFilter) tools.appendChild(methodFilter);
     }
     section.appendChild(tools);
 
@@ -2207,11 +2249,14 @@ function wireRefsFilter(panel) {
     const usageMode = () =>
         usageTabs.find(t => t.classList.contains("is-active"))?.dataset.usageFilter ?? "all";
 
+    const methodSelect = panel.querySelector("[data-method-filter]");
+
     const run = () => {
         const needle = filter.value.trim().toLowerCase();
         const setOnly = usageMode() === "set";
         const noTemporary = hideTemporary?.checked === true;
-        if (needle.length === 0 && !setOnly && !noTemporary) {
+        const method = methodSelect?.value ?? "";
+        if (needle.length === 0 && !setOnly && !noTemporary && method === "") {
             // Same reason as wireOutlineFilter: clearing the box restores
             // everything, rather than leaving whatever held no rows hidden.
             for (let i = 0; i < sections.length; i++) {
@@ -2230,7 +2275,8 @@ function wireRefsFilter(panel) {
                 const usage = item.dataset.usage;
                 const match = (needle.length === 0 || hay.includes(needle))
                     && (!setOnly || (usage != null && usage !== "read"))
-                    && (!noTemporary || item.dataset.temporary !== "1");
+                    && (!noTemporary || item.dataset.temporary !== "1")
+                    && (method === "" || item.dataset.method === method);
                 setHidden(item, !match);
                 if (match) sectionVisible = true;
             }
@@ -2267,6 +2313,47 @@ function wireRefsFilter(panel) {
         });
     }
     hideTemporary?.addEventListener("change", run);
+    methodSelect?.addEventListener("change", run);
+}
+
+/// The method picker over a Find built-in calls list: every method the list
+/// holds, most used first, with its count. Null when there is only one.
+/// C/AL writes INSERT where AL writes Insert, so names are matched without
+/// regard to case and shown as most often written.
+function buildMethodFilter(rows) {
+    const byMethod = new Map();
+    for (const r of rows) {
+        if (r.category !== "system_call" || !r.memberName) continue;
+        const key = r.memberName.toLowerCase();
+        const entry = byMethod.get(key) ?? { count: 0, spellings: new Map() };
+        entry.count++;
+        entry.spellings.set(r.memberName, (entry.spellings.get(r.memberName) ?? 0) + 1);
+        byMethod.set(key, entry);
+    }
+    if (byMethod.size < 2) return null;
+
+    const wrap = document.createElement("span");
+    wrap.className = "select-wrap sv-method-filter";
+    const select = document.createElement("select");
+    select.className = "select";
+    select.dataset.methodFilter = "";
+    select.setAttribute("aria-label", "Show calls to");
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = `All methods (${rows.length.toLocaleString()})`;
+    select.appendChild(all);
+    const sorted = Array.from(byMethod.entries())
+        .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]));
+    for (const [key, entry] of sorted) {
+        const label = Array.from(entry.spellings.entries()).sort((a, b) => b[1] - a[1])[0][0];
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = `${label} (${entry.count.toLocaleString()})`;
+        select.appendChild(option);
+    }
+    wrap.appendChild(select);
+    wrap.insertAdjacentHTML("beforeend", SELECT_CARET_ICON_SVG);
+    return wrap;
 }
 
 /// The read / set switch and the temporary-record box under the references
@@ -2491,6 +2578,7 @@ function buildRefsRow(r, session, fileId, editorId) {
             : null,
     });
     if (r.usage) row.dataset.usage = r.usage;
+    if (r.category === "system_call" && r.memberName) row.dataset.method = r.memberName.toLowerCase();
     if (r.isTemporary) row.dataset.temporary = "1";
     attachRefsTooltip(row, r);
     return row;

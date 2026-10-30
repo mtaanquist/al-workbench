@@ -503,7 +503,7 @@ public sealed class ReferenceQueryService
                   AND sr.target_app_id      = {1}::uuid
                   AND sr.target_object_kind = {2}
                   AND sr.target_object_id   = {3}::int
-                  AND ({5}::text IS NULL OR sr.system_method_name = {5}::text)
+                  AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
                 UNION ALL
                 SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
                        sr.reference_kind, sr.line_number, sr.system_method_name
@@ -514,7 +514,7 @@ public sealed class ReferenceQueryService
                   AND sr.target_object_kind = {2}
                   AND sr.target_object_id   IS NULL
                   AND sr.target_object_name = {4}
-                  AND ({5}::text IS NULL OR sr.system_method_name = {5}::text)
+                  AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
             )
             SELECT
                 sr.id                    AS "Id",
@@ -554,14 +554,17 @@ public sealed class ReferenceQueryService
                 query.TargetObjectKind,
                 (object?)query.TargetObjectId ?? DBNull.Value,
                 query.TargetObjectName,
-                (object?)query.SystemMethodName ?? DBNull.Value)
+                query.SystemMethodNames is { Count: > 0 } methods
+                    ? methods.Select(n => n.Trim().ToLowerInvariant()).ToArray()
+                    : DBNull.Value)
             .ToListAsync(ct);
 
         matches = await EnrichReferencesWithSnippetsAsync(matches, ct);
 
         _logger.LogInformation(
             "FindSystemReferences ReleaseId={ReleaseId} TargetAppId={TargetAppId} Kind={Kind} Id={Id} Name={Name} Method={Method} Matches={Count}",
-            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName, query.SystemMethodName, matches.Count);
+            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName,
+            query.SystemMethodNames is null ? null : string.Join(",", query.SystemMethodNames), matches.Count);
 
         return matches;
     }

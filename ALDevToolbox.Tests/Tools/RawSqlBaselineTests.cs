@@ -100,7 +100,7 @@ public sealed class RawSqlBaselineTests
             }),
         ["ALDevToolbox/Services/ObjectExplorer/Import/CalImportService.cs"] = new(
             "Import work scoped by the module or release id the job owns, read through the filter in the job's organisation.",
-            new() { ["BackfillSystemReferencesAsync"] = 1, ["ResolveTargetsByIdAsync"] = 8 }),
+            new() { ["BackfillSystemReferencesAsync"] = 1, ["ResolveSystemReferenceIdsAsync"] = 1, ["ResolveTargetsByIdAsync"] = 8 }),
         ["ALDevToolbox/Services/ObjectExplorer/Import/CallSiteReferenceEmitter.cs"] = new(
             "Seeded with the release id being imported, read through the filter; same chain fence as ChainObjectResolution.",
             new() { ["GetVisibleChainModuleIdsAsync"] = 1 }),

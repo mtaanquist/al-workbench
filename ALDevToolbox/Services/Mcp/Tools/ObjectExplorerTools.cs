@@ -330,12 +330,12 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "find_system_references", ReadOnly = true)]
-    [Description("Finds the calls to a built-in / system method (Insert, Modify, ModifyAll, Delete, DeleteAll, SetRange, Validate, etc.) on a specific object in a BC release — the calls that find_references deliberately omits. Use this to answer 'where is this table inserted/modified/deleted?'. Optionally narrow to one method. Capped at 200 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
+    [Description("Finds the calls to a built-in / system method on a specific object in a BC release — the calls that find_references deliberately omits. On a table: Insert, Modify, ModifyAll, Delete, DeleteAll, Get, Find/FindFirst/FindLast/FindSet, SetRange, Validate and so on; on a page: Run, RunModal, SetRecord; on a report: Run, RunModal, SaveAsPdf, SaveAs; on a codeunit: Run. Both the instance form (CustomerList.RunModal()) and the static form (Page.RunModal(Page::\"Customer List\")) are found. Use this to answer 'where is this table inserted/modified/deleted?' or 'where is this page opened?'. Optionally narrow to some methods. Capped at 200 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
     public async Task<ReferenceSearchResult> FindSystemReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — usually a table. Resolved case-insensitively against oe_module_objects.")] string targetObject,
         [Description("AL kind of the target object. Defaults to 'table'.")] string targetKind = "table",
-        [Description("Optional system method name to narrow to, e.g. 'Insert', 'Modify', 'Delete', 'SetRange'.")] string? systemMethod = null,
+        [Description("Optional method name to narrow to, or several separated by commas, e.g. 'Insert', 'Modify,ModifyAll', 'FindFirst,FindLast,FindSet', 'Run,RunModal'. Matched without regard to case.")] string? systemMethod = null,
         CancellationToken ct = default)
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
@@ -355,11 +355,13 @@ public sealed class ObjectExplorerTools
             TargetObjectKind: owner.Kind,
             TargetObjectId: owner.ObjectId,
             TargetObjectName: owner.Name,
-            SystemMethodName: string.IsNullOrWhiteSpace(systemMethod) ? null : systemMethod.Trim());
+            SystemMethodNames: string.IsNullOrWhiteSpace(systemMethod)
+                ? null
+                : systemMethod.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
         var matches = await _references.FindSystemReferencesAsync(releaseId, query, MaxResults, ct);
         return ReferenceSearchResult.From(matches, MaxResults,
-            "Pass systemMethod to narrow the search to one method.");
+            "Pass systemMethod to narrow the search to some methods.");
     }
 
     [McpServerTool(Name = "get_object_outline", ReadOnly = true)]

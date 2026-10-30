@@ -320,6 +320,11 @@ public sealed class CalImportService
             _db.ChangeTracker.Clear();
         }
 
+        foreach (var moduleId in moduleAppId.Keys)
+        {
+            await ResolveSystemReferenceIdsAsync(moduleId, ct).ConfigureAwait(false);
+        }
+
         _logger.LogInformation(
             "Backfilled system references (C/AL): ReleaseId={ReleaseId} Emitted={Count}", releaseId, emitted);
     }
@@ -567,7 +572,9 @@ public sealed class CalImportService
         // System / built-in method calls (INSERT, MODIFY, SETRANGE, …) go to
         // the separate oe_module_system_references table — see #279. Within a
         // single C/AL export the receiver id is enough; the target name stays
-        // empty (the find-system-references query matches by id).
+        // empty (the find-system-references query matches by id). A static
+        // dispatch (PAGE.RUNMODAL(PAGE::"Customer List")) names its target
+        // instead, and ResolveSystemReferenceIdsAsync fills in the id.
         foreach (var sr in result.SystemReferences)
         {
             _db.OeModuleSystemReferences.Add(new OeModuleSystemReference
@@ -579,7 +586,7 @@ public sealed class CalImportService
                 TargetAppId = appId,
                 TargetObjectKind = sr.TargetKind,
                 TargetObjectId = sr.TargetId,
-                TargetObjectName = string.Empty,
+                TargetObjectName = sr.TargetName ?? string.Empty,
                 SystemMethodName = sr.MemberName ?? string.Empty,
                 ReferenceKind = sr.ReferenceKind,
                 LineNumber = bodyLine + sr.Line - 1,
@@ -630,6 +637,23 @@ public sealed class CalImportService
     }
 
     /// <summary>
+    /// Fills in the object id of system references that name their target
+    /// rather than carry its id: the static dispatches
+    /// (<c>PAGE.RUNMODAL(PAGE::"Customer List")</c>). The find query matches
+    /// by id when the object has one, so without this they would never be found.
+    /// </summary>
+    private async Task ResolveSystemReferenceIdsAsync(long moduleId, CancellationToken ct)
+    {
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE oe_module_system_references r SET target_object_id = o.object_id " +
+            "FROM oe_module_objects o " +
+            "WHERE r.module_id = {0} AND o.module_id = {0} " +
+            "AND r.target_object_id IS NULL AND r.target_object_name <> '' " +
+            "AND o.name = r.target_object_name AND o.kind = r.target_object_kind",
+            new object[] { moduleId }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Resolves the numeric object ids that C/AL references carry into target
     /// names, within the single module. Set-based UPDATEs so a full-database
     /// export (tens of thousands of vars/refs) resolves without loading rows.
@@ -637,6 +661,8 @@ public sealed class CalImportService
     private async Task ResolveTargetsByIdAsync(long moduleId, CancellationToken ct)
     {
         var p = new object[] { moduleId };
+
+        await ResolveSystemReferenceIdsAsync(moduleId, ct).ConfigureAwait(false);
 
         await _db.Database.ExecuteSqlRawAsync(
             "UPDATE oe_module_references r SET target_object_name = o.name " +

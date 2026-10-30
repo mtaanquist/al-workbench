@@ -2055,7 +2055,7 @@ public sealed class ObjectExplorerServiceTests : IDisposable
         // Narrowing to a method that wasn't called returns nothing.
         var modifyHits = await refs.FindSystemReferencesAsync(releaseId, new FindSystemReferencesQuery(
             TargetAppId: appId, TargetObjectKind: "table", TargetObjectId: 99000,
-            TargetObjectName: "Acme", SystemMethodName: "Modify"));
+            TargetObjectName: "Acme", SystemMethodNames: ["Modify"]));
         modifyHits.Should().BeEmpty();
     }
 

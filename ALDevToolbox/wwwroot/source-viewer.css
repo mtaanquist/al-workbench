@@ -593,3 +593,14 @@ button.sv-sec-h:focus-visible {
 .sv-usage-filter .check {
     font-size: var(--text-xs);
 }
+
+/* The method picker on a Find built-in calls list, under the filter box. */
+.sv-method-filter {
+    margin-top: var(--space-2);
+}
+
+.sv-method-filter .select {
+    width: 100%;
+    height: var(--control-h-sm);
+    font-size: var(--text-xs);
+}
