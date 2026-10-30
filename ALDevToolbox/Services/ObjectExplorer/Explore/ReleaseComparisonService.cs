@@ -317,7 +317,7 @@ public sealed class ReleaseComparisonService
     /// </summary>
     public async Task<List<ReleaseCompareFileRow>> CompareReleaseFilesFlatAsync(
         int leftReleaseId, int rightReleaseId, int? take = MaxCompareFileRows,
-        CancellationToken ct = default, string? pathPattern = null)
+        string? pathPattern = null, CancellationToken ct = default)
     {
         var context = await CompareReleasesCoreAsync(leftReleaseId, rightReleaseId, ct);
         if (context is null) return new();
@@ -351,7 +351,7 @@ public sealed class ReleaseComparisonService
         {
             var addedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => addedRightModuleIds.Contains(f.ModuleId))
-                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern))
+                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern, "\\"))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
                 .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
                 .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
@@ -366,7 +366,7 @@ public sealed class ReleaseComparisonService
         {
             var removedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => removedLeftModuleIds.Contains(f.ModuleId))
-                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern))
+                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern, "\\"))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
                 .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
                 .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))

@@ -101,17 +101,20 @@ public sealed class ObjectExplorerTools
         // the cap counts. The service returns one row past the cap when it cut
         // the set - see issues #685 and #1510.
         var scanCap = ReleaseComparisonService.MaxCompareFileRows;
-        var rows = await _comparison.CompareReleaseFilesFlatAsync(leftId, rightId, scanCap, ct, pathPattern);
+        var rows = await _comparison.CompareReleaseFilesFlatAsync(leftId, rightId, scanCap, pathPattern, ct);
         var scanTruncated = rows.Count > scanCap;
         if (scanTruncated) rows = rows.Take(scanCap).ToList();
 
         var matched = rows;
         var page = matched.Take(MaxResults).ToList();
         var notes = new List<string>();
+        var filtered = !string.IsNullOrWhiteSpace(pathPattern);
         if (matched.Count > MaxResults)
-            notes.Add($"Showing the first {MaxResults} of {matched.Count} matching files.");
+            notes.Add(scanTruncated
+                ? $"Showing the first {MaxResults} of at least {scanCap} {(filtered ? "matching" : "changed")} files."
+                : $"Showing the first {MaxResults} of {matched.Count} {(filtered ? "matching" : "changed")} files.");
         if (scanTruncated)
-            notes.Add($"The diff stopped after the first {scanCap} changed files (ordered by app, then path), so later files were never examined.");
+            notes.Add($"The diff stopped after the first {scanCap} {(filtered ? "matching" : "changed")} files (ordered by app, then path), so later files were never examined.");
         if (notes.Count > 0)
             notes.Add("Pass pathPattern, or compare two individual apps, to narrow the comparison.");
 
@@ -136,7 +139,11 @@ public sealed class ObjectExplorerTools
             new ObjectListFilter(Kinds: kinds, Search: namePattern),
             MaxObjectMatches + 1,
             ct: ct);
-        return CappedRows<ReleaseObjectMatch>.From(rows, MaxObjectMatches, "objects", "best matches first",
+        // Ranking only applies when there is something to rank by: a bare kind
+        // prefix or an empty pattern comes back in kind, then id order.
+        var ranked = !string.IsNullOrWhiteSpace(ObjectSearchRanking.ExtractKindPrefix(namePattern).Remainder);
+        return CappedRows<ReleaseObjectMatch>.From(rows, MaxObjectMatches, "objects",
+            ranked ? "best matches first" : "ordered by kind, then id",
             "Add a token to namePattern or pass kind to narrow the search.");
     }
 
@@ -265,7 +272,7 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "get_object_outline", ReadOnly = true)]
-    [Description("Returns the outline of one AL object (table, page, codeunit, etc.) in a BC release — its declared procedures, triggers, event publishers, and fields with their line numbers and symbol ids. Use this to discover what an object exposes before calling get_procedure_source or list_procedure_calls. The returned symbol ids disambiguate procedure name collisions (page actions and table fields each carry an OnAction / OnValidate trigger with the same name). Each row also carries 'doc' — the declaration's XML doc-comment summary — when the module was imported with source and the declaration was documented; it is null otherwise, which is the common case. The outline lists at most 150 members, in line order; Truncated and Note say whether more were left out, and totalSymbols how many the object has, so pass memberKind or namePattern to narrow a large object such as a posting codeunit or Sales Line.")]
+    [Description("Returns the outline of one AL object (table, page, codeunit, etc.) in a BC release — its declared procedures, triggers, event publishers, and fields with their line numbers and symbol ids. Use this to discover what an object exposes before calling get_procedure_source or list_procedure_calls. The returned symbol ids disambiguate procedure name collisions (page actions and table fields each carry an OnAction / OnValidate trigger with the same name). Each row also carries 'doc' — the declaration's XML doc-comment summary — when the module was imported with source and the declaration was documented; it is null otherwise, which is the common case. The outline lists at most 150 members, in line order; Truncated and Note say whether more were left out, and totalSymbols how many members matched the filters, so pass memberKind or namePattern to narrow a large object such as a posting codeunit or Sales Line.")]
     public async Task<ObjectOutlineResult> GetObjectOutlineAsync(
         [Description("Release Label ('BC 28.1') or numeric id from list_releases.")] string releaseLabelOrId,
         [Description("Name of the target object — resolved case-insensitively against oe_module_objects.")] string objectName,

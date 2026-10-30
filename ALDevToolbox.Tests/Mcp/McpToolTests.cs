@@ -1379,6 +1379,25 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
+    public void An_outline_keeps_every_member_kind_named_in_a_comma_separated_list()
+    {
+        var symbols = new List<ObjectSymbolRow>
+        {
+            new(1, "field", "No.", null, null, null, 1),
+            new(2, "trigger", "OnValidate", null, null, null, 2),
+            new(3, "local procedure", "CheckCredit", null, null, null, 3),
+            new(4, "event publisher", "OnAfterPost", null, null, null, 4),
+        };
+        var outline = new ObjectOutline(1, "table", 37, "CRONUS Line", 1, "CRONUS", null, null, 1, symbols);
+
+        var result = ObjectOutlineResult.From(outline, memberKind: "procedure, trigger", namePattern: null, cap: 150);
+
+        result.Outline.Symbols.Select(sym => sym.Name).Should().Equal("OnValidate", "CheckCredit");
+        result.TotalSymbols.Should().Be(2);
+        result.Truncated.Should().BeFalse();
+    }
+
+    [Fact]
     public void Capped_rows_say_when_more_matched_and_how_to_narrow()
     {
         var fits = CappedRows<int>.From([1, 2, 3], cap: 3, "objects", "best matches first", "Narrow it.");
