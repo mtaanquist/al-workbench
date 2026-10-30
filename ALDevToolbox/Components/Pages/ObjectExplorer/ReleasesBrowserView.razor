@@ -55,10 +55,12 @@
     else
     {
         var searching = !string.IsNullOrWhiteSpace(_search);
-        // Searching looks in every category; otherwise the active tab's rows.
-        var sections = _tabs
+        // Searching looks in every category until the user picks a tab, which
+        // narrows the same search to that tab; otherwise the active tab's rows.
+        var acrossTabs = searching && !_searchInTab;
+        var sections = VisibleTabs
             .Select(t => (Tab: t, Rows: Rows(t.Kind)))
-            .Where(s => searching ? s.Rows.Count > 0 : s.Tab.Kind == _kind)
+            .Where(s => acrossTabs ? s.Rows.Count > 0 : s.Tab.Kind == _kind)
             .ToList();
         var shown = sections.SelectMany(s => s.Rows).ToList();
         var totalFiles = shown.Sum(r => (long)r.SourceFileCount);
@@ -66,17 +68,18 @@
         <div class="filter-bar">
             <span class="search filter-bar__search">
                 <Icon Name="search" Width="15" Height="15" Css="search__icon" />
-                <input type="search" class="input" @bind="_search" @bind:event="oninput"
+                <input type="search" class="input" @bind="_search" @bind:event="oninput" @bind:after="SearchAcrossTabs"
                        placeholder="Search all releases..."
                        aria-label="Search releases"
                        data-page-search aria-keyshortcuts="F3" title="Search releases (F3)" />
             </span>
             <div class="pill-tabs oe-tabs" role="tablist" aria-label="Release category">
-                @foreach (var t in _tabs.Where(t => t.Kind != "cal" || TabRows("cal").Any()))
+                @foreach (var t in VisibleTabs)
                 {
-                    // While searching no tab is chosen: the results span them all,
-                    // and each tab's count is its share of the matches.
-                    var active = !searching && _kind == t.Kind;
+                    // While searching across tabs none is chosen: the results span
+                    // them all, and each tab's count is its share of the matches.
+                    // Clicking one narrows the search to it.
+                    var active = !acrossTabs && _kind == t.Kind;
                     <button type="button" class="pill-tab @(active ? "is-active" : "")"
                             role="tab" aria-selected="@(active ? "true" : "false")"
                             @onclick="() => SetKind(t.Kind)"
@@ -91,7 +94,7 @@
             @if (shown.Count > 0)
             {
                 <span class="oe-tally">
-                    <b>@shown.Count</b> release@(shown.Count == 1 ? "" : "s") @(searching ? "matched" : _kind == SolutionKind ? "built" : "imported")
+                    <b>@shown.Count</b> @(_kind == SolutionKind && !acrossTabs ? "build" : "release")@(shown.Count == 1 ? "" : "s") @(searching ? "matched" : _kind == SolutionKind ? "listed" : "imported")
                     · <b>@totalFiles.ToString("N0")</b> files indexed
                 </span>
             }
@@ -100,8 +103,8 @@
         @* .oe-panel is display:contents - it exists only to give role="tabpanel"
            something to attach to, and must not add a box to .page's grid. *@
         <div id="oe-releases" role="tabpanel" class="oe-panel"
-             aria-labelledby="@(searching ? null : $"oe-tab-{_kind}")"
-             aria-label="@(searching ? "Search results" : null)">
+             aria-labelledby="@(acrossTabs ? null : $"oe-tab-{_kind}")"
+             aria-label="@(acrossTabs ? "Search results" : null)">
         @if (shown.Count == 0)
         {
             <div class="card">
@@ -109,28 +112,19 @@
                 {
                     <div class="empty-state">
                         <span class="empty-state__icon"><Icon Name="funnel-x" Width="21" Height="21" /></span>
-                        <span class="empty-state__title">No releases match "@_search"</span>
+                        <span class="empty-state__title">No @(acrossTabs ? "" : CategoryNoun + " ")releases match "@_search"</span>
                         <span class="empty-state__text">
                             Try a different name, version, publisher, or solution. To search for an
                             object, open a release first.
                         </span>
-                        <button type="button" class="btn empty-state__action" @onclick="ClearSearch">Clear search</button>
-                    </div>
-                }
-                else if (_kind == SolutionKind)
-                {
-                    <div class="empty-state">
-                        <span class="empty-state__icon"><Icon Name="folder-git-2" Width="21" Height="21" /></span>
-                        <span class="empty-state__title">No solution builds yet</span>
-                        <span class="empty-state__text">
-                            When a solution's build pipeline finishes a build, its newest build
-                            shows up here, so you can search the customer's code next to
-                            Business Central's.
-                        </span>
-                        <a class="btn empty-state__action" href="/solutions">
-                            <Icon Name="folder-git-2" Width="15" Height="15" />
-                            <span>Open solutions</span>
-                        </a>
+                        @if (acrossTabs)
+                        {
+                            <button type="button" class="btn empty-state__action" @onclick="ClearSearch">Clear search</button>
+                        }
+                        else
+                        {
+                            <button type="button" class="btn empty-state__action" @onclick="SearchAcrossTabs">Search all tabs</button>
+                        }
                     </div>
                 }
                 else
@@ -163,7 +157,7 @@
                 }
             </div>
         }
-        else if (searching)
+        else if (acrossTabs)
         {
             // One section per category with a match, in tab order. Groups within
             // a category (versions, publishers) would bury a short result list
@@ -199,7 +193,7 @@
             // A preview build never takes the hero, and the hero never points at
             // one: featured there it would read as GA. The hero is the newest
             // shipped release; previews stay in the grid under their major, pilled.
-            var showHero = _kind == "first_party" && shown.Any(r => !r.IsPrerelease);
+            var showHero = !searching && _kind == "first_party" && shown.Any(r => !r.IsPrerelease);
             var featured = showHero ? shown.First(r => !r.IsPrerelease) : shown[0];
             var gridRows = showHero ? shown.Where(r => r.Id != featured.Id).ToList() : shown;
 
@@ -300,13 +294,34 @@
         _pipelineReleases = await ObjectExplorer.ListLatestPipelineBuildReleasesAsync();
     }
 
+    /// <summary>True once a tab is clicked during a search: the search then looks in that tab alone.</summary>
+    private bool _searchInTab;
+
+    /// <summary>
+    /// C/AL and Solutions show only while the org has some: most orgs never
+    /// import C/AL, and an org that does not use solutions has no builds.
+    /// </summary>
+    private IEnumerable<(string Kind, string Label, string Icon)> VisibleTabs =>
+        _tabs.Where(t => t.Kind is not ("cal" or SolutionKind) || TabRows(t.Kind).Any());
+
+    /// <summary>
+    /// Picking a tab keeps the search and narrows it to that tab, since the
+    /// tab's count is what invited the click.
+    /// </summary>
     private void SetKind(string kind)
     {
         _kind = kind;
-        _search = string.Empty;
+        _searchInTab = !string.IsNullOrWhiteSpace(_search);
     }
 
-    private void ClearSearch() => _search = string.Empty;
+    /// <summary>Typing searches every tab again.</summary>
+    private void SearchAcrossTabs() => _searchInTab = false;
+
+    private void ClearSearch()
+    {
+        _search = string.Empty;
+        _searchInTab = false;
+    }
 
     /// <summary>The rows behind a tab — Solutions carries the pipeline entries, the rest their own kind.</summary>
     private IEnumerable<ReleaseListItem> TabRows(string kind) => kind == SolutionKind
@@ -343,6 +358,7 @@
         "first_party" => "Microsoft",
         "third_party" => "third-party",
         "cal" => "C/AL",
+        SolutionKind => "solution",
         _ => "",
     };
 
@@ -411,6 +427,12 @@
                                 @if (firstOfSolution)
                                 {
                                     <strong>@r.ProjectName</strong>
+                                }
+                                else
+                                {
+                                    @* Shown once to the eye; a screen reader moving down the
+                                       column still hears whose pipeline each row is. *@
+                                    <span class="u-sr">@r.ProjectName</span>
                                 }
                             </td>
                             <td>

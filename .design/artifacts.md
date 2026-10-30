@@ -288,8 +288,9 @@ app). The **New build** action lets the user pick which to build:
   Third-party) surfaces each pipeline's *latest ready* build release
   (`ObjectExplorerService.ListLatestPipelineBuildReleasesAsync` — one table row per pipeline,
   sorted by solution then pipeline) so a pipeline's current objects are findable without opening
-  its project first. It is a table, not cards, because it grows with the number of customers. The
-  page's search box looks across every tab at once and groups the matches by tab. Older builds remain
+  its project first. It is a table, not cards, because it grows with the number of customers, and
+  like C/AL it is hidden while there is nothing to list. The page's search box looks across every
+  tab at once and groups the matches by tab; clicking a tab narrows the same search to it. Older builds remain
   Artifacts-only, and MCP `list_releases` still excludes all project releases.
 - **Comparing two builds of the same project is kept** — it's genuinely useful — but scoped to that
   project. Artifacts offers a "Compare builds" picker listing only *this project's* builds;

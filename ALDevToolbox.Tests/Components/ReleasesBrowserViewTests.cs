@@ -125,7 +125,68 @@ public sealed class ReleasesBrowserViewTests : IDisposable
         });
     }
 
-    private async Task SeedPipelineBuildAsync(string solution, string pipelineName)
+    [Fact]
+    public async Task Clicking_a_tab_while_searching_narrows_the_search_to_it()
+    {
+        await SeedAsync("Denmark Toolkit 1.0.0.0", files: 4, dedupKey: null);
+        await SeedPipelineBuildAsync("CRONUS Denmark", "main");
+
+        var cut = _ctx.Render<ReleasesBrowserView>();
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Should().NotBeEmpty());
+        cut.Find("input[type=search]").Input("denmark");
+        cut.WaitForAssertion(() => cut.FindAll(".oe-group__head").Should().HaveCount(2));
+
+        cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Solutions")).Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("input[type=search]").GetAttribute("value").Should().Be("denmark", "the query the count came from is kept");
+            cut.Find(".pill-tab.is-active").TextContent.Should().Contain("Solutions");
+            cut.Markup.Should().Contain("CRONUS Denmark").And.NotContain("Denmark Toolkit");
+        });
+
+        // Typing again looks across every tab.
+        cut.Find("input[type=search]").Input("denmar");
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".pill-tab.is-active").Should().BeEmpty();
+            cut.Markup.Should().Contain("Denmark Toolkit").And.Contain("CRONUS Denmark");
+        });
+    }
+
+    [Fact]
+    public async Task A_solution_is_named_once_however_many_pipelines_it_has()
+    {
+        await SeedPipelineBuildAsync("CRONUS Denmark", "staging", "main");
+
+        var cut = _ctx.Render<ReleasesBrowserView>();
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Should().NotBeEmpty());
+        cut.FindAll(".pill-tab").First(t => t.TextContent.Contains("Solutions")).Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            var rows = cut.FindAll("table.oe-solutions tbody tr");
+            rows.Should().HaveCount(2);
+            rows[0].QuerySelector("a")!.TextContent.Should().Be("main");
+            rows[0].QuerySelector("strong")!.TextContent.Should().Be("CRONUS Denmark");
+            rows[1].QuerySelector("a")!.TextContent.Should().Be("staging");
+            rows[1].QuerySelector("strong").Should().BeNull("the name is shown once per solution");
+        });
+    }
+
+    [Fact]
+    public async Task The_Solutions_tab_is_hidden_while_there_are_no_builds()
+    {
+        await SeedAsync("Continia Banking 28.6.0.0", files: 4, dedupKey: null);
+
+        var cut = _ctx.Render<ReleasesBrowserView>();
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab").Should().NotBeEmpty());
+
+        cut.FindAll(".pill-tab").Select(t => t.QuerySelector("span")!.TextContent)
+            .Should().Equal("Microsoft", "Third-party");
+    }
+
+    private async Task SeedPipelineBuildAsync(string solution, params string[] pipelineNames)
     {
         await using var db = _db.NewContext();
         var project = new OeProject
@@ -137,10 +198,18 @@ public sealed class ReleasesBrowserViewTests : IDisposable
         };
         db.OeProjects.Add(project);
         await db.SaveChangesAsync();
+        foreach (var pipelineName in pipelineNames)
+        {
+            await SeedPipelineAsync(db, project.Id, solution, pipelineName);
+        }
+    }
+
+    private static async Task SeedPipelineAsync(ALDevToolbox.Data.AppDbContext db, int projectId, string solution, string pipelineName)
+    {
         var pipeline = new OePipeline
         {
             OrganizationId = TestDb.DefaultOrgId,
-            ProjectId = project.Id,
+            ProjectId = projectId,
             Name = pipelineName,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
@@ -163,7 +232,7 @@ public sealed class ReleasesBrowserViewTests : IDisposable
         db.OeProjectBuilds.Add(new OeProjectBuild
         {
             OrganizationId = TestDb.DefaultOrgId,
-            ProjectId = project.Id,
+            ProjectId = projectId,
             PipelineId = pipeline.Id,
             ReleaseId = release.Id,
             Status = ProjectBuildStatus.Ready,
