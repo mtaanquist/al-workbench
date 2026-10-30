@@ -314,7 +314,9 @@ public sealed class ObjectExplorerTools
                 .Where(m => includeTemporary || m.IsTemporary != true)
                 .ToList();
             var result = ReferenceSearchResult.From(matches, MaxResults,
-                includeTemporary ? "Pass includeTemporary false to leave out temporary records." : "");
+                includeTemporary ? "Pass includeTemporary false to leave out temporary records."
+                : wantedUsage == "all" ? "Pass usage 'set' to keep only the places that change the field."
+                : "There is nothing narrower to filter on; read the rows shown first.");
             return checkedAll
                 ? result
                 : result with

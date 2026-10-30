@@ -52,6 +52,9 @@ public sealed class ReferenceUsageTests : IDisposable
     [InlineData("|Buffer.Init();", "Buffer", "record_write", null)]
     [InlineData("|Buffer.TransferFields(Thing);", "Buffer", "record_write", null)]
     [InlineData("Thing.TransferFields(|Buffer);", "Buffer", "read", null)]
+    [InlineData("|Buffer.INIT;", "Buffer", "record_write", null)]
+    [InlineData("TempThing.Validate(\"No.\", |\"No.\");", "No.", "read", null)]
+    [InlineData("TempThing.CalcFields(Amount, |\"No.\");", "No.", "read", "TempThing")]
     public void Classifies_the_reference_on_its_line(string marked, string name, string usage, string? receiver)
     {
         var column = marked.IndexOf('|') + 1;
@@ -105,7 +108,9 @@ public sealed class ReferenceUsageTests : IDisposable
             var
                 TempA, "Temp B": Record "Sales Line" temporary;
                 Normal: Record "Sales Line";
-            procedure Fill(var TempC: Record Customer temporary)
+            procedure Fill(var TempC: Record Customer temporary;
+                Other: Integer,
+                TempE: Record Microsoft.Sales.Document."Sales Line" temporary)
             VAR
               TempD@1000 : TEMPORARY Record 37;
             """;
@@ -113,7 +118,7 @@ public sealed class ReferenceUsageTests : IDisposable
             .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value);
 
         ReferenceUsage.ParseTemporaryNames(captured)
-            .Should().BeEquivalentTo(["TempA", "Temp B", "TempC", "TempD"]);
+            .Should().BeEquivalentTo(["TempA", "Temp B", "TempC", "TempD", "TempE"]);
     }
 
     [Theory]

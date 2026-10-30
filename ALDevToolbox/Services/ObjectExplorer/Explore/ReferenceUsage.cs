@@ -56,6 +56,12 @@ public static class ReferenceUsage
         ["Clear"] = Clear,
     };
 
+    // Field-name methods whose later arguments are fields too.
+    private static readonly HashSet<string> AllArgumentsAreFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CalcFields", "CalcSums", "SetCurrentKey", "SetLoadFields", "AddLoadFields", "SetAutoCalcFields",
+    };
+
     // Called on the variable itself: X.Init() / X.TransferFields(Y) / X.Copy(Y)
     // overwrite X's fields wholesale.
     private static readonly HashSet<string> RecordWriteMethods = new(StringComparer.OrdinalIgnoreCase)
@@ -124,9 +130,11 @@ public static class ReferenceUsage
             var methodStart = SkipSpace(line, p + 1);
             var methodEnd = TokenEnd(line, methodStart);
             var method = Unquote(line[methodStart..methodEnd]);
+            // Parentheses are optional on a call with no arguments: X.INIT;
             if (RecordWriteMethods.Contains(method)
                 && SkipSpace(line, methodEnd) is var afterMethod
-                && afterMethod < line.Length && line[afterMethod] == '(')
+                && (afterMethod >= line.Length || line[afterMethod] is '(' or ';' or '\n'
+                    || IsIdentChar(line[afterMethod])))
             {
                 usage = RecordWrite;
             }
@@ -155,9 +163,13 @@ public static class ReferenceUsage
             {
                 usage = setter;
             }
-            // A bare name inside Validate / SetRange / CalcFields / ... names a
-            // field on the record the method is called on: TempLine.Validate("No.").
-            if (receiver is null && exprStart == start && IsFieldNameTaking(call.Method))
+            // A bare name inside Validate / SetRange / ... names a field on the
+            // record the method is called on: TempLine.Validate("No."). Only the
+            // first argument does, except for the methods every argument of
+            // which is a field; in TempLine.Validate("No.", "No.") the second
+            // is the calling object's own field.
+            if (receiver is null && exprStart == start && IsFieldNameTaking(call.Method)
+                && (call.FirstArgument || AllArgumentsAreFields.Contains(call.Method)))
             {
                 receiver = call.Receiver;
             }
@@ -199,11 +211,7 @@ public static class ReferenceUsage
             if (string.IsNullOrEmpty(list)) continue;
             foreach (var part in list.Split(','))
             {
-                var trimmed = part.Trim();
-                // C/AL declares TempLine@1000 : TEMPORARY Record 37.
-                var at = trimmed.IndexOf('@');
-                if (at > 0 && !trimmed.StartsWith('"')) trimmed = trimmed[..at];
-                trimmed = Unquote(trimmed.Trim());
+                var trimmed = Unquote(part.Trim());
                 if (trimmed.Length > 0) names.Add(trimmed);
             }
         }
@@ -381,12 +389,12 @@ public static class ReferenceUsage
     /// <summary>
     /// Postgres (ARE) pattern capturing the names in a declaration of a
     /// temporary record: AL <c>TempA, "Temp B": Record "Sales Line" temporary</c>
-    /// (variables and parameters alike) and C/AL
-    /// <c>TempLine@1000 : TEMPORARY Record 37</c>. Group 1 is the AL name
-    /// list, group 2 the C/AL name.
+    /// (variables and parameters alike, the type optionally namespace-qualified)
+    /// and C/AL <c>TempLine@1000 : TEMPORARY Record 37</c>. Group 1 is the AL
+    /// name list, which stays on one line, group 2 the C/AL name.
     /// </summary>
     internal const string TemporaryDeclarationPattern =
-        """((?:(?:"[^"\n]+"|\w+)\s*,\s*)*(?:"[^"\n]+"|\w+))\s*:\s*Record\s+(?:"[^"\n]+"|[\w.]+)\s+temporary\y"""
+        """((?:(?:"[^"\n]+"|\w+)[ \t]*,[ \t]*)*(?:"[^"\n]+"|\w+))\s*:\s*Record\s+(?:[\w.]+\.)?(?:"[^"\n]+"|[\w.]+)\s+temporary\y"""
         + """|("[^"\n]+"|\w+)@\d+\s*:\s*TEMPORARY\s+Record\y""";
 
     /// <summary>

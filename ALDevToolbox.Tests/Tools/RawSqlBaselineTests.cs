@@ -175,6 +175,15 @@ public sealed class RawSqlBaselineTests
                     ["ResolveExtractedReferenceAtAsync", "ResolveMemberSymbolAsync", "ResolveObjectByNameAsync"],
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/SourceViewerService.cs"] = ["GoToDefinitionAsync"],
             }),
+        ("ReferenceQueryService.EnrichReferencesWithSnippetsAsync",
+            new(@"\bEnrichReferencesWithSnippetsAsync\s*\(", RegexOptions.Compiled),
+            new(StringComparer.Ordinal)
+            {
+                ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceQueryService.cs"] =
+                    ["FindReferencesAsync", "FindReferencesForSymbolAsync", "FindSystemReferencesAsync"],
+                // Its file ids come from a filtered EF query, behind SeedVisibleAsync.
+                ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceSessionService.cs"] = ["CreateFromGlobalVariableAsync"],
+            }),
     ];
 
     [Fact]

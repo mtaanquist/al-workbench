@@ -833,11 +833,16 @@ public sealed class ReferenceQueryService
         // end of the line; the TrimEnd below takes it off along with trailing
         // indentation. The temps CTE runs the two declaration patterns of
         // ReferenceUsage in the database, so only the captured names travel
-        // back rather than the file bodies (#687).
+        // back rather than the file bodies (#687). Both per-file CTEs are
+        // MATERIALIZED: inlined, Postgres ran the regexes and the line split
+        // once per (file, line) pair rather than once per file, about ten
+        // times slower on a 5000-row field search.
         var sql = $$"""
-            WITH temps AS (
+            WITH temps AS MATERIALIZED (
                 SELECT f.id AS file_id,
-                       fc.content ~* {4} AS rec_temporary,
+                       -- Both alternatives of the pattern contain the word, so
+                       -- the substring test is a safe and cheaper gate.
+                       fc.content ILIKE '%temporary%' AND fc.content ~* {4} AS rec_temporary,
                        -- The capture walks the whole file; most files declare
                        -- nothing temporary, and the plain substring test
                        -- skips them for the price of one scan.
@@ -849,7 +854,7 @@ public sealed class ReferenceQueryService
                 JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
                 WHERE f.id = ANY({5}::bigint[]) AND f.organization_id = {2}::int
             ),
-            split AS (
+            split AS MATERIALIZED (
                 SELECT f.id AS file_id, string_to_array(fc.content, E'\n') AS lines
                 FROM oe_module_files  f
                 JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
