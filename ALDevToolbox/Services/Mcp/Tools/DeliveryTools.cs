@@ -92,6 +92,8 @@ public sealed class DeliveryTools
         CancellationToken ct = default)
     {
         await _releasePipelines.EnsureReleasePipelineExistsAsync(deploymentPipelineId, ct);
+        if (deploymentId is not null && beforeDeploymentId is not null)
+            throw new McpException("Pass deploymentId or beforeDeploymentId, not both.");
         if (deploymentId is { } id)
         {
             var one = await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, 1, ct, onlyDeliveryId: id);

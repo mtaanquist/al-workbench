@@ -360,6 +360,14 @@ public sealed class DeliveryToolsTests : IDisposable
             await using var ctx = _db.NewContext();
             ids.Add((await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId);
         }
+        // The two older ones requested in the same instant are told apart by id.
+        await using (var ctx = _db.NewContext())
+        {
+            var same = DateTime.UtcNow.AddHours(-1);
+            foreach (var d in await ctx.OeProjectDeliveries.Where(d => d.Id == ids[0] || d.Id == ids[1]).ToListAsync())
+                d.CreatedAt = same;
+            await ctx.SaveChangesAsync();
+        }
 
         await using var read = _db.NewContext();
         var tools = NewTools(read);
@@ -371,7 +379,9 @@ public sealed class DeliveryToolsTests : IDisposable
         oldest.Select(d => (d.Id, d.Number)).Should().Equal((ids[0], 1));
         (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, beforeDeploymentId: ids[0])).Should().BeEmpty();
         (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, beforeDeploymentId: 999_999))
-            .Should().BeEmpty("that deployment is not this pipeline's");
+            .Should().BeEmpty("that deployment does not exist");
+        var both = () => tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: ids[1], beforeDeploymentId: ids[2]);
+        await both.Should().ThrowAsync<McpException>();
     }
 
     // ── GitHub releases as an artifact source (#632) ──────────────────────
