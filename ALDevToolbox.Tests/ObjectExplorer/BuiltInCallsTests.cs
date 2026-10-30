@@ -131,6 +131,62 @@ public sealed class BuiltInCallsTests : IDisposable
     }
 
     [Fact]
+    public async Task A_cut_list_offers_every_method_even_those_called_only_past_the_cut()
+    {
+        // The list keeps the alphabetically first objects. CRONUS Alpha's two
+        // Insert calls fill a cap of two; Modify and Delete sit past the cut,
+        // so a picker built from the rows in hand could not offer them (#1543).
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var entryId = await ObjectIdAsync(read, releaseId, "CRONUS Entry");
+        var sessions = NewSessions(read);
+        sessions.MaxMatches = 2;
+
+        var session = await sessions.CreateSystemReferencesFromObjectAsync(entryId, "owner");
+
+        session.Should().NotBeNull();
+        session!.Truncated.Should().BeTrue();
+        session.Results.Should().HaveCount(2).And.OnlyContain(r => r.SourceObjectName == "CRONUS Alpha");
+        session.MethodNames.Should().Equal("Insert", "Delete", "Modify");
+
+        var narrowed = await sessions.NarrowSystemReferencesAsync(session.Token, "owner", "Delete");
+
+        narrowed!.Results.Should().ContainSingle().Which.SourceObjectName.Should().Be("CRONUS Zulu");
+        narrowed.MethodNames.Should().Equal("Insert", "Delete", "Modify");
+    }
+
+    [Fact]
+    public async Task A_list_under_the_cap_leaves_the_picker_to_the_rows_in_hand()
+    {
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var entryId = await ObjectIdAsync(read, releaseId, "CRONUS Entry");
+
+        var session = await NewSessions(read).CreateSystemReferencesFromObjectAsync(entryId, "owner");
+
+        session!.Truncated.Should().BeFalse();
+        session.Results.Should().HaveCount(5);
+        session.MethodNames.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_method_list_counts_every_call_without_regard_to_case()
+    {
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var methods = await NewReferences(read).ListSystemReferenceMethodsAsync(releaseId,
+            new FindSystemReferencesQuery(Guid.Parse(AppId), "table", 50104, "CRONUS Entry",
+                // Ignored: the picker lists every method, whatever is picked.
+                SystemMethodNames: ["modify"]));
+
+        methods.Select(m => (m.Name, m.Count))
+            .Should().Equal(("Insert", 3), ("Delete", 1), ("Modify", 1));
+    }
+
+    [Fact]
     public async Task Someone_elses_list_cannot_be_narrowed()
     {
         var releaseId = await ImportAsync();
@@ -157,6 +213,12 @@ public sealed class BuiltInCallsTests : IDisposable
         (await NewSessions(read).CreateSystemReferencesAtPositionAsync(fileId, line, 10, "owner"))
             .Should().BeNull();
     }
+
+    private static Task<long> ObjectIdAsync(Data.AppDbContext ctx, int releaseId, string name) =>
+        ctx.OeModuleObjects.AsNoTracking()
+            .Where(o => o.Module!.ReleaseId == releaseId && o.Kind == "table" && o.Name == name)
+            .Select(o => o.Id)
+            .SingleAsync();
 
     private static async Task<(long FileId, string[] Lines)> SetterFileAsync(Data.AppDbContext ctx, int releaseId)
     {
@@ -197,6 +259,13 @@ public sealed class BuiltInCallsTests : IDisposable
                     ReferenceSourceFileName = "src/Gadget.Table.al",
                     Fields = new object[] { new { Id = 1, Name = "No.", TypeDefinition = new { Name = "Code[20]" } } },
                 },
+                new
+                {
+                    Id = 50104,
+                    Name = "CRONUS Entry",
+                    ReferenceSourceFileName = "src/Entry.Table.al",
+                    Fields = new object[] { new { Id = 1, Name = "No.", TypeDefinition = new { Name = "Code[20]" } } },
+                },
             },
             Pages = new object[]
             {
@@ -219,6 +288,20 @@ public sealed class BuiltInCallsTests : IDisposable
                         },
                     },
                 },
+                new
+                {
+                    Id = 50105,
+                    Name = "CRONUS Alpha",
+                    ReferenceSourceFileName = "src/Alpha.Codeunit.al",
+                    Methods = new object[] { new { Name = "Run", Parameters = Array.Empty<object>() } },
+                },
+                new
+                {
+                    Id = 50106,
+                    Name = "CRONUS Zulu",
+                    ReferenceSourceFileName = "src/Zulu.Codeunit.al",
+                    Methods = new object[] { new { Name = "Run", Parameters = Array.Empty<object>() } },
+                },
             },
         });
         var source = new Dictionary<string, string>
@@ -239,6 +322,42 @@ public sealed class BuiltInCallsTests : IDisposable
                     {
                         field(1; "No."; Code[20]) { }
                     }
+                }
+                """,
+            ["src/Entry.Table.al"] = """
+                table 50104 "CRONUS Entry"
+                {
+                    fields
+                    {
+                        field(1; "No."; Code[20]) { }
+                    }
+                }
+                """,
+            // Alpha sorts first, so a cut list keeps its calls; Zulu's are the
+            // ones past the cut. INSERT is the C/AL spelling of Insert.
+            ["src/Alpha.Codeunit.al"] = """
+                codeunit 50105 "CRONUS Alpha"
+                {
+                    procedure Run()
+                    var
+                        Entry: Record "CRONUS Entry";
+                    begin
+                        Entry.Insert();
+                        Entry.Insert();
+                        Entry.Modify();
+                    end;
+                }
+                """,
+            ["src/Zulu.Codeunit.al"] = """
+                codeunit 50106 "CRONUS Zulu"
+                {
+                    procedure Run()
+                    var
+                        Entry: Record "CRONUS Entry";
+                    begin
+                        Entry.INSERT();
+                        Entry.Delete();
+                    end;
                 }
                 """,
             ["src/ThingCard.Page.al"] = """

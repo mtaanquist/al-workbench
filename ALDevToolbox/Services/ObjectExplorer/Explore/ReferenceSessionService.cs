@@ -26,6 +26,13 @@ public sealed class ReferenceSessionService
     private readonly ProjectAccess _access;
     private readonly ILogger<ReferenceSessionService> _logger;
 
+    /// <summary>
+    /// The most rows a session holds before it is cut and flagged truncated.
+    /// <see cref="ReferenceQueryService.MaxReferenceMatches"/> in production;
+    /// tests lower it to put rows past the cut without importing thousands.
+    /// </summary>
+    internal int MaxMatches { get; set; } = ReferenceQueryService.MaxReferenceMatches;
+
     public ReferenceSessionService(
         IMemoryCache cache,
         ReferenceQueryService references,
@@ -223,7 +230,7 @@ public sealed class ReferenceSessionService
             TargetObjectKind: kind,
             TargetObjectId: objectId,
             TargetObjectName: name);
-        var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, ct: ct);
+        var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, MaxMatches, ct);
         var label = objectId is { } oid
             ? $"built-in calls on {kind} {oid} {name}"
             : $"built-in calls on {kind} {name}";
@@ -231,7 +238,10 @@ public sealed class ReferenceSessionService
         if (!session.Truncated) return session;
         // Counting per method over a cut list would undercount, so a long
         // list hands the picker to the server: each method is fetched whole.
-        return CacheSession(session with { MethodNames = MethodNamesOf(session.Results) }, ownerKey, query);
+        // The methods to offer come from the whole matched set too, since the
+        // rows in hand miss any method called only past the cut (#1543).
+        var methods = await _references.ListSystemReferenceMethodsAsync(seedReleaseId, query, ct);
+        return CacheSession(session with { MethodNames = methods.Select(m => m.Name).ToList() }, ownerKey, query);
     }
 
     /// <summary>
@@ -252,7 +262,7 @@ public sealed class ReferenceSessionService
 
         method = string.IsNullOrWhiteSpace(method) ? null : method.Trim();
         var narrowed = query with { SystemMethodNames = method is null ? null : [method] };
-        var results = await _references.FindSystemReferencesAsync(cached.Session.ReleaseId, narrowed, ct: ct);
+        var results = await _references.FindSystemReferencesAsync(cached.Session.ReleaseId, narrowed, MaxMatches, ct);
         var session = Store(cached.Session.TargetLabel, cached.Session.ReleaseId, results, ownerKey,
             cached.Session.TargetName, kind: "built_in_calls", query: query);
         var methods = cached.Session.MethodNames ?? MethodNamesOf(cached.Session.Results);
@@ -382,7 +392,7 @@ public sealed class ReferenceSessionService
             .ThenBy(m => m.LineNumber)
             // Cap consistently with the other find-references paths (+1 so Store
             // can detect truncation). See issue #366.
-            .Take(ReferenceQueryService.MaxReferenceMatches + 1)
+            .Take(MaxMatches + 1)
             .ToListAsync(ct);
 
         // The code line, and whether each use reads or sets the variable.
@@ -595,16 +605,16 @@ public sealed class ReferenceSessionService
         string label, int releaseId, IReadOnlyList<ReferenceMatch> results, string ownerKey,
         string targetName, string kind = "references", FindSystemReferencesQuery? query = null)
     {
-        // The query methods fetch up to MaxReferenceMatches + 1 rows; if we got
+        // The query methods fetch up to MaxMatches + 1 rows; if we got
         // more than the cap, trim to the cap and flag the session truncated so
         // the panel can say "showing the first N". See issue #366.
-        var truncated = results.Count > ReferenceQueryService.MaxReferenceMatches;
+        var truncated = results.Count > MaxMatches;
         if (truncated)
         {
-            results = results.Take(ReferenceQueryService.MaxReferenceMatches).ToList();
+            results = results.Take(MaxMatches).ToList();
             _logger.LogInformation(
                 "Reference session truncated to {Cap} rows: {Label}",
-                ReferenceQueryService.MaxReferenceMatches, label);
+                MaxMatches, label);
         }
 
         var token = Guid.NewGuid().ToString("N");

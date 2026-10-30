@@ -285,6 +285,12 @@ public sealed record FindReferencesQuery(
     string? TargetMemberKind = null);
 
 /// <summary>
+/// One built-in method called on a Find built-in calls target and how many
+/// calls it has, counted over every match, not just the rows a cut list keeps.
+/// </summary>
+public sealed record SystemMethodCount(string Name, int Count);
+
+/// <summary>
 /// Query envelope for <c>FindSystemReferencesAsync</c> — the receiver object
 /// triplet (same matching as <see cref="FindReferencesQuery"/>), optionally
 /// narrowed to some built-in methods (<c>Insert</c>, <c>Modify</c>, …),
