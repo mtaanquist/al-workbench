@@ -16,6 +16,12 @@ project thread "One-time secret sharing links".
   it, presses Show secret (typing the passphrase first, if there is one), and copies it.
 - When the last allowed view is used, the link expires, or the sender revokes it, the link
   stops working and the encrypted copy is deleted.
+- The sender can open their own link to check what they sent without using up a view
+  (asked for by Mads on 2026-10-29). They need the whole link and the passphrase like
+  anyone else, and must be signed in to the organisation as the person who created it.
+  Their look is not counted, recorded or notified. A wrong passphrase is recorded and
+  counts towards the lockout like anyone else's. If they were signed out between loading
+  the page and pressing Show secret, the reveal is refused rather than spending a view.
 - The sender (or an Admin) can extend a link that still works: keep it working for one,
   three or seven days from now, offered only when that adds at least an hour. Views
   left are unchanged. There is no cap on how many times a link can be extended; a link
@@ -58,10 +64,19 @@ The server never sees the secret or the key.
    closes the link and clears the ciphertext when it takes the last view, so an aborted
    request cannot leave a used-up link holding its secret. Wrong passphrases are counted
    and the link locked the same way, so a burst of guesses sent at once still gets five.
-7. The reveal endpoint is anonymous, rate limited to 20 requests per address per 10
+7. The creator's free look changes none of this. The recipient page and the reveal
+   compare the signed-in principal's user and organisation ids with the row the token
+   already found, and only then skip the view. The recipient page's script sends the
+   sign-in cookie with the reveal only when the page says the viewer is the creator;
+   otherwise it stays `credentials: "omit"`. The key is still only in the link: a
+   creator who has lost the link cannot see the secret, from the list or anywhere else.
+   The cost: someone holding both the link and the creator's signed-in session reads the
+   secret without the sender being told. A stolen session is already a serious breach;
+   the passphrase still guards against it.
+8. The reveal endpoint is anonymous, rate limited to 20 requests per address per 10
    minutes, takes a body of at most 1 KB and answers `Cache-Control: no-store`. The
    recipient page sets `noindex` and `no-referrer`.
-8. The secret and passphrase boxes on the sender's page are not bound to the Blazor
+9. The secret and passphrase boxes on the sender's page are not bound to the Blazor
    component, so what is typed never travels over the circuit. The browser hands .NET only
    ciphertext and the two checks, and puts the link together itself.
 

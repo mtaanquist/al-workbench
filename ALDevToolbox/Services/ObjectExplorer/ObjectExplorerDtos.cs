@@ -10,7 +10,7 @@ namespace ALDevToolbox.Services.ObjectExplorer;
 /// run, which is fine for a "how much room is this taking" overview.
 /// <see cref="PipelineName"/> is filled only by
 /// <see cref="ObjectExplorerService.ListLatestPipelineBuildReleasesAsync"/> —
-/// the pipeline-build rows surfaced on the Third-party tab.
+/// the pipeline-build rows surfaced on the Object Explorer's Solutions tab.
 /// </summary>
 public sealed record ReleaseListItem(
     int Id,

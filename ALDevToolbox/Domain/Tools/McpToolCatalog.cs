@@ -79,7 +79,8 @@ public static class McpToolCatalog
 
         // ---- Object Explorer ----
         new McpToolDescriptor("list_releases", ObjectExplorer,
-            "Lists the Business Central releases you can browse, the same ones the Releases page shows.", false, ToolKey.ObjectExplorer),
+            "Lists the Business Central releases you can browse, the same ones the Releases page shows, "
+            + "including the newest build of each solution pipeline. It can search by customer, publisher or version.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("list_release_modules", ObjectExplorer,
             "Lists the apps and modules inside one release, up to 200 at a time. "
             + "It can narrow the list by name.", false, ToolKey.ObjectExplorer),

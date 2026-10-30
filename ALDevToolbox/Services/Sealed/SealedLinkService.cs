@@ -51,7 +51,9 @@ public sealed record SealedLinkRow(
 
 /// <summary>What the recipient page needs before anything is revealed.</summary>
 /// <param name="PassphraseSalt">Base64url, or null when the link has no passphrase.</param>
-public sealed record SealedLinkSummary(string OrganizationName, string SenderName, DateTime ExpiresAt, int ViewsLeft, string? PassphraseSalt);
+/// <param name="OpenedByCreator">The signed-in person is the one who created the link, so opening it spends no view.</param>
+public sealed record SealedLinkSummary(
+    string OrganizationName, string SenderName, DateTime ExpiresAt, int ViewsLeft, string? PassphraseSalt, bool OpenedByCreator = false);
 
 /// <summary>How a reveal went.</summary>
 public enum SealedRevealStatus
@@ -64,15 +66,19 @@ public enum SealedRevealStatus
     WrongPassphrase,
     /// <summary>That wrong passphrase was the last one allowed: the link is now closed.</summary>
     LockedOut,
+    /// <summary>The page offered the creator a free look, but the caller is no longer signed in as them. Nothing was spent.</summary>
+    NotCreator,
 }
 
 /// <summary>The outcome of <see cref="SealedLinkService.RevealAsync"/>.</summary>
+/// <param name="ByCreator">Shown to the link's own creator, so no view was spent.</param>
 public sealed record SealedRevealResult(
     SealedRevealStatus Status,
     byte[]? Ciphertext = null,
     byte[]? Iv = null,
     int ViewsLeft = 0,
-    int AttemptsLeft = 0);
+    int AttemptsLeft = 0,
+    bool ByCreator = false);
 
 /// <summary>
 /// Sealed: share a secret through a link that opens a set number of times and then
@@ -430,6 +436,8 @@ public sealed class SealedLinkService
             .Where(l => l.Token == token && l.ClosedAt == null && l.ExpiresAt > now)
             .Select(l => new
             {
+                l.OrganizationId,
+                l.CreatedByUserId,
                 OrganizationName = l.Organization!.Name,
                 SenderName = l.CreatedByUser!.DisplayName,
                 SenderEmail = l.CreatedByUser!.Email,
@@ -445,7 +453,8 @@ public sealed class SealedLinkService
             string.IsNullOrWhiteSpace(link.SenderName) ? link.SenderEmail : link.SenderName,
             link.ExpiresAt,
             link.MaxViews - link.ViewCount,
-            link.PassphraseSalt is null ? null : Base64Url.EncodeToString(link.PassphraseSalt));
+            link.PassphraseSalt is null ? null : Base64Url.EncodeToString(link.PassphraseSalt),
+            IsCreator(link.OrganizationId, link.CreatedByUserId));
     }
 
     /// <summary>
@@ -453,10 +462,21 @@ public sealed class SealedLinkService
     /// (and <paramref name="passphraseCheck"/>, if the link has a passphrase) match.
     /// Two reveals at once cannot both take the last view: the count only moves in a
     /// conditional update that one of them loses. Anonymous: see the class remarks.
+    ///
+    /// <para>When the signed-in person created the link, nothing is spent or recorded:
+    /// they can check what they sent. They still need the whole link and the
+    /// passphrase, since the server cannot decrypt anything, and a wrong passphrase
+    /// counts towards the lockout like anyone else's.</para>
     /// </summary>
     /// <param name="ipAddress">The recipient's address, recorded for the sender.</param>
+    /// <param name="asCreator">
+    /// The page told the caller they are the creator. If the sign-in has gone since
+    /// (signed out in another tab, the session ended), refuse instead of spending the
+    /// view the page promised to keep.
+    /// </param>
     public async Task<SealedRevealResult> RevealAsync(
-        string token, string? linkCheck, string? passphraseCheck, string? ipAddress, CancellationToken ct = default)
+        string token, string? linkCheck, string? passphraseCheck, string? ipAddress, bool asCreator = false,
+        CancellationToken ct = default)
     {
         var gone = new SealedRevealResult(SealedRevealStatus.Gone);
         if (!IsWellFormedToken(token)) return gone;
@@ -471,6 +491,7 @@ public sealed class SealedLinkService
             {
                 l.Id,
                 l.OrganizationId,
+                l.CreatedByUserId,
                 l.Ciphertext,
                 l.Iv,
                 l.LinkCheckHash,
@@ -493,6 +514,15 @@ public sealed class SealedLinkService
                 && CryptographicOperations.FixedTimeEquals(SHA256.HashData(given), link.PassphraseCheckHash);
             if (!right) return await RecordWrongPassphraseAsync(link.Id, link.OrganizationId, ipAddress, now, ct);
         }
+
+        if (IsCreator(link.OrganizationId, link.CreatedByUserId))
+        {
+            _logger.LogInformation("Sealed link {LinkId} opened by its creator; no view spent.", link.Id);
+            return new SealedRevealResult(
+                SealedRevealStatus.Revealed, link.Ciphertext, link.Iv,
+                ViewsLeft: link.MaxViews - link.ViewCount, ByCreator: true);
+        }
+        if (asCreator) return new SealedRevealResult(SealedRevealStatus.NotCreator);
 
         // Taking the view and, on the last one, closing the link and dropping the
         // ciphertext is one statement: a request aborted in between cannot leave a
@@ -598,6 +628,14 @@ public sealed class SealedLinkService
     }
 
     private static string? Truncate(string? ip) => ip is { Length: > 64 } ? ip[..64] : ip;
+
+    /// <summary>
+    /// True when the signed-in principal created the link. Both ids come from the
+    /// auth cookie and are compared with the row the token already pinned, so this
+    /// widens nothing: a recipient with no account always reads false.
+    /// </summary>
+    private bool IsCreator(int organizationId, int createdByUserId) =>
+        _orgContext.CurrentUserId == createdByUserId && _orgContext.CurrentOrganizationId == organizationId;
 
     private async Task<bool> IsAdminAsync(int userId, CancellationToken ct) =>
         await _db.Users.AsNoTracking()

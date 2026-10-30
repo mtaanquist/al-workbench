@@ -42,6 +42,7 @@ public sealed class RouteAuthorizationTests
             ["/login"] = "sign-in page",
             ["/login/challenge"] = "second-factor / verification step of sign-in, still pre-cookie",
             ["/login/magic"] = "passwordless sign-in request page",
+            ["/login/magic/confirm"] = "passwordless sign-in confirmation (token in the URL; only the button spends it)",
             ["/signup"] = "self-service signup request",
             ["/signup/details"] = "second step of a signup request, still pre-cookie",
             ["/forgot-password"] = "password-reset request form",
