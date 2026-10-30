@@ -72,20 +72,34 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
     {
         await _f.SeedCustomerAsync();
         var id = await UpgradeAsync();
+        // The upgrade's own read is held, so the page is still loading for as long as the
+        // assertion needs rather than for as long as the database takes (#1495).
+        var hold = new HoldFirstCommand(sql => sql.Contains("FROM oe_environment_upgrades AS", StringComparison.Ordinal));
+        _ctx.Services.ConfigureDbContext<ALDevToolbox.Data.AppDbContext>(opts => opts.AddInterceptors(hold));
 
-        var cut = Render(id);
-
-        // Straight after the first render the page is still reading the upgrade: the frame's
-        // skeleton head, the page's skeleton rows, no heading yet.
-        cut.WaitForAssertion(() =>
+        try
         {
-            cut.Markup.Should().Contain("Loading the upgrade and each environment...");
-            cut.Markup.Should().NotContain("from Business Central", "the page reads the mirror, not Business Central");
-            cut.FindAll("h1").Should().BeEmpty();
-            cut.FindAll(".detail-head .skeleton").Should().NotBeEmpty();
-            cut.Find(".page-head__crumbs a").GetAttribute("href").Should().Be("/upgrades");
-        });
-        cut.WaitForAssertion(() => cut.Find("h1.detail-head__title").TextContent.Should().Be("28.5 in November 2026"));
+            var cut = Render(id);
+            await hold.Held.WaitAsync(TimeSpan.FromSeconds(30));
+
+            // While the page reads the upgrade: the frame's skeleton head, the page's
+            // skeleton rows, no heading yet.
+            cut.WaitForAssertion(() =>
+            {
+                cut.Markup.Should().Contain("Loading the upgrade and each environment...");
+                cut.Markup.Should().NotContain("from Business Central", "the page reads the mirror, not Business Central");
+                cut.FindAll("h1").Should().BeEmpty();
+                cut.FindAll(".detail-head .skeleton").Should().NotBeEmpty();
+                cut.Find(".page-head__crumbs a").GetAttribute("href").Should().Be("/upgrades");
+            });
+
+            hold.Release();
+            cut.WaitForAssertion(() => cut.Find("h1.detail-head__title").TextContent.Should().Be("28.5 in November 2026"));
+        }
+        finally
+        {
+            hold.Release();
+        }
     }
 
     [Fact]
