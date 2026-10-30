@@ -77,6 +77,30 @@
 
             <div class="card__head">
                 <div>
+                    <h2 class="card__title">Keeping environments up to date</h2>
+                    <p class="card__sub">AL Workbench asks Business Central about every solution's environments in the background, so the Environments and Upgrades pages are current without anyone pressing Refresh.</p>
+                </div>
+            </div>
+            <div class="setting-list">
+                <SettingRow Name="Check environments">
+                    <HintContent>
+                        By default, environments are checked once a night. Checking more often shows status changes and new update dates sooner. If Business Central asks AL Workbench to wait, that customer's environments are checked again once the wait is over.
+                    </HintContent>
+                    <ChildContent>
+                        <select id="org-bc-refresh-interval" class="input" style="max-width:260px" aria-label="Check environments"
+                                @bind="_refreshInterval" @bind:after="SaveRefreshIntervalAsync" disabled="@_refreshSaving">
+                            @foreach (var choice in EnvironmentRefreshInterval.Choices)
+                            {
+                                <option value="@choice.Minutes">@choice.Label</option>
+                            }
+                        </select>
+                        <FeedbackLine Ok="@_refreshOk" Error="@_refreshError" />
+                    </ChildContent>
+                </SettingRow>
+            </div>
+
+            <div class="card__head">
+                <div>
                     <h2 class="card__title">App registration</h2>
                     <p class="card__sub">One app registration for every customer, set up once here. Each customer authorises it in their own Business Central admin center, and a solution then needs only that customer's tenant ID.</p>
                 </div>
@@ -220,6 +244,7 @@
             _expires = _view.SecretExpiresAt?.Date;
             _production.Load(_view.DefaultWindows.ProductionStart, _view.DefaultWindows.ProductionEnd);
             _sandbox.Load(_view.DefaultWindows.SandboxStart, _view.DefaultWindows.SandboxEnd);
+            _refreshInterval = _savedRefreshInterval = await OrgAdmin.GetEnvironmentRefreshIntervalAsync();
         }
         catch (ProjectAccessDeniedException ex)
         {
@@ -320,6 +345,44 @@
         finally
         {
             _saving = false;
+        }
+    }
+
+    // ── How often environments are checked ──────────────────────────────
+
+    private int _refreshInterval = EnvironmentRefreshInterval.DefaultMinutes;
+    private int _savedRefreshInterval = EnvironmentRefreshInterval.DefaultMinutes;
+    private bool _refreshSaving;
+    private string? _refreshOk;
+    private string? _refreshError;
+
+    private async Task SaveRefreshIntervalAsync()
+    {
+        _refreshOk = _refreshError = null;
+        if (_refreshInterval == _savedRefreshInterval) return;
+        _refreshSaving = true;
+        try
+        {
+            await OrgAdmin.SetEnvironmentRefreshIntervalAsync(_refreshInterval);
+            _savedRefreshInterval = _refreshInterval;
+            _refreshOk = _refreshInterval == EnvironmentRefreshInterval.DefaultMinutes
+                ? "Saved. Environments are checked once a night."
+                : $"Saved. Environments are checked {EnvironmentRefreshInterval.Choices.First(c => c.Minutes == _refreshInterval).Label.ToLowerInvariant()}.";
+        }
+        catch (PlanValidationException ex)
+        {
+            _refreshInterval = _savedRefreshInterval;
+            _refreshError = ex.Errors.Values.FirstOrDefault() ?? "That did not save. Choose one of the listed intervals.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Saving the environment refresh interval failed.");
+            _refreshInterval = _savedRefreshInterval;
+            _refreshError = "Couldn't save how often environments are checked. Try again in a moment.";
+        }
+        finally
+        {
+            _refreshSaving = false;
         }
     }
 
