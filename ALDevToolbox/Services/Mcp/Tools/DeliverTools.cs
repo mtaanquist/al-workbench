@@ -394,7 +394,7 @@ public sealed class DeliverTools
     // ── Deliveries ──────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_recent_deployments", ReadOnly = true)]
-    [Description("Lists deployments across every solution you can see, newest first: for each, the solution, the deployment pipeline, the target environment, the build, its status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve it in the web UI, with nothing sent yet; 'dismissed' is such a prepared deployment that a person dismissed or a newer build replaced before anyone approved it, so nothing was ever sent; 'handed_off' means Business Central accepted the apps and installs them in its own later window), when it was requested, started and finished, who triggered it, and - for a failed one - the failure message and each app's result. These are the workbench's own records of what it deployed. Use it for 'did the deployment go alright?' or 'what failed to deploy this week?'; list_deployments has one deployment pipeline's full history, with whole failure messages; here a long one is cut. Truncated and Note say whether the limit left deployments out.")]
+    [Description("Lists deployments across every solution you can see, newest first: for each, the solution, the deployment pipeline, the target environment, the build, its status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve it in the web UI, with nothing sent yet; 'dismissed' is such a prepared deployment that a person dismissed or a newer build replaced before anyone approved it, so nothing was ever sent; 'handed_off' means Business Central accepted the apps and installs them in its own later window), when it was requested, started and finished, who triggered it, and - for a failed one - the failure message and each app's result. These are the workbench's own records of what it deployed. Use it for 'did the deployment go alright?' or 'what failed to deploy this week?'; list_deployments has one deployment pipeline's full history, and with deploymentId one deployment's whole failure messages; here a long one is cut. Truncated and Note say whether the limit left deployments out.")]
     public async Task<CappedRows<RecentDelivery>> ListRecentDeliveriesAsync(
         [Description("Optional status to keep, e.g. 'failed' or 'deployed'.")] string? status = null,
         [Description("Optional date (yyyy-MM-dd, UTC): only deployments requested on or after it.")] string? since = null,
@@ -415,9 +415,9 @@ public sealed class DeliverTools
         var deployments = rows.Select(d => new RecentDelivery(
             d.Id, d.ProjectId, d.ProjectName, d.ReleasePipelineId, d.ReleasePipelineName, d.EnvironmentName,
             d.BuildId, d.Status, d.CreatedAt, d.ScheduledFor, d.StartedAt, d.FinishedAt,
-            McpListLimit.ShortenFailure(d.FailureMessage, "list_deployments"),
+            McpListLimit.ShortenFailure(d.FailureMessage, "list_deployments with deploymentId"),
             d.TriggeredByName,
-            d.Apps.Select(a => a with { Message = McpListLimit.ShortenFailure(a.Message, "list_deployments") }).ToList()))
+            d.Apps.Select(a => a with { Message = McpListLimit.ShortenFailure(a.Message, "list_deployments with deploymentId") }).ToList()))
             .ToList();
         return CappedRows<RecentDelivery>.From(deployments, cap, "deployments", "newest first",
             cap < McpListLimit.Max
