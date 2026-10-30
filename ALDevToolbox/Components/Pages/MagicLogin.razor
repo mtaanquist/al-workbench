@@ -1,6 +1,7 @@
 @page "/login/magic"
 @layout ALDevToolbox.Components.Layout.AuthLayout
 @using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services.Account
 
 <PageTitle>Sign in with a link · AL Workbench</PageTitle>
 
@@ -37,6 +38,20 @@
         <Legal>Nothing after a few minutes? Check your spam folder, then ask your administrator for help signing in.</Legal>
     </AuthCard>
 }
+else if (Error == MagicLinkReasons.MicrosoftOnly)
+{
+    @* The organisation went Microsoft-only after the link was sent. A new
+       link would be refused the same way, so sign-in is the only way on. *@
+    <AuthCard Title="This link can't be used">
+        <Sub>@PasswordResetService.MicrosoftOnlyMessage</Sub>
+        <ChildContent>
+            <a class="btn btn--primary" href="/login" style="height: var(--control-h-lg)">
+                <Icon Name="log-in" Width="16" Height="16" />
+                <span>Back to sign in</span>
+            </a>
+        </ChildContent>
+    </AuthCard>
+}
 else if (Error == "not-configured")
 {
     <AuthCard Title="Sign-in links are turned off">
@@ -57,12 +72,13 @@ else
     <AuthCard Title="Sign in with a link" FormAction="/auth/login/magic">
         <Sub>We'll email you a single-use link. No password needed.</Sub>
         <Alerts>
-            @if (Error == "invalid")
+            @if (Error == MagicLinkReasons.InvalidLink)
             {
                 @* A link that was already used or has expired lands here, so
-                   the message sits above the form that sends a new one. *@
+                   the message sits above the form that sends a new one. The
+                   URL carries a code only, so it cannot put words on this card. *@
                 <Alert Tone="AlertTone.Danger">
-                    <span>@(Message ?? "This sign-in link is no longer valid. Request a new one.")</span>
+                    <span>@PasswordResetService.MagicLinkInvalidMessage</span>
                 </Alert>
             }
         </Alerts>
@@ -88,5 +104,4 @@ else
 @code {
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
     [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
-    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
 }

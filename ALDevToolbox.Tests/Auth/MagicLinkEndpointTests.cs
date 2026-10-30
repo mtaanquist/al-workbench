@@ -82,18 +82,68 @@ public sealed class MagicLinkEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task A_post_without_the_page_form_is_refused_and_leaves_the_link_usable()
+    public async Task A_post_without_the_page_form_goes_back_to_the_page_and_leaves_the_link_usable()
     {
         var token = await IssueTokenAsync("forged@cronus.example");
 
         using var forged = await _factory.CreateClient().PostAsync("/auth/login/magic/consume",
             new FormUrlEncodedContent([new KeyValuePair<string, string>("Token", token)]));
 
-        forged.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        forged.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        forged.Headers.Location!.OriginalString.Should().Be($"/login/magic/confirm?token={Uri.EscapeDataString(token)}");
         SetsAuthCookie(forged).Should().BeFalse();
 
         using var signIn = await SignInAsync(_factory.CreateClient(), token);
         signIn.Headers.Location!.OriginalString.Should().Be("/");
+    }
+
+    [Fact]
+    public async Task A_refused_link_explains_itself_in_the_pages_own_words()
+    {
+        var token = await IssueTokenAsync("spent@cronus.example");
+        using (await SignInAsync(_factory.CreateClient(), token)) { }
+
+        var client = _factory.CreateClient();
+        using var refused = await SignInAsync(client, token);
+        refused.Headers.Location!.OriginalString.Should().Be("/login/magic?err=invalid");
+
+        using var page = await client.GetAsync(refused.Headers.Location);
+        (await page.Content.ReadAsStringAsync()).Should().Contain(PasswordResetService.MagicLinkInvalidMessage);
+    }
+
+    [Fact]
+    public async Task The_refusal_card_cannot_be_made_to_say_anything_from_the_url()
+    {
+        using var page = await _factory.CreateClient()
+            .GetAsync("/login/magic?err=invalid&msg=Call%20support%20on%20555-0100");
+
+        var html = await page.Content.ReadAsStringAsync();
+        html.Should().Contain(PasswordResetService.MagicLinkInvalidMessage);
+        html.Should().NotContain("555-0100");
+    }
+
+    [Fact]
+    public async Task A_microsoft_only_refusal_points_to_sign_in()
+    {
+        using var page = await _factory.CreateClient().GetAsync("/login/magic?err=microsoft-only");
+
+        var html = await page.Content.ReadAsStringAsync();
+        html.Should().Contain("Your organisation signs in with Microsoft.");
+        html.Should().NotContain("action=\"/auth/login/magic\"", "a new link would be refused the same way");
+    }
+
+    [Fact]
+    public async Task A_link_without_its_token_offers_a_new_one()
+    {
+        var client = _factory.CreateClient();
+
+        using var page = await client.GetAsync("/login/magic/confirm");
+        var html = await page.Content.ReadAsStringAsync();
+        html.Should().Contain("That link is missing something");
+        html.Should().NotContain("action=\"/auth/login/magic/consume\"");
+
+        using var old = await client.GetAsync("/auth/login/magic/consume");
+        old.Headers.Location!.OriginalString.Should().Be("/login/magic");
     }
 
     /// <summary>Opens the confirmation page and presses Sign in, as the person does.</summary>
