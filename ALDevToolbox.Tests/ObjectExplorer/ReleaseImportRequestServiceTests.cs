@@ -266,7 +266,11 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (drained.Count(j => j.ReleaseId != int.MaxValue) < 20 && DateTime.UtcNow < deadline)
         {
-            if (queue.Reader.TryRead(out var job)) drained.Add(job);
+            if (queue.Reader.TryRead(out var job))
+            {
+                queue.MarkPickedUp(job); // what the worker does as it starts a job
+                drained.Add(job);
+            }
             else await Task.Delay(10);
         }
         drained.Where(j => j.ReleaseId != int.MaxValue).Select(j => j.ReleaseId)
@@ -274,6 +278,63 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         drained.Where(j => j.ReleaseId != int.MaxValue)
             .Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill && j.JobRowId > 0);
         lifetime.StopApplication();
+    }
+
+    [Fact]
+    public async Task An_import_submitted_during_a_long_backfill_waits_behind_at_most_one_backfill()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseIds = await SeedReadyReleasesAsync(ctx, 20);
+        var queue = new ReleaseImportQueue();
+        var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+            NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
+        try
+        {
+            await NewService(ctx, queue, lifetime: lifetime).QueueBackfillAllAsync(releaseIds);
+
+            // The worker starts the first backfill; the feed tops the queue up to
+            // its limit and no further, however long the run.
+            var first = await ReadNextAsync(queue);
+            first.Source.Should().BeOfType<ReleaseImportSource.Backfill>();
+            queue.MarkPickedUp(first);
+            await WaitUntilAsync(() => queue.Reader.Count == ReleaseImportQueue.PacedJobLimit);
+            await Task.Delay(200);
+            queue.Reader.Count.Should().Be(ReleaseImportQueue.PacedJobLimit,
+                "a bulk backfill must leave the rest of the shared queue free");
+
+            // Someone imports a DVD meanwhile: it gets on the queue at once.
+            var userImport = new ReleaseImportJob(int.MaxValue,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.Url("https://download.example.com/cronus.zip"));
+            await queue.EnqueueAsync(userImport).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+            var backfillsAhead = 0;
+            while (true)
+            {
+                var job = await ReadNextAsync(queue);
+                queue.MarkPickedUp(job);
+                if (ReferenceEquals(job, userImport)) break;
+                backfillsAhead++;
+            }
+            backfillsAhead.Should().BeLessThanOrEqualTo(ReleaseImportQueue.PacedJobLimit);
+        }
+        finally
+        {
+            lifetime.StopApplication();
+        }
+    }
+
+    private static async Task<ReleaseImportJob> ReadNextAsync(ReleaseImportQueue queue) =>
+        await queue.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The condition never held.");
+            await Task.Delay(10);
+        }
     }
 
     [Fact]

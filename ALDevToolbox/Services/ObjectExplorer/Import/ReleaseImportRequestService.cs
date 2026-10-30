@@ -479,7 +479,9 @@ public sealed class ReleaseImportRequestService
     /// behind it (#1542). Instead the durable <c>queued</c> rows are written here, in
     /// one short pass, and the in-memory jobs are handed to the same background
     /// feeder the startup resume uses, which waits on a full queue for as long as it
-    /// takes. The feeder runs until shutdown, not until the request ends, so closing
+    /// takes. It feeds them paced (<see cref="ReleaseImportQueue.EnqueuePacedAsync"/>),
+    /// one waiting at a time, so an import submitted during the run is not stuck
+    /// behind a full queue of backfills. The feeder runs until shutdown, not until the request ends, so closing
     /// the tab loses nothing; a shutdown part-way leaves the unwritten rows for the
     /// startup reconcile, which marks an interrupted backfill failed.</para>
     ///
@@ -501,7 +503,7 @@ public sealed class ReleaseImportRequestService
         }
         if (jobs.Count > 0)
         {
-            _ = ResumedImportJobs.EnqueueAllAsync(_queue, jobs, _logger, "system-reference backfill", _lifetime.ApplicationStopping);
+            _ = ResumedImportJobs.EnqueueAllAsync(_queue, jobs, _logger, "system-reference backfill", _lifetime.ApplicationStopping, paced: true);
         }
         _logger.LogInformation(
             "Queued {Count} system-reference backfill(s), skipping {Skipped} already queued.",

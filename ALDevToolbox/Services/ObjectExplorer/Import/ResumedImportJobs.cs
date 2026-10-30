@@ -49,20 +49,24 @@ internal static class ResumedImportJobs
     /// Writes <paramref name="jobs"/> in order, waiting whenever the queue is full. Never
     /// throws. Also the feeder behind the bulk system-reference backfill (#1542), which
     /// must not hold a request while the queue drains. <paramref name="purpose"/> only
-    /// labels the log lines.
+    /// labels the log lines. <paramref name="paced"/> writes through
+    /// <see cref="ReleaseImportQueue.EnqueuePacedAsync"/>, so a long run never holds more
+    /// than a slot or so of the queue and other imports get in promptly.
     /// </summary>
     internal static async Task EnqueueAllAsync(
         ReleaseImportQueue queue,
         IReadOnlyList<ReleaseImportJob> jobs,
         ILogger logger,
         string purpose,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool paced = false)
     {
         try
         {
             foreach (var job in jobs)
             {
-                await queue.EnqueueAsync(job, ct).ConfigureAwait(false);
+                if (paced) await queue.EnqueuePacedAsync(job, ct).ConfigureAwait(false);
+                else await queue.EnqueueAsync(job, ct).ConfigureAwait(false);
             }
             logger.LogInformation("Queued {Count} release import(s), {Purpose}.", jobs.Count, purpose);
         }
