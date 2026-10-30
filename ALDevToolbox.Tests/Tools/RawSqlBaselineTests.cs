@@ -100,7 +100,7 @@ public sealed class RawSqlBaselineTests
             }),
         ["ALDevToolbox/Services/ObjectExplorer/Import/CalImportService.cs"] = new(
             "Import work scoped by the module or release id the job owns, read through the filter in the job's organisation.",
-            new() { ["BackfillSystemReferencesAsync"] = 1, ["ResolveTargetsByIdAsync"] = 8 }),
+            new() { ["BackfillSystemReferencesAsync"] = 1, ["ResolveSystemReferenceIdsAsync"] = 1, ["ResolveTargetsByIdAsync"] = 8 }),
         ["ALDevToolbox/Services/ObjectExplorer/Import/CallSiteReferenceEmitter.cs"] = new(
             "Seeded with the release id being imported, read through the filter; same chain fence as ChainObjectResolution.",
             new() { ["GetVisibleChainModuleIdsAsync"] = 1 }),
@@ -171,9 +171,21 @@ public sealed class RawSqlBaselineTests
             new(StringComparer.Ordinal)
             {
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/ObjectExplorerService.cs"] = ["ResolveChainObjectAsync"],
+                // Seeded with the clicked file's release, read through the filter behind SeedVisibleAsync.
+                ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceSessionService.cs"] =
+                    ["CreateSystemReferencesAtPositionAsync"],
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceResolver.cs"] =
                     ["ResolveExtractedReferenceAtAsync", "ResolveMemberSymbolAsync", "ResolveObjectByNameAsync"],
                 ["ALDevToolbox/Services/ObjectExplorer/Explore/SourceViewerService.cs"] = ["GoToDefinitionAsync"],
+            }),
+        ("ReferenceQueryService.EnrichReferencesWithSnippetsAsync",
+            new(@"\bEnrichReferencesWithSnippetsAsync\s*\(", RegexOptions.Compiled),
+            new(StringComparer.Ordinal)
+            {
+                ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceQueryService.cs"] =
+                    ["FindReferencesAsync", "FindReferencesForSymbolAsync", "FindSystemReferencesAsync"],
+                // Its file ids come from a filtered EF query, behind SeedVisibleAsync.
+                ["ALDevToolbox/Services/ObjectExplorer/Explore/ReferenceSessionService.cs"] = ["CreateFromGlobalVariableAsync"],
             }),
     ];
 

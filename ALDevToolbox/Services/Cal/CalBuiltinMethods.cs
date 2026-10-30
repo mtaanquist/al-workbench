@@ -78,7 +78,7 @@ internal static class CalBuiltinMethods
     /// </summary>
     public static readonly HashSet<string> FieldNameTakingMethods = new(StringComparer.OrdinalIgnoreCase)
     {
-        "SETRANGE", "SETFILTER", "TESTFIELD", "VALIDATE", "FIELDNO", "FIELDNAME",
+        "SETRANGE", "SETFILTER", "TESTFIELD", "VALIDATE", "MODIFYALL", "FIELDNO", "FIELDNAME",
         "FIELDCAPTION", "FIELDERROR", "FIELDACTIVE", "CALCFIELDS", "SETCURRENTKEY",
         "GETRANGEMIN", "GETRANGEMAX", "GETRANGEFILTER", "GETFILTER",
     };

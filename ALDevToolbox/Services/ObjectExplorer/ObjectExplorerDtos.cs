@@ -287,14 +287,15 @@ public sealed record FindReferencesQuery(
 /// <summary>
 /// Query envelope for <c>FindSystemReferencesAsync</c> — the receiver object
 /// triplet (same matching as <see cref="FindReferencesQuery"/>), optionally
-/// narrowed to a single built-in method (<c>Insert</c>, <c>Modify</c>, …).
+/// narrowed to some built-in methods (<c>Insert</c>, <c>Modify</c>, …),
+/// matched without regard to case since C/AL writes them in capitals.
 /// </summary>
 public sealed record FindSystemReferencesQuery(
     Guid TargetAppId,
     string TargetObjectKind,
     int? TargetObjectId,
     string TargetObjectName,
-    string? SystemMethodName = null);
+    IReadOnlyList<string>? SystemMethodNames = null);
 
 /// <summary>
 /// One reference matched by <c>FindReferencesAsync</c>. Carries enough
@@ -315,6 +316,12 @@ public sealed record FindSystemReferencesQuery(
 /// trigger the reference sits inside (resolved from the reference's
 /// <c>source_symbol_id</c>) — null for declarations and object-scope
 /// references that aren't inside a member body.
+///
+/// <see cref="Usage"/> says whether a field or variable reference reads the
+/// value or sets it (one of the <see cref="Explore.ReferenceUsage"/> values),
+/// and <see cref="IsTemporary"/> whether a field is reached through a temporary
+/// record. Both are worked out from the source line when the snippet is cut
+/// (null for every other kind of reference and for rows without source).
 /// </summary>
 public sealed record ReferenceMatch(
     long Id,
@@ -334,7 +341,10 @@ public sealed record ReferenceMatch(
     string? MemberSignature = null,
     string? SourceMemberName = null,
     string? SourceMemberKind = null,
-    string? SourceMemberSignature = null);
+    string? SourceMemberSignature = null,
+    int? ColumnNumber = null,
+    string? Usage = null,
+    bool? IsTemporary = null);
 
 /// <summary>
 /// Read-only projection of an <c>oe_module_files</c> row for the source viewer.
@@ -537,7 +547,16 @@ public sealed record ReferenceSession(
     // "BlockCustomer"), where TargetLabel is the whole sentence fragment
     // ("references to table 36 Sales Header"). The panel heading wants the
     // short form; the log line and the close button's tooltip want the long one.
-    string TargetName = "");
+    string TargetName = "",
+    // "references", or "built_in_calls" for a Find built-in calls search: the
+    // panel heads and filters the two differently.
+    string Kind = "references",
+    // Built-in calls only, once the list is too long to hold whole: the
+    // methods to offer in the picker, which then asks the server for one
+    // method's calls rather than filtering the rows in hand.
+    IReadOnlyList<string>? MethodNames = null,
+    // The method this list was narrowed to on the server, null for all.
+    string? Method = null);
 
 /// <summary>
 /// One row in the source-viewer outline's "Using" or "Used by" sections (#148).

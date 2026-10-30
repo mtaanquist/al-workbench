@@ -223,6 +223,23 @@ The "Possibly related" bucket becomes much smaller because the heuristic only ru
 
 Find references on an `OeModuleSymbol` (procedure / field) is the same shape with one extra hop: the cross-module pass starts by finding every `OeModuleVariable` whose subtype matches the object that *holds* the symbol, then narrows to call sites of the named member via source scanning of those holding modules. This is where the receiver-aware logic still earns its keep — but now bootstrapped from authoritative type data.
 
+### Where a field is set
+
+A `field_access`, `variable_use` or local-variable reference says whether it reads the value or sets it (`ReferenceMatch.Usage`), and a field reference whether it goes through a temporary record (`ReferenceMatch.IsTemporary`). The References panel offers both as filters ("Read or set" / "Where set", "Hide temporary records"), and the MCP `find_references` tool takes them as `usage` and `includeTemporary` alongside `targetField`.
+
+**Worked out at query time, not stored.** `ReferenceUsage` classifies each row from its source line and column, in the same query that cuts the snippet. Storing it on `oe_module_references` would have been exact, but would answer nothing for the releases already imported until each was imported again. A set is `:=` and the compound assignments, the first argument of `Validate`, `ModifyAll`, `Evaluate` and `Clear`, and `Init` / `TransferFields` / `Copy` called on a record variable. A statement split over several lines (`Rec."No." :=` with the value below, or the field on the line after `Rec.Validate(`) is read whole: the query hands back three lines on each side, from each file split into lines once, and the scan reads across them, stopping at the `;` that ends the previous statement. Line comments are blanked first. Only a split wider than that window, or a block comment in the middle of one, still reads as a read.
+
+**Temporary is a property of the record, decided per file.** The snippet query also runs two patterns over each file that holds a field reference, in the database so only the captured names come back (#687): declarations of a temporary record (AL `Name: Record X temporary`, variables and parameters alike; C/AL `Name@1 : TEMPORARY Record 37`), and whether the object's own `Rec` is temporary (`SourceTableTemporary = true`, `TableType = Temporary`). A field reached through a declared name is temporary when that name is; one reached through `Rec`, `xRec` or no receiver takes the object's flag. Names are matched within the file, not per procedure, and a `with` block is not followed.
+
+`ModifyAll` joined the methods whose arguments are read as field names on the receiver, so its field argument is a reference at all. That reaches only releases imported after the change.
+
+### Built-in calls on an object
+
+"Find built-in calls" lists the calls to the runtime's own methods on an object: `Insert`, `Modify`, `Get`, the `Find` family on a table, `Run` / `RunModal` on a page, `SaveAsPdf` on a report. They live in `oe_module_system_references`, apart from Find references, because they would bury it. It is offered on the object's own name, on its outline row, and from a right-click on any name in the code: a table or page name, or a variable of one (the variable's declared type names the object). The panel offers a method picker once the list holds more than one method, matched without regard to case because C/AL writes `MODIFY`. When the list is cut at the 5,000-row cap, counting the rows in hand would undercount, so the picker drops its counts and each pick queries that method again on the server. The MCP `find_system_references` takes one or several methods the same way.
+
+Two shapes produce a row. The instance form (`CustomerList.RunModal()`, `Cust.Insert()`) always has. The static form, `Page.RunModal(Page::"Customer List", Cust)` or `Report.SaveAsPdf(Report::Statement, Path)`, is recorded on the object its typed first argument names, in both the AL walker and the C/AL extractor; C/AL names its target, so the import fills in the id afterwards. A release imported before the static form was recorded gets it from the admin "Backfill system references" action, which re-extracts over stored source without a new upload. A static call with a numeric or computed first argument (`Page.Run(0, Rec)`) names no object and is not recorded.
+
+
 ## UI
 
 The Object Explorer's hierarchy becomes:

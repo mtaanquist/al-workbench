@@ -254,15 +254,28 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "find_references", ReadOnly = true)]
-    [Description("Finds the places in a BC release that reference a specific table, page, or codeunit — optionally narrowed to a specific field or procedure on it. Resolves the target by name; pass 'Sales Line' + field 'No.' to answer 'which procedures change the No. field on Sales Line?'-style questions. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out — a popular base table runs well past that, so narrow with targetField or targetProcedure.")]
+    [Description("Finds the places in a BC release that reference a specific table, page, or codeunit — optionally narrowed to a specific field or procedure on it. Resolves the target by name. For a field, each reference's Usage says whether it reads the field ('read') or sets it ('assign' for := and +=, 'validate', 'modify_all', 'evaluate', 'clear'), and IsTemporary whether it goes through a temporary record; pass 'Sales Line' + field 'No.' + usage 'set' to answer 'which procedures change the No. field on Sales Line?', and includeTemporary false to leave out temporary records. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out — a popular base table runs well past that, so narrow with targetField or targetProcedure.")]
     public async Task<ReferenceSearchResult> FindReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — table, page, codeunit, etc. Resolved case-insensitively against oe_module_objects.")] string targetObject,
         [Description("AL kind of the target object. Defaults to 'table'.")] string targetKind = "table",
         [Description("Optional field name on the target table — narrows the search to references that touch this field.")] string? targetField = null,
         [Description("Optional procedure name on the target object — narrows the search to references that call this procedure.")] string? targetProcedure = null,
+        [Description("With targetField only: 'all' (default) returns every reference, 'set' only the places that change the field (:=, Validate, ModifyAll, Evaluate, Clear), 'read' only the places that read it.")] string usage = "all",
+        [Description("With targetField only: false leaves out references through a temporary record (a variable declared temporary, or Rec on a page or table whose record is temporary). Default true.")] bool includeTemporary = true,
         CancellationToken ct = default)
     {
+        var wantedUsage = usage.Trim().ToLowerInvariant();
+        if (wantedUsage is not ("all" or "set" or "read"))
+        {
+            throw new McpException($"Unknown usage '{usage}'. Use 'all', 'set' or 'read'.");
+        }
+        var filtered = wantedUsage != "all" || !includeTemporary;
+        if (filtered && string.IsNullOrWhiteSpace(targetField))
+        {
+            throw new McpException("usage and includeTemporary apply to a field: pass targetField as well.");
+        }
+
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
 
         var kind = targetKind.Trim().ToLowerInvariant();
@@ -303,20 +316,50 @@ public sealed class ObjectExplorerTools
         // the response. Object-only queries stay on the lighter path.
         // The cap goes into the query, so only the rows returned are fetched and
         // given a code snippet (#1247).
+        // A usage filter is applied after the query (usage is read from the
+        // source line), so it fetches the full reference set and filters that:
+        // capping first would drop the writes that sit past the first 50 rows.
+        var take = filtered ? ReferenceQueryService.MaxReferenceMatches : MaxReferenceRows;
         var matches = memberName is null
-            ? await _references.FindReferencesAsync(releaseId, query, MaxReferenceRows, ct)
-            : await _references.FindReferencesForSymbolAsync(releaseId, query, MaxReferenceRows, ct);
+            ? await _references.FindReferencesAsync(releaseId, query, take, ct)
+            : await _references.FindReferencesForSymbolAsync(releaseId, query, take, ct);
+        if (filtered)
+        {
+            // FindReferences* fetch one row past the cap, so more than the cap
+            // means the set the filter ran over was itself cut short.
+            var checkedAll = matches.Count <= ReferenceQueryService.MaxReferenceMatches;
+            matches = matches
+                .Where(m => wantedUsage switch
+                {
+                    "set" => ReferenceUsage.IsWrite(m.Usage),
+                    "read" => m.Usage == ReferenceUsage.Read,
+                    _ => true,
+                })
+                .Where(m => includeTemporary || m.IsTemporary != true)
+                .ToList();
+            var result = ReferenceSearchResult.From(matches, MaxReferenceRows,
+                includeTemporary ? "Pass includeTemporary false to leave out temporary records."
+                : wantedUsage == "all" ? "Pass usage 'set' to keep only the places that change the field."
+                : "There is nothing narrower to filter on; read the rows shown first.");
+            return checkedAll
+                ? result
+                : result with
+                {
+                    Truncated = true,
+                    Note = $"Only the first {ReferenceQueryService.MaxReferenceMatches} references to the field were checked; some that match may be missing. {result.Note}".TrimEnd(),
+                };
+        }
         return ReferenceSearchResult.From(matches, MaxReferenceRows,
             "Pass targetField or targetProcedure to narrow the search.");
     }
 
     [McpServerTool(Name = "find_system_references", ReadOnly = true)]
-    [Description("Finds the calls to a built-in / system method (Insert, Modify, ModifyAll, Delete, DeleteAll, SetRange, Validate, etc.) on a specific object in a BC release — the calls that find_references deliberately omits. Use this to answer 'where is this table inserted/modified/deleted?'. Optionally narrow to one method. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
+    [Description("Finds the calls to a built-in / system method on a specific object in a BC release — the calls that find_references deliberately omits. On a table: Insert, Modify, ModifyAll, Delete, DeleteAll, Get, Find/FindFirst/FindLast/FindSet, SetRange, Validate and so on; on a page: Run, RunModal, SetRecord; on a report: Run, RunModal, SaveAsPdf, SaveAs; on a codeunit: Run. Both the instance form (CustomerList.RunModal()) and the static form (Page.RunModal(Page::\"Customer List\")) are found. Use this to answer 'where is this table inserted/modified/deleted?' or 'where is this page opened?'. Optionally narrow to some methods. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
     public async Task<ReferenceSearchResult> FindSystemReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — usually a table. Resolved case-insensitively against oe_module_objects.")] string targetObject,
         [Description("AL kind of the target object. Defaults to 'table'.")] string targetKind = "table",
-        [Description("Optional system method name to narrow to, e.g. 'Insert', 'Modify', 'Delete', 'SetRange'.")] string? systemMethod = null,
+        [Description("Optional method name to narrow to, or several separated by commas, e.g. 'Insert', 'Modify,ModifyAll', 'FindFirst,FindLast,FindSet', 'Run,RunModal'. Matched without regard to case.")] string? systemMethod = null,
         CancellationToken ct = default)
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
@@ -336,11 +379,13 @@ public sealed class ObjectExplorerTools
             TargetObjectKind: owner.Kind,
             TargetObjectId: owner.ObjectId,
             TargetObjectName: owner.Name,
-            SystemMethodName: string.IsNullOrWhiteSpace(systemMethod) ? null : systemMethod.Trim());
+            SystemMethodNames: string.IsNullOrWhiteSpace(systemMethod)
+                ? null
+                : systemMethod.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
         var matches = await _references.FindSystemReferencesAsync(releaseId, query, MaxReferenceRows, ct);
         return ReferenceSearchResult.From(matches, MaxReferenceRows,
-            "Pass systemMethod to narrow the search to one method.");
+            "Pass systemMethod to narrow the search to some methods.");
     }
 
     [McpServerTool(Name = "get_object_outline", ReadOnly = true)]
