@@ -14,6 +14,9 @@ public static class ReferenceUsage
 {
     public const string Read = "read";
 
+    /// <summary>Lines read on each side of a reference, for statements split over several lines.</summary>
+    public const int ContextLines = 3;
+
     /// <summary><c>X := ...</c>, and the compound <c>+=</c> / <c>-=</c> / <c>*=</c> / <c>/=</c>.</summary>
     public const string Assign = "assign";
 
@@ -62,18 +65,45 @@ public static class ReferenceUsage
 
     /// <summary>
     /// Classifies the reference whose name starts at 1-based
-    /// <paramref name="column"/> on <paramref name="line"/>. When the column is
-    /// missing or does not land on <paramref name="name"/> (rows imported before
-    /// columns were stamped), the first whole-word occurrence of the name on
-    /// the line is used instead. Returns null when the name is not on the line
-    /// at all, so an unknown site is never reported as a read.
-    /// <para>One line is all it looks at: a statement split so that the
-    /// <c>:=</c> or the <c>Validate(</c> sits on another line reads as a read.</para>
+    /// <paramref name="column"/> on <paramref name="line"/>, looking at that
+    /// line alone. See <see cref="Classify(IReadOnlyList{string}, int, int?, string?)"/>.
     /// </summary>
-    public static Site? Classify(string line, int? column, string? name)
+    public static Site? Classify(string line, int? column, string? name) =>
+        Classify([line], 0, column, name);
+
+    /// <summary>
+    /// Classifies the reference whose name starts at 1-based
+    /// <paramref name="column"/> on <c>lines[target]</c>. The lines around it
+    /// are there for statements split over several lines
+    /// (<c>Rec."No." :=</c> on one, the value on the next, or the field on the
+    /// line after <c>Rec.Validate(</c>): the scan reads across them, and stops
+    /// at the <c>;</c> that ends the previous statement. When the column is
+    /// missing or does not land on <paramref name="name"/> (rows imported
+    /// before columns were stamped), the first whole-word occurrence of the
+    /// name on the target line is used instead. Returns null when the name is
+    /// not on that line at all, so an unknown site is never reported as a read.
+    /// </summary>
+    public static Site? Classify(IReadOnlyList<string> lines, int target, int? column, string? name)
     {
-        var start = LocateName(line, column, name);
-        if (start < 0) return null;
+        if (target < 0 || target >= lines.Count) return null;
+        var at = LocateName(lines[target], column, name);
+        if (at < 0) return null;
+
+        // One string with the lines joined, and line comments blanked out so a
+        // parenthesis or := in a comment is not read as code. Blanking rather
+        // than cutting keeps every column where it was.
+        var offset = 0;
+        var joined = new System.Text.StringBuilder();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            if (i == target) offset = joined.Length;
+            joined.Append(BlankLineComment(lines[i])).Append('\n');
+        }
+        return ClassifyAt(joined.ToString(), offset + at);
+    }
+
+    private static Site? ClassifyAt(string line, int start)
+    {
         var end = TokenEnd(line, start);
         if (end <= start) return null;
 
@@ -178,6 +208,23 @@ public static class ReferenceUsage
             }
         }
         return names;
+    }
+
+    /// <summary>Replaces a <c>//</c> comment (outside strings and quoted names) with spaces.</summary>
+    private static string BlankLineComment(string line)
+    {
+        char? quote = null;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (quote is not null) { if (c == quote) quote = null; continue; }
+            if (c is '\'' or '"') { quote = c; continue; }
+            if (c == '/' && i + 1 < line.Length && line[i + 1] == '/')
+            {
+                return line[..i] + new string(' ', line.Length - i);
+            }
+        }
+        return line;
     }
 
     private static bool IsFieldNameTaking(string method) =>

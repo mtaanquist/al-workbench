@@ -316,7 +316,9 @@ public sealed class ReferenceSessionService
             var idx = IndexOfWord(lineText, varName, 0);
             if (idx < 0) continue;
             var trimmed = lineText.TrimStart();
-            var site = ReferenceUsage.Classify(lineText, idx + 1, varName);
+            var from = Math.Max(i - ReferenceUsage.ContextLines, 0);
+            var to = Math.Min(i + ReferenceUsage.ContextLines, lines.Length - 1);
+            var site = ReferenceUsage.Classify(lines[from..(to + 1)], i - from, idx + 1, varName);
             rows.Add(new ReferenceMatch(
                 Id: rows.Count + 1,
                 SourceModuleId: meta.ModuleId,

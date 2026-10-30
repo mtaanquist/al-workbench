@@ -64,6 +64,26 @@ public sealed class ReferenceUsageTests : IDisposable
         site.Receiver.Should().Be(receiver);
     }
 
+    [Theory]
+    [InlineData(new[] { "Thing.|\"No.\" :=", "    'A';" }, "assign", "Thing")]
+    [InlineData(new[] { "Thing.Validate(", "    |\"No.\",", "    'B');" }, "validate", "Thing")]
+    [InlineData(new[] { "TempThing.ModifyAll(", "    |\"No.\", 'C');" }, "modify_all", "TempThing")]
+    [InlineData(new[] { "Foo(Bar);", "|\"No.\" := 1;" }, "assign", null)]
+    [InlineData(new[] { "Thing.Validate(\"No.\", 1);", "if Other.|\"No.\" = 1 then" }, "read", "Other")]
+    [InlineData(new[] { "Thing.|\"No.\" // :=", "    = 1" }, "read", "Thing")]
+    public void Reads_across_a_statement_split_over_lines(string[] marked, string usage, string? receiver)
+    {
+        var target = Array.FindIndex(marked, l => l.Contains('|'));
+        var column = marked[target].IndexOf('|') + 1;
+        var lines = marked.Select(l => l.Replace("|", "")).ToArray();
+
+        var site = ReferenceUsage.Classify(lines, target, column, "No.");
+
+        site.Should().NotBeNull();
+        site!.Usage.Should().Be(usage);
+        site.Receiver.Should().Be(receiver);
+    }
+
     [Fact]
     public void Without_a_column_the_first_whole_word_occurrence_is_used()
     {
@@ -135,6 +155,7 @@ public sealed class ReferenceUsageTests : IDisposable
         byLine["if Thing.\"No.\" = '' then;"].Should().Be(("read", false));
         byLine["TempThing.\"No.\" := 'E';"].Should().Be(("assign", true));
         byLine["Thing.SetRange(\"No.\", 'F');"].Should().Be(("read", false));
+        byLine["\"No.\","].Should().Be(("validate", false), "the Validate( is on the line above");
     }
 
     [Fact]
@@ -152,6 +173,7 @@ public sealed class ReferenceUsageTests : IDisposable
             "Thing.Validate(\"No.\", 'B');",
             "Thing.ModifyAll(\"No.\", 'C');",
             "Evaluate(Thing.\"No.\", 'D');",
+            "\"No.\",",
         ]);
         result.Truncated.Should().BeFalse();
     }
@@ -250,6 +272,9 @@ public sealed class ReferenceUsageTests : IDisposable
                         if Thing."No." = '' then;
                         TempThing."No." := 'E';
                         Thing.SetRange("No.", 'F');
+                        Thing.Validate(
+                            "No.",
+                            'G');
                     end;
                 }
                 """,

@@ -817,6 +817,16 @@ public sealed class ReferenceQueryService
             .Distinct()
             .ToArray();
 
+        // The files whose reference sites are classified as read or set. Those
+        // are split into lines once, so each site can take the lines around it
+        // too: a statement split over several lines keeps its := or Validate(
+        // on a line of its own.
+        var contextFiles = matches
+            .Where(m => m.SourceFileId.HasValue && ReferenceUsage.AppliesTo(m.ReferenceKind))
+            .Select(m => m.SourceFileId!.Value)
+            .Distinct()
+            .ToArray();
+
         // split_part counts fields from 1 and returns '' past the end of the
         // string, which is exactly what we want for a line number beyond the
         // file. Splitting on '\n' alone leaves the '\r' of CRLF content on the
@@ -838,17 +848,26 @@ public sealed class ReferenceQueryService
                 FROM oe_module_files  f
                 JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
                 WHERE f.id = ANY({5}::bigint[]) AND f.organization_id = {2}::int
+            ),
+            split AS (
+                SELECT f.id AS file_id, string_to_array(fc.content, E'\n') AS lines
+                FROM oe_module_files  f
+                JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+                WHERE f.id = ANY({6}::bigint[]) AND f.organization_id = {2}::int
             )
             SELECT m.file_id                             AS "FileId",
                    m.line                                AS "LineNumber",
                    f.path                                AS "Path",
                    split_part(fc.content, E'\n', m.line) AS "Text",
                    t.rec_temporary                       AS "RecTemporary",
-                   t.names                               AS "TemporaryNames"
+                   t.names                               AS "TemporaryNames",
+                   greatest(m.line - {7}, 1)             AS "ContextStart",
+                   s.lines[greatest(m.line - {7}, 1) : m.line + {7}] AS "Context"
             FROM unnest({0}::bigint[], {1}::int[]) AS m(file_id, line)
             JOIN oe_module_files  f  ON f.id = m.file_id AND f.organization_id = {2}::int
             JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
             LEFT JOIN temps t ON t.file_id = m.file_id
+            LEFT JOIN split s ON s.file_id = m.file_id
             """;
 
         var rows = await _db.Database
@@ -859,7 +878,9 @@ public sealed class ReferenceQueryService
                 _orgContext.OrganizationIdForFilter,
                 ReferenceUsage.TemporaryDeclarationPattern,
                 ReferenceUsage.TemporaryRecPattern,
-                temporaryFiles)
+                temporaryFiles,
+                contextFiles,
+                ReferenceUsage.ContextLines)
             .ToListAsync(ct);
 
         var lookup = rows.ToDictionary(r => (r.FileId, r.LineNumber));
@@ -876,7 +897,7 @@ public sealed class ReferenceQueryService
                 if (raw.Length > 200) raw = raw[..200] + "...";
                 var classified = m with { SourceFilePath = row.Path, Snippet = raw };
                 if (ReferenceUsage.AppliesTo(m.ReferenceKind)
-                    && ReferenceUsage.Classify(text.TrimEnd('\r'), m.ColumnNumber, m.MemberName) is { } site)
+                    && ClassifySite(row, text, m) is { } site)
                 {
                     bool? isTemporary = null;
                     if (m.ReferenceKind == "field_access" && row.RecTemporary is { } recTemporary)
@@ -907,10 +928,28 @@ public sealed class ReferenceQueryService
     /// <c>RecTemporary</c> and <c>TemporaryNames</c> are only filled for files
     /// holding a field reference: whether the file's own <c>Rec</c> is
     /// temporary, and the name lists of its temporary record declarations.
+    /// <c>Context</c> is the lines from <c>ContextStart</c> around the
+    /// reference, for files holding a field or variable reference.
     /// </summary>
     private sealed record SnippetRow(
         long FileId, int LineNumber, string Path, string? Text,
-        bool? RecTemporary, string[]? TemporaryNames);
+        bool? RecTemporary, string[]? TemporaryNames,
+        int ContextStart, string[]? Context);
+
+    /// <summary>
+    /// Read or set for one reference, from the lines around it when the query
+    /// brought them back, else from its own line.
+    /// </summary>
+    private static ReferenceUsage.Site? ClassifySite(SnippetRow row, string text, ReferenceMatch m)
+    {
+        var target = row.LineNumber - row.ContextStart;
+        if (row.Context is { Length: > 0 } context && target >= 0 && target < context.Length)
+        {
+            var lines = context.Select(l => (l ?? string.Empty).TrimEnd('\r')).ToArray();
+            return ReferenceUsage.Classify(lines, target, m.ColumnNumber, m.MemberName);
+        }
+        return ReferenceUsage.Classify(text.TrimEnd('\r'), m.ColumnNumber, m.MemberName);
+    }
 
     /// <summary>
     /// Returns the codeunits (across the visible module chain seeded by
