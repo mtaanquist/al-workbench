@@ -273,6 +273,22 @@ public sealed class ArtifactsToolsTests : IDisposable
     }
 
     [Fact]
+    public void A_changelog_the_service_already_cut_keeps_its_note_and_counts_only_commits()
+    {
+        var commits = Enumerable.Range(1, 100)
+            .Select(i => new ChangelogRow($"abc{i:D4}", $"Commit {i}", "CRONUS dev", null))
+            .Append(new ChangelogRow(string.Empty, "...and more commits not shown (the changelog is capped at 100)", string.Empty, null))
+            .ToList();
+
+        var capped = ArtifactsTools.CapChangelog([new ChangelogGroup("cronus-core", commits)]);
+
+        var rows = capped[0].Commits;
+        rows.Should().HaveCount(ArtifactsTools.MaxChangelogCommits + 2);
+        rows[ArtifactsTools.MaxChangelogCommits].Message.Should().StartWith("At least 80 more commits");
+        rows[^1].Message.Should().Contain("capped at 100", "the service's own note is kept");
+    }
+
+    [Fact]
     public void A_list_row_failure_message_is_cut_and_says_where_the_rest_is()
     {
         McpListLimit.ShortenFailure(null, "get_solution_build").Should().BeNull();

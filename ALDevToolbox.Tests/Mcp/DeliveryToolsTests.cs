@@ -74,13 +74,19 @@ public sealed class DeliveryToolsTests : IDisposable
     {
         await using (var ctx = _db.NewContext())
         {
-            await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            var seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            // Named unlike its type, so the search has to read the type to find it.
+            await ctx.OeProjectEnvironments.Where(e => e.ProjectId == seed.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(e => e.Name, "Live"));
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Name, "CRONUS App to Live"));
         }
 
         await using var read = _db.NewContext();
         var tools = NewTools(read);
 
         (await tools.ListReleasePipelinesAsync(search: "production")).Rows.Should().ContainSingle();
+        (await tools.ListReleasePipelinesAsync(search: "live")).Rows.Should().ContainSingle();
         (await tools.ListReleasePipelinesAsync(search: "nowhere")).Rows.Should().BeEmpty();
         var cut = await tools.ListReleasePipelinesAsync(limit: 0);
         cut.Rows.Should().HaveCount(1, "a limit below one still returns one row");

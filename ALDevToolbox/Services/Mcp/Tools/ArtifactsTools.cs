@@ -204,19 +204,29 @@ public sealed class ArtifactsTools
     /// <summary>
     /// The first commits of each repository's changelog, with a summary row (no
     /// hash, as the service's own notes have) counting the rest. A long gap
-    /// between builds ran to 100 commits per repository (#1511).
+    /// between builds ran to 100 commits per repository (#1511). The service's
+    /// own hashless notes are not commits: they are left out of the count and
+    /// kept after the summary, and when one is there the stored list was itself
+    /// cut, so the count is a lower bound.
     /// </summary>
     internal static IReadOnlyList<ChangelogGroup> CapChangelog(IReadOnlyList<ChangelogGroup> groups) =>
-        groups.Select(g => g.Commits.Count <= MaxChangelogCommits
-            ? g
-            : g with
+        groups.Select(g =>
+        {
+            var commits = g.Commits.Where(c => !string.IsNullOrEmpty(c.ShortHash)).ToList();
+            if (commits.Count <= MaxChangelogCommits) return g;
+            var notes = g.Commits.Where(c => string.IsNullOrEmpty(c.ShortHash)).ToList();
+            var more = commits.Count - MaxChangelogCommits;
+            var summary = notes.Count == 0
+                ? $"{more} more commits are not shown; the build page has the full changelog."
+                : $"At least {more} more commits are not shown; the build page lists more of them.";
+            return g with
             {
-                Commits = g.Commits.Take(MaxChangelogCommits)
-                    .Append(new ChangelogRow(string.Empty,
-                        $"{g.Commits.Count - MaxChangelogCommits} more commits are not shown; the build page has the full changelog.",
-                        string.Empty, null))
+                Commits = commits.Take(MaxChangelogCommits)
+                    .Append(new ChangelogRow(string.Empty, summary, string.Empty, null))
+                    .Concat(notes)
                     .ToList(),
-            }).ToList();
+            };
+        }).ToList();
 }
 
 /// <summary>One build's detail for the <c>get_solution_build</c> MCP tool, with download paths for its deliverables.</summary>

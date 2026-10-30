@@ -57,7 +57,7 @@ public sealed class DeliveryTools
     [Description("Lists the deployment pipelines you can see in the organisation — each is a named 'deploy this build pipeline's builds to this Business Central environment' target. Returns each pipeline's id, name, its owning solution (id and name), its source build pipeline (or, for a pipeline that installs a repository's GitHub releases, that repository), the target environment (name, Production/Sandbox type, and whether it is still present in Business Central), when installs run (its deployment schedule), schema sync mode, and whether a new successful build prepares a deployment for a person to approve (prepareDeploymentOnNewBuild; nothing installs until someone approves it in the web UI), and its branch rule: when restrictBranch is true it only deploys builds made from allowedBranch (null means the repositories' default branch). buildPipelineDeleted is true when its source build pipeline was deleted, so no new builds will reach it. disabled is true when someone disabled the deployment pipeline: deploy_build refuses it and nothing deploys through it until a person enables it again in the web UI. buildPipelineDisabled is true when its source build pipeline is disabled, so no new builds will reach it, though its earlier builds can still be deployed. Deploying refuses a build from another branch, and an app older than the version the environment already has. Archived deployment pipelines (kept only for their history) and pipelines under a private solution you are not on the team for are not listed. Returns the first 25 unless you raise limit; Truncated and Note say whether more were left out, so pass search or solutionId to narrow it. Use an id with deploy_build (to deploy a build) or list_deployments (to see its history).")]
     public async Task<CappedRows<ReleasePipelineRow>> ListReleasePipelinesAsync(
         [Description("Optional solution id to list only that solution's deployment pipelines.")] int? solutionId = null,
-        [Description("Optional case-insensitive substring of the deployment pipeline's name, its solution, its environment or its build pipeline, e.g. a customer name or 'Production'.")] string? search = null,
+        [Description("Optional case-insensitive substring of the deployment pipeline's name, its solution, its environment's name or type, its build pipeline, or the repository it installs releases from, e.g. a customer name or 'Production'.")] string? search = null,
         [Description(McpCatalogueLimit.Description + " Default 25.")] int limit = DefaultPipelineLimit,
         CancellationToken ct = default)
     {
@@ -68,7 +68,8 @@ public sealed class DeliveryTools
             var matched = string.IsNullOrEmpty(needle)
                 ? rows
                 : rows.Where(r => Has(r.Name, needle) || Has(r.ProjectName, needle)
-                                  || Has(r.EnvironmentName, needle) || Has(r.BuildPipelineName, needle)).ToList();
+                                  || Has(r.EnvironmentName, needle) || Has(r.EnvironmentType, needle)
+                                  || Has(r.BuildPipelineName, needle) || Has(r.GithubReleaseRepositoryName, needle)).ToList();
             return CappedRows<ReleasePipelineRow>.From(matched, McpCatalogueLimit.Clamp(limit), "deployment pipelines",
                 "ordered by name", "Pass search or solutionId to narrow the list, or raise limit.");
         }
