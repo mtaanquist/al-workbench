@@ -2607,18 +2607,35 @@ public sealed class DeliveryService
     /// page that shows the latest few and extends the list on request. Each row carries
     /// its per-pipeline <see cref="DeliveryHistoryRow.Number"/> (1 for the pipeline's
     /// first deployment), so a row whose number is above 1 says there are older ones.
+    /// <paramref name="onlyDeliveryId"/> reads that one deployment of the pipeline, still
+    /// numbered by its place in the history, and an empty list when it is not this
+    /// pipeline's (#1525).
     /// </summary>
-    public async Task<List<DeliveryHistoryRow>> ListDeliveryHistoryAsync(int releasePipelineId, int limit, CancellationToken ct = default)
+    public async Task<List<DeliveryHistoryRow>> ListDeliveryHistoryAsync(
+        int releasePipelineId, int limit, CancellationToken ct = default, int? onlyDeliveryId = null)
     {
         await EnsureCanViewReleasePipelineAsync(releasePipelineId, ct);
-        var query = _db.OeProjectDeliveries.AsNoTracking()
+        var pipelineRows = _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.ReleasePipelineId == releasePipelineId);
 
         // "Deployment 49" is display-only: the position in this pipeline's history, not a
         // stored column. Counting once and numbering down from it is exact as long as
         // the order below is total, hence the id tie-break.
-        var total = await query.CountAsync(ct);
+        var total = await pipelineRows.CountAsync(ct);
         if (total == 0) return new List<DeliveryHistoryRow>();
+
+        var query = pipelineRows;
+        var newer = 0;
+        if (onlyDeliveryId is { } onlyId)
+        {
+            var anchor = await pipelineRows.Where(d => d.Id == onlyId)
+                .Select(d => new { d.CreatedAt })
+                .FirstOrDefaultAsync(ct);
+            if (anchor is null) return new List<DeliveryHistoryRow>();
+            newer = await pipelineRows
+                .CountAsync(d => d.CreatedAt > anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id > onlyId), ct);
+            query = pipelineRows.Where(d => d.Id == onlyId);
+        }
 
         var rows = await query
             .OrderByDescending(d => d.CreatedAt).ThenByDescending(d => d.Id)
@@ -2664,7 +2681,7 @@ public sealed class DeliveryService
             rows.Where(r => r.Status == ProjectDeliveryStatus.HandedOff).Select(r => r.Id).ToList(), ct);
         for (var i = 0; i < rows.Count; i++)
         {
-            rows[i] = rows[i] with { Number = total - i, StillHeld = stillHeld.Contains(rows[i].Id) };
+            rows[i] = rows[i] with { Number = total - newer - i, StillHeld = stillHeld.Contains(rows[i].Id) };
         }
         return rows;
     }
