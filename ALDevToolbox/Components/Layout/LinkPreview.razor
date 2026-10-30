@@ -51,7 +51,7 @@
         ("/environments", "Environment", "Environments"),
         ("/upgrades", "Upgrade", "Upgrades"),
         ("/object-explorer", "Object Explorer", "Object Explorer"),
-        ("/cookbook", "Cookbook recipe", "Cookbook"),
+        ("/cookbook", "Cookbook", "Cookbook"),
         ("/templates", "Template", "Templates"),
         ("/translator", "Translator", "Translator"),
     ];
@@ -63,10 +63,8 @@
     {
         var ctx = Http.HttpContext;
         if (ctx is null) return;
-        // The cookie challenge sends ?ReturnUrl=, the router's own redirect ?return=.
         var query = ctx.Request.Query;
-        var returnUrl = query.TryGetValue("return", out var r) ? r.ToString() : query["ReturnUrl"].ToString();
-        _preview = Describe(ctx.Request.Path, returnUrl);
+        _preview = Describe(ctx.Request.Path, PickReturnUrl(query["return"], query["ReturnUrl"]));
         _image = Origin.For(ctx) + ImagePath;
     }
 
@@ -94,6 +92,14 @@
         }
         return Site;
     }
+
+    /// <summary>
+    /// The cookie challenge sends <c>?ReturnUrl=</c>, the router's own redirect
+    /// <c>?return=</c>; a request never carries both unless someone typed it, and
+    /// then the router's wins.
+    /// </summary>
+    public static string? PickReturnUrl(string? routerReturn, string? challengeReturn) =>
+        string.IsNullOrEmpty(routerReturn) ? challengeReturn : routerReturn;
 
     private static bool IsPath(string path, string segment) =>
         string.Equals(path, segment, StringComparison.OrdinalIgnoreCase)

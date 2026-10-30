@@ -2,7 +2,9 @@ using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Components.Layout;
 using ALDevToolbox.Tests.Infrastructure;
+using ALDevToolbox.Endpoints;
 using AwesomeAssertions;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ALDevToolbox.Tests.Components;
 
@@ -32,7 +34,7 @@ public sealed class LinkPreviewTests
 
     [Theory]
     [InlineData("/solutions/cronus?tab=people", "Solution in AL Workbench")]
-    [InlineData("/pipelines/deployments/3", "Deployment in AL Workbench")]
+    [InlineData("/s/abcdefghijklmnop", "A secure link from AL Workbench")]
     [InlineData("//evil.example/solutions/x", "AL Workbench")]
     [InlineData("/\\evil.example/solutions/x", "AL Workbench")]
     [InlineData("https://evil.example/solutions/x", "AL Workbench")]
@@ -40,6 +42,15 @@ public sealed class LinkPreviewTests
     public void The_sign_in_page_describes_where_the_link_was_going(string returnUrl, string title)
     {
         LinkPreview.Describe("/login", returnUrl).Title.Should().Be(title);
+    }
+
+    [Fact]
+    public void The_routers_return_value_wins_over_the_cookie_challenges()
+    {
+        // LinkPreview reads ?return= first; Describe gets whichever won, so
+        // check the rule at the component's own seam.
+        LinkPreview.PickReturnUrl("/pipelines/1", "/solutions/x").Should().Be("/pipelines/1");
+        LinkPreview.PickReturnUrl(null, "/solutions/x").Should().Be("/solutions/x");
     }
 
     [Fact]
@@ -104,7 +115,22 @@ public sealed class LinkPreviewEndpointTests : IDisposable
         image.Content.Headers.ContentType!.MediaType.Should().Be("image/png");
     }
 
-    private static string Meta(string html, string name) =>
-        Regex.Match(html, $"""<meta (?:property|name)="{Regex.Escape(name)}" content="([^"]*)" """.TrimEnd())
-            .Groups[1].Value;
+    [Fact]
+    public async Task The_image_url_uses_the_configured_public_address()
+    {
+        using var factory = new EndpointFactory(_db, services =>
+            services.AddSingleton(new PublicOrigin("https://tools.cronus.example")));
+
+        using var page = await factory.CreateClient(handleCookies: false).GetAsync("/login");
+
+        Meta(await page.Content.ReadAsStringAsync(), "og:image")
+            .Should().Be("https://tools.cronus.example/link-preview.png");
+    }
+
+    private static string Meta(string html, string name)
+    {
+        var match = Regex.Match(html, $"""<meta (?:property|name)="{Regex.Escape(name)}" content="([^"]*)" """.TrimEnd());
+        match.Success.Should().BeTrue($"the page should carry a {name} tag");
+        return match.Groups[1].Value;
+    }
 }
