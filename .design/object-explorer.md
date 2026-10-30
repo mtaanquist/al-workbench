@@ -325,6 +325,10 @@ Scroll-sync between the two panes is gated on `roots.length === 2 && first root 
 
 Out of scope for v1: object-level diff (added/removed/renamed objects), symbol-level diff (procedure signature changes), reference-impact rollups. The underlying schema supports these — the `ObjectExplorerService.Compare*` surface is the staging point — but the UI deliberately doesn't surface them until someone needs them.
 
+## Bounded MCP answers
+
+An assistant client refuses a tool answer much past a few tens of thousands of characters, and at production scale (a few hundred releases, millions of indexed files) the Object Explorer tools ran well past that. Since #1510 each list tool fetches one row past its own cap and says in `truncated` and `note` when rows were left out and which filter narrows them: `search_objects` 100, `search_procedures` 75, `search_content` 60 files, `find_references` 50, `list_procedure_calls` 100, `search_translations` 50, `list_release_modules` 100, `get_object_outline` 150 members (narrowed by `memberKind` and `namePattern`), and `list_releases` at most 100. The compare tools keep 200, as their rows are narrow. Every capped list also stops once its rows reach a character budget of 22,000 (`McpAnswerBudget`, #1524), so the row caps are upper bounds rather than guesses at row length: 150 event publishers with their signatures stop at about half that.
+
 ## Outline dependencies
 
 The source-viewer outline carries two extra collapsible sections at the bottom (Issue #148):

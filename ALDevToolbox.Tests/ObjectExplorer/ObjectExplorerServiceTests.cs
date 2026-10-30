@@ -1855,7 +1855,9 @@ public sealed class ObjectExplorerServiceTests : IDisposable
         result.Truncated.Should().BeTrue();
         result.Note.Should().Contain("first 1").And.Contain("Narrow it.");
 
-        ALDevToolbox.Services.Mcp.Tools.ReferenceSearchResult.From(all, all.Count, "Narrow it.")
+        // A small slice, so the character budget (#1524) cannot be what cuts it.
+        var two = all.Take(2).ToList();
+        ALDevToolbox.Services.Mcp.Tools.ReferenceSearchResult.From(two, two.Count, "Narrow it.")
             .Truncated.Should().BeFalse("an exactly-fitting result is not cut");
     }
 

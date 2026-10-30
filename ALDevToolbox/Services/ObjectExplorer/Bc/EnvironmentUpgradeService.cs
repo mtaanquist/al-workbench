@@ -241,7 +241,7 @@ public sealed class EnvironmentUpgradeService
 
         // The fleet is the mirror as the Upgrades page reads it, deleted-but-restorable
         // environments included: a line's environment deleted mid-wave is still worth seeing.
-        var fleet = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct).ConfigureAwait(false))
+        var fleet = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct: ct).ConfigureAwait(false))
             .ToDictionary(r => r.EnvironmentId);
         var byId = headers.ToDictionary(h => h.Id);
 

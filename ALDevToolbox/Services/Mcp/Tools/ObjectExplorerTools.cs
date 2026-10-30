@@ -27,6 +27,21 @@ public sealed class ObjectExplorerTools
 {
     private const int MaxResults = 200;
 
+    // Per-tool row caps, sized so a full page of each tool's rows stays near
+    // 25,000 characters: a response much past that is refused by assistant
+    // clients (find_references returned 100,000 at 200 rows). The compare tools
+    // keep MaxResults, as their rows are narrow (#1510). Each list also stops at
+    // McpAnswerBudget's character budget, so the caps are upper bounds (#1524).
+    private const int MaxObjectMatches = 100;
+    private const int MaxProcedureMatches = 75;
+    private const int MaxContentMatches = 60;
+    private const int MaxReferenceRows = 50;
+    private const int MaxProcedureCalls = 100;
+    private const int MaxTranslationMatches = 50;
+    private const int MaxModuleRows = 100;
+    private const int MaxReleaseListRows = 100;
+    private const int MaxOutlineSymbols = 150;
+
     private readonly ObjectExplorerService _explorer;
     private readonly ObjectSearchService _search;
     private readonly ReferenceQueryService _references;
@@ -53,7 +68,7 @@ public sealed class ObjectExplorerTools
     public async Task<ReleaseListResult> ListReleasesAsync(
         [Description("Optional case-insensitive substring of the release label, publisher, BC version, solution name or pipeline name: a customer's name finds their solution's build, 'Continia' that vendor's apps, '28.5' one version. Null lists every release up to limit.")] string? search = null,
         [Description("Optional kind: 'first_party' (Microsoft), 'third_party', 'cal' or 'solution'. Null lists every kind.")] string? kind = null,
-        [Description("How many to return. Default 50, at least 1, at most 200.")] int limit = DefaultReleaseListLimit,
+        [Description("How many to return. Default 50, at least 1, at most 100.")] int limit = DefaultReleaseListLimit,
         CancellationToken ct = default)
     {
         var wantedKind = kind?.Trim().ToLowerInvariant();
@@ -61,7 +76,7 @@ public sealed class ObjectExplorerTools
         {
             throw new McpException($"Unknown kind '{kind}'. Use one of: {string.Join(", ", ReleaseListKinds)}.");
         }
-        var cap = Math.Clamp(limit, 1, MaxResults);
+        var cap = Math.Clamp(limit, 1, MaxReleaseListRows);
 
         // Project builds are otherwise served through the Artifacts tools; the one
         // exception is the newest ready build per pipeline, which the Releases page
@@ -78,11 +93,12 @@ public sealed class ObjectExplorerTools
             .Select(ReleaseSummary.From)
             .Where(r => string.IsNullOrEmpty(wantedKind) || r.Kind == wantedKind)
             .ToList();
-        var truncated = matched.Count > cap;
+        var shown = McpAnswerBudget.Fit(matched, cap);
+        var truncated = matched.Count > shown;
         return new ReleaseListResult(
-            matched.Take(cap).ToList(),
+            matched.Take(shown).ToList(),
             truncated,
-            truncated ? TruncationNote(matched, cap) : NoMatchNote(matched, search));
+            truncated ? TruncationNote(matched, shown, budgetCut: shown < cap) : NoMatchNote(matched, search));
     }
 
     /// <summary>
@@ -114,14 +130,16 @@ public sealed class ObjectExplorerTools
     }
 
     /// <summary>Names what a cut release list left out, by kind, so an agent can tell the solution builds were among them.</summary>
-    private static string TruncationNote(List<ReleaseSummary> matched, int cap)
+    private static string TruncationNote(List<ReleaseSummary> matched, int cap, bool budgetCut)
     {
         var leftOut = matched.Skip(cap)
             .GroupBy(r => r.Kind)
             .Select(g => $"{g.Count()} {g.Key}")
             .ToList();
         return $"Showing {cap} of {matched.Count} releases; left out: {string.Join(", ", leftOut)}. "
-            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list, or raise limit.";
+            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list"
+            // A higher limit would come back cut in the same place (#1524).
+            + (budgetCut ? "." : ", or raise limit.");
     }
 
     [McpServerTool(Name = "compare_releases", ReadOnly = true)]
@@ -152,29 +170,26 @@ public sealed class ObjectExplorerTools
         var leftId = await _explorer.ResolveReleaseAsync(baseReleaseLabelOrId, ct);
         var rightId = await _explorer.ResolveReleaseAsync(otherReleaseLabelOrId, ct);
 
-        // Explicit scan cap: the diff is materialised in memory before the path
-        // filter runs, so an uncapped DVD-to-DVD compare would buffer tens of
-        // thousands of rows to hand back 200. The service returns one row past
-        // the cap when it cut the set — see issue #685.
+        // Explicit scan cap: the diff is materialised in memory, so an uncapped
+        // DVD-to-DVD compare would buffer tens of thousands of rows to hand back
+        // 200. The path filter is applied inside the scan, so it narrows what
+        // the cap counts. The service returns one row past the cap when it cut
+        // the set - see issues #685 and #1510.
         var scanCap = ReleaseComparisonService.MaxCompareFileRows;
-        var rows = await _comparison.CompareReleaseFilesFlatAsync(leftId, rightId, scanCap, ct);
+        var rows = await _comparison.CompareReleaseFilesFlatAsync(leftId, rightId, scanCap, pathPattern, ct);
         var scanTruncated = rows.Count > scanCap;
         if (scanTruncated) rows = rows.Take(scanCap).ToList();
 
-        IEnumerable<ReleaseCompareFileRow> filtered = rows;
-        if (!string.IsNullOrWhiteSpace(pathPattern))
-        {
-            var needle = pathPattern.Trim();
-            filtered = filtered.Where(r => r.Path.Contains(needle, StringComparison.OrdinalIgnoreCase));
-        }
-
-        var matched = filtered.ToList();
+        var matched = rows;
         var page = matched.Take(MaxResults).ToList();
         var notes = new List<string>();
+        var filtered = !string.IsNullOrWhiteSpace(pathPattern);
         if (matched.Count > MaxResults)
-            notes.Add($"Showing the first {MaxResults} of {matched.Count} matching files.");
+            notes.Add(scanTruncated
+                ? $"Showing the first {MaxResults} of at least {scanCap} {(filtered ? "matching" : "changed")} files."
+                : $"Showing the first {MaxResults} of {matched.Count} {(filtered ? "matching" : "changed")} files.");
         if (scanTruncated)
-            notes.Add($"The diff stopped after the first {scanCap} changed files (ordered by app, then path), so later files were never examined.");
+            notes.Add($"The diff stopped after the first {scanCap} {(filtered ? "matching" : "changed")} files (ordered by app, then path), so later files were never examined.");
         if (notes.Count > 0)
             notes.Add("Pass pathPattern, or compare two individual apps, to narrow the comparison.");
 
@@ -185,8 +200,8 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_objects", ReadOnly = true)]
-    [Description("Searches a BC release for AL objects (tables, pages, codeunits, reports, etc.) by name or id. Tokens in the pattern are split on whitespace; every token must appear as a case-insensitive substring of the object name (BC \"Tell Me\" style), so 'sal set' finds 'Sales & Receivables Setup'. Wrap a phrase in double quotes for a literal match (\"sales header\"), and prefix a token with '-' to exclude it (setup -temp). Returns the owning module name + source file pointer for each hit, with word-boundary matches ranked first.")]
-    public async Task<IReadOnlyList<ReleaseObjectMatch>> SearchObjectsAsync(
+    [Description("Searches a BC release for AL objects (tables, pages, codeunits, reports, etc.) by name or id. Tokens in the pattern are split on whitespace; every token must appear as a case-insensitive substring of the object name (BC \"Tell Me\" style), so 'sal set' finds 'Sales & Receivables Setup'. Wrap a phrase in double quotes for a literal match (\"sales header\"), and prefix a token with '-' to exclude it (setup -temp). Returns the owning module name + source file pointer for each hit, with word-boundary matches ranked first. Capped at 100 rows; Truncated and Note say whether more were left out, so add a token or a kind to narrow it.")]
+    public async Task<CappedRows<ReleaseObjectMatch>> SearchObjectsAsync(
         [Description("Release Label ('BC 28.1') or numeric id from list_releases.")] string releaseLabelOrId,
         [Description("Whitespace-separated tokens; every token must appear (case-insensitive substring) in the object name. Use \"quotes\" for a literal phrase and a -prefix to exclude a token. A single bare numeric token still matches by object id. A leading kind prefix scopes the search to one kind: 't:item' (or 'table:item') finds tables named 'item'; bare 't:' returns every table. Shortcuts: t/p/c/r/q/x/e/i and te/pe/re/ee/ps/pse/ca/ms/pr, or the full kind name.")] string namePattern,
         [Description("Optional AL kind filter ('table', 'page', 'codeunit', 'report', 'query', 'enum', 'interface', 'tableextension', 'pageextension'). Legacy C/AL releases also carry 'menusuite' (and 'form'/'dataport' from pre-2013 exports). Pass several comma-separated to match any of them ('table,page'). Null returns every kind.")] string? kind = null,
@@ -194,43 +209,52 @@ public sealed class ObjectExplorerTools
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
         var kinds = kind?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return await _search.SearchObjectsInReleaseAsync(
+        var rows = await _search.SearchObjectsInReleaseAsync(
             releaseId,
             new ObjectListFilter(Kinds: kinds, Search: namePattern),
-            MaxResults,
+            MaxObjectMatches + 1,
             ct: ct);
+        // Ranking only applies when there is something to rank by: a bare kind
+        // prefix or an empty pattern comes back in kind, then id order.
+        var ranked = !string.IsNullOrWhiteSpace(ObjectSearchRanking.ExtractKindPrefix(namePattern).Remainder);
+        return CappedRows<ReleaseObjectMatch>.From(rows, MaxObjectMatches, "objects",
+            ranked ? "best matches first" : "ordered by kind, then id",
+            "Add a token to namePattern or pass kind to narrow the search.");
     }
 
     [McpServerTool(Name = "search_procedures", ReadOnly = true)]
-    [Description("Searches a BC release for procedures (methods / triggers / event publishers) by name. Returns the owning object + module for each hit.")]
-    public async Task<IReadOnlyList<ReleaseProcedureMatch>> SearchProceduresAsync(
+    [Description("Searches a BC release for procedures (methods / triggers / event publishers) by name. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
+    public async Task<CappedRows<ReleaseProcedureMatch>> SearchProceduresAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Substring of the procedure name.")] string namePattern,
         [Description("Optional ModuleId to narrow to one module.")] long? moduleId = null,
         CancellationToken ct = default)
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
-        return await _search.SearchProceduresInReleaseAsync(releaseId, namePattern, moduleId, MaxResults, ct: ct);
+        var rows = await _search.SearchProceduresInReleaseAsync(releaseId, namePattern, moduleId, MaxProcedureMatches + 1, ct: ct);
+        return CappedRows<ReleaseProcedureMatch>.From(rows, MaxProcedureMatches, "procedures", "ordered by module",
+            "Lengthen namePattern or pass moduleId to narrow the search.");
     }
 
     [McpServerTool(Name = "search_content", ReadOnly = true)]
-    [Description("Searches AL source content across a BC release for a free-text query. Returns the line containing the hit; truncated at ~500 characters per line. The query must be at least 3 characters (a shorter term can't be trigram-indexed and returns no results).")]
-    public async Task<IReadOnlyList<ReleaseContentMatch>> SearchContentAsync(
+    [Description("Searches AL source content across a BC release for a free-text query. Returns the line containing the hit, cut at 200 characters, at most 3 lines per file and 60 lines in all; Truncated and Note say whether more were left out, so make the query more specific or pass moduleId to narrow it. The query must be at least 3 characters (a shorter term can't be trigram-indexed and returns no results).")]
+    public async Task<CappedRows<ReleaseContentMatch>> SearchContentAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Free-text search query, at least 3 characters. Matched literally (case-insensitive substring) against .al source bodies.")] string query,
         [Description("Optional ModuleId to narrow to one module.")] long? moduleId = null,
         CancellationToken ct = default)
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
-        var rows = await _search.SearchContentInReleaseAsync(releaseId, query, moduleId, MaxResults, 3, ct);
-        // Snippet is whatever the line carries; cap to keep responses bounded.
-        return rows.Select(r => r.Snippet.Length > 500
-            ? r with { Snippet = r.Snippet[..500] + "..." }
-            : r).Take(MaxResults).ToList();
+        // The service caps files, not lines: one past the cap in files is enough to
+        // know whether more lines matched than are returned.
+        var rows = await _search.SearchContentInReleaseAsync(releaseId, query, moduleId, MaxContentMatches + 1, 3, ct);
+        // The service already cuts each snippet at 200 characters.
+        return CappedRows<ReleaseContentMatch>.From(rows, MaxContentMatches, "lines", "ordered by module, then file",
+            "Make the query more specific or pass moduleId to narrow the search.");
     }
 
     [McpServerTool(Name = "find_references", ReadOnly = true)]
-    [Description("Finds the places in a BC release that reference a specific table, page, or codeunit — optionally narrowed to a specific field or procedure on it. Resolves the target by name. For a field, each reference's Usage says whether it reads the field ('read') or sets it ('assign' for := and +=, 'validate', 'modify_all', 'evaluate', 'clear'), and IsTemporary whether it goes through a temporary record; pass 'Sales Line' + field 'No.' + usage 'set' to answer 'which procedures change the No. field on Sales Line?', and includeTemporary false to leave out temporary records. Capped at 200 rows ordered by module, then object; Truncated and Note say whether more were left out — a popular base table runs well past that, so narrow with targetField or targetProcedure.")]
+    [Description("Finds the places in a BC release that reference a specific table, page, or codeunit — optionally narrowed to a specific field or procedure on it. Resolves the target by name. For a field, each reference's Usage says whether it reads the field ('read') or sets it ('assign' for := and +=, 'validate', 'modify_all', 'evaluate', 'clear'), and IsTemporary whether it goes through a temporary record; pass 'Sales Line' + field 'No.' + usage 'set' to answer 'which procedures change the No. field on Sales Line?', and includeTemporary false to leave out temporary records. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out — a popular base table runs well past that, so narrow with targetField or targetProcedure.")]
     public async Task<ReferenceSearchResult> FindReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — table, page, codeunit, etc. Resolved case-insensitively against oe_module_objects.")] string targetObject,
@@ -294,8 +318,8 @@ public sealed class ObjectExplorerTools
         // given a code snippet (#1247).
         // A usage filter is applied after the query (usage is read from the
         // source line), so it fetches the full reference set and filters that:
-        // capping first would drop the writes that sit past the first 200 rows.
-        var take = filtered ? ReferenceQueryService.MaxReferenceMatches : MaxResults;
+        // capping first would drop the writes that sit past the first 50 rows.
+        var take = filtered ? ReferenceQueryService.MaxReferenceMatches : MaxReferenceRows;
         var matches = memberName is null
             ? await _references.FindReferencesAsync(releaseId, query, take, ct)
             : await _references.FindReferencesForSymbolAsync(releaseId, query, take, ct);
@@ -313,7 +337,7 @@ public sealed class ObjectExplorerTools
                 })
                 .Where(m => includeTemporary || m.IsTemporary != true)
                 .ToList();
-            var result = ReferenceSearchResult.From(matches, MaxResults,
+            var result = ReferenceSearchResult.From(matches, MaxReferenceRows,
                 includeTemporary ? "Pass includeTemporary false to leave out temporary records."
                 : wantedUsage == "all" ? "Pass usage 'set' to keep only the places that change the field."
                 : "There is nothing narrower to filter on; read the rows shown first.");
@@ -325,12 +349,12 @@ public sealed class ObjectExplorerTools
                     Note = $"Only the first {ReferenceQueryService.MaxReferenceMatches} references to the field were checked; some that match may be missing. {result.Note}".TrimEnd(),
                 };
         }
-        return ReferenceSearchResult.From(matches, MaxResults,
+        return ReferenceSearchResult.From(matches, MaxReferenceRows,
             "Pass targetField or targetProcedure to narrow the search.");
     }
 
     [McpServerTool(Name = "find_system_references", ReadOnly = true)]
-    [Description("Finds the calls to a built-in / system method on a specific object in a BC release — the calls that find_references deliberately omits. On a table: Insert, Modify, ModifyAll, Delete, DeleteAll, Get, Find/FindFirst/FindLast/FindSet, SetRange, Validate and so on; on a page: Run, RunModal, SetRecord; on a report: Run, RunModal, SaveAsPdf, SaveAs; on a codeunit: Run. Both the instance form (CustomerList.RunModal()) and the static form (Page.RunModal(Page::\"Customer List\")) are found. Use this to answer 'where is this table inserted/modified/deleted?' or 'where is this page opened?'. Optionally narrow to some methods. Capped at 200 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
+    [Description("Finds the calls to a built-in / system method on a specific object in a BC release — the calls that find_references deliberately omits. On a table: Insert, Modify, ModifyAll, Delete, DeleteAll, Get, Find/FindFirst/FindLast/FindSet, SetRange, Validate and so on; on a page: Run, RunModal, SetRecord; on a report: Run, RunModal, SaveAsPdf, SaveAs; on a codeunit: Run. Both the instance form (CustomerList.RunModal()) and the static form (Page.RunModal(Page::\"Customer List\")) are found. Use this to answer 'where is this table inserted/modified/deleted?' or 'where is this page opened?'. Optionally narrow to some methods. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
     public async Task<ReferenceSearchResult> FindSystemReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — usually a table. Resolved case-insensitively against oe_module_objects.")] string targetObject,
@@ -359,17 +383,19 @@ public sealed class ObjectExplorerTools
                 ? null
                 : systemMethod.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
-        var matches = await _references.FindSystemReferencesAsync(releaseId, query, MaxResults, ct);
-        return ReferenceSearchResult.From(matches, MaxResults,
+        var matches = await _references.FindSystemReferencesAsync(releaseId, query, MaxReferenceRows, ct);
+        return ReferenceSearchResult.From(matches, MaxReferenceRows,
             "Pass systemMethod to narrow the search to some methods.");
     }
 
     [McpServerTool(Name = "get_object_outline", ReadOnly = true)]
-    [Description("Returns the outline of one AL object (table, page, codeunit, etc.) in a BC release — its declared procedures, triggers, event publishers, and fields with their line numbers and symbol ids. Use this to discover what an object exposes before calling get_procedure_source or list_procedure_calls. The returned symbol ids disambiguate procedure name collisions (page actions and table fields each carry an OnAction / OnValidate trigger with the same name). Each row also carries 'doc' — the declaration's XML doc-comment summary — when the module was imported with source and the declaration was documented; it is null otherwise, which is the common case.")]
-    public async Task<ObjectOutline> GetObjectOutlineAsync(
+    [Description("Returns the outline of one AL object (table, page, codeunit, etc.) in a BC release — its declared procedures, triggers, event publishers, and fields with their line numbers and symbol ids. Use this to discover what an object exposes before calling get_procedure_source or list_procedure_calls. The returned symbol ids disambiguate procedure name collisions (page actions and table fields each carry an OnAction / OnValidate trigger with the same name). Each row also carries 'doc' — the declaration's XML doc-comment summary — when the module was imported with source and the declaration was documented; it is null otherwise, which is the common case. The outline lists at most 150 members, in line order; Truncated and Note say whether more were left out, and totalSymbols how many members matched the filters, so pass memberKind or namePattern to narrow a large object such as a posting codeunit or Sales Line.")]
+    public async Task<ObjectOutlineResult> GetObjectOutlineAsync(
         [Description("Release Label ('BC 28.1') or numeric id from list_releases.")] string releaseLabelOrId,
         [Description("Name of the target object — resolved case-insensitively against oe_module_objects.")] string objectName,
         [Description("AL kind of the target object. Defaults to 'codeunit'.")] string objectKind = "codeunit",
+        [Description("Optional comma-separated member kinds to keep, e.g. 'procedure', 'trigger', 'field' or 'procedure,trigger'. 'procedure' also keeps local and internal procedures. Null keeps every kind.")] string? memberKind = null,
+        [Description("Optional case-insensitive substring of the member name, e.g. 'Post' or 'OnValidate'. Null keeps every member.")] string? namePattern = null,
         CancellationToken ct = default)
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
@@ -378,7 +404,7 @@ public sealed class ObjectExplorerTools
         {
             throw new McpException($"Could not find a {objectKind.Trim().ToLowerInvariant()} named '{objectName}' in release {releaseLabelOrId}. Try search_objects to discover the exact name.");
         }
-        return outline;
+        return ObjectOutlineResult.From(outline, memberKind, namePattern, MaxOutlineSymbols);
     }
 
     [McpServerTool(Name = "get_procedure_source", ReadOnly = true)]
@@ -402,8 +428,8 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "list_procedure_calls", ReadOnly = true)]
-    [Description("Returns the outgoing references (method calls, field accesses, type references) emitted from inside one procedure / trigger body. Use this to trace what a procedure does without reading the full source: each row carries the target object + member name + line so the agent can follow the call chain. Same disambiguation rules as get_procedure_source — pass symbolId from get_object_outline when the procedure name is shared (OnAction / OnValidate).")]
-    public async Task<IReadOnlyList<ProcedureCall>> ListProcedureCallsAsync(
+    [Description("Returns the outgoing references (method calls, field accesses, type references) emitted from inside one procedure / trigger body. Use this to trace what a procedure does without reading the full source: each row carries the target object + member name + line so the agent can follow the call chain. Same disambiguation rules as get_procedure_source — pass symbolId from get_object_outline when the procedure name is shared (OnAction / OnValidate). Capped at 100 calls in line order; Truncated and Note say whether more were left out, and get_procedure_source reads the body itself.")]
+    public async Task<CappedRows<ProcedureCall>> ListProcedureCallsAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Symbol id from get_object_outline. Preferred when set.")] long? symbolId = null,
         [Description("Name of the owning object. Required when symbolId is null.")] string? objectName = null,
@@ -413,12 +439,13 @@ public sealed class ObjectExplorerTools
     {
         var resolvedSymbolId = symbolId ?? await _explorer.ResolveProcedureSymbolIdAsync(releaseLabelOrId, objectName, objectKind, procedureName, ct);
         await _explorer.EnsureSymbolVisibleAsync(resolvedSymbolId, ct);
-        var calls = await _explorer.ListProcedureCallsAsync(resolvedSymbolId, MaxResults, ct);
+        var calls = await _explorer.ListProcedureCallsAsync(resolvedSymbolId, MaxProcedureCalls + 1, ct);
         if (calls is null)
         {
             throw new McpException($"Symbol id {resolvedSymbolId} doesn't exist. Call get_object_outline to see the current ids for an object.");
         }
-        return calls;
+        return CappedRows<ProcedureCall>.From(calls, MaxProcedureCalls, "calls", "in line order",
+            "Call get_procedure_source to read the rest of the body.");
     }
 
     [McpServerTool(Name = "list_translation_languages", ReadOnly = true)]
@@ -432,8 +459,8 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_translations", ReadOnly = true)]
-    [Description("Searches translated captions / labels / error messages in a BC release for a substring of the target text. Use this when a customer reports an issue in their native language and you need to find the AL field, caption, or label that produced the text. Defaults to caption + label hits (the user's stated priority — captions for fields, labels for error messages); pass kinds='any' to include tooltips and other property kinds. Each hit carries the owning module + object + sub-element + property names plus a SymbolId when the lookup hint resolved to a known symbol — clients can navigate straight to source for those rows.")]
-    public async Task<IReadOnlyList<TranslationMatch>> SearchTranslationsAsync(
+    [Description("Searches translated captions / labels / error messages in a BC release for a substring of the target text. Use this when a customer reports an issue in their native language and you need to find the AL field, caption, or label that produced the text. Defaults to caption + label hits (the user's stated priority — captions for fields, labels for error messages); pass kinds='any' to include tooltips and other property kinds. Each hit carries the owning module + object + sub-element + property names plus a SymbolId when the lookup hint resolved to a known symbol — clients can navigate straight to source for those rows. Capped at 50 rows; Truncated and Note say whether more were left out, so lengthen the query or pass language or moduleNamePattern to narrow it.")]
+    public async Task<CappedRows<TranslationMatch>> SearchTranslationsAsync(
         [Description("Release Label ('BC 28.1') or numeric id.")] string releaseLabelOrId,
         [Description("Substring of the target (translated) text, case-insensitive. E.g. 'Aktivér montageordrer' for the Danish caption.")] string query,
         [Description("Optional BCP-47 language code (e.g. 'da-DK', 'de-DE'). Null searches every uploaded language. 'da' (no region) matches every variant starting with that prefix.")] string? language = null,
@@ -451,14 +478,16 @@ public sealed class ObjectExplorerTools
         {
             set.Add(raw);
         }
-        return await _translations.SearchTranslationsInReleaseAsync(
-            releaseId, query, language, set, moduleNamePattern, MaxResults, ct);
+        var rows = await _translations.SearchTranslationsInReleaseAsync(
+            releaseId, query, language, set, moduleNamePattern, MaxTranslationMatches + 1, ct);
+        return CappedRows<TranslationMatch>.From(rows, MaxTranslationMatches, "translations", "ordered by module, then object",
+            "Lengthen the query or pass language or moduleNamePattern to narrow the search.");
     }
 
     private const int MaxProcedureSourceLines = 200;
 
     [McpServerTool(Name = "list_release_modules", ReadOnly = true)]
-    [Description("Lists the modules (extensions) in a BC release with their identity, flags, and whether a SymbolReference.json was stored for each at import time. Use this to discover the modules you can pass to search_objects, find_references, get_object_outline, and download_symbol_reference. Sorted alphabetically by name and capped at 200 rows; Truncated and Note say whether more were left out — a full Business Central release has more modules than that, so pass namePattern (e.g. 'System Application') to find one late in the alphabet.")]
+    [Description("Lists the modules (extensions) in a BC release with their identity, flags, and whether a SymbolReference.json was stored for each at import time. Use this to discover the modules you can pass to search_objects, find_references, get_object_outline, and download_symbol_reference. Sorted alphabetically by name and capped at 100 rows; Truncated and Note say whether more were left out — a full Business Central release has more modules than that, so pass namePattern (e.g. 'System Application') to find one late in the alphabet.")]
     public async Task<ReleaseModuleListResult> ListReleaseModulesAsync(
         [Description("Release Label ('BC 28.1') or numeric id.")] string releaseLabelOrId,
         [Description("Optional case-insensitive substring of the module name. Null lists every module.")] string? namePattern = null,
@@ -466,15 +495,15 @@ public sealed class ObjectExplorerTools
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
         // One past the cap, so a cut list says so instead of reading as complete (#1344).
-        var rows = await _explorer.ListReleaseModulesForMcpAsync(releaseId, MaxResults + 1, namePattern, ct);
-        var truncated = rows.Count > MaxResults;
+        var rows = await _explorer.ListReleaseModulesForMcpAsync(releaseId, MaxModuleRows + 1, namePattern, ct);
+        var truncated = rows.Count > MaxModuleRows;
         return new ReleaseModuleListResult(
-            rows.Take(MaxResults).Select(m => new ReleaseModuleSummary(
+            rows.Take(MaxModuleRows).Select(m => new ReleaseModuleSummary(
                 m.Id, m.Name, m.Publisher, m.Version, m.AppId,
                 m.IsTest, m.IsInternal, m.IsLanguagePack, m.DependencyCount, m.HasStoredSymbolReference)).ToList(),
             truncated,
             truncated
-                ? $"Showing the first {MaxResults} modules (ordered by name); more were left out. Pass namePattern to narrow the list."
+                ? $"Showing the first {MaxModuleRows} modules (ordered by name); more were left out. Pass namePattern to narrow the list."
                 : null);
     }
 
@@ -541,9 +570,8 @@ public sealed record ReferenceSearchResult(
     /// <summary>Cuts <paramref name="matches"/> (fetched one past the cap) to <paramref name="cap"/> and says so.</summary>
     internal static ReferenceSearchResult From(IReadOnlyList<ReferenceMatch> matches, int cap, string narrowHint)
     {
-        if (matches.Count <= cap) return new(matches, false, null);
-        return new(matches.Take(cap).ToList(), true,
-            $"Showing the first {cap} references (ordered by module, then object); more were left out. {narrowHint}");
+        var capped = CappedRows<ReferenceMatch>.From(matches, cap, "references", "ordered by module, then object", narrowHint);
+        return new(capped.Rows, capped.Truncated, capped.Note);
     }
 }
 
@@ -564,6 +592,41 @@ public sealed record ObjectCompareResult(
             set.Truncated
                 ? $"Showing the first {cap} objects (ordered by kind, then id); more were left out. Pass kind or namePattern to narrow the comparison."
                 : null);
+}
+
+/// <summary>
+/// What <c>get_object_outline</c> returns: the outline with its members narrowed
+/// by the caller's filters and cut at the tool's cap. A posting codeunit or Sales
+/// Line carries several hundred members, which ran past what an assistant can
+/// read in one response (#1510). <see cref="TotalSymbols"/> counts the members
+/// that matched before the cut.
+/// </summary>
+public sealed record ObjectOutlineResult(
+    ObjectOutline Outline,
+    int TotalSymbols,
+    bool Truncated,
+    string? Note)
+{
+    internal static ObjectOutlineResult From(ObjectOutline outline, string? memberKind, string? namePattern, int cap)
+    {
+        // "local procedure" as an agent writes it, local_procedure as the outline stores it.
+        var kinds = memberKind?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(k => k.Replace(' ', '_')).ToArray() ?? [];
+        var name = namePattern?.Trim();
+        var matched = outline.Symbols
+            .Where(sym => kinds.Length == 0 || kinds.Any(k => sym.Kind.Contains(k, StringComparison.OrdinalIgnoreCase)))
+            .Where(sym => string.IsNullOrEmpty(name) || sym.Name.Contains(name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var shown = McpAnswerBudget.Fit(matched, cap);
+        var truncated = shown < matched.Count;
+        return new ObjectOutlineResult(
+            outline with { Symbols = matched.Take(shown).ToList() },
+            matched.Count,
+            truncated,
+            truncated
+                ? $"Showing the first {shown} of {matched.Count} members (in line order); more were left out. Pass memberKind or namePattern to narrow the outline."
+                : null);
+    }
 }
 
 /// <summary>
