@@ -25,6 +25,14 @@ namespace ALDevToolbox.Services.Account;
 /// SiteAdmin, never by an org Admin who happens to share the organisation. See
 /// <see cref="RequireMayManage"/>.
 /// </para>
+/// <para>
+/// Every change re-reads the acting user from the database first
+/// (<see cref="RequireActingAdminAsync"/>) instead of trusting the role and
+/// site-admin claims. The Users page runs in a Blazor circuit, which keeps the
+/// principal it connected with for as long as the websocket stays up, so an
+/// Admin demoted or disabled while the page was open would otherwise keep
+/// acting as one, down to promoting themselves back (#1534).
+/// </para>
 /// </remarks>
 public sealed class UserAdministrationService
 {
@@ -62,6 +70,7 @@ public sealed class UserAdministrationService
     /// </summary>
     public async Task ApproveSignupAsync(int signupRequestId, int decidedByUserId, int actingOrgId, CancellationToken ct = default)
     {
+        await RequireActingAdminAsync(actingOrgId, ct);
         var req = await LoadSignupRequestAsync(signupRequestId, actingOrgId, ct);
         if (req.Decision != SignupDecision.Pending || req.UserId is null)
         {
@@ -87,6 +96,7 @@ public sealed class UserAdministrationService
     /// <summary>Rejects a pending signup. The user row is deleted; the request keeps the audit trail.</summary>
     public async Task RejectSignupAsync(int signupRequestId, int decidedByUserId, int actingOrgId, CancellationToken ct = default)
     {
+        await RequireActingAdminAsync(actingOrgId, ct);
         var req = await LoadSignupRequestAsync(signupRequestId, actingOrgId, ct);
         if (req.Decision != SignupDecision.Pending)
         {
@@ -128,8 +138,11 @@ public sealed class UserAdministrationService
         // save never leaves tokens revoked on an account still active.
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
         await LockAdminGuardAsync(actingOrgId, ct);
+        // Read under the org lock, so a demotion of the actor that committed
+        // while we waited is the one we see.
+        var actorIsSiteAdmin = await RequireActingAdminAsync(actingOrgId, ct);
         var user = await LoadUserAsync(userId, actingOrgId, ct);
-        RequireMayManage(user);
+        RequireMayManage(user, actorIsSiteAdmin);
         if (user.Role == UserRole.Admin && user.Status == UserStatus.Active
             && await CountActiveAdminsAsync(actingOrgId, ct) <= 1)
         {
@@ -186,8 +199,9 @@ public sealed class UserAdministrationService
     /// <summary>Re-enables a disabled user without further admin approval.</summary>
     public async Task EnableUserAsync(int userId, int actingOrgId, CancellationToken ct = default)
     {
+        var actorIsSiteAdmin = await RequireActingAdminAsync(actingOrgId, ct);
         var user = await LoadUserAsync(userId, actingOrgId, ct);
-        RequireMayManage(user);
+        RequireMayManage(user, actorIsSiteAdmin);
         if (user.Status == UserStatus.Disabled) user.Status = UserStatus.Active;
         await _db.SaveChangesAsync(ct);
     }
@@ -200,8 +214,9 @@ public sealed class UserAdministrationService
     /// </summary>
     public async Task ChangeDisplayNameAsync(int userId, string newDisplayName, int actingOrgId, CancellationToken ct = default)
     {
+        var actorIsSiteAdmin = await RequireActingAdminAsync(actingOrgId, ct);
         var user = await LoadUserAsync(userId, actingOrgId, ct);
-        RequireMayManage(user);
+        RequireMayManage(user, actorIsSiteAdmin);
         var trimmed = newDisplayName?.Trim() ?? string.Empty;
         if (trimmed.Length is < 2 or > 80)
         {
@@ -217,8 +232,9 @@ public sealed class UserAdministrationService
         // Guard and save under the org lock, as in DisableUserAsync (#1260).
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
         await LockAdminGuardAsync(actingOrgId, ct);
+        var actorIsSiteAdmin = await RequireActingAdminAsync(actingOrgId, ct);
         var user = await LoadUserAsync(userId, actingOrgId, ct);
-        RequireMayManage(user);
+        RequireMayManage(user, actorIsSiteAdmin);
         if (user.Role == UserRole.Admin && newRole != UserRole.Admin
             && user.Status == UserStatus.Active
             && await CountActiveAdminsAsync(actingOrgId, ct) <= 1)
@@ -260,6 +276,10 @@ public sealed class UserAdministrationService
     private async Task<BulkActionResult> BulkAsync(
         IReadOnlyList<int> userIds, Func<int, Task> op, int actingOrgId, CancellationToken ct)
     {
+        // Once for the batch, so a stale page gets one refusal rather than a
+        // failure row per user; each row checks again, since the batch can
+        // take the actor's own rights away part-way through.
+        await RequireActingAdminAsync(actingOrgId, ct);
         var succeeded = new List<int>();
         var failures = new List<BulkActionFailure>();
         foreach (var id in userIds.Distinct())
@@ -340,15 +360,46 @@ public sealed class UserAdministrationService
     }
 
     /// <summary>
+    /// Re-reads the acting user (<see cref="IOrganizationContext.CurrentUserId"/>)
+    /// from the database and refuses unless they are still an active Admin of
+    /// <paramref name="actingOrgId"/>. Returns the row's SiteAdmin flag for
+    /// <see cref="RequireMayManage"/>. The role and site-admin claims can be
+    /// hours old inside a Blazor circuit, where the cookie revalidation never
+    /// runs (#1534); this is the same row-over-claim read as
+    /// <c>TeamService.IsOrgAdminAsync</c>. Inside the query filter: the actor
+    /// belongs to the request's own organisation, which is the acting one.
+    /// </summary>
+    private async Task<bool> RequireActingAdminAsync(int actingOrgId, CancellationToken ct)
+    {
+        var actorId = _orgContext.CurrentUserId;
+        var actor = actorId is int id
+            ? await _db.Users.AsNoTracking()
+                .Where(u => u.Id == id && u.OrganizationId == actingOrgId)
+                .Select(u => new { u.Status, u.Role, u.IsSiteAdmin })
+                .FirstOrDefaultAsync(ct)
+            : null;
+        if (actor is null || actor.Status != UserStatus.Active || actor.Role != UserRole.Admin)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Actor"] = "Your account no longer has admin rights in this organisation. Reload the page to see what you can do."
+            });
+        }
+        return actor.IsSiteAdmin;
+    }
+
+    /// <summary>
     /// Refuses an email, name, status or role change on a SiteAdmin's account unless
     /// the actor is a SiteAdmin too. An org Admin shares the organisation with
     /// the bootstrap SiteAdmin in the usual single-org setup, and changing that
     /// account's email or status would hand them, or lock everyone out of, the
-    /// cross-organisation console.
+    /// cross-organisation console. <paramref name="actorIsSiteAdmin"/> comes
+    /// from the actor's row (<see cref="RequireActingAdminAsync"/>), not the
+    /// claim, which a SiteAdmin demoted while a page was open would still carry.
     /// </summary>
-    private void RequireMayManage(User target)
+    private static void RequireMayManage(User target, bool actorIsSiteAdmin)
     {
-        if (target.IsSiteAdmin && !_orgContext.IsSiteAdmin)
+        if (target.IsSiteAdmin && !actorIsSiteAdmin)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -399,8 +450,9 @@ public sealed class UserAdministrationService
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
+        var actorIsSiteAdmin = await RequireActingAdminAsync(actingOrgId, ct);
         var user = await LoadUserAsync(targetUserId, actingOrgId, ct);
-        RequireMayManage(user);
+        RequireMayManage(user, actorIsSiteAdmin);
         if (user.Id == actingUserId)
         {
             // Admins changing their own email via the admin route is too
