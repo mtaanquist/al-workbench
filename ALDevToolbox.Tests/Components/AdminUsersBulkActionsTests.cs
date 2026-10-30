@@ -102,8 +102,11 @@ public sealed class AdminUsersBulkActionsTests : IAsyncDisposable
         foreach (var name in names) cut.Find($"input[aria-label='Select {name}']").Change(true);
     }
 
+    // The bar appears on the render after the last box is ticked, which can land a
+    // moment after Change returns when the suite is busy: wait for it like Answer does.
     private static void Bulk(IRenderedComponent<AdminAdministrationUsers> cut, string action) =>
-        cut.Find(".bulk-bar").QuerySelectorAll("button").Single(b => b.TextContent.Trim() == action).Click();
+        cut.WaitForAssertion(() => cut.Find(".bulk-bar").QuerySelectorAll("button")
+            .Single(b => b.TextContent.Trim() == action).Click());
 
     private static void Answer(IRenderedComponent<AdminAdministrationUsers> cut, string button) =>
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn")
