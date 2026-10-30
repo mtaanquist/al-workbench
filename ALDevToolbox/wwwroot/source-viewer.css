@@ -569,3 +569,27 @@ button.sv-sec-h:focus-visible {
 .oe-diff-overview__mark--inserted  { background-color: var(--bar-succeeded); }
 .oe-diff-overview__mark--deleted   { background-color: var(--bar-failed); }
 .oe-diff-overview__mark--modified  { background-color: var(--bar-draft); }
+
+/* The references panel's read / set switch and temporary-record box, under
+   the filter box. Wraps on a narrow rail rather than squeezing the labels. */
+.sv-usage-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-2);
+}
+
+.sv-usage-filter .pill-tabs {
+    flex: 1 1 auto;
+}
+
+.sv-usage-filter .pill-tab {
+    flex: 1 1 0;
+    justify-content: center;
+    font-size: var(--text-xs);
+}
+
+.sv-usage-filter .check {
+    font-size: var(--text-xs);
+}

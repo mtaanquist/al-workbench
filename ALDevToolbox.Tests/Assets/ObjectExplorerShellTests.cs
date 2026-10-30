@@ -433,6 +433,7 @@ public sealed class ObjectExplorerShellTests
     [InlineData("FOLDER_ICON_SVG", "folder")]
     [InlineData("FILE_CODE_ICON_SVG", "file-code")]
     [InlineData("CHEVRON_RIGHT_ICON_SVG", "chevron-right")]
+    [InlineData("CHECK_ICON_SVG", "check")]
     public void Inlined_tree_icons_match_the_vendored_svg(string constant, string icon)
     {
         var js = Read(ViewerJs);

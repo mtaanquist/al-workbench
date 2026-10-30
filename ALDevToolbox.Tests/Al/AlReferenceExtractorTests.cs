@@ -2610,8 +2610,13 @@ public sealed class AlReferenceExtractorTests
             """;
         var result = AlReferenceExtractor.Extract(src, OwnerCodeunit(MakeResolver()));
 
+        // Neither call is a reference in its own right. ModifyAll's first
+        // argument names the field it sets, so that field is one: "where is
+        // this field set?" has to find it.
         result.References.Where(r => r.ReferenceKind != "property_object")
-            .Should().BeEmpty(because: "DeleteAll and ModifyAll are Record built-ins");
+            .Should().ContainSingle(because: "DeleteAll and ModifyAll are Record built-ins")
+            .Which.Should().Match<ExtractedReference>(r =>
+                r.ReferenceKind == "field_access" && r.TargetMemberName == "Name" && r.Line == 6);
         result.Stats.UnresolvedReceivers.Should().Be(0);
     }
 

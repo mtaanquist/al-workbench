@@ -370,7 +370,7 @@ public sealed class ReferenceQueryService
             ,
             matched AS (
                 SELECT mr.id, mr.module_id, mr.source_object_id, mr.source_symbol_id,
-                       mr.reference_kind, mr.line_number,
+                       mr.reference_kind, mr.line_number, mr.column_number,
                        mr.target_member_name, mr.target_member_kind
                 FROM oe_module_references mr
                 WHERE mr.module_id = ANY(ARRAY(SELECT id FROM winning))
@@ -394,7 +394,7 @@ public sealed class ReferenceQueryService
                   )
                 UNION ALL
                 SELECT mr.id, mr.module_id, mr.source_object_id, mr.source_symbol_id,
-                       mr.reference_kind, mr.line_number,
+                       mr.reference_kind, mr.line_number, mr.column_number,
                        mr.target_member_name, mr.target_member_kind
                 FROM oe_module_references mr
                 WHERE mr.module_id = ANY(ARRAY(SELECT id FROM winning))
@@ -433,7 +433,10 @@ public sealed class ReferenceQueryService
                 -- and rows imported before the symbol link existed.
                 ss.name                  AS "SourceMemberName",
                 ss.kind                  AS "SourceMemberKind",
-                ss.signature             AS "SourceMemberSignature"
+                ss.signature             AS "SourceMemberSignature",
+                mr.column_number         AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM matched mr
             JOIN oe_module_objects so ON so.id = mr.source_object_id
             JOIN oe_modules        m  ON m.id  = mr.module_id
@@ -531,7 +534,10 @@ public sealed class ReferenceQueryService
                 NULL::text               AS "MemberSignature",
                 ss.name                  AS "SourceMemberName",
                 ss.kind                  AS "SourceMemberKind",
-                ss.signature             AS "SourceMemberSignature"
+                ss.signature             AS "SourceMemberSignature",
+                NULL::int                AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM matched sr
             JOIN oe_module_objects so ON so.id = sr.source_object_id
             JOIN oe_modules        m  ON m.id  = sr.module_id
@@ -630,7 +636,10 @@ public sealed class ReferenceQueryService
                 -- A declaration isn't a call site inside a member body.
                 NULL::text               AS "SourceMemberName",
                 NULL::text               AS "SourceMemberKind",
-                NULL::text               AS "SourceMemberSignature"
+                NULL::text               AS "SourceMemberSignature",
+                NULL::int                AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM oe_module_symbols s
             JOIN oe_module_objects o  ON o.id = s.object_id
             JOIN oe_modules        m  ON m.id = o.module_id
@@ -737,7 +746,10 @@ public sealed class ReferenceQueryService
                 -- An implementing-procedure declaration, not a call site.
                 NULL::text               AS "SourceMemberName",
                 NULL::text               AS "SourceMemberKind",
-                NULL::text               AS "SourceMemberSignature"
+                NULL::text               AS "SourceMemberSignature",
+                NULL::int                AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM oe_module_references mr
             JOIN oe_module_objects    so ON so.id = mr.source_object_id
             JOIN oe_modules           sm ON sm.id = mr.module_id
@@ -784,7 +796,7 @@ public sealed class ReferenceQueryService
     /// when no user is signed in, so an unauthenticated call enriches nothing
     /// exactly as the filtered query it replaces did.</para>
     /// </summary>
-    private async Task<List<ReferenceMatch>> EnrichReferencesWithSnippetsAsync(
+    internal async Task<List<ReferenceMatch>> EnrichReferencesWithSnippetsAsync(
         List<ReferenceMatch> matches, CancellationToken ct)
     {
         // Distinct (file, line) pairs — many matches share a file, and popular
@@ -796,19 +808,47 @@ public sealed class ReferenceQueryService
             .ToList();
         if (pairs.Count == 0) return matches;
 
+        // The files whose field references need the "is the record temporary?"
+        // answer. Only those are scanned for temporary declarations; the scan
+        // runs once per file however many of its lines matched.
+        var temporaryFiles = matches
+            .Where(m => m.SourceFileId.HasValue && m.ReferenceKind == "field_access")
+            .Select(m => m.SourceFileId!.Value)
+            .Distinct()
+            .ToArray();
+
         // split_part counts fields from 1 and returns '' past the end of the
         // string, which is exactly what we want for a line number beyond the
         // file. Splitting on '\n' alone leaves the '\r' of CRLF content on the
         // end of the line; the TrimEnd below takes it off along with trailing
-        // indentation.
-        const string sql = """
+        // indentation. The temps CTE runs the two declaration patterns of
+        // ReferenceUsage in the database, so only the captured names travel
+        // back rather than the file bodies (#687).
+        var sql = $$"""
+            WITH temps AS (
+                SELECT f.id AS file_id,
+                       fc.content ~* {4} AS rec_temporary,
+                       -- The capture walks the whole file; most files declare
+                       -- nothing temporary, and the plain substring test
+                       -- skips them for the price of one scan.
+                       CASE WHEN fc.content ILIKE '%temporary%' THEN
+                           ARRAY(SELECT coalesce(x.m[1], x.m[2])
+                                 FROM regexp_matches(fc.content, {3}, 'gi') AS x(m))
+                       END AS names
+                FROM oe_module_files  f
+                JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+                WHERE f.id = ANY({5}::bigint[]) AND f.organization_id = {2}::int
+            )
             SELECT m.file_id                             AS "FileId",
                    m.line                                AS "LineNumber",
                    f.path                                AS "Path",
-                   split_part(fc.content, E'\n', m.line) AS "Text"
+                   split_part(fc.content, E'\n', m.line) AS "Text",
+                   t.rec_temporary                       AS "RecTemporary",
+                   t.names                               AS "TemporaryNames"
             FROM unnest({0}::bigint[], {1}::int[]) AS m(file_id, line)
             JOIN oe_module_files  f  ON f.id = m.file_id AND f.organization_id = {2}::int
             JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+            LEFT JOIN temps t ON t.file_id = m.file_id
             """;
 
         var rows = await _db.Database
@@ -816,10 +856,14 @@ public sealed class ReferenceQueryService
                 sql,
                 pairs.Select(p => p.FileId).ToArray(),
                 pairs.Select(p => p.Line).ToArray(),
-                _orgContext.OrganizationIdForFilter)
+                _orgContext.OrganizationIdForFilter,
+                ReferenceUsage.TemporaryDeclarationPattern,
+                ReferenceUsage.TemporaryRecPattern,
+                temporaryFiles)
             .ToListAsync(ct);
 
         var lookup = rows.ToDictionary(r => (r.FileId, r.LineNumber));
+        var temporaryNames = new Dictionary<long, HashSet<string>>();
 
         var enriched = new List<ReferenceMatch>(matches.Count);
         foreach (var m in matches)
@@ -827,9 +871,26 @@ public sealed class ReferenceQueryService
             if (m.SourceFileId is { } fid && m.LineNumber is { } ln
                 && lookup.TryGetValue((fid, ln), out var row))
             {
-                var raw = (row.Text ?? string.Empty).TrimEnd();
+                var text = row.Text ?? string.Empty;
+                var raw = text.TrimEnd();
                 if (raw.Length > 200) raw = raw[..200] + "...";
-                enriched.Add(m with { SourceFilePath = row.Path, Snippet = raw });
+                var classified = m with { SourceFilePath = row.Path, Snippet = raw };
+                if (ReferenceUsage.AppliesTo(m.ReferenceKind)
+                    && ReferenceUsage.Classify(text.TrimEnd('\r'), m.ColumnNumber, m.MemberName) is { } site)
+                {
+                    bool? isTemporary = null;
+                    if (m.ReferenceKind == "field_access" && row.RecTemporary is { } recTemporary)
+                    {
+                        if (!temporaryNames.TryGetValue(fid, out var names))
+                        {
+                            names = ReferenceUsage.ParseTemporaryNames(row.TemporaryNames ?? []);
+                            temporaryNames[fid] = names;
+                        }
+                        isTemporary = ReferenceUsage.IsTemporary(site.Receiver, recTemporary, names);
+                    }
+                    classified = classified with { Usage = site.Usage, IsTemporary = isTemporary };
+                }
+                enriched.Add(classified);
             }
             else
             {
@@ -843,8 +904,13 @@ public sealed class ReferenceQueryService
     /// One extracted source line, keyed back to the requested (file, line) pair
     /// — see <see cref="EnrichReferencesWithSnippetsAsync"/>. <c>Text</c> is
     /// empty when the line number runs past the end of the file.
+    /// <c>RecTemporary</c> and <c>TemporaryNames</c> are only filled for files
+    /// holding a field reference: whether the file's own <c>Rec</c> is
+    /// temporary, and the name lists of its temporary record declarations.
     /// </summary>
-    private sealed record SnippetRow(long FileId, int LineNumber, string Path, string? Text);
+    private sealed record SnippetRow(
+        long FileId, int LineNumber, string Path, string? Text,
+        bool? RecTemporary, string[]? TemporaryNames);
 
     /// <summary>
     /// Returns the codeunits (across the visible module chain seeded by

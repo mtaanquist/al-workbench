@@ -96,7 +96,7 @@ public static class McpToolCatalog
         new McpToolDescriptor("search_content", ObjectExplorer,
             "Searches the AL source itself, for when you remember the code but not the object.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("find_references", ObjectExplorer,
-            "Finds every place that touches a table, field or procedure.", false, ToolKey.ObjectExplorer),
+            "Finds every place that touches a table, field or procedure, or only the places that set a field.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("find_system_references", ObjectExplorer,
             "Finds uses of platform types that the base application does not declare.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("get_object_outline", ObjectExplorer,

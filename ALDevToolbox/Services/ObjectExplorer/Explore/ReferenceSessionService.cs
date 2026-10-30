@@ -241,7 +241,7 @@ public sealed class ReferenceSessionService
                 r.SourceObject!.SourceFile!.Path,
                 null,
                 "variable_use",
-                null,
+                r.TargetMemberName,
                 null,
                 null,
                 // Enclosing procedure / trigger that uses the global (LEFT
@@ -249,13 +249,19 @@ public sealed class ReferenceSessionService
                 // reference wasn't stamped with a source symbol).
                 r.SourceSymbol!.Name,
                 r.SourceSymbol!.Kind,
-                r.SourceSymbol!.Signature))
+                r.SourceSymbol!.Signature,
+                r.ColumnNumber,
+                null,
+                null))
             .OrderBy(m => m.SourceObjectName)
             .ThenBy(m => m.LineNumber)
             // Cap consistently with the other find-references paths (+1 so Store
             // can detect truncation). See issue #366.
             .Take(ReferenceQueryService.MaxReferenceMatches + 1)
             .ToListAsync(ct);
+
+        // The code line, and whether each use reads or sets the variable.
+        rows = await _references.EnrichReferencesWithSnippetsAsync(rows, ct);
 
         var label = $"references to variable {head.OwnerKind} {head.OwnerName}.{head.Name}";
         return Store(label, head.ReleaseId, rows, ownerKey, head.Name);
@@ -310,6 +316,7 @@ public sealed class ReferenceSessionService
             var idx = IndexOfWord(lineText, varName, 0);
             if (idx < 0) continue;
             var trimmed = lineText.TrimStart();
+            var site = ReferenceUsage.Classify(lineText, idx + 1, varName);
             rows.Add(new ReferenceMatch(
                 Id: rows.Count + 1,
                 SourceModuleId: meta.ModuleId,
@@ -325,7 +332,9 @@ public sealed class ReferenceSessionService
                 Category: "object",
                 MemberName: null,
                 MemberKind: null,
-                MemberSignature: null));
+                MemberSignature: null,
+                ColumnNumber: idx + 1,
+                Usage: site?.Usage));
         }
 
         var label = $"uses of local variable {varName} in this file";

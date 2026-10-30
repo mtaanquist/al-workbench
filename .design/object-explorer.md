@@ -223,6 +223,16 @@ The "Possibly related" bucket becomes much smaller because the heuristic only ru
 
 Find references on an `OeModuleSymbol` (procedure / field) is the same shape with one extra hop: the cross-module pass starts by finding every `OeModuleVariable` whose subtype matches the object that *holds* the symbol, then narrows to call sites of the named member via source scanning of those holding modules. This is where the receiver-aware logic still earns its keep — but now bootstrapped from authoritative type data.
 
+### Where a field is set
+
+A `field_access`, `variable_use` or local-variable reference says whether it reads the value or sets it (`ReferenceMatch.Usage`), and a field reference whether it goes through a temporary record (`ReferenceMatch.IsTemporary`). The References panel offers both as filters ("Read or set" / "Where set", "Hide temporary records"), and the MCP `find_references` tool takes them as `usage` and `includeTemporary` alongside `targetField`.
+
+**Worked out at query time, not stored.** `ReferenceUsage` classifies each row from its own source line and column, in the same pass that cuts the snippet. Storing it on `oe_module_references` would have been exact, but would answer nothing for the releases already imported until each was imported again; the line is already fetched for the snippet, so reading it costs nothing extra. A set is `:=` and the compound assignments, the first argument of `Validate`, `ModifyAll`, `Evaluate` and `Clear`, and `Init` / `TransferFields` / `Copy` called on a record variable. The price is that it sees one line: a statement split so that the `:=` or the `Validate(` is on another line reads as a read.
+
+**Temporary is a property of the record, decided per file.** The snippet query also runs two patterns over each file that holds a field reference, in the database so only the captured names come back (#687): declarations of a temporary record (AL `Name: Record X temporary`, variables and parameters alike; C/AL `Name@1 : TEMPORARY Record 37`), and whether the object's own `Rec` is temporary (`SourceTableTemporary = true`, `TableType = Temporary`). A field reached through a declared name is temporary when that name is; one reached through `Rec`, `xRec` or no receiver takes the object's flag. Names are matched within the file, not per procedure, and a `with` block is not followed.
+
+`ModifyAll` joined the methods whose arguments are read as field names on the receiver, so its field argument is a reference at all. That reaches only releases imported after the change.
+
 ## UI
 
 The Object Explorer's hierarchy becomes:

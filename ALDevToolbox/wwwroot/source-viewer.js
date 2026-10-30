@@ -1942,6 +1942,11 @@ const SEARCH_ICON_SVG =
     '<svg class="search__icon" viewBox="0 0 24 24" width="15" height="15" fill="none" ' +
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>';
+// The tick in the references panel's "Hide temporary records" box. Pinned
+// against Resources/Icons/check.svg.
+const CHECK_ICON_SVG =
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 // The explorer tree's four glyphs, same rules as above. Pinned against
 // Resources/Icons/{package,folder,file-code,chevron-right}.svg.
 const PACKAGE_ICON_SVG =
@@ -2102,6 +2107,13 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     const tools = document.createElement("div");
     tools.className = "sv-sec-tools";
     tools.appendChild(search);
+    // Field and variable references know whether they read or set the value
+    // (and, for fields, whether the record is temporary): offer those as
+    // filters only when the list has something for them to act on.
+    const hasUsage = session.results.some(r => r.usage);
+    if (hasUsage) {
+        tools.appendChild(buildUsageFilter(session.results.some(r => r.isTemporary)));
+    }
     section.appendChild(tools);
 
     // Group references by their source object so every place that touches
@@ -2186,9 +2198,17 @@ function wireRefsFilter(panel) {
     // narrows the set" then costs a handful of style writes instead of 5000.
     const setHidden = (el, value) => { if (el.hidden !== value) el.hidden = value; };
 
+    // The read / set and temporary filters, when the panel offers them.
+    const usageTabs = Array.from(panel.querySelectorAll("[data-usage-filter]"));
+    const hideTemporary = panel.querySelector("[data-hide-temporary]");
+    const usageMode = () =>
+        usageTabs.find(t => t.classList.contains("is-active"))?.dataset.usageFilter ?? "all";
+
     const run = () => {
         const needle = filter.value.trim().toLowerCase();
-        if (needle.length === 0) {
+        const setOnly = usageMode() === "set";
+        const noTemporary = hideTemporary?.checked === true;
+        if (needle.length === 0 && !setOnly && !noTemporary) {
             // Same reason as wireOutlineFilter: clearing the box restores
             // everything, rather than leaving whatever held no rows hidden.
             for (let i = 0; i < sections.length; i++) {
@@ -2204,7 +2224,10 @@ function wireRefsFilter(panel) {
             let sectionVisible = false;
             for (const item of rowsBySection[i]) {
                 const hay = item.dataset.filter ?? "";
-                const match = hay.includes(needle);
+                const usage = item.dataset.usage;
+                const match = (needle.length === 0 || hay.includes(needle))
+                    && (!setOnly || (usage != null && usage !== "read"))
+                    && (!noTemporary || item.dataset.temporary !== "1");
                 setHidden(item, !match);
                 if (match) sectionVisible = true;
             }
@@ -2230,6 +2253,53 @@ function wireRefsFilter(panel) {
         clearTimeout(timer);
         timer = setTimeout(run, SEARCH_DEBOUNCE_MS);
     });
+    for (const tab of usageTabs) {
+        tab.addEventListener("click", () => {
+            for (const t of usageTabs) {
+                const active = t === tab;
+                t.classList.toggle("is-active", active);
+                t.setAttribute("aria-pressed", active ? "true" : "false");
+            }
+            run();
+        });
+    }
+    hideTemporary?.addEventListener("change", run);
+}
+
+/// The read / set switch and the temporary-record box under the references
+/// filter. Both narrow the rows already in the panel; nothing is fetched.
+function buildUsageFilter(hasTemporary) {
+    const wrap = document.createElement("div");
+    wrap.className = "sv-usage-filter";
+
+    const tabs = document.createElement("div");
+    tabs.className = "pill-tabs pill-tabs--equal";
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Show uses");
+    for (const [mode, label] of [["all", "Read or set"], ["set", "Where set"]]) {
+        const tab = document.createElement("button");
+        tab.type = "button";
+        tab.className = mode === "all" ? "pill-tab is-active" : "pill-tab";
+        tab.dataset.usageFilter = mode;
+        tab.setAttribute("aria-pressed", mode === "all" ? "true" : "false");
+        tab.textContent = label;
+        tabs.appendChild(tab);
+    }
+    wrap.appendChild(tabs);
+
+    if (hasTemporary) {
+        const check = document.createElement("label");
+        check.className = "check";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.dataset.hideTemporary = "";
+        const box = document.createElement("span");
+        box.className = "check__box";
+        box.innerHTML = CHECK_ICON_SVG;
+        check.append(input, box, "Hide temporary records");
+        wrap.appendChild(check);
+    }
+    return wrap;
 }
 
 // Within an object, order rows by reference category (declarations first,
@@ -2417,8 +2487,27 @@ function buildRefsRow(r, session, fileId, editorId) {
             }
             : null,
     });
+    if (r.usage) row.dataset.usage = r.usage;
+    if (r.isTemporary) row.dataset.temporary = "1";
     attachRefsTooltip(row, r);
     return row;
+}
+
+/// What the reference does with the field or variable, as the hover card
+/// says it. Mirrors the ReferenceUsage values on the server.
+function usageLabel(usage, isTemporary) {
+    let text;
+    switch (usage) {
+        case "read":         text = "Reads the value"; break;
+        case "assign":       text = "Sets the value with :="; break;
+        case "validate":     text = "Sets the value with Validate"; break;
+        case "modify_all":   text = "Sets the value with ModifyAll"; break;
+        case "evaluate":     text = "Sets the value with Evaluate"; break;
+        case "clear":        text = "Clears the value"; break;
+        case "record_write": text = "Overwrites the record"; break;
+        default:             return "";
+    }
+    return isTemporary ? `${text}, on a temporary record` : text;
 }
 
 /// Plain-text fallback for the row's `title`, for keyboard users and for
@@ -2436,6 +2525,8 @@ function refsRowTitle(r) {
     if (r.sourceFilePath) parts.push(r.sourceFilePath);
     const kind = referenceKindLabel(r.referenceKind);
     if (kind) parts.push(kind);
+    const usage = usageLabel(r.usage, r.isTemporary);
+    if (usage) parts.push(usage);
     return parts.join(" - ");
 }
 
@@ -2823,6 +2914,16 @@ function showRefsTooltip(anchor, r) {
     kindRow.className = "source-viewer__refs-tooltip-kind u-muted";
     kindRow.textContent = describeReferenceCategory(r.category, r.referenceKind);
     el.appendChild(kindRow);
+
+    // Read or set, and through a temporary record - the two things the
+    // panel's filters work on, so the row says which side it fell on.
+    const usage = usageLabel(r.usage, r.isTemporary);
+    if (usage) {
+        const usageRow = document.createElement("div");
+        usageRow.className = "source-viewer__refs-tooltip-kind u-muted";
+        usageRow.textContent = usage;
+        el.appendChild(usageRow);
+    }
 
     positionRefsTooltip(el, anchor);
     el.hidden = false;

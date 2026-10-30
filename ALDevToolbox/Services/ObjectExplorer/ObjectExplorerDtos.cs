@@ -315,6 +315,12 @@ public sealed record FindSystemReferencesQuery(
 /// trigger the reference sits inside (resolved from the reference's
 /// <c>source_symbol_id</c>) — null for declarations and object-scope
 /// references that aren't inside a member body.
+///
+/// <see cref="Usage"/> says whether a field or variable reference reads the
+/// value or sets it (one of the <see cref="Explore.ReferenceUsage"/> values),
+/// and <see cref="IsTemporary"/> whether a field is reached through a temporary
+/// record. Both are worked out from the source line when the snippet is cut
+/// (null for every other kind of reference and for rows without source).
 /// </summary>
 public sealed record ReferenceMatch(
     long Id,
@@ -334,7 +340,10 @@ public sealed record ReferenceMatch(
     string? MemberSignature = null,
     string? SourceMemberName = null,
     string? SourceMemberKind = null,
-    string? SourceMemberSignature = null);
+    string? SourceMemberSignature = null,
+    int? ColumnNumber = null,
+    string? Usage = null,
+    bool? IsTemporary = null);
 
 /// <summary>
 /// Read-only projection of an <c>oe_module_files</c> row for the source viewer.
