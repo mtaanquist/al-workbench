@@ -13,7 +13,7 @@ App folders are relative to `ALDevToolbox/`.
 | Folder                       | What goes there                                                              |
 |------------------------------|------------------------------------------------------------------------------|
 | `Components/Pages/`          | Routable pages (one `.razor` per route). A tool with more than a page or two gets its own subfolder — `Pages/Upgrades/` is the Business Central platform-update fleet page. |
-| `Components/Layout/`         | Shell layout, sidebar, top bar, reconnect modal.                             |
+| `Components/Layout/`         | Shell layout, sidebar, top bar, reconnect modal, and the link-preview tags in the page head. |
 | `Components/Email/`          | The emails: `EmailLayout`, `EmailParagraph`, `EmailButton`, `EmailCode`, the `EmailTheme` token values, one component per email, and `EmailPreviews` (sample data for the SiteAdmin preview tab). Rendered by `Services/Email/`, never routed. See `.design/email.md`. |
 | `Components/Shared/`         | Reusable components (`SettingRow`, `AuthCard`, `ConfirmDialog`, `DependencyPicker`, `AuditHistoryPanel`, `EnvironmentActivityFeed`, ...). Check here before building a new control. |
 | `Components/Shared/Archetypes/` | The page frame, one component per handoff structure: `PageHead`, `EmptyState`, `LoadingBlock`, `FilterBar`, the page frames `ListPage`, `DetailPage`, `EditPage`, `GeneratorPage` and `LauncherPage`, plus the content archetypes `DocsPage`, `SetupSteps` / `SetupStep` and `ErrorPage`. Pages compose these instead of copying the markup — see "Page archetypes" below. |
