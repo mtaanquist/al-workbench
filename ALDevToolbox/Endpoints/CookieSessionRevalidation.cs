@@ -103,6 +103,53 @@ internal static class CookieSessionRevalidation
     }
 
     /// <summary>
+    /// Where <see cref="ALDevToolbox.Services.Account.SessionRevalidationCircuitHandler"/>
+    /// sends an interactive page whose user no longer matches their row.
+    /// </summary>
+    public const string RefreshPath = "/auth/session/refresh";
+
+    /// <summary>
+    /// <c>GET /auth/session/refresh?return=...</c>: the same check as
+    /// <see cref="ValidateAsync"/>, without its throttle, then back to the page.
+    /// A circuit cannot re-run the cookie check itself, and a plain reload
+    /// would not help while the throttle still holds the old claims (the new
+    /// circuit would carry them again), so the page comes here first. An
+    /// account that is gone, disabled or past a credential change is signed
+    /// out to the sign-in page; otherwise the cookie is re-issued with claims
+    /// rebuilt from the row, and the page's own authorisation decides what the
+    /// user sees next (#1534).
+    /// </summary>
+    public static IEndpointRouteBuilder MapSessionRefresh(this IEndpointRouteBuilder app)
+    {
+        app.MapGet(RefreshPath, async (HttpContext ctx, IOrganizationContext org, AppDbContext db, TimeProvider clock, CancellationToken ct) =>
+        {
+            var cookie = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            User? user = null;
+            if (cookie.Succeeded && cookie.Properties is not null && org.CurrentUserId is int userId)
+            {
+                // Filtered: the cookie's own user, inside the organisation its claims name.
+                user = await db.Users.AsNoTracking()
+                    .Include(u => u.Organization)
+                    .FirstOrDefaultAsync(u => u.Id == userId, ct);
+            }
+            if (user is null || user.Status != UserStatus.Active
+                || (user.CredentialsChangedAt is { } changedAt && SignedInAt(cookie.Properties!) < changedAt))
+            {
+                await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                return Results.Redirect(RouteConstants.Login);
+            }
+
+            var properties = cookie.Properties!;
+            var rebuilt = EndpointHelpers.BuildIdentity(user);
+            ALDevToolbox.Services.Account.StepUpAuth.ApplyClaims(rebuilt, properties);
+            properties.Items[LastValidatedKey] = clock.GetUtcNow().UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+            await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(rebuilt), properties);
+            return Results.Redirect(EndpointHelpers.ResolveSafeReturn(ctx.Request.Query["return"].ToString()));
+        }).RequireAuthorization();
+        return app;
+    }
+
+    /// <summary>
     /// Endpoint filter for the endpoints that hand out a credential that
     /// outlives the cookie: an access token, a passkey, an authenticator app,
     /// recovery codes, a Microsoft link, an assistant's consent. The check
