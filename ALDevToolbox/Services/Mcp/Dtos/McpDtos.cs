@@ -515,10 +515,14 @@ public sealed record CookbookGuidance(
 /// Null when everything is in place. Otherwise one plain sentence to pass on to
 /// the person, naming the step that unblocks them.
 /// </param>
+/// <param name="Truncated">True when more repositories matched than were returned (#1511).</param>
+/// <param name="Note">What was left out and how to narrow the list; null when nothing was.</param>
 public sealed record RepositoryListResult(
     string Readiness,
     string? Guidance,
-    IReadOnlyList<RepositorySummary> Repositories);
+    IReadOnlyList<RepositorySummary> Repositories,
+    bool Truncated = false,
+    string? Note = null);
 
 /// <summary>
 /// One repository, as an agent needs it: enough to name it in a later call, to

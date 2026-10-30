@@ -46,7 +46,7 @@ public sealed class ArtifactsToolsTests : IDisposable
         await using var read = _db.NewContext();
         var tools = NewTools(read);
 
-        (await tools.ListProjectsAsync()).Should().ContainSingle(p => p.Name == "CRONUS A/S");
+        (await tools.ListProjectsAsync()).Rows.Should().ContainSingle(p => p.Name == "CRONUS A/S");
         (await tools.ListProjectBuildsAsync("CRONUS A/S")).Should().ContainSingle();
         (await tools.ListProjectBuildsAsync(projectId.ToString())).Should().ContainSingle();
     }
@@ -231,6 +231,75 @@ public sealed class ArtifactsToolsTests : IDisposable
         (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 0)).Should().HaveCount(1, "a limit below one still returns the newest");
     }
 
+    [Fact]
+    public async Task List_solutions_stops_at_the_limit_and_says_how_to_narrow_it()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var name in new[] { "CRONUS A/S", "CRONUS Danmark", "CRONUS Sverige" })
+            {
+                await SeedProjectAsync(ctx, name);
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var cut = await tools.ListProjectsAsync(limit: 2);
+        cut.Rows.Select(r => r.Name).Should().Equal("CRONUS A/S", "CRONUS Danmark");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("search");
+
+        var all = await tools.ListProjectsAsync();
+        all.Rows.Should().HaveCount(3);
+        all.Truncated.Should().BeFalse();
+        all.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public void A_long_changelog_keeps_the_first_commits_and_counts_the_rest()
+    {
+        var commits = Enumerable.Range(1, ArtifactsTools.MaxChangelogCommits + 5)
+            .Select(i => new ChangelogRow($"abc{i:D4}", $"Commit {i}", "CRONUS dev", null))
+            .ToList();
+        var groups = new List<ChangelogGroup> { new("cronus-core", commits), new("cronus-small", commits.Take(2).ToList()) };
+
+        var capped = ArtifactsTools.CapChangelog(groups);
+
+        capped[0].Commits.Should().HaveCount(ArtifactsTools.MaxChangelogCommits + 1);
+        capped[0].Commits[^1].ShortHash.Should().BeEmpty("the summary row carries no hash, like the service's own notes");
+        capped[0].Commits[^1].Message.Should().StartWith("5 more commits");
+        capped[1].Commits.Should().HaveCount(2, "a short changelog is left alone");
+    }
+
+    [Fact]
+    public void A_changelog_the_service_already_cut_keeps_its_note_and_counts_only_commits()
+    {
+        var commits = Enumerable.Range(1, 100)
+            .Select(i => new ChangelogRow($"abc{i:D4}", $"Commit {i}", "CRONUS dev", null))
+            .Append(new ChangelogRow(string.Empty, "...and more commits not shown (the changelog is capped at 100)", string.Empty, null))
+            .ToList();
+
+        var capped = ArtifactsTools.CapChangelog([new ChangelogGroup("cronus-core", commits)]);
+
+        var rows = capped[0].Commits;
+        rows.Should().HaveCount(ArtifactsTools.MaxChangelogCommits + 2);
+        rows[ArtifactsTools.MaxChangelogCommits].Message.Should().StartWith("At least 80 more commits");
+        rows[^1].Message.Should().Contain("capped at 100", "the service's own note is kept");
+    }
+
+    [Fact]
+    public void A_list_row_failure_message_is_cut_and_says_where_the_rest_is()
+    {
+        McpListLimit.ShortenFailure(null, "get_solution_build").Should().BeNull();
+        McpListLimit.ShortenFailure("Short failure.", "get_solution_build").Should().Be("Short failure.");
+
+        var cut = McpListLimit.ShortenFailure(new string('x', 1000), "get_solution_build");
+        cut!.Should().StartWith(new string('x', McpListLimit.MaxListFailureMessage) + "...");
+        cut.Should().Contain("get_solution_build");
+        cut.Length.Should().BeLessThan(400);
+    }
+
     private async Task SeedUsersAsync()
     {
         await using var ctx = _db.NewContext();
@@ -335,7 +404,7 @@ public sealed class ArtifactsToolsTests : IDisposable
         {
             ActAs(userId, siteAdmin);
             await using var read = _db.NewContext();
-            var rows = await NewTools(read).ListProjectsAsync();
+            var rows = (await NewTools(read).ListProjectsAsync()).Rows;
             rows.Any(r => r.Name == "CRONUS Denmark").Should().Be(
                 expected, $"user {userId} (siteAdmin={siteAdmin}) on a {visibility} project");
             // Never a locked row: the agent surface has no use for a name it can't act on.
