@@ -6,6 +6,7 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Services.Mcp;
 using ALDevToolbox.Services.Mcp.Dtos;
 using ALDevToolbox.Services.Mcp.Tools;
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Tests.Builders;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -1212,7 +1213,7 @@ public sealed class McpToolTests : IDisposable
         var tools = NewOeTools(ctx);
 
         var all = await tools.ListReleaseModulesAsync(releaseId.ToString());
-        all.Rows.Should().HaveCount(200);
+        all.Rows.Should().HaveCount(100);
         all.Truncated.Should().BeTrue();
         all.Note.Should().Contain("namePattern");
         all.Rows.Should().NotContain(r => r.Name == "Zz System Application");
@@ -1328,16 +1329,66 @@ public sealed class McpToolTests : IDisposable
 
         // Pick any codeunit in DK Core to outline. We discover the name
         // via the same path the agent would — search_objects.
-        var found = await tools.SearchObjectsAsync(releaseId.ToString(), namePattern: "", kind: "codeunit");
+        var found = (await tools.SearchObjectsAsync(releaseId.ToString(), namePattern: "", kind: "codeunit")).Rows;
         found.Should().NotBeEmpty(because: "DK Core ships at least one codeunit");
         var target = found.First();
 
-        var outline = await tools.GetObjectOutlineAsync(releaseId.ToString(), target.Name, "codeunit");
+        var outline = (await tools.GetObjectOutlineAsync(releaseId.ToString(), target.Name, "codeunit")).Outline;
         outline.Name.Should().Be(target.Name);
         outline.Symbols.Should().NotBeEmpty(
             because: "every imported codeunit has at least one procedure / trigger row");
         outline.Symbols.Should().AllSatisfy(s => s.Id.Should().BeGreaterThan(0));
         outline.Symbols.Should().BeInAscendingOrder(s => s.LineNumber);
+    }
+
+    [Fact]
+    public async Task GetObjectOutline_narrows_members_by_kind_and_name()
+    {
+        var releaseId = await SeedDkCoreReleaseAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewOeTools(ctx);
+        var target = (await tools.SearchObjectsAsync(releaseId.ToString(), namePattern: "", kind: "codeunit")).Rows.First();
+
+        var all = await tools.GetObjectOutlineAsync(releaseId.ToString(), target.Name, "codeunit");
+        all.TotalSymbols.Should().Be(all.Outline.Symbols.Count);
+        all.Truncated.Should().BeFalse();
+
+        var procedures = await tools.GetObjectOutlineAsync(releaseId.ToString(), target.Name, "codeunit", memberKind: "procedure");
+        procedures.Outline.Symbols.Should().OnlyContain(sym => sym.Kind.Contains("procedure"));
+
+        var first = all.Outline.Symbols[0];
+        var named = await tools.GetObjectOutlineAsync(releaseId.ToString(), target.Name, "codeunit", namePattern: first.Name.ToUpperInvariant());
+        named.Outline.Symbols.Should().Contain(sym => sym.Id == first.Id);
+        named.Outline.Symbols.Should().OnlyContain(sym => sym.Name.Contains(first.Name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void An_outline_past_the_cap_keeps_the_first_members_and_says_how_many_matched()
+    {
+        var symbols = Enumerable.Range(1, 5)
+            .Select(i => new ObjectSymbolRow(i, "procedure", $"Post{i}", null, null, null, i))
+            .ToList();
+        var outline = new ObjectOutline(1, "codeunit", 80, "CRONUS Post", 1, "CRONUS", null, null, 1, symbols);
+
+        var result = ObjectOutlineResult.From(outline, memberKind: null, namePattern: null, cap: 3);
+
+        result.Outline.Symbols.Select(sym => sym.Name).Should().Equal("Post1", "Post2", "Post3");
+        result.TotalSymbols.Should().Be(5);
+        result.Truncated.Should().BeTrue();
+        result.Note.Should().Contain("first 3 of 5").And.Contain("memberKind");
+    }
+
+    [Fact]
+    public void Capped_rows_say_when_more_matched_and_how_to_narrow()
+    {
+        var fits = CappedRows<int>.From([1, 2, 3], cap: 3, "objects", "best matches first", "Narrow it.");
+        fits.Truncated.Should().BeFalse();
+        fits.Note.Should().BeNull();
+
+        var cut = CappedRows<int>.From([1, 2, 3, 4], cap: 3, "objects", "best matches first", "Narrow it.");
+        cut.Rows.Should().Equal(1, 2, 3);
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Be("Showing the first 3 objects (best matches first); more were left out. Narrow it.");
     }
 
     [Fact]
@@ -1408,7 +1459,7 @@ public sealed class McpToolTests : IDisposable
         symbolId.Should().NotBe(0,
             because: "the importer should have stamped source_symbol_id on at least one method_call / field_access row");
 
-        var calls = await tools.ListProcedureCallsAsync(releaseId.ToString(), symbolId: symbolId);
+        var calls = (await tools.ListProcedureCallsAsync(releaseId.ToString(), symbolId: symbolId)).Rows;
         calls.Should().NotBeEmpty();
         calls.Should().AllSatisfy(c => c.TargetObjectName.Should().NotBeNullOrEmpty());
     }
@@ -1439,7 +1490,7 @@ public sealed class McpToolTests : IDisposable
         affected.Should().BeGreaterThan(0,
             because: "this fixture procedure has stamped rows we just nulled");
 
-        var calls = await tools.ListProcedureCallsAsync(releaseId.ToString(), symbolId: symbolId);
+        var calls = (await tools.ListProcedureCallsAsync(releaseId.ToString(), symbolId: symbolId)).Rows;
         calls.Should().NotBeEmpty(
             because: "the line-range fallback should recover the same rows once the FK column is empty");
     }

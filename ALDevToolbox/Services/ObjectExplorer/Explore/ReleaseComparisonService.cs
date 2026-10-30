@@ -317,7 +317,7 @@ public sealed class ReleaseComparisonService
     /// </summary>
     public async Task<List<ReleaseCompareFileRow>> CompareReleaseFilesFlatAsync(
         int leftReleaseId, int rightReleaseId, int? take = MaxCompareFileRows,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? pathPattern = null)
     {
         var context = await CompareReleasesCoreAsync(leftReleaseId, rightReleaseId, ct);
         if (context is null) return new();
@@ -334,6 +334,13 @@ public sealed class ReleaseComparisonService
         // punctuation and digits differently, and left gaps in the cut (#1262).
         var fetch = take.HasValue ? take.Value + 1 : int.MaxValue;
 
+        // The path filter runs before the cap, in the database where it can, so
+        // narrowing a large diff reaches files past the first few thousand rather
+        // than filtering only those (#1510).
+        var needle = string.IsNullOrWhiteSpace(pathPattern) ? null : pathPattern.Trim();
+        var likePattern = needle is null ? null : "%" + ObjectSearchService.EscapeLike(needle) + "%";
+        bool PathMatches(string path) => needle is null || path.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
         // Added / Removed modules: every file in that module is added/removed.
         var addedRightModuleIds = summary.Added.Where(m => m.RightModuleId.HasValue)
             .Select(m => m.RightModuleId!.Value).ToList();
@@ -344,6 +351,7 @@ public sealed class ReleaseComparisonService
         {
             var addedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => addedRightModuleIds.Contains(f.ModuleId))
+                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
                 .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
                 .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
@@ -358,6 +366,7 @@ public sealed class ReleaseComparisonService
         {
             var removedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => removedLeftModuleIds.Contains(f.ModuleId))
+                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
                 .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
                 .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
@@ -380,17 +389,17 @@ public sealed class ReleaseComparisonService
                 context.LeftFilesByModule.GetValueOrDefault(lm, EmptyFiles),
                 context.RightFilesByModule.GetValueOrDefault(rm, EmptyFiles));
 
-            foreach (var f in pairsAdded)
+            foreach (var f in pairsAdded.Where(f => PathMatches(f.Path)))
             {
                 rows.Add(new ReleaseCompareFileRow(m.AppId, m.Name, f.Path, "added",
                     LeftFileId: null, RightFileId: f.RightFileId));
             }
-            foreach (var f in pairsRemoved)
+            foreach (var f in pairsRemoved.Where(f => PathMatches(f.Path)))
             {
                 rows.Add(new ReleaseCompareFileRow(m.AppId, m.Name, f.Path, "removed",
                     LeftFileId: f.LeftFileId, RightFileId: null));
             }
-            foreach (var f in pairsChanged)
+            foreach (var f in pairsChanged.Where(f => PathMatches(f.Path)))
             {
                 rows.Add(new ReleaseCompareFileRow(m.AppId, m.Name, f.Path, "modified",
                     LeftFileId: f.LeftFileId, RightFileId: f.RightFileId));

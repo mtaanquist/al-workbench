@@ -263,7 +263,7 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         (await tools.GetProcedureSourceAsync(fixture.OpenReleaseLabel, symbolId: fixture.ProcedureSymbolId))
             .SymbolId.Should().Be(fixture.ProcedureSymbolId);
         (await tools.ListProcedureCallsAsync(fixture.OpenReleaseLabel, symbolId: fixture.CallingSymbolId))
-            .Should().NotBeEmpty();
+            .Rows.Should().NotBeEmpty();
     }
 
     // ── Seeding ─────────────────────────────────────────────────────────
