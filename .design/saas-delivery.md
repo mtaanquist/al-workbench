@@ -249,7 +249,12 @@ a status Microsoft adds later shouldn't silently stop every deployment.
 It is checked twice, and the second check is the one that matters:
 
 1. **At scheduling**, against the cached status, as a field-keyed validation error so it lands next to
-   the environment on the form.
+   the environment on the form. A cached status that refuses is asked again first (the same single
+   `GET`), with the answer written back to the row: an environment the last read caught `Preparing`
+   (a new one, or one a failed deployment just re-read) otherwise kept refusing "Deploy again" and
+   "Deploy now" until the next refresh, long after it was up. Only a refusing status is re-read, so an
+   ordinary deployment costs nothing extra; when the re-read fails, the cached refusal stands and says
+   it is the last status read.
 2. **At claim time**, by re-reading the single environment (`GET .../environments/{name}`) after the
    claim and before the first upload. A delivery scheduled at 09:00 for 22:00 was fine when it was
    scheduled; an update that landed at 20:00 is invisible to check 1. The fresh status is written back

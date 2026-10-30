@@ -362,6 +362,77 @@ public sealed class DeliveryService
         return delivery;
     }
 
+    /// <summary>How long a deployment waits for Business Central to re-read a refusing environment status. Shortened by tests.</summary>
+    internal TimeSpan StatusRecheckTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Asks Business Central for the environment's status when the stored one refuses a
+    /// deployment, writes the answer back to the environment row, and returns the refusal
+    /// that still stands, or null when the environment can take the install after all.
+    /// Without this, an environment that was Preparing when last read kept refusing every
+    /// deployment until the next refresh, however long ago it came up.
+    /// <para>
+    /// Only a refusing status is re-read, so an ordinary deployment costs Business Central
+    /// nothing extra. When the re-read fails the stored refusal stands, said to be the last
+    /// one read, since deploying on a guess is worse than asking the person to try again.
+    /// </para>
+    /// </summary>
+    private async Task<string?> RecheckEnvironmentStatusAsync(
+        int projectId, int environmentId, string envName, string? applicationFamily, string storedRefusal, CancellationToken ct)
+    {
+        // A person is usually waiting in a dialog for this, so it gets a short leash.
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(StatusRecheckTimeout);
+
+        BcDeliveryContext bc;
+        try
+        {
+            bc = await _tokens.AcquireDeliveryContextAsync(projectId, timeout.Token);
+        }
+        catch (BcApiException ex)
+        {
+            // The connection's own sentence (not set up, secret expired) says what to fix;
+            // waiting would not help, so it must not read as "try again".
+            _logger.LogWarning(ex, "Couldn't sign in to re-read environment {Env} (project {ProjectId}) before deploying.",
+                envName, projectId);
+            return ex.Message;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return CouldNotAsk();
+        }
+
+        BcEnvironment? live;
+        try
+        {
+            live = await _admin.GetEnvironmentAsync(bc.AccessToken, applicationFamily, envName, timeout.Token);
+        }
+        catch (Exception ex) when (ex is BcApiException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            _logger.LogWarning(ex, "Couldn't re-read environment {Env} (project {ProjectId}) before deploying.", envName, projectId);
+            return CouldNotAsk();
+        }
+
+        if (live is null)
+        {
+            return $"Business Central no longer has an environment called '{envName}'. Refresh the environments on the solution's Business Central page.";
+        }
+
+        await _db.OeProjectEnvironments.Where(e => e.Id == environmentId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(e => e.Status, live.Status)
+                .SetProperty(e => e.StatusFetchedAt, _clock.GetUtcNow().UtcDateTime), ct);
+        _panelCache.Invalidate(projectId, environmentId);
+
+        var refusal = BcEnvironmentStatus.RefusalMessage(envName, live.Status);
+        _logger.LogInformation("Re-read environment {Env} (project {ProjectId}) before deploying: {Status}, {Outcome}.",
+            envName, projectId, live.Status, refusal is null ? "deploying" : "still refused");
+        return refusal;
+
+        string CouldNotAsk() =>
+            storedRefusal + " Business Central couldn't be asked again just now, so this is the last status read. Try again in a moment.";
+    }
+
     /// <summary>
     /// Everything a deployment of <paramref name="projectBuildId"/> through
     /// <paramref name="releasePipelineId"/> needs, checked the way every release is: the
@@ -397,6 +468,7 @@ public sealed class DeliveryService
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvMissing = r.ProjectEnvironment.MissingSince != null,
                 EnvStatus = r.ProjectEnvironment.Status,
+                EnvFamily = r.ProjectEnvironment.ApplicationFamily,
                 EnvType = r.ProjectEnvironment.Type,
                 WindowStart = r.ProjectEnvironment.UpdateWindowStart,
                 WindowEnd = r.ProjectEnvironment.UpdateWindowEnd,
@@ -426,9 +498,13 @@ public sealed class DeliveryService
         // one that catches an update that lands between scheduling and running.
         // Preparing a deployment skips it: an environment busy with an update when a build
         // lands is ready again long before anyone approves, and the approval checks again.
-        if (checkEnvironmentStatus && BcEnvironmentStatus.RefusalMessage(rp.EnvName, rp.EnvStatus) is { } statusRefusal)
+        // A cached status that refuses may be stale - a new environment reads as Preparing
+        // until the next refresh, long after it is up - so it is asked again before it
+        // turns anyone away.
+        if (checkEnvironmentStatus && BcEnvironmentStatus.RefusalMessage(rp.EnvName, rp.EnvStatus) is { } statusRefusal
+            && await RecheckEnvironmentStatusAsync(rp.ProjectId, rp.ProjectEnvironmentId, rp.EnvName, rp.EnvFamily, statusRefusal, ct) is { } stillRefused)
         {
-            throw Validation("ProjectEnvironment", statusRefusal);
+            throw Validation("ProjectEnvironment", stillRefused);
         }
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
