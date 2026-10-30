@@ -1359,7 +1359,7 @@ public sealed class McpToolTests : IDisposable
         }
         await using var ctx = _db.NewContext();
 
-        var labels = (await NewOeTools(ctx).ListReleasesAsync()).Select(r => r.Label).ToList();
+        var labels = (await NewOeTools(ctx).ListReleasesAsync()).Rows.Select(r => r.Label).ToList();
 
         labels.Should().Contain("MCP list ready");
         labels.Should().NotContain(new[] { "MCP list failed", "MCP list importing", "MCP list empty symbols" });

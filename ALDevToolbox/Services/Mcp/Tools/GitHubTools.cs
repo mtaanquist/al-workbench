@@ -67,7 +67,9 @@ public sealed class GitHubTools
         "offered, and every other tool that takes a repository accepts only what this one lists. " +
         "When the list is empty because something is not set up yet - no GitHub organisation connected, " +
         "or your own GitHub account not connected - the answer says which, in a sentence you can pass " +
-        "on to the person. Returns the first 50 by name unless you raise limit; truncated and note say " +
+        "on to the person. To read or search a customer's code, use list_releases with the customer's " +
+        "name as search instead: a solution's built code is searchable there, and a repository is not. " +
+        "Returns the first 50 by name unless you raise limit; truncated and note say " +
         "whether more were left out, so pass search to narrow it.")]
     public async Task<RepositoryListResult> ListRepositoriesAsync(
         [Description("Optional case-insensitive substring of the repository's name, e.g. a customer name.")] string? search = null,

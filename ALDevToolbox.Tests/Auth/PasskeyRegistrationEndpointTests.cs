@@ -310,7 +310,16 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
                 .CreateMagicLoginTokenAsync(email, "203.0.113.9"))!;
         }
         var client = _factory.CreateClient();
-        using var consume = await client.GetAsync("/auth/login/magic/consume?token=" + Uri.EscapeDataString(raw));
+        // The link opens a confirmation page; only its Sign in button spends the token (#1500).
+        using var page = await client.GetAsync("/login/magic/confirm?token=" + Uri.EscapeDataString(raw));
+        var antiforgery = System.Text.RegularExpressions.Regex.Match(
+            await page.Content.ReadAsStringAsync(),
+            """name="__RequestVerificationToken"[^>]*value="([^"]+)""").Groups[1].Value;
+        using var consume = await client.PostAsync("/auth/login/magic/consume", new FormUrlEncodedContent(
+        [
+            new KeyValuePair<string, string>("Token", raw),
+            new KeyValuePair<string, string>("__RequestVerificationToken", antiforgery),
+        ]));
         consume.StatusCode.Should().Be(HttpStatusCode.Redirect);
         consume.Headers.Location!.OriginalString.Should().Be("/");
         return client;

@@ -127,6 +127,91 @@ public sealed class SealedLinkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_creator_can_open_their_own_link_without_spending_a_view()
+    {
+        var alex = await SignInAsync("alex@cronus.example");
+        var input = Input() with { PassphraseSalt = B64(16), PassphraseCheck = B64(32) };
+        var token = await CreateAsync(input);
+
+        (await Service().GetForRecipientAsync(token))!.OpenedByCreator.Should().BeTrue();
+        var mine = await Service().RevealAsync(token, input.LinkCheck, input.PassphraseCheck, "203.0.113.4");
+        var again = await Service().RevealAsync(token, input.LinkCheck, input.PassphraseCheck, "203.0.113.4");
+
+        mine.Status.Should().Be(SealedRevealStatus.Revealed);
+        mine.ByCreator.Should().BeTrue();
+        mine.Ciphertext.Should().Equal(Base64Url.DecodeFromChars(input.Ciphertext));
+        again.ViewsLeft.Should().Be(1, "the creator's looks spend nothing");
+        var link = await ReadLinkAsync();
+        link.ViewCount.Should().Be(0);
+        link.Events.Should().BeEmpty("nothing to tell the sender about their own look");
+
+        (await Service().RevealAsync(token, input.LinkCheck, null, null)).Status
+            .Should().Be(SealedRevealStatus.WrongPassphrase, "the creator still needs the passphrase");
+        (await ReadLinkAsync()).FailedPassphraseAttempts.Should().Be(1);
+
+        SignOut();
+        var summary = await Service().GetForRecipientAsync(token);
+        summary!.OpenedByCreator.Should().BeFalse();
+        var theirs = await Service().RevealAsync(token, input.LinkCheck, input.PassphraseCheck, null);
+        theirs.ByCreator.Should().BeFalse();
+        theirs.ViewsLeft.Should().Be(0);
+        (await ReadLinkAsync()).CreatedByUserId.Should().Be(alex);
+    }
+
+    [Fact]
+    public async Task A_creator_look_after_signing_out_is_refused_without_spending_the_view()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+        SignOut();
+
+        var result = await Service().RevealAsync(token, input.LinkCheck, null, null, asCreator: true);
+
+        result.Status.Should().Be(SealedRevealStatus.NotCreator);
+        result.Ciphertext.Should().BeNull();
+        var link = await ReadLinkAsync();
+        link.ViewCount.Should().Be(0, "the page promised the creator a free look, so nothing may be spent");
+        link.ClosedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_creator_gets_nothing_from_a_wrong_link_or_a_closed_one()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+
+        (await Service().RevealAsync(token, B64(32), null, null, asCreator: true)).Status.Should().Be(SealedRevealStatus.Gone);
+        await Service().RevokeAsync((await Service().ListAsync()).Single().Id);
+
+        (await Service().GetForRecipientAsync(token)).Should().BeNull();
+        (await Service().RevealAsync(token, input.LinkCheck, null, null, asCreator: true)).Status.Should().Be(SealedRevealStatus.Gone);
+    }
+
+    [Fact]
+    public async Task Someone_else_signed_in_spends_a_view_like_any_recipient()
+    {
+        var alex = await SignInAsync("alex@cronus.example");
+        var input = Input(views: 2);
+        var token = await CreateAsync(input);
+
+        await SignInAsync("admin@cronus.example", UserRole.Admin);
+        (await Service().GetForRecipientAsync(token))!.OpenedByCreator.Should().BeFalse();
+        var admin = await Service().RevealAsync(token, input.LinkCheck, null, null);
+
+        admin.ByCreator.Should().BeFalse("only the creator looks for free, not an Admin");
+        admin.ViewsLeft.Should().Be(1);
+
+        // The creator's user id under another organisation is not the creator: both ids must match the row.
+        _db.OrgContext.CurrentUserId = alex;
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        var elsewhere = await Service().RevealAsync(token, input.LinkCheck, null, null);
+        elsewhere.ByCreator.Should().BeFalse();
+        elsewhere.ViewsLeft.Should().Be(0);
+    }
+
+    [Fact]
     public async Task A_link_without_its_key_part_spends_nothing()
     {
         await SignInAsync("alex@cronus.example");
@@ -408,8 +493,10 @@ public sealed class SealedLinkServiceTests : IDisposable
         var input = Input();
         var token = await CreateAsync(input);
         var id = (await Service().ListAsync()).Single().Id;
+        SignOut();
         (await Service().RevealAsync(token, input.LinkCheck, null, null)).Status.Should().Be(SealedRevealStatus.Revealed);
 
+        await SignInAsync("alex@cronus.example");
         await Service().RevokeAsync(id);
 
         (await ReadLinkAsync()).ClosedReason.Should().Be(SealedLinkClosedReason.UsedUp);

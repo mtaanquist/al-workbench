@@ -40,17 +40,32 @@ else
 {
     <AuthCard>
         <ChildContent>
-            <div class="sealed-open" data-sealed-open data-token="@Token" data-salt="@(_summary.PassphraseSalt ?? string.Empty)">
+            <div class="sealed-open" data-sealed-open data-token="@Token" data-salt="@(_summary.PassphraseSalt ?? string.Empty)" data-creator="@(_summary.OpenedByCreator ? "true" : null)">
                 <div data-sealed-state="ready">
                     <div class="auth__head">
-                        <h1 class="auth__title">@_summary.SenderName at @_summary.OrganizationName sent you a secret</h1>
-                        <p class="auth__sub">
-                            Press Show secret when you are ready to copy it.
-                            @(_summary.ViewsLeft == 1
-                                ? "It can only be shown once, so copy it somewhere safe before you leave this page."
-                                : $"It can be shown {_summary.ViewsLeft} times.")
-                            The link expires <span data-sealed-local-time="@_summary.ExpiresAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)"><Timestamp Value="@_summary.ExpiresAt" Format="d MMM yyyy 'at' HH:mm" /></span>.
-                        </p>
+                        @if (_summary.OpenedByCreator)
+                        {
+                            <h1 class="auth__title">This is a link you created</h1>
+                            <p class="auth__sub">
+                                You are signed in as the person who created it, so you can look at the secret here without
+                                using up one of its views, and you won't be told it was opened.
+                                @(_summary.ViewsLeft == 1
+                                    ? "The person you send it to can still open it once."
+                                    : $"The people you send it to can still open it {_summary.ViewsLeft} times.")
+                                It expires <span data-sealed-local-time="@_summary.ExpiresAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)"><Timestamp Value="@_summary.ExpiresAt" Format="d MMM yyyy 'at' HH:mm" /></span>.
+                            </p>
+                        }
+                        else
+                        {
+                            <h1 class="auth__title">@_summary.SenderName at @_summary.OrganizationName sent you a secret</h1>
+                            <p class="auth__sub">
+                                Press Show secret when you are ready to copy it.
+                                @(_summary.ViewsLeft == 1
+                                    ? "It can only be shown once, so copy it somewhere safe before you leave this page."
+                                    : $"It can be shown {_summary.ViewsLeft} times.")
+                                The link expires <span data-sealed-local-time="@_summary.ExpiresAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)"><Timestamp Value="@_summary.ExpiresAt" Format="d MMM yyyy 'at' HH:mm" /></span>.
+                            </p>
+                        }
                     </div>
                     <div class="auth__fields">
                         @if (_summary.PassphraseSalt is not null)
@@ -59,7 +74,9 @@ else
                                 <label class="field__label" for="sealed-passphrase">Passphrase</label>
                                 <input class="input" id="sealed-passphrase" type="text" autocomplete="off" autocapitalize="off"
                                        autocorrect="off" spellcheck="false" data-sealed-passphrase />
-                                <span class="field__hint">The sender should have given you this separately, for example by phone. Capital letters count.</span>
+                                <span class="field__hint">@(_summary.OpenedByCreator
+                                    ? "The passphrase you chose when you created the link. Capital letters count."
+                                    : "The sender should have given you this separately, for example by phone. Capital letters count.")</span>
                             </div>
                         }
                         <div data-sealed-error hidden>
@@ -74,7 +91,7 @@ else
 
                 <div data-sealed-state="revealed" hidden>
                     <div class="auth__head">
-                        <h1 class="auth__title">Your secret from @_summary.OrganizationName</h1>
+                        <h1 class="auth__title">@(_summary.OpenedByCreator ? "The secret you sent" : $"Your secret from {_summary.OrganizationName}")</h1>
                         <p class="auth__sub" data-sealed-left></p>
                     </div>
                     <textarea class="textarea textarea--code" rows="4" readonly spellcheck="false"
