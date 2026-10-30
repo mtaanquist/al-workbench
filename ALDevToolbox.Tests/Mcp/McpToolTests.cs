@@ -71,7 +71,7 @@ public sealed class McpToolTests : IDisposable
         await using var ctx2 = _db.NewContext();
         var tools = NewCookbookTools(ctx2);
 
-        var rows = await tools.SearchAsync(query: "posting");
+        var rows = (await tools.SearchAsync(query: "posting")).Rows;
 
         rows.Should().ContainSingle();
         rows[0].Title.Should().Be("Posting Validation Override");
@@ -101,6 +101,123 @@ public sealed class McpToolTests : IDisposable
         detail.Type.Should().Be("Snippet");
         detail.Files.Should().HaveCount(2);
         detail.Files.Select(f => f.Path).Should().Contain(new[] { "a.al", "sub/b.al" });
+    }
+
+    [Fact]
+    public async Task SearchRecipes_stops_at_the_limit_in_title_order_and_says_so()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS C"));
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS A"));
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS B"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        var cut = await tools.SearchAsync(query: "cronus", limit: 2);
+        cut.Rows.Select(r => r.Title).Should().Equal("CRONUS A", "CRONUS B");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 2 recipes");
+
+        var whole = await tools.SearchAsync(query: "cronus", limit: 3);
+        whole.Rows.Should().HaveCount(3);
+        whole.Truncated.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SearchRecipes_clamps_the_limit_and_cuts_long_descriptions_but_not_keywords()
+    {
+        var keywords = string.Join(", ", Enumerable.Range(1, 60).Select(i => $"keyword{i}"));
+        await using (var ctx = _db.NewContext())
+        {
+            var recipe = RecipeBuilder.Default("CRONUS Long");
+            recipe.Description = new string('d', 1000);
+            recipe.Keywords = keywords;
+            ctx.Recipes.Add(recipe);
+            ctx.Recipes.Add(RecipeBuilder.Default("CRONUS Short"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        var one = await tools.SearchAsync(query: "cronus", limit: 0);
+        one.Rows.Should().ContainSingle("a limit below one still returns one row");
+        one.Rows[0].Description.Should().HaveLength(CookbookTools.MaxSummaryDescriptionLength + 3);
+        one.Rows[0].Keywords.Should().Be(keywords, "keywords are served whole");
+        (await tools.SearchAsync(query: "cronus", limit: 1000)).Rows.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task GetRecipe_lists_files_past_the_budget_by_path_and_fetches_them_by_path()
+    {
+        var big = new string('x', CookbookTools.MaxRecipeAnswerLength / 2);
+        int recipeId;
+        await using (var ctx = _db.NewContext())
+        {
+            var s = RecipeBuilder.Default("Large module", type: RecipeType.Module)
+                .WithFile("Setup.al", big, relativePath: "Setup")
+                .WithFile("SetupPage.al", big, relativePath: "Setup/Pages")
+                .WithFile("Events.al", "// small", relativePath: "Events")
+                .WithFile("README.md", "# root");
+            ctx.Recipes.Add(s);
+            await ctx.SaveChangesAsync();
+            recipeId = s.Id;
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        var whole = await tools.GetAsync(recipeId);
+        whole.Files.Select(f => f.Path).Should().Equal("Setup/Setup.al", "Setup/Pages/SetupPage.al", "Events/Events.al", "README.md");
+        whole.Files[0].Content.Should().Be(big);
+        whole.Files[1].Content.Should().BeNull("the second large body does not fit beside the first and the recipe's text");
+        whole.Files[2].Content.Should().Be("// small", "a later file that still fits is kept");
+        whole.Truncated.Should().BeTrue();
+        whole.Note.Should().Contain("1 of 4 files").And.Contain("path");
+
+        var one = await tools.GetAsync(recipeId, path: "setup/pages/setuppage.al");
+        one.Files.Should().ContainSingle().Which.Content.Should().Be(big);
+        one.Truncated.Should().BeFalse();
+
+        (await tools.GetAsync(recipeId, path: "Setup")).Files.Select(f => f.Path)
+            .Should().Equal(["Setup/Setup.al", "Setup/Pages/SetupPage.al"], "a folder takes in its subfolders");
+        (await tools.GetAsync(recipeId, path: "README.md")).Files.Should().ContainSingle().Which.Content.Should().Be("# root");
+        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Set"))
+            .Should().ThrowAsync<McpException>().WithMessage("*no file or folder*");
+    }
+
+    [Fact]
+    public async Task GetRecipe_cuts_a_file_too_large_for_one_answer_and_reads_on_from_an_offset()
+    {
+        var huge = string.Concat(Enumerable.Range(0, 50_000).Select(i => (char)('a' + i % 26)));
+        int recipeId;
+        await using (var ctx = _db.NewContext())
+        {
+            var s = RecipeBuilder.Default("Huge").WithFile("Huge.al", huge);
+            ctx.Recipes.Add(s);
+            await ctx.SaveChangesAsync();
+            recipeId = s.Id;
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        var first = await tools.GetAsync(recipeId);
+        first.Truncated.Should().BeTrue();
+        var cut = first.Files[0].Content!.Length;
+        huge.Should().StartWith(first.Files[0].Content);
+        first.Note.Should().Contain($"cut after {cut} of 50000").And.Contain($"offset {cut}");
+
+        var rest = await tools.GetAsync(recipeId, path: "Huge.al", offset: cut);
+        rest.Files[0].Content.Should().Be(huge[cut..]);
+        rest.Truncated.Should().BeFalse();
+
+        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Huge.al", offset: 60_000))
+            .Should().ThrowAsync<McpException>().WithMessage("*offset*");
     }
 
     [Fact]
