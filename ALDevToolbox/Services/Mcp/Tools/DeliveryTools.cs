@@ -71,7 +71,8 @@ public sealed class DeliveryTools
                                   || Has(r.EnvironmentName, needle) || Has(r.EnvironmentType, needle)
                                   || Has(r.BuildPipelineName, needle) || Has(r.GithubReleaseRepositoryName, needle)).ToList();
             return CappedRows<ReleasePipelineRow>.From(matched, McpCatalogueLimit.Clamp(limit), "deployment pipelines",
-                "ordered by name", "Pass search or solutionId to narrow the list, or raise limit.");
+                "ordered by name", "Pass search or solutionId to narrow the list.",
+                CappedRows<ReleasePipelineRow>.RaiseLimitHint);
         }
         catch (ProjectAccessDeniedException)
         {

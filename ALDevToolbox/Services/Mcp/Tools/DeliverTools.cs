@@ -423,9 +423,8 @@ public sealed class DeliverTools
             d.Apps.Select(a => a with { Message = McpListLimit.ShortenFailure(a.Message, "list_deployments") }).ToList()))
             .ToList();
         return CappedRows<RecentDelivery>.From(deployments, cap, "deployments", "newest first",
-            cap < McpListLimit.Max
-                ? "Raise limit, or pass solution, status or since to narrow the list."
-                : "Pass solution, status or since to narrow the list.");
+            "Pass solution, status or since to narrow the list.",
+            cap < McpListLimit.Max ? CappedRows<RecentDelivery>.RaiseLimitHint : null);
     }
 
     // ── Customer information ────────────────────────────────────────────

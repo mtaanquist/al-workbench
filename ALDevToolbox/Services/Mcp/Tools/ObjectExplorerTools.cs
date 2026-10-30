@@ -99,7 +99,7 @@ public sealed class ObjectExplorerTools
         return new ReleaseListResult(
             matched.Take(shown).ToList(),
             truncated,
-            truncated ? TruncationNote(matched, shown) : NoMatchNote(matched, search));
+            truncated ? TruncationNote(matched, shown, budgetCut: shown < cap) : NoMatchNote(matched, search));
     }
 
     /// <summary>
@@ -131,14 +131,16 @@ public sealed class ObjectExplorerTools
     }
 
     /// <summary>Names what a cut release list left out, by kind, so an agent can tell the solution builds were among them.</summary>
-    private static string TruncationNote(List<ReleaseSummary> matched, int cap)
+    private static string TruncationNote(List<ReleaseSummary> matched, int cap, bool budgetCut)
     {
         var leftOut = matched.Skip(cap)
             .GroupBy(r => r.Kind)
             .Select(g => $"{g.Count()} {g.Key}")
             .ToList();
         return $"Showing {cap} of {matched.Count} releases; left out: {string.Join(", ", leftOut)}. "
-            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list, or raise limit.";
+            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list"
+            // A higher limit would come back cut in the same place (#1524).
+            + (budgetCut ? "." : ", or raise limit.");
     }
 
     [McpServerTool(Name = "compare_releases", ReadOnly = true)]
