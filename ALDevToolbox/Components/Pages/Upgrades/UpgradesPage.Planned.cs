@@ -170,7 +170,10 @@ public partial class UpgradesPage
     private static List<string> OfferedVersionNames(IEnumerable<UpgradeFleetRow> rows) =>
         UpgradeFleetService.OfferedVersions(rows).Select(o => o.Version).ToList();
 
-    /// <summary>Counts the view changes, so only the latest one's read is laid down.</summary>
+    /// <summary>
+    /// Counts the view changes and the fleet's own reloads, so a view read is laid down
+    /// only if nothing newer started while it was out.
+    /// </summary>
     private int _viewLoads;
 
     /// <summary>
@@ -207,7 +210,9 @@ public partial class UpgradesPage
                 case UpgradesView.Fleet:
                     var fleet = await services.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: Gone);
                     var pending = await services.GetRequiredService<UpgradeActionService>().ListPendingAsync(Gone);
-                    if (Latest()) ShowLoaded(fleet, pending);
+                    // Not under a run or a dialog that a tick on the old rows opened: those own
+                    // the table, as they do against the poll, and reload it when they finish.
+                    if (Latest() && !PollPaused) ShowLoaded(fleet, pending);
                     break;
                 case UpgradesView.Archive:
                     var archive = await services.GetRequiredService<EnvironmentUpgradeService>().ListArchivedAsync(ct: Gone);
