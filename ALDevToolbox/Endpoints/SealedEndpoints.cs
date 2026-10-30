@@ -34,7 +34,7 @@ internal static class SealedEndpoints
             if (!tools.IsSiteEnabled(ToolKey.Sealed)) return Gone();
 
             var ip = ctx.Connection.RemoteIpAddress?.ToString();
-            var result = await sealedLinks.RevealAsync(token, request.Check, request.Passphrase, ip, ct);
+            var result = await sealedLinks.RevealAsync(token, request.Check, request.Passphrase, ip, request.AsCreator, ct);
             return result.Status switch
             {
                 SealedRevealStatus.Revealed => Results.Json(new
@@ -42,12 +42,15 @@ internal static class SealedEndpoints
                     ciphertext = Base64Url.EncodeToString(result.Ciphertext!),
                     iv = Base64Url.EncodeToString(result.Iv!),
                     viewsLeft = result.ViewsLeft,
+                    creator = result.ByCreator,
                 }),
                 SealedRevealStatus.WrongPassphrase => Results.Json(
                     new { error = "wrong-passphrase", attemptsLeft = result.AttemptsLeft },
                     statusCode: StatusCodes.Status403Forbidden),
                 SealedRevealStatus.LockedOut => Results.Json(
                     new { error = "locked" }, statusCode: StatusCodes.Status403Forbidden),
+                SealedRevealStatus.NotCreator => Results.Json(
+                    new { error = "not-creator" }, statusCode: StatusCodes.Status409Conflict),
                 _ => Gone(),
             };
         })
@@ -63,4 +66,5 @@ internal static class SealedEndpoints
 }
 
 /// <summary>The recipient browser's proofs: one from the key in the link, one from the passphrase if there is one.</summary>
-internal sealed record SealedRevealRequest(string? Check, string? Passphrase);
+/// <param name="AsCreator">The page promised the creator a free look: refuse rather than spend a view if they are not.</param>
+internal sealed record SealedRevealRequest(string? Check, string? Passphrase, bool AsCreator = false);

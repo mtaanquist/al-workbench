@@ -233,10 +233,14 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     check: toB64u(keys.linkCheck),
+                    asCreator: root.hasAttribute("data-creator"),
                     passphrase: keys.passphraseCheck ? toB64u(keys.passphraseCheck) : null,
                 }),
                 cache: "no-store",
-                credentials: "omit",
+                // Anonymous unless the page says the signed-in person created this
+                // link: only then does the sign-in cookie go along, so the server can
+                // let them look without spending a view.
+                credentials: root.hasAttribute("data-creator") ? "same-origin" : "omit",
             });
 
             if (res.status === 429) {
@@ -251,6 +255,10 @@
                 return;
             }
             if (res.status === 403 && body.error === "locked") { show(root, "locked"); return; }
+            if (res.status === 409 && body.error === "not-creator") {
+                say(root, "You are no longer signed in as the person who created this link, so nothing was shown and no view was used. Sign in again and reload this page.");
+                return;
+            }
             if (!res.ok) { show(root, "gone"); return; }
 
             const plain = await crypto.subtle.decrypt(
@@ -260,7 +268,10 @@
             if (out) out.value = dec.decode(plain);
             const left = root.querySelector("[data-sealed-left]");
             if (left) {
-                left.textContent = body.viewsLeft > 0
+                left.textContent = body.creator
+                    ? "You created this link, so opening it here did not use up a view. It can still be opened "
+                        + (body.viewsLeft === 1 ? "once." : body.viewsLeft + " times.")
+                    : body.viewsLeft > 0
                     ? "This link can be opened " + (body.viewsLeft === 1 ? "once more." : body.viewsLeft + " more times.")
                     : "Copy it now and keep it somewhere safe. This link has been used up, so it can't be opened again.";
             }

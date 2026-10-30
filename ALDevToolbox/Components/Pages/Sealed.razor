@@ -109,7 +109,7 @@
             <div class="card__head">
                 <div>
                     <h2 class="card__title">Your link is ready</h2>
-                    <p class="card__sub">Copy it into your email now. It is shown only once: AL Workbench keeps no copy of the part that unlocks the secret.</p>
+                    <p class="card__sub">Copy it into your email now. It is shown only once: AL Workbench keeps no copy of the part that unlocks the secret. To check what you sent, open the link while you are signed in; that doesn't use up a view.</p>
                 </div>
             </div>
             <div class="card__body sealed-form">
@@ -146,7 +146,7 @@
         <div class="card__head">
             <div>
                 <h2 class="card__title">@(_everyone ? "Everyone's links" : "Your links")</h2>
-                <p class="card__sub">See whether a link was opened, and revoke one that should no longer work. Links that have stopped working are removed from this list after @((int)SealedLinkService.RetentionAfterClose.TotalDays) days.</p>
+                <p class="card__sub">See whether a link was opened, extend one that needs longer, or revoke one that should no longer work. Links that have stopped working are removed from this list after @((int)SealedLinkService.RetentionAfterClose.TotalDays) days.</p>
             </div>
             <div class="sealed-list-actions">
                 @if (_canSeeEveryone)
@@ -263,6 +263,13 @@
                             <td class="data-table__actions">
                                 @if (open && (row.CreatedByUserId == _userId || _canSeeEveryone))
                                 {
+                                    @if (CanExtend(row, now))
+                                    {
+                                        <button type="button" class="btn btn--sm" @onclick="() => ExtendAsync(row)">
+                                            <Icon Name="clock" Width="14" Height="14" />
+                                            <span>Extend</span>
+                                        </button>
+                                    }
                                     <button type="button" class="btn btn--sm" @onclick="() => RevokeAsync(row)">
                                         <Icon Name="x" Width="14" Height="14" />
                                         <span>Revoke</span>
@@ -279,6 +286,20 @@
 </div>
 
 <ConfirmDialog @ref="_confirmRevoke" />
+<ConfirmDialog @ref="_confirmExtend">
+    <label class="field">
+        <span class="field__label">Keep it working for</span>
+        <SelectBox>
+            <select class="select" @bind="_extendHours">
+                @foreach (var hours in _extendChoices)
+                {
+                    <option value="@hours">@ExtendLabel(hours)</option>
+                }
+            </select>
+        </SelectBox>
+        <span class="field__hint">The number of times it can be opened stays the same.</span>
+    </label>
+</ConfirmDialog>
 
 @code {
     [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
@@ -287,6 +308,9 @@
     private ElementReference _passphraseRef;
     private ElementReference _linkRef;
     private ConfirmDialog? _confirmRevoke;
+    private ConfirmDialog? _confirmExtend;
+    private List<int> _extendChoices = [];
+    private int _extendHours;
 
     private int _expiresInHours = SealedLinkService.DefaultExpiryHours;
     private int _maxViews = 1;
@@ -469,10 +493,63 @@
         await LoadAsync();
     }
 
+    private async Task ExtendAsync(SealedLinkRow row)
+    {
+        if (_confirmExtend is null) return;
+        var now = Clock.GetUtcNow().UtcDateTime;
+        _extendChoices = ExtendChoicesFor(row, now);
+        if (_extendChoices.Count == 0)
+        {
+            _listError = "That link can't be given more time now. It may have stopped working, or already works for a week.";
+            await LoadAsync();
+            return;
+        }
+        _extendHours = _extendChoices.Contains(SealedLinkService.DefaultExpiryHours)
+            ? SealedLinkService.DefaultExpiryHours
+            : _extendChoices[0];
+        var name = string.IsNullOrWhiteSpace(row.Label) ? "this link" : $"\"{row.Label}\"";
+        if (!await _confirmExtend.OpenAsync(
+                "Extend this link?",
+                $"Give {name} more time before it stops working, for example when the person you sent it to has been away.",
+                "Extend link",
+                confirmButtonClass: "btn--primary",
+                confirmIcon: "clock"))
+        {
+            return;
+        }
+        _listError = null;
+        try
+        {
+            await SealedLinks.ExtendAsync(row.Id, _extendHours);
+        }
+        catch (PlanValidationException ex)
+        {
+            _listError = ex.Errors.Values.FirstOrDefault();
+        }
+        await LoadAsync();
+    }
+
+    /// <summary>The extension choices that would move this link's expiry later, not earlier.</summary>
+    private static List<int> ExtendChoicesFor(SealedLinkRow row, DateTime now) =>
+        row.IsOpenAt(now)
+            ? SealedLinkService.ExtensionChoices.Where(h => SealedLinkService.ExtendsEnough(row.ExpiresAt, now, h)).ToList()
+            : [];
+
+    private static bool CanExtend(SealedLinkRow row, DateTime now) => ExtendChoicesFor(row, now).Count > 0;
+
+    private static string ExtendLabel(int hours) => hours switch
+    {
+        24 => "1 day from now",
+        72 => "3 days from now",
+        168 => "7 days from now",
+        _ => $"{hours} hours from now",
+    };
+
     private static string ExpiryLabel(int hours) => hours switch
     {
         1 => "In 1 hour",
         24 => "In 1 day",
+        72 => "In 3 days",
         168 => "In 7 days",
         _ => $"In {hours} hours",
     };

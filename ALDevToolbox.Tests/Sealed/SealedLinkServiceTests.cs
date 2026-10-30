@@ -127,6 +127,91 @@ public sealed class SealedLinkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_creator_can_open_their_own_link_without_spending_a_view()
+    {
+        var alex = await SignInAsync("alex@cronus.example");
+        var input = Input() with { PassphraseSalt = B64(16), PassphraseCheck = B64(32) };
+        var token = await CreateAsync(input);
+
+        (await Service().GetForRecipientAsync(token))!.OpenedByCreator.Should().BeTrue();
+        var mine = await Service().RevealAsync(token, input.LinkCheck, input.PassphraseCheck, "203.0.113.4");
+        var again = await Service().RevealAsync(token, input.LinkCheck, input.PassphraseCheck, "203.0.113.4");
+
+        mine.Status.Should().Be(SealedRevealStatus.Revealed);
+        mine.ByCreator.Should().BeTrue();
+        mine.Ciphertext.Should().Equal(Base64Url.DecodeFromChars(input.Ciphertext));
+        again.ViewsLeft.Should().Be(1, "the creator's looks spend nothing");
+        var link = await ReadLinkAsync();
+        link.ViewCount.Should().Be(0);
+        link.Events.Should().BeEmpty("nothing to tell the sender about their own look");
+
+        (await Service().RevealAsync(token, input.LinkCheck, null, null)).Status
+            .Should().Be(SealedRevealStatus.WrongPassphrase, "the creator still needs the passphrase");
+        (await ReadLinkAsync()).FailedPassphraseAttempts.Should().Be(1);
+
+        SignOut();
+        var summary = await Service().GetForRecipientAsync(token);
+        summary!.OpenedByCreator.Should().BeFalse();
+        var theirs = await Service().RevealAsync(token, input.LinkCheck, input.PassphraseCheck, null);
+        theirs.ByCreator.Should().BeFalse();
+        theirs.ViewsLeft.Should().Be(0);
+        (await ReadLinkAsync()).CreatedByUserId.Should().Be(alex);
+    }
+
+    [Fact]
+    public async Task A_creator_look_after_signing_out_is_refused_without_spending_the_view()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+        SignOut();
+
+        var result = await Service().RevealAsync(token, input.LinkCheck, null, null, asCreator: true);
+
+        result.Status.Should().Be(SealedRevealStatus.NotCreator);
+        result.Ciphertext.Should().BeNull();
+        var link = await ReadLinkAsync();
+        link.ViewCount.Should().Be(0, "the page promised the creator a free look, so nothing may be spent");
+        link.ClosedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_creator_gets_nothing_from_a_wrong_link_or_a_closed_one()
+    {
+        await SignInAsync("alex@cronus.example");
+        var input = Input();
+        var token = await CreateAsync(input);
+
+        (await Service().RevealAsync(token, B64(32), null, null, asCreator: true)).Status.Should().Be(SealedRevealStatus.Gone);
+        await Service().RevokeAsync((await Service().ListAsync()).Single().Id);
+
+        (await Service().GetForRecipientAsync(token)).Should().BeNull();
+        (await Service().RevealAsync(token, input.LinkCheck, null, null, asCreator: true)).Status.Should().Be(SealedRevealStatus.Gone);
+    }
+
+    [Fact]
+    public async Task Someone_else_signed_in_spends_a_view_like_any_recipient()
+    {
+        var alex = await SignInAsync("alex@cronus.example");
+        var input = Input(views: 2);
+        var token = await CreateAsync(input);
+
+        await SignInAsync("admin@cronus.example", UserRole.Admin);
+        (await Service().GetForRecipientAsync(token))!.OpenedByCreator.Should().BeFalse();
+        var admin = await Service().RevealAsync(token, input.LinkCheck, null, null);
+
+        admin.ByCreator.Should().BeFalse("only the creator looks for free, not an Admin");
+        admin.ViewsLeft.Should().Be(1);
+
+        // The creator's user id under another organisation is not the creator: both ids must match the row.
+        _db.OrgContext.CurrentUserId = alex;
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        var elsewhere = await Service().RevealAsync(token, input.LinkCheck, null, null);
+        elsewhere.ByCreator.Should().BeFalse();
+        elsewhere.ViewsLeft.Should().Be(0);
+    }
+
+    [Fact]
     public async Task A_link_without_its_key_part_spends_nothing()
     {
         await SignInAsync("alex@cronus.example");
@@ -323,14 +408,95 @@ public sealed class SealedLinkServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_sender_can_extend_an_open_link_from_now_and_it_is_audited()
+    {
+        var alex = await SignInAsync("alex@cronus.example");
+        var token = await CreateAsync(Input(hours: 24));
+        var id = (await Service().ListAsync()).Single().Id;
+        _clock.Advance(TimeSpan.FromHours(20));
+
+        await Service().ExtendAsync(id, 72);
+
+        var link = await ReadLinkAsync();
+        link.ExpiresAt.Should().Be(Start.UtcDateTime.AddHours(20 + 72), "an extension counts from now, not from creation");
+        link.ClosedAt.Should().BeNull();
+        link.ViewCount.Should().Be(0);
+        link.MaxViews.Should().Be(1, "extending gives more time, not more views");
+        link.Ciphertext.Should().NotBeNull();
+        await using var ctx = _db.NewContext();
+        (await ctx.AuditLog.SingleAsync(a => a.EntityType == AuditEntityType.SealedLink && a.Action == AuditAction.Updated))
+            .ChangedByUserId.Should().Be(alex);
+
+        _clock.Advance(TimeSpan.FromHours(30));
+        SignOut();
+        (await Service().GetForRecipientAsync(token)).Should().NotBeNull("the link would have expired without the extension");
+    }
+
+    [Fact]
+    public async Task Extending_refuses_a_closed_link_a_shorter_time_and_a_choice_outside_the_list()
+    {
+        await SignInAsync("alex@cronus.example");
+        await CreateAsync(Input(hours: 168));
+        var id = (await Service().ListAsync()).Single().Id;
+
+        var shorter = () => Service().ExtendAsync(id, 72);
+        var odd = () => Service().ExtendAsync(id, 1000);
+        var same = () => Service().ExtendAsync(id, 168);
+        (await shorter.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ExpiresInHours");
+        (await odd.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ExpiresInHours");
+        (await same.Should().ThrowAsync<PlanValidationException>()).Which.Errors
+            .Should().ContainKey("ExpiresInHours", "a week from now on a fresh week-long link adds nothing");
+        (await ReadLinkAsync()).ExpiresAt.Should().Be(Start.UtcDateTime.AddHours(168), "a refused extension changes nothing");
+
+        _clock.Advance(TimeSpan.FromHours(169));
+        var expired = () => Service().ExtendAsync(id, 168);
+        (await expired.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+
+        await CreateAsync(Input(hours: 24));
+        var second = (await Service().ListAsync()).First().Id;
+        await Service().RevokeAsync(second);
+        var revoked = () => Service().ExtendAsync(second, 168);
+        (await revoked.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+    }
+
+    [Fact]
+    public async Task Only_the_sender_or_an_admin_can_extend()
+    {
+        await SignInAsync("alex@cronus.example");
+        await CreateAsync(Input(hours: 1));
+        var id = (await Service().ListAsync()).Single().Id;
+
+        await SignInAsync("kim@cronus.example");
+        var colleague = () => Service().ExtendAsync(id, 24);
+        (await colleague.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+
+        await SignInAsync("kim@fabrikam.example", UserRole.Admin, TestDb.OtherOrgId);
+        var otherOrgAdmin = () => Service().ExtendAsync(id, 24);
+        (await otherOrgAdmin.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Link");
+
+        await SignInAsync("admin@cronus.example", UserRole.Admin);
+        await Service().ExtendAsync(id, 24);
+        (await ReadLinkAsync()).ExpiresAt.Should().Be(Start.UtcDateTime.AddHours(24));
+    }
+
+    [Fact]
+    public void New_links_default_to_three_days()
+    {
+        SealedLinkService.DefaultExpiryHours.Should().Be(72);
+        SealedLinkService.ExpiryChoices.Should().Contain(SealedLinkService.DefaultExpiryHours);
+    }
+
+    [Fact]
     public async Task Revoking_a_link_that_has_already_closed_keeps_why_it_closed()
     {
         await SignInAsync("alex@cronus.example");
         var input = Input();
         var token = await CreateAsync(input);
         var id = (await Service().ListAsync()).Single().Id;
+        SignOut();
         (await Service().RevealAsync(token, input.LinkCheck, null, null)).Status.Should().Be(SealedRevealStatus.Revealed);
 
+        await SignInAsync("alex@cronus.example");
         await Service().RevokeAsync(id);
 
         (await ReadLinkAsync()).ClosedReason.Should().Be(SealedLinkClosedReason.UsedUp);

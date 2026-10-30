@@ -563,7 +563,8 @@ public sealed class UpgradesListPageTests : IAsyncDisposable
     public async Task New_upgrade_clicked_before_the_first_fleet_read_lands_still_picks_the_offered_version()
     {
         await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
-        var gate = new FirstFleetReadGate();
+        // Only the fleet read filters out environments Business Central stopped reporting.
+        var gate = new HoldFirstCommand(sql => sql.Contains("missing_since", StringComparison.Ordinal));
         _ctx.Services.ConfigureDbContext<ALDevToolbox.Data.AppDbContext>(opts => opts.AddInterceptors(gate));
         // The time zone and the access check are read once per circuit. With both in
         // hand the page first yields on the upgrades read, after it knows its view, so
@@ -584,34 +585,6 @@ public sealed class UpgradesListPageTests : IAsyncDisposable
         finally
         {
             gate.Release();
-        }
-    }
-
-    /// <summary>Holds the first fleet read until released; every later one runs straight through.</summary>
-    private sealed class FirstFleetReadGate : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
-    {
-        private readonly TaskCompletionSource _held = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private int _seen;
-
-        public Task Held => _held.Task;
-
-        public void Release() => _released.TrySetResult();
-
-        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
-            System.Data.Common.DbCommand command,
-            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
-            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result,
-            CancellationToken cancellationToken = default)
-        {
-            // Only the fleet read filters out environments Business Central stopped reporting.
-            if (command.CommandText.Contains("missing_since", StringComparison.Ordinal)
-                && Interlocked.Increment(ref _seen) == 1)
-            {
-                _held.TrySetResult();
-                await _released.Task.WaitAsync(cancellationToken);
-            }
-            return result;
         }
     }
 
@@ -812,6 +785,62 @@ public sealed class UpgradesListPageTests : IAsyncDisposable
             cut.Find(".upg-scroll tbody tr .upg-env a").TextContent.Should().Be("PROD-DK");
             cut.Instance.WatchedEnvironmentIds.Should().Equal(envs[0]);
         });
+    }
+
+    /// <summary>
+    /// Back to Fleet before the Open view's read is in: the fleet is read alongside it
+    /// rather than on the same context (which threw, #1495), and the Open read landing
+    /// late does not take the Fleet view's rows or its watch away.
+    /// </summary>
+    [Fact]
+    public async Task Coming_back_to_the_Fleet_view_before_the_Open_read_lands_still_reads_the_fleet()
+    {
+        var (_, envs) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
+        await using (var ctx = _db.NewContext())
+        {
+            var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envs[0]);
+            env.Status = "Upgrading";
+            await ctx.SaveChangesAsync();
+        }
+        // Armed only once the page is up, so the first load's own read of the upgrades passes.
+        var armed = false;
+        var hold = new HoldFirstCommand(sql => Volatile.Read(ref armed)
+            && sql.Contains("FROM oe_environment_upgrades AS", StringComparison.Ordinal));
+        _ctx.Services.ConfigureDbContext<ALDevToolbox.Data.AppDbContext>(opts => opts.AddInterceptors(hold));
+        var nav = _ctx.Services.GetRequiredService<NavigationManager>();
+
+        try
+        {
+            var cut = Render("fleet");
+            cut.WaitForAssertion(() =>
+            {
+                cut.FindAll(".pill-tab__count").Should().HaveCount(3);
+                cut.Instance.WatchedEnvironmentIds.Should().Equal(envs[0]);
+            });
+
+            Volatile.Write(ref armed, true);
+            nav.NavigateTo(nav.GetUriWithQueryParameter("view", "open"));
+            await hold.Held.WaitAsync(TimeSpan.FromSeconds(30));
+            nav.NavigateTo(nav.GetUriWithQueryParameter("view", "fleet"));
+
+            cut.WaitForAssertion(() =>
+            {
+                cut.Find(".upg-scroll tbody tr .upg-env a").TextContent.Should().Be("Production");
+                cut.Instance.WatchedEnvironmentIds.Should().Equal(envs[0]);
+            });
+
+            hold.Release();
+            _db.WaitForQueriesToSettle();
+            cut.WaitForAssertion(() =>
+            {
+                cut.Find(".upg-scroll tbody tr .upg-env a").TextContent.Should().Be("Production");
+                cut.Instance.WatchedEnvironmentIds.Should().Equal(envs[0]);
+            });
+        }
+        finally
+        {
+            hold.Release();
+        }
     }
 
     // ── Open filters, Archive pages, the subtitle ───────────────────────

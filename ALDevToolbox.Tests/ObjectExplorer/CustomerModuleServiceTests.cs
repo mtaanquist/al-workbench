@@ -370,6 +370,68 @@ public sealed class CustomerModuleServiceTests : IDisposable
         (await Svc(ctx).ListProjectIdsWithModuleAsync(capture)).Should().BeEquivalentTo([keeps]);
     }
 
+    /// <summary>
+    /// A customer with the module only on a sandbox next to production does not have it:
+    /// their card reads production, and the filter and the catalogue count must agree with
+    /// the card rather than name a customer whose card then shows nothing (#1515).
+    /// </summary>
+    [Fact]
+    public async Task The_module_filter_and_count_read_the_same_environment_as_the_card()
+    {
+        var capture = await AddToCatalogAsync("Continia Document Capture", "Continia Software", CaptureAppId);
+        var trialOnly = await SeedSolutionAsync("CRONUS Denmark", ProjectHostingType.MicrosoftCloud);
+        await SeedEnvironmentAsync(trialOnly, "Production", "Production", (Guid.NewGuid(), "Base Application", "Microsoft", "25.3.0.0"));
+        await SeedEnvironmentAsync(trialOnly, "Test", "Sandbox", (CaptureAppId, "Document Capture", "Continia Software", "25.1.0.0"));
+        var sandboxOnly = await SeedSolutionAsync("CRONUS Norway", ProjectHostingType.MicrosoftCloud);
+        await SeedEnvironmentAsync(sandboxOnly, "Sandbox", "Sandbox", (CaptureAppId, "Document Capture", "Continia Software", "25.1.0.0"));
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+
+        (await svc.GetSolutionModulesAsync(trialOnly)).Modules.Should().BeEmpty();
+        (await svc.ListProjectIdsWithModuleAsync(capture)).Should().BeEquivalentTo([sandboxOnly],
+            "a solution with only sandboxes is read from one of them, the same as its card");
+        (await svc.ListCatalogAsync()).Single().Solutions.Should().Be(1);
+    }
+
+    /// <summary>
+    /// A catalogue entry without an app id is matched by name and publisher on the card,
+    /// so the filter and the count find it the same way. A typed row left on a solution
+    /// that has since moved online does not count: its card reads the environment.
+    /// </summary>
+    [Fact]
+    public async Task The_module_filter_and_count_match_by_name_and_count_each_solution_once()
+    {
+        var fornav = await AddToCatalogAsync("ForNAV", "ForNAV");
+        var online = await SeedSolutionAsync("CRONUS Denmark", ProjectHostingType.MicrosoftCloud);
+        await SeedEnvironmentAsync(online, "Production", "Production", (Guid.NewGuid(), "fornav", "ForNAV", "8.1.0.0"));
+        var otherPublisher = await SeedSolutionAsync("CRONUS Sweden", ProjectHostingType.MicrosoftCloud);
+        await SeedEnvironmentAsync(otherPublisher, "Production", "Production", (Guid.NewGuid(), "ForNAV", "CRONUS International", "1.0.0.0"));
+        var onPrem = await SeedSolutionAsync("CRONUS Norway", ProjectHostingType.CustomerHardware);
+        var movedOnline = await SeedSolutionAsync("CRONUS Finland", ProjectHostingType.MicrosoftCloud);
+        await SeedEnvironmentAsync(movedOnline, "Production", "Production", (Guid.NewGuid(), "Base Application", "Microsoft", "25.3.0.0"));
+        await using (var seed = _db.NewContext())
+        {
+            // Typed rows left from before these two solutions moved online: one next to the
+            // installed app, one with nothing installed.
+            seed.OeProjectModules.AddRange(
+                new OeProjectModule { OrganizationId = TestDb.DefaultOrgId, ProjectId = online, ModuleId = fornav, CreatedAt = DateTime.UtcNow },
+                new OeProjectModule { OrganizationId = TestDb.DefaultOrgId, ProjectId = movedOnline, ModuleId = fornav, CreatedAt = DateTime.UtcNow });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        await svc.SaveSolutionModuleAsync(onPrem, null, new SolutionModuleInput(fornav, "8.1", null));
+
+        (await svc.GetSolutionModulesAsync(movedOnline)).Modules.Should().BeEmpty();
+        (await svc.ListProjectIdsWithModuleAsync(fornav)).Should().BeEquivalentTo([online, onPrem]);
+        (await svc.ListCatalogAsync()).Single().Solutions.Should().Be(2);
+        (await svc.GetModuleAcrossSolutionsAsync(fornav, [online, onPrem, otherPublisher, movedOnline]))
+            .Where(h => h.Module is not null).Select(h => h.ProjectId)
+            .Should().BeEquivalentTo([online, onPrem], "the per-solution read agrees with the filter");
+    }
+
     [Fact]
     public async Task Apps_to_pick_from_leave_out_microsofts_and_what_is_already_in_the_catalogue_most_widespread_first()
     {

@@ -202,7 +202,12 @@ yet, or genuinely none of the catalogue's modules installed.
 
 The Solutions list has a **Has {module}** filter, shown once there is a catalogue. It is
 part of the list's GET form, so a filtered list is a shareable address; it counts a module
-either way (typed in, or installed in any current environment).
+either way (typed in, or installed in the environment the Modules card reads from). It
+reads the same environment as the card on purpose: an app installed only on a sandbox next
+to production is a trial or a copy, not something the customer runs, and a filter that
+listed it would name customers whose card then does not show the module (#1515). The
+catalogue's per-module count on `/admin/customer-modules` counts the same way, each
+Solution once.
 
 With modules in, **Customer is the first tab and the one an existing Solution opens on.**
 Links that mean another tab say so (`/solutions/{slug}/repositories`, `pipelines`, `bc`,

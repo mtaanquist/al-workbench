@@ -51,7 +51,9 @@ public sealed record SealedLinkRow(
 
 /// <summary>What the recipient page needs before anything is revealed.</summary>
 /// <param name="PassphraseSalt">Base64url, or null when the link has no passphrase.</param>
-public sealed record SealedLinkSummary(string OrganizationName, string SenderName, DateTime ExpiresAt, int ViewsLeft, string? PassphraseSalt);
+/// <param name="OpenedByCreator">The signed-in person is the one who created the link, so opening it spends no view.</param>
+public sealed record SealedLinkSummary(
+    string OrganizationName, string SenderName, DateTime ExpiresAt, int ViewsLeft, string? PassphraseSalt, bool OpenedByCreator = false);
 
 /// <summary>How a reveal went.</summary>
 public enum SealedRevealStatus
@@ -64,15 +66,19 @@ public enum SealedRevealStatus
     WrongPassphrase,
     /// <summary>That wrong passphrase was the last one allowed: the link is now closed.</summary>
     LockedOut,
+    /// <summary>The page offered the creator a free look, but the caller is no longer signed in as them. Nothing was spent.</summary>
+    NotCreator,
 }
 
 /// <summary>The outcome of <see cref="SealedLinkService.RevealAsync"/>.</summary>
+/// <param name="ByCreator">Shown to the link's own creator, so no view was spent.</param>
 public sealed record SealedRevealResult(
     SealedRevealStatus Status,
     byte[]? Ciphertext = null,
     byte[]? Iv = null,
     int ViewsLeft = 0,
-    int AttemptsLeft = 0);
+    int AttemptsLeft = 0,
+    bool ByCreator = false);
 
 /// <summary>
 /// Sealed: share a secret through a link that opens a set number of times and then
@@ -88,11 +94,31 @@ public sealed record SealedRevealResult(
 /// </summary>
 public sealed class SealedLinkService
 {
-    /// <summary>How long a link may live, in hours: an hour, a day, a week.</summary>
-    public static readonly IReadOnlyList<int> ExpiryChoices = [1, 24, 168];
+    /// <summary>How long a link may live, in hours: an hour, a day, three days, a week.</summary>
+    public static readonly IReadOnlyList<int> ExpiryChoices = [1, 24, 72, 168];
 
-    /// <summary>The expiry the form starts on.</summary>
-    public const int DefaultExpiryHours = 24;
+    /// <summary>
+    /// The expiry the form starts on. Three days rather than one, because a recipient
+    /// who is away for a day should not come back to a dead link (Mads, 2026-10-30).
+    /// </summary>
+    public const int DefaultExpiryHours = 72;
+
+    /// <summary>
+    /// How far from now an open link can be extended, in hours. Never further out than
+    /// the longest choice at creation, so extending keeps a link alive without making
+    /// any one moment's exposure longer than a new link's could be.
+    /// </summary>
+    public static readonly IReadOnlyList<int> ExtensionChoices = [24, 72, 168];
+
+    /// <summary>
+    /// The least an extension must add. Below this the choice changes nothing anyone
+    /// would notice, such as "a week from now" on a link made a minute ago for a week.
+    /// </summary>
+    public static readonly TimeSpan MinExtensionGain = TimeSpan.FromHours(1);
+
+    /// <summary>True when extending to <paramref name="hoursFromNow"/> from <paramref name="now"/> adds enough to be worth offering.</summary>
+    public static bool ExtendsEnough(DateTime expiresAt, DateTime now, int hoursFromNow) =>
+        now.AddHours(hoursFromNow) - expiresAt >= MinExtensionGain;
 
     /// <summary>The most times one link may be opened.</summary>
     public const int MaxViewsLimit = 5;
@@ -174,7 +200,7 @@ public sealed class SealedLinkService
 
         if (!ExpiryChoices.Contains(input.ExpiresInHours))
         {
-            errors["ExpiresInHours"] = "Pick when the link expires: in an hour, a day or a week.";
+            errors["ExpiresInHours"] = "Pick when the link expires: in an hour, a day, three days or a week.";
         }
         if (input.MaxViews < 1 || input.MaxViews > MaxViewsLimit)
         {
@@ -324,6 +350,80 @@ public sealed class SealedLinkService
     }
 
     /// <summary>
+    /// Keeps an open link working until <paramref name="hoursFromNow"/> hours from now.
+    /// The sender may extend their own links, an Admin anyone's. A link that has
+    /// already stopped working cannot come back: its secret is gone with it.
+    /// </summary>
+    public async Task ExtendAsync(int id, int hoursFromNow, CancellationToken ct = default)
+    {
+        var userId = RequireUserId();
+        var link = await _db.SealedLinks.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id, ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "That link no longer exists. Reload the page to see your links.",
+            });
+        if (link.CreatedByUserId != userId && !await IsAdminAsync(userId, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "Only the person who created this link, or an Admin, can extend it.",
+            });
+        }
+        if (!ExtensionChoices.Contains(hoursFromNow))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ExpiresInHours"] = "Pick how long to keep it working: a day, three days or a week.",
+            });
+        }
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var expiresAt = now.AddHours(hoursFromNow);
+        if (link.ClosedAt is not null || link.ExpiresAt <= now || link.ViewCount >= link.MaxViews)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "This link has already stopped working, so it can't be extended. Create a new one instead.",
+            });
+        }
+        if (!ExtendsEnough(link.ExpiresAt, now, hoursFromNow))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ExpiresInHours"] = "The link already works for longer than that.",
+            });
+        }
+
+        // Conditional, so a link that a reveal, a revoke or the sweep closed a moment
+        // ago stays closed instead of being given a new expiry with no secret behind it.
+        var extended = await _db.SealedLinks
+            .Where(l => l.Id == id && l.ClosedAt == null && l.ExpiresAt > now && l.ViewCount < l.MaxViews)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.ExpiresAt, expiresAt), ct);
+        if (extended == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Link"] = "This link has already stopped working, so it can't be extended. Create a new one instead.",
+            });
+        }
+
+        _db.AuditLog.Add(new AuditLogEntry
+        {
+            Timestamp = now,
+            ChangedBy = await AuditActor.ResolveAsync(_db, userId, ct),
+            ChangedByUserId = userId,
+            OrganizationId = link.OrganizationId,
+            EntityType = AuditEntityType.SealedLink,
+            EntityId = link.Id,
+            Action = AuditAction.Updated,
+            EntityName = link.Label,
+        });
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation(
+            "Sealed link {LinkId} extended by user {UserId} to {ExpiresAt:o}.", link.Id, userId, expiresAt);
+    }
+
+    /// <summary>
     /// What the recipient page shows before anything is revealed, or null when the link
     /// does not exist or no longer opens. Anonymous: see the class remarks.
     /// </summary>
@@ -336,6 +436,8 @@ public sealed class SealedLinkService
             .Where(l => l.Token == token && l.ClosedAt == null && l.ExpiresAt > now)
             .Select(l => new
             {
+                l.OrganizationId,
+                l.CreatedByUserId,
                 OrganizationName = l.Organization!.Name,
                 SenderName = l.CreatedByUser!.DisplayName,
                 SenderEmail = l.CreatedByUser!.Email,
@@ -351,7 +453,8 @@ public sealed class SealedLinkService
             string.IsNullOrWhiteSpace(link.SenderName) ? link.SenderEmail : link.SenderName,
             link.ExpiresAt,
             link.MaxViews - link.ViewCount,
-            link.PassphraseSalt is null ? null : Base64Url.EncodeToString(link.PassphraseSalt));
+            link.PassphraseSalt is null ? null : Base64Url.EncodeToString(link.PassphraseSalt),
+            IsCreator(link.OrganizationId, link.CreatedByUserId));
     }
 
     /// <summary>
@@ -359,10 +462,21 @@ public sealed class SealedLinkService
     /// (and <paramref name="passphraseCheck"/>, if the link has a passphrase) match.
     /// Two reveals at once cannot both take the last view: the count only moves in a
     /// conditional update that one of them loses. Anonymous: see the class remarks.
+    ///
+    /// <para>When the signed-in person created the link, nothing is spent or recorded:
+    /// they can check what they sent. They still need the whole link and the
+    /// passphrase, since the server cannot decrypt anything, and a wrong passphrase
+    /// counts towards the lockout like anyone else's.</para>
     /// </summary>
     /// <param name="ipAddress">The recipient's address, recorded for the sender.</param>
+    /// <param name="asCreator">
+    /// The page told the caller they are the creator. If the sign-in has gone since
+    /// (signed out in another tab, the session ended), refuse instead of spending the
+    /// view the page promised to keep.
+    /// </param>
     public async Task<SealedRevealResult> RevealAsync(
-        string token, string? linkCheck, string? passphraseCheck, string? ipAddress, CancellationToken ct = default)
+        string token, string? linkCheck, string? passphraseCheck, string? ipAddress, bool asCreator = false,
+        CancellationToken ct = default)
     {
         var gone = new SealedRevealResult(SealedRevealStatus.Gone);
         if (!IsWellFormedToken(token)) return gone;
@@ -377,6 +491,7 @@ public sealed class SealedLinkService
             {
                 l.Id,
                 l.OrganizationId,
+                l.CreatedByUserId,
                 l.Ciphertext,
                 l.Iv,
                 l.LinkCheckHash,
@@ -399,6 +514,15 @@ public sealed class SealedLinkService
                 && CryptographicOperations.FixedTimeEquals(SHA256.HashData(given), link.PassphraseCheckHash);
             if (!right) return await RecordWrongPassphraseAsync(link.Id, link.OrganizationId, ipAddress, now, ct);
         }
+
+        if (IsCreator(link.OrganizationId, link.CreatedByUserId))
+        {
+            _logger.LogInformation("Sealed link {LinkId} opened by its creator; no view spent.", link.Id);
+            return new SealedRevealResult(
+                SealedRevealStatus.Revealed, link.Ciphertext, link.Iv,
+                ViewsLeft: link.MaxViews - link.ViewCount, ByCreator: true);
+        }
+        if (asCreator) return new SealedRevealResult(SealedRevealStatus.NotCreator);
 
         // Taking the view and, on the last one, closing the link and dropping the
         // ciphertext is one statement: a request aborted in between cannot leave a
@@ -504,6 +628,14 @@ public sealed class SealedLinkService
     }
 
     private static string? Truncate(string? ip) => ip is { Length: > 64 } ? ip[..64] : ip;
+
+    /// <summary>
+    /// True when the signed-in principal created the link. Both ids come from the
+    /// auth cookie and are compared with the row the token already pinned, so this
+    /// widens nothing: a recipient with no account always reads false.
+    /// </summary>
+    private bool IsCreator(int organizationId, int createdByUserId) =>
+        _orgContext.CurrentUserId == createdByUserId && _orgContext.CurrentOrganizationId == organizationId;
 
     private async Task<bool> IsAdminAsync(int userId, CancellationToken ct) =>
         await _db.Users.AsNoTracking()

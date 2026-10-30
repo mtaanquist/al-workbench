@@ -457,6 +457,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh: true, ct);
         }
+        catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+        {
+            _logger.LogWarning("BC test connection: token step throttled for project {ProjectId}; asked to wait {Wait}.", projectId, wait);
+            return Throttled(wait);
+        }
         catch (BcApiException ex)
         {
             _logger.LogWarning("BC test connection: token step failed for project {ProjectId}: {Message}.", projectId, ex.Message);
@@ -468,6 +473,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         try
         {
             environments = await _adminClient.ListEnvironmentsAsync(token, ct);
+        }
+        catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+        {
+            _logger.LogWarning("BC test connection: environments call throttled for project {ProjectId}; asked to wait {Wait}.", projectId, wait);
+            return Throttled(wait);
         }
         // 401 and 403 mean different things here and are fixed in different places, so
         // they get different messages. Entra having issued a token (we got past the step
@@ -505,14 +515,24 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // onto, and so a failure here can never cost us the environment list itself.
         // A refresh in this scope that failed after reading leaves nothing for this one to announce.
         _scheduleChanges.Clear();
-        await MirrorBcEnvironmentDetailsAsync(project, token, ct);
+        var throttledFor = await MirrorBcEnvironmentDetailsAsync(project, token, ct);
         await _db.SaveChangesAsync(ct);
         await AnnounceScheduleChangesAsync();
 
         _logger.LogInformation("BC test connection succeeded for project {ProjectId}: {Count} environment(s).", projectId, environments.Count);
         return new BcConnectionTestResult(BcConnectionResult.Success, environments.Count,
-            environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.");
+            (environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.")
+            + (throttledFor is null ? "" : " Business Central asked us to slow down before every detail was read, so some show their previous answer."),
+            throttledFor);
     }
+
+    /// <summary>The result for a run Business Central asked to slow down, in words a consultant can act on.</summary>
+    private static BcConnectionTestResult Throttled(TimeSpan wait) =>
+        new(BcConnectionResult.Throttled, 0,
+            wait < TimeSpan.FromMinutes(2)
+                ? "Business Central asked us to slow down. Try again in a minute or two."
+                : $"Business Central asked us to slow down. Try again in about {Math.Ceiling(wait.TotalMinutes):N0} minutes.",
+            wait);
 
     /// <summary>
     /// The project's fetched environments (the delivery targets). Production first, then
@@ -548,7 +568,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <para>
     /// <b>Cached for <see cref="BcPanelCache.Ttl"/>.</b> These are four reads against
     /// Business Central, and re-issuing them every time a consultant expands a row is
-    /// traffic Microsoft's API does not need — especially as we honour no throttle. A
+    /// traffic Microsoft's API does not need. A
     /// window this short keeps the panel's promise of "what is true right now" while
     /// collapsing a working session's repeated opens into one fetch. Anything we write
     /// ourselves invalidates the entry (see <see cref="BcPanelCache.Invalidate"/>), so a
@@ -1792,35 +1812,75 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <param name="at">The slot for <see cref="UploadAppTiming.AtTime"/>; ignored for the other timings.</param>
     /// <param name="confirmedPrerequisiteAppIds">The apps the caller agreed may be installed or updated alongside; null or empty for none.</param>
     /// <returns>The timing that applied and the slot the update waits for.</returns>
-    public async Task<UploadAppOutcome> BookAppUpdateAsync(
+    public Task<UploadAppOutcome> BookAppUpdateAsync(
         int projectId, int environmentId, Guid appId, string targetVersion, UploadAppTiming timing,
-        DateTimeOffset? at = null, IReadOnlyCollection<Guid>? confirmedPrerequisiteAppIds = null, CancellationToken ct = default)
+        DateTimeOffset? at = null, IReadOnlyCollection<Guid>? confirmedPrerequisiteAppIds = null, CancellationToken ct = default) =>
+        BookAppUpdatesAsync(projectId, environmentId,
+            new[] { new AppUpdatePick(appId, targetVersion, confirmedPrerequisiteAppIds ?? Array.Empty<Guid>()) },
+            timing, at, ct);
+
+    /// <summary>
+    /// Books several AppSource apps to be updated in one go, for one slot - the
+    /// operations team's "these eight tonight at 20:00". Each app gets its own
+    /// <c>Pending</c> row, held to the same rules as <see cref="BookAppUpdateAsync"/>
+    /// (which is this with one pick), and more than one share a batch in dependency
+    /// order: an app another picked app waits for goes first, so by the time the
+    /// dependent is sent Business Central no longer lists it as waiting.
+    /// <see cref="UpgradeActionWorker"/> sends them one after another and waits for each;
+    /// a failed one stops only the picked apps that wait for it. All or nothing: one app
+    /// refused books none of them, so the person never has to work out which half went.
+    /// See <c>.design/saas-delivery.md</c>, "Updating an AppSource app".
+    /// </summary>
+    /// <param name="picks">The apps, each with the version shown and the prerequisites the person agreed to. A repeated app is booked once.</param>
+    /// <param name="at">The slot for <see cref="UploadAppTiming.AtTime"/>; ignored for the other timings.</param>
+    /// <returns>The timing that applied, the slot the batch waits for, and how many apps were booked.</returns>
+    public async Task<UploadAppOutcome> BookAppUpdatesAsync(
+        int projectId, int environmentId, IReadOnlyList<AppUpdatePick> picks, UploadAppTiming timing,
+        DateTimeOffset? at = null, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(targetVersion))
+        ArgumentNullException.ThrowIfNull(picks);
+        if (picks.GroupBy(p => p.AppId).Any(g => g.Select(p => p.TargetVersion?.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+        {
+            throw Validation("App", "The same app was picked twice with different versions. Refresh and pick again.");
+        }
+        var distinct = picks.DistinctBy(p => p.AppId).ToList();
+        if (distinct.Count == 0)
+        {
+            throw Validation("App", "Choose at least one app to update.");
+        }
+        if (distinct.Count > MaxUpdateBatch)
+        {
+            throw Validation("App", $"Choose at most {MaxUpdateBatch} apps at a time.");
+        }
+        if (distinct.Any(p => string.IsNullOrWhiteSpace(p.TargetVersion)))
         {
             throw Validation("App", "Choose the version to update to.");
         }
 
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
-        var confirmed = confirmedPrerequisiteAppIds ?? Array.Empty<Guid>();
         // The slot first: a time that has gone is refused without asking Business Central anything.
         var now = _clock.GetUtcNow().UtcDateTime;
         var (applied, runsAt) = await ResolveBookingSlotAsync(environmentId, timing, at, now, ct);
 
-        BcAvailableAppUpdate offered;
+        IReadOnlyList<BcAvailableAppUpdate> waiting;
         try
         {
-            offered = await ReadOfferedUpdateAsync(env, appId, targetVersion, confirmed, ct);
+            waiting = await _apps.ListAvailableUpdatesAsync(env.Token, env.Family, env.Name, ct);
         }
         catch (BcApiException ex)
         {
             throw Validation("App", "Business Central didn't list the waiting updates. " + ex.Message);
         }
+        var offered = distinct
+            .Select(p => CheckOfferedUpdate(waiting, p.AppId, p.TargetVersion, p.ConfirmedPrerequisiteAppIds, several: distinct.Count > 1))
+            .ToList();
 
         // One booking per app, counting the apps a booking brings along: a second would
         // only ask Business Central for the same update twice, and whichever ran first
-        // would leave the other failing on an update that is no longer waiting.
-        var covered = offered.Requirements.Select(r => r.AppId!.Value).Append(appId).ToList();
+        // would leave the other failing on an update that is no longer waiting. Within
+        // one batch an overlap is fine - the batch goes in order, and an app updated by
+        // an earlier row is no longer waiting when a later one is sent.
+        var covered = offered.SelectMany(o => o.Requirements.Select(r => r.AppId!.Value).Append(o.AppId)).Distinct().ToList();
         var clash = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.EnvironmentId == env.Id && a.Kind == UpgradeActionKind.UpdateApp
                         && a.Status == UpgradeActionStatus.Pending
@@ -1830,35 +1890,54 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .FirstOrDefaultAsync(ct);
         if (clash is not null)
         {
-            throw Validation("App", clash.BcAppId == appId
-                ? $"An update of {offered.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time."
-                : $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves {offered.Name} or an app it waits for. Cancel that booking under Scheduled installs first.");
+            var same = offered.FirstOrDefault(o => o.AppId == clash.BcAppId);
+            throw Validation("App", same is not null
+                ? $"An update of {same.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time."
+                : offered.Count == 1
+                ? $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves {offered[0].Name} or an app it waits for. Cancel that booking under Scheduled installs first."
+                : $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves one of these apps or an app they wait for. Cancel that booking under Scheduled installs first.");
         }
 
-        _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        // Dependencies first, with DependencyOrder as the uploads use it: an app a picked
+        // app waits for goes before it. Unrelated apps keep the order they were picked in.
+        var ordered = DependencyOrder.Sort(offered,
+            o => o.AppId.ToString(),
+            o => o.Requirements.Select(r => r.AppId!.Value.ToString()));
+
+        var orgId = RequireOrganizationId();
+        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
+        var batchId = ordered.Count > 1 ? Guid.NewGuid() : (Guid?)null;
+        for (var i = 0; i < ordered.Count; i++)
         {
-            OrganizationId = RequireOrganizationId(),
-            ProjectId = projectId,
-            EnvironmentId = env.Id,
-            Kind = UpgradeActionKind.UpdateApp,
-            Status = UpgradeActionStatus.Pending,
-            RequestedByUserId = _orgContext.CurrentUserId,
-            RequestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct),
-            RequestedAt = now,
-            ExecuteAfter = runsAt,
-            BcAppId = appId,
-            AppName = Truncate(offered.Name, 250),
-            TargetVersion = offered.Version,
-            // What the person was shown, and so what the send may bring along. The check
-            // above has made sure each one has an id and was agreed to.
-            PrerequisiteAppIds = offered.Requirements.Select(r => r.AppId!.Value).ToList(),
-        });
+            var update = ordered[i];
+            _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = orgId,
+                ProjectId = projectId,
+                EnvironmentId = env.Id,
+                Kind = UpgradeActionKind.UpdateApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedByUserId = _orgContext.CurrentUserId,
+                RequestedBy = requestedBy,
+                RequestedAt = now,
+                ExecuteAfter = runsAt,
+                BcAppId = update.AppId,
+                AppName = Truncate(update.Name, 250),
+                TargetVersion = update.Version,
+                // What the person was shown, and so what the send may bring along. The check
+                // above has made sure each one has an id and was agreed to.
+                PrerequisiteAppIds = update.Requirements.Select(r => r.AppId!.Value).ToList(),
+                BatchId = batchId,
+                BatchOrder = batchId is null ? null : i,
+            });
+        }
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "User {UserId} booked app {AppId} ({AppName}) to be updated to {Version} on {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}), along with {PrerequisiteCount} prerequisites.",
-            _orgContext.CurrentUserId, appId, offered.Name, offered.Version, env.Name, projectId, runsAt, applied, offered.Requirements.Count);
-        return new UploadAppOutcome(applied, runsAt, 1);
+            "User {UserId} booked {Count} AppSource update(s) ({Apps}) on {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}), along with {PrerequisiteCount} prerequisites.",
+            _orgContext.CurrentUserId, ordered.Count, string.Join(", ", ordered.Select(o => $"{o.Name} {o.Version}")),
+            env.Name, projectId, runsAt, applied, ordered.Sum(o => o.Requirements.Count));
+        return new UploadAppOutcome(applied, runsAt, ordered.Count);
     }
 
     /// <summary>
@@ -1922,8 +2001,22 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         (string Token, string Family, string Name, int Id) env, Guid appId, string targetVersion, IReadOnlyCollection<Guid> confirmed, CancellationToken ct)
     {
         var waiting = await _apps.ListAvailableUpdatesAsync(env.Token, env.Family, env.Name, ct);
+        return CheckOfferedUpdate(waiting, appId, targetVersion, confirmed, several: false);
+    }
+
+    /// <summary>
+    /// The half of <see cref="ReadOfferedUpdateAsync"/> that needs no call: finds
+    /// <paramref name="appId"/> in a list already read, so a booking of several apps reads
+    /// the list once. <paramref name="several"/> only changes how an app no longer on the
+    /// list is named, since "that app" points at nothing when there were eight.
+    /// </summary>
+    private static BcAvailableAppUpdate CheckOfferedUpdate(
+        IReadOnlyList<BcAvailableAppUpdate> waiting, Guid appId, string targetVersion, IReadOnlyCollection<Guid> confirmed, bool several)
+    {
         var offered = waiting.FirstOrDefault(u => u.AppId == appId)
-            ?? throw Validation("App", "Business Central no longer has an update waiting for that app. Refresh and look again.");
+            ?? throw Validation("App", several
+                ? "Business Central no longer has an update waiting for one of the apps you picked. Refresh and look again."
+                : "Business Central no longer has an update waiting for that app. Refresh and look again.");
         if (!string.Equals(offered.Version, targetVersion.Trim(), StringComparison.OrdinalIgnoreCase))
         {
             throw Validation("App", $"Business Central now offers {offered.Name} {offered.Version}, not {targetVersion}. Refresh and try again.");
@@ -2118,6 +2211,13 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
     /// <summary>The most apps one upload may book together. A vendor's suite, not a whole environment.</summary>
     public const int MaxUploadBatch = 10;
+
+    /// <summary>
+    /// The most AppSource updates one booking takes. Nothing is stored per app but a row,
+    /// so this is only a bound on one request; it sits above the waiting list of any
+    /// environment seen so far.
+    /// </summary>
+    public const int MaxUpdateBatch = 100;
 
     /// <summary>
     /// Sends one booked upload when its slot arrives and waits for Business Central to
@@ -2862,8 +2962,13 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// stale rather than to empty. The two mirrors fail independently — a denied updates
     /// read still leaves a freshly-read window.
     /// </para>
+    /// <para>
+    /// Being told to slow down is the exception: the first throttled read ends the
+    /// mirror, because the remaining reads go to the same tenant and would only be
+    /// refused too. Returns how long Business Central asked us to wait, or null.
+    /// </para>
     /// </summary>
-    private async Task MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
+    private async Task<TimeSpan?> MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
     {
         var rows = await _db.OeProjectEnvironments
             .Where(e => e.ProjectId == project.Id && e.MissingSince == null)
@@ -2885,6 +2990,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             _logger.LogWarning(
                 "Couldn't read the storage figures for project {ProjectId}: {Message}.", project.Id, ex.Message);
+            if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
         }
 
         foreach (var row in rows)
@@ -2904,6 +3010,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the Business Central update window for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -2917,6 +3024,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the Business Central platform updates for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -2931,8 +3039,18 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the installed apps for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
         }
+        return null;
+    }
+
+    private TimeSpan StoppedMirror(int projectId, TimeSpan wait)
+    {
+        _logger.LogWarning(
+            "Business Central asked us to wait {Wait} for project {ProjectId}; the rest of its environment details keep their previous answers.",
+            wait, projectId);
+        return wait;
     }
 
     /// <summary>
@@ -3209,6 +3327,13 @@ public sealed record UploadPackage(byte[] Bytes, string FileName);
 /// batch - already past for "now".
 /// </summary>
 public sealed record UploadAppOutcome(UploadAppTiming Timing, DateTime RunsAtUtc, int Count);
+
+/// <summary>
+/// One app handed to <see cref="ProjectConnectionService.BookAppUpdatesAsync"/>: the
+/// waiting update as the page showed it, and the prerequisites the person was shown
+/// and agreed may move with it.
+/// </summary>
+public sealed record AppUpdatePick(Guid AppId, string TargetVersion, IReadOnlyCollection<Guid> ConfirmedPrerequisiteAppIds);
 
 /// <summary>Where one environment lands in the preview of "set the delivery window" (issue #961).</summary>
 public enum DeliveryWindowChangeGroup

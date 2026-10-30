@@ -10,7 +10,7 @@ This document specifies a new Object Explorer ingest path: define a **Project**,
 >
 > Object navigation is unchanged: an `OeProjectBuild` points at the `project`-kind `OeRelease` it produces, and the importer hook stays exactly as described here.
 >
-> **Kind restructure (post-Artifacts):** the `'project'` kind is now *reserved for pipeline-build Releases* — manual "Project-specific bundle" imports were merged into `'third_party'` (publisher differentiates them; migration `MergeProjectKindAndAddCal`), and the import forms can no longer post `kind=project`. The user-facing `/object-explorer` Third-party tab additionally surfaces each pipeline's latest ready build release — see the "Object Explorer split" exception in `artifacts.md`.
+> **Kind restructure (post-Artifacts):** the `'project'` kind is now *reserved for pipeline-build Releases* — manual "Project-specific bundle" imports were merged into `'third_party'` (publisher differentiates them; migration `MergeProjectKindAndAddCal`), and the import forms can no longer post `kind=project`. The user-facing `/object-explorer` Solutions tab surfaces each pipeline's latest ready build release — see the "Object Explorer split" exception in `artifacts.md`.
 
 ## As built
 
