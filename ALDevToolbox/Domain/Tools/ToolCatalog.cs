@@ -28,6 +28,8 @@ public enum ToolKey
     Pipelines,
     Releases,
     Translator,
+    /// <summary>One-time secret links. See <c>.design/sealed.md</c>.</summary>
+    Sealed,
     Mcp,
 }
 
@@ -107,6 +109,12 @@ public static class ToolCatalog
             "Translate AL apps and manage XLIFF files.",
             new[] { "/translator" },
             SwitchOnlyPrefixes: new[] { "/api/translator" }),
+        // Only the sender's page is gated. A recipient's /s/{token} has no account,
+        // so no organisation whose switch could apply; it answers to the site-wide
+        // switch alone, in SealedEndpoints and the page itself.
+        new ToolDescriptor(ToolKey.Sealed, "Sealed",
+            "Send a secret as a link that opens a set number of times, instead of as plain text.",
+            new[] { "/sealed" }),
         new ToolDescriptor(ToolKey.Mcp, "MCP",
             "Let AI coding assistants connect to your tools.",
             new[] { "/tools/mcp" }),

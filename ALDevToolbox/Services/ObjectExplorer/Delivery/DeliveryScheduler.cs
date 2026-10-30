@@ -72,7 +72,10 @@ public sealed class DeliveryScheduler : PolledScheduler
     /// one holds the site closed over a database that may be half-loaded (#1321).
     /// Due rows stay scheduled and are picked up on the first sweep after.
     /// </summary>
-    protected override Task TickAsync(CancellationToken ct) =>
+    protected override Task TickAsync(CancellationToken ct) => TickOnceAsync(ct);
+
+    /// <summary>One poll, maintenance gate included. Internal so a test can drive it without the poll loop.</summary>
+    internal Task TickOnceAsync(CancellationToken ct) =>
         _maintenance?.IsActive == true ? Task.CompletedTask : SweepAsync(ct);
 
     /// <summary>

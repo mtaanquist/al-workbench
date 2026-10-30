@@ -693,13 +693,14 @@ export function mountReadOnly(container, value, language, options) {
                 action: () => opts.dotNetRef.invokeMethodAsync(
                     callback, onDeclaration.symbolId),
             });
-            // "Find system references" — built-in/system method calls (Insert,
-            // Modify, SetRange, …) on this object. Object headers only; system
-            // calls target a whole object, not a member. symbolId here is the
-            // oe_module_objects.Id. See #279/#291.
-            if (!onDeclaration.isMemberSymbol) {
+            // "Find built-in calls" — built-in/system method calls (Insert,
+            // Modify, Get, RunModal, …) on this object. Object headers only;
+            // system calls target a whole object, not a member. symbolId here
+            // is the oe_module_objects.Id. See #279/#291. Only hosts that
+            // answer the call (opts.builtInCalls) get the item.
+            if (!onDeclaration.isMemberSymbol && opts.builtInCalls) {
                 items.push({
-                    label: "Find system references",
+                    label: "Find built-in calls",
                     action: () => opts.dotNetRef.invokeMethodAsync(
                         "OnFindSystemReferences", onDeclaration.symbolId),
                 });
@@ -715,6 +716,15 @@ export function mountReadOnly(container, value, language, options) {
                 action: () => opts.dotNetRef.invokeMethodAsync(
                     "OnFindReferencesAt", line.number, colInLine),
             });
+            // The same for a table or page named in the code, or a variable
+            // of one: Customer in Customer.Insert().
+            if (opts.builtInCalls) {
+                items.push({
+                    label: "Find built-in calls",
+                    action: () => opts.dotNetRef.invokeMethodAsync(
+                        "OnFindSystemReferencesAt", line.number, colInLine),
+                });
+            }
         }
         // Disable "Go to definition" when the click lands on the declaration
         // name itself — the target would be the click site, which causes the

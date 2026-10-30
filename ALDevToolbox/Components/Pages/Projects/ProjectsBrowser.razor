@@ -360,7 +360,7 @@
                 {
                     <div class="sol-rail__item">
                         <span class="sol-rail__strong">@person.Name</span>
-                        <span class="u-muted">@CustomerPeopleSection.RoleText(person.Role)@(person.Areas is { } areas ? $" - {areas}" : "")</span>
+                        <span class="u-muted">@CustomerPeopleSection.RolesText(person.Roles)@(person.Areas is { } areas ? $" - {areas}" : "")</span>
                     </div>
                 }
             </div>

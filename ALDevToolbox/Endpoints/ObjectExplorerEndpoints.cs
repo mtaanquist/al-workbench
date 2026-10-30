@@ -124,7 +124,10 @@ internal static class ObjectExplorerEndpoints
         // release id; reuses the same FolderZip / AppFiles + SourceZips
         // form shape so the upload-building helpers come for free.
         // Same 1 GB cap — a late-landing partner DVD is rare but possible.
-        app.MapPost("/admin/object-explorer/release/{releaseId:int}/modules", async (
+        // Posts to .../modules/upload, not .../modules: that address is the
+        // AdminReleaseModules page, and Razor component endpoints accept POST
+        // too, so sharing it made every upload an AmbiguousMatchException.
+        app.MapPost("/admin/object-explorer/release/{releaseId:int}/modules/upload", async (
             int releaseId,
             HttpContext ctx,
             ReleaseImportRequestService imports,
@@ -335,15 +338,16 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ProjectService projects,
             ReleaseImportService importer,
-            PersistedImportJobs persistedJobs,
+            ReleaseImportRequestService requests,
             ProjectBuildImporter projectBuilds,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
 
-            var origin = await persistedJobs.GetLatestForReleaseAsync(id, ct);
-            if (origin is not { Kind: "project_build", ProjectId: int projectId })
+            // A release hidden by the solution-visibility fence gets this answer
+            // too, so the refusal confirms nothing about another team's build.
+            if (await requests.FindSymbolRecoveryProjectAsync(id, ct) is not int projectId)
             {
                 RedirectManage(ctx, id, "Symbols", "This release isn't a solution build, so there's nothing to recover.");
                 return;
@@ -414,29 +418,26 @@ internal static class ObjectExplorerEndpoints
         app.MapPost("/admin/object-explorer/{id:int}/backfill-system-references", async (
             int id,
             HttpContext ctx,
-            AppDbContext db,
+            ReleaseManagementService management,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            // Query-filtered to the caller's org, so another org's id reads as
-            // missing. Only a ready, live release has stored source to re-scan;
-            // queueing one anyway would add a job row the worker refuses, and
-            // that row would then shadow the real source on the Retry card.
-            var release = await db.OeReleases.AsNoTracking()
-                .Where(r => r.Id == id)
-                .Select(r => new { r.Status, r.DeletedAt })
-                .FirstOrDefaultAsync(ct);
-            if (release is null)
+            // Another org's id and a Private solution's release the caller can't
+            // see both read as missing, and answer the same 404 (#1430).
+            try
             {
-                ctx.Response.StatusCode = StatusCodes.Status404NotFound;
-                return;
+                if (!await management.EnsureBackfillableAsync(id, ct))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
             }
-            if (release.Status != "ready" || release.DeletedAt is not null)
+            catch (PlanValidationException ex)
             {
-                RedirectManage(ctx, id, "Backfill",
-                    "Only a release that finished importing and isn't deleted can have its system references backfilled.");
+                var first = ex.Errors.First();
+                RedirectManage(ctx, id, first.Key, first.Value);
                 return;
             }
             var source = new ReleaseImportSource.Backfill();
@@ -448,17 +449,13 @@ internal static class ObjectExplorerEndpoints
         // in the org — the "I don't want to reimport my whole catalogue" path.
         app.MapPost("/admin/object-explorer/backfill-system-references-all", async (
             HttpContext ctx,
-            AppDbContext db,
+            ReleaseManagementService management,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            // Query-filtered to the caller's org; no cross-tenant enqueue.
-            var releaseIds = await db.OeReleases.AsNoTracking()
-                .Where(r => r.Status == "ready" && r.DeletedAt == null)
-                .Select(r => r.Id)
-                .ToListAsync(ct);
+            var releaseIds = await management.ListBackfillableReleaseIdsAsync(ct);
             foreach (var rid in releaseIds)
             {
                 var source = new ReleaseImportSource.Backfill();

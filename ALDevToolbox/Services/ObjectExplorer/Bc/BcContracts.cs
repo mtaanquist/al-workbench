@@ -80,6 +80,13 @@ public enum BcConnectionResult
     /// </summary>
     AccessDenied,
 
+    /// <summary>
+    /// Business Central (or Microsoft sign-in) asked us to slow down, and the wait it
+    /// named was too long to sit out. <see cref="BcConnectionTestResult.RetryAfter"/> says
+    /// how long.
+    /// </summary>
+    Throttled,
+
     /// <summary>Any other failure (network, unexpected status, malformed response).</summary>
     Error,
 }
@@ -89,7 +96,13 @@ public enum BcConnectionResult
 /// classification, the number of environments fetched on success, and a
 /// user-facing message. Never carries the secret.
 /// </summary>
-public sealed record BcConnectionTestResult(BcConnectionResult Result, int EnvironmentCount, string Message)
+/// <param name="RetryAfter">
+/// Set when Business Central asked us to slow down at some point in the run - on a
+/// <see cref="BcConnectionResult.Throttled"/> failure, or part-way through the detail
+/// reads of an otherwise successful one - with how long it asked us to wait.
+/// </param>
+public sealed record BcConnectionTestResult(
+    BcConnectionResult Result, int EnvironmentCount, string Message, TimeSpan? RetryAfter = null)
 {
     public bool IsSuccess => Result == BcConnectionResult.Success;
 }
@@ -102,6 +115,13 @@ public sealed record BcConnectionTestResult(BcConnectionResult Result, int Envir
 public sealed class BcApiException : Exception
 {
     public System.Net.HttpStatusCode? StatusCode { get; }
+
+    /// <summary>
+    /// Set when Business Central asked us to slow down (a 429, or a 503 naming a wait):
+    /// how long it asked for. Callers that work through many customers use it to leave
+    /// this one alone until then.
+    /// </summary>
+    public TimeSpan? RetryAfter { get; init; }
 
     public BcApiException(System.Net.HttpStatusCode? statusCode, string message, Exception? inner = null)
         : base(message, inner)

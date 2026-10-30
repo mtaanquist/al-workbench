@@ -151,6 +151,7 @@ public static class NavDestinations
         new("Translator", "/translator", "languages", "Work with text", Tool: ToolKey.Translator),
         new("Diff", "/diff", "git-compare", "Work with text", Tool: ToolKey.Compare),
         new("Piper", "/piper", "git-merge", "Work with text", Tool: ToolKey.Piper),
+        new("Sealed", "/sealed", "lock", "Work with text", Tool: ToolKey.Sealed),
 
         // ---- Deliver ----
         new("Solutions", "/solutions", "folder-git-2", "Deliver", Tool: ToolKey.Projects),

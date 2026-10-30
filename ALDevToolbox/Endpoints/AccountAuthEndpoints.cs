@@ -408,7 +408,7 @@ internal static class AccountAuthEndpoints
                     // pinned to the typed email.
                     var user = await db.Users.IgnoreQueryFilters()
                         .FirstAsync(u => u.Email == addr.Trim().ToLowerInvariant(), ct);
-                    var url = $"{publicOrigin.For(ctx)}/auth/login/magic/consume?token={Uri.EscapeDataString(token)}";
+                    var url = $"{publicOrigin.For(ctx)}/login/magic/confirm?token={Uri.EscapeDataString(token)}";
                     var content = await MagicLinkEmail.RenderAsync(emailRenderer, user.DisplayName, url, ct);
                     await email.SendAsync(user.Email, content, EmailPurpose.MagicLink, ct);
                 }
@@ -420,14 +420,31 @@ internal static class AccountAuthEndpoints
             ctx.Response.Redirect("/login/magic?ok=1");
         });
 
-        app.MapGet("/auth/login/magic/consume", async (
+        // Links sent before #1500 point here. A GET must never spend the token
+        // (mail scanners and link previews fetch links before the person
+        // clicks), so it only forwards to the confirmation page. Safe to drop
+        // once those links have expired; they last 15 minutes.
+        app.MapGet("/auth/login/magic/consume", (HttpContext ctx) =>
+        {
+            var token = ctx.Request.Query["token"].ToString();
+            ctx.Response.Redirect(string.IsNullOrEmpty(token)
+                ? "/login/magic"
+                : $"/login/magic/confirm?token={Uri.EscapeDataString(token)}");
+        });
+
+        // /auth/login/magic/consume — the confirmation page's Sign in button.
+        // Spends the single-use token and signs the person in.
+        app.MapPost("/auth/login/magic/consume", async (
             HttpContext ctx,
             PasswordResetService passwordReset,
+            IAntiforgery antiforgery,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("MagicLogin");
-            var token = ctx.Request.Query["token"].ToString();
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var token = form["Token"].ToString();
             if (string.IsNullOrEmpty(token))
             {
                 ctx.Response.Redirect("/login/magic");
@@ -442,8 +459,10 @@ internal static class AccountAuthEndpoints
             }
             catch (PlanValidationException ex)
             {
-                var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"/login/magic?err=invalid&msg={Uri.EscapeDataString(first.Value)}");
+                var reason = ex.Errors.FirstOrDefault().Value == PasswordResetService.MicrosoftOnlyMessage
+                    ? MagicLinkReasons.MicrosoftOnly
+                    : MagicLinkReasons.InvalidLink;
+                ctx.Response.Redirect($"/login/magic?err={reason}");
             }
         });
 
@@ -500,8 +519,15 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect(
-                    $"/reset-password?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}");
+                // A refused link is sent as a reason code alone: the page renders
+                // its own copy for it, so the card can't be made to say anything
+                // by editing the URL.
+                var query = first.Key != "Token"
+                    ? $"err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}"
+                    : first.Value == PasswordResetService.MicrosoftOnlyMessage
+                        ? $"err={ResetPasswordReasons.MicrosoftOnly}"
+                        : $"err={ResetPasswordReasons.InvalidLink}";
+                ctx.Response.Redirect($"/reset-password?token={Uri.EscapeDataString(token)}&{query}");
             }
         });
 

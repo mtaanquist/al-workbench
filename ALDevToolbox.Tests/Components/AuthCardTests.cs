@@ -191,7 +191,7 @@ public sealed class AuthCardTests : IDisposable
 
         cut.WaitForAssertion(() =>
         {
-            cut.Find(".auth__title").TextContent.Should().Contain("Default");
+            cut.Find(".auth__title").TextContent.Should().Contain("Tenant");
             var email = cut.Find("#ai-email");
             email.GetAttribute("value").Should().Be("new.consultant@cronus.example");
             // readonly, not disabled: a disabled input is skipped by the
@@ -235,6 +235,71 @@ public sealed class AuthCardTests : IDisposable
 
         // Email-only accounts have exactly one way in; a one-tab strip is chrome.
         cut.WaitForAssertion(() => cut.FindAll(".pill-tabs").Should().BeEmpty());
+    }
+
+    // ---- ResetPassword ----
+
+    [Fact]
+    public void A_refused_reset_link_offers_the_way_back_instead_of_the_form_again()
+    {
+        Navigate("/reset-password?token=spent&err=" + ResetPasswordReasons.InvalidLink);
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("form").Should().BeEmpty("the link can't be submitted again");
+            cut.Find(".auth__title").TextContent.Trim().Should().Be("This link can't be used");
+            cut.Markup.Should().Contain("This reset link is no longer valid. Request a new one.");
+            // The message asks for a new link, so the button gets one; sign-in
+            // stays in the foot, as on the missing-token card.
+            cut.Find("a.btn--primary").GetAttribute("href").Should().Be("/forgot-password");
+            cut.Find(".auth__foot a").GetAttribute("href").Should().Be("/login");
+        });
+    }
+
+    [Fact]
+    public void A_reset_link_refused_for_a_Microsoft_only_organisation_offers_sign_in()
+    {
+        // A new link would be refused the same way, so sign-in is the action.
+        Navigate("/reset-password?token=live&err=" + ResetPasswordReasons.MicrosoftOnly);
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("form").Should().BeEmpty();
+            cut.Markup.Should().Contain("Your organisation signs in with Microsoft.");
+            cut.Find("a.btn--primary").GetAttribute("href").Should().Be("/login");
+            cut.FindAll("a[href='/forgot-password']").Should().BeEmpty();
+        });
+    }
+
+    [Theory]
+    [InlineData(ResetPasswordReasons.InvalidLink)]
+    [InlineData(ResetPasswordReasons.MicrosoftOnly)]
+    public void A_refused_reset_link_card_ignores_any_message_in_the_address(string reason)
+    {
+        // The card's copy is the page's own, so an edited link can't put words in it.
+        Navigate("/reset-password?token=spent&err=" + reason + "&msg=" + Uri.EscapeDataString("Call CRONUS support on +45 0000 0000"));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".auth__title").TextContent.Trim().Should().Be("This link can't be used");
+            cut.Markup.Should().NotContain("CRONUS support");
+        });
+    }
+
+    [Fact]
+    public void A_rejected_password_keeps_the_form_so_it_can_be_retyped()
+    {
+        Navigate("/reset-password?token=live&err=Password&msg=" + Uri.EscapeDataString("Password must be at least 12 characters."));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("form").GetAttribute("action").Should().Be("/auth/reset-password");
+            cut.Markup.Should().Contain("Password must be at least 12 characters.");
+        });
     }
 
     [Fact]

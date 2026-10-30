@@ -95,7 +95,13 @@ public sealed class DependencyDriftServiceTests : IDisposable
          "version":"2.0.0.0","application":"28.2.0.0","platform":"28.0.0.0"}
         """;
 
+    /// <summary>An organisation id no other test class uses; see <see cref="ActAsAnOrganisationOfItsOwnAsync"/>.</summary>
+    private const int GateOrgId = 6301;
+
     private readonly TestDb _db = new();
+
+    /// <summary>The organisation the seeding helpers write for: the acting one.</summary>
+    private int _orgId = TestDb.DefaultOrgId;
 
     public DependencyDriftServiceTests()
     {
@@ -174,6 +180,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     [Fact]
     public async Task A_scan_waits_while_another_scan_of_the_same_organisation_is_replacing_its_findings()
     {
+        await ActAsAnOrganisationOfItsOwnAsync();
         await ReadyAsync();
         await SeedCatalogueAsync("28.2.0.0");
         await SeedSolutionAsync(RepoA);
@@ -184,10 +191,11 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         Task<int> scanning;
         // Another import finishing at the same time (#1137): each replaces the whole set.
-        using (await DependencyDriftService.ScanGate.EnterAsync(TestDb.DefaultOrgId, TestContext.Current.CancellationToken))
+        using (await DependencyDriftService.ScanGate.EnterAsync(GateOrgId, TestContext.Current.CancellationToken))
         {
             scanning = service.ScanForReleaseAsync(releaseId, TestContext.Current.CancellationToken);
-            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            SpinWait.SpinUntil(() => DependencyDriftService.ScanGate.WaitingCount(GateOrgId) == 1,
+                TimeSpan.FromSeconds(30)).Should().BeTrue("the scan has to reach the gate and wait there");
             scanning.IsCompleted.Should().BeFalse("the organisation's findings are being replaced");
             api.Calls.Should().BeEmpty("nothing is read until the other scan is done");
         }
@@ -222,6 +230,34 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var _ = ctx;
 
         (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_dependency_written_with_fewer_parts_than_the_catalogue_is_not_behind()
+    {
+        // "27.0" and "27.0.0.0" are the same version; a missing part counts as zero.
+        // Comparing it as lower would offer a pull request that changes nothing.
+        const string shortDependency = """
+            {"id":"1c0ffee0-0000-4000-8000-000000000004","name":"Payment Import","publisher":"CRONUS",
+             "version":"1.0.0.0","application":"28.2.0.0","platform":"28.0.0.0",
+             "dependencies":[{"id":"63ca2fa4-4f03-4f2b-a480-172fef340d3f","name":"System Application",
+               "publisher":"Microsoft","version":"27.0"}]}
+            """;
+        await ReadyAsync();
+        await SeedCatalogueAsync("27.0.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var api = BaseApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", shortDependency));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+        api.Calls.Should().Contain(c => c.Contains($"/repos/{RepoA}/contents/app.json"), "the manifest was read");
     }
 
     [Fact]
@@ -1314,7 +1350,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var release = new OeRelease
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Label = prerelease ? $"Business Central {bcVersion[..4]} (DK) Preview" : "Business Central 28.2 (DK)",
             Kind = kind,
             Status = "ready",
@@ -1330,7 +1366,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         ctx.OeModules.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeModule
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             ReleaseId = release.Id,
             AppId = Guid.NewGuid(),
             Name = "System",
@@ -1354,7 +1390,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         var now = DateTime.UtcNow;
         var project = new OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Name = name ?? "CRONUS A/S payments",
             DefaultArtifactCountry = "dk",
             Visibility = visibility,
@@ -1365,7 +1401,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
             [
                 new OeProjectRepository
                 {
-                    OrganizationId = TestDb.DefaultOrgId,
+                    OrganizationId = _orgId,
                     Provider = RepositoryProvider.GitHub,
                     Url = $"https://github.com/{fullName}",
                     DisplayName = fullName.Split('/')[^1],
@@ -1386,7 +1422,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var environment = new OeProjectEnvironment
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             ProjectId = projectId,
             Name = name,
             Type = type,
@@ -1425,7 +1461,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         {
             ctx.GitHubRepositoryDrift.Add(new GitHubRepositoryDrift
             {
-                OrganizationId = TestDb.DefaultOrgId,
+                OrganizationId = _orgId,
                 Repository = fullName,
                 Path = "app.json",
                 Field = field,
@@ -1452,7 +1488,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.GitHubUpdatePullRequests.Add(new GitHubUpdatePullRequest
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Repository = fullName.ToLowerInvariant(),
             Version = version,
             PullRequestNumber = number,
@@ -1468,7 +1504,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.WellKnownDependencies.Add(new WellKnownDependency
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             DepId = SystemAppId,
             DepName = "System Application",
             DepPublisher = "Microsoft",
@@ -1493,7 +1529,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new OrganizationSettings
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             GitHubInstallationId = InstallationId,
             GitHubOrgLogin = OrgLogin,
             GitHubConnectedAt = DateTime.UtcNow,
@@ -1510,6 +1546,29 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var access = _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, api));
         await access.LinkAsync("the-code");
+    }
+
+    /// <summary>
+    /// Moves the test, and its user, to an organisation whose id no other test class
+    /// uses. The scan gate is process-wide and keyed by organisation, and every test
+    /// database has a <see cref="TestDb.DefaultOrgId"/>, so a scan in a class running
+    /// alongside would otherwise count as this one reaching the gate.
+    /// </summary>
+    private async Task ActAsAnOrganisationOfItsOwnAsync()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.Organizations.Add(new Organization
+        {
+            Id = GateOrgId,
+            Name = "CRONUS Gate",
+            Slug = "cronus-gate",
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+        await ctx.Users.IgnoreQueryFilters().Where(u => u.Id == UserId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.OrganizationId, GateOrgId));
+        _orgId = GateOrgId;
+        _db.OrgContext.CurrentOrganizationId = GateOrgId;
     }
 
     /// <summary>Deployment configured, organisation connected, user linked.</summary>

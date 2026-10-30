@@ -21,7 +21,7 @@ public sealed class PersistedImportJobsTests : IDisposable
     public void Dispose() => _db.Dispose();
 
     private static readonly AmbientOrganizationScope.OrganizationIdentity Identity =
-        new(OrganizationId: 1, UserId: null, IsSiteAdmin: false, IsSystemOrganization: true);
+        new(OrganizationId: TestDb.DefaultOrgId, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
 
     private PersistedImportJobs NewService(Data.AppDbContext ctx) =>
         new(ctx, TimeProvider.System);

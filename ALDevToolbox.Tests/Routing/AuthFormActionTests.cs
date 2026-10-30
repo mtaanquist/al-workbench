@@ -33,7 +33,7 @@ public class AuthFormActionTests : IClassFixture<TestDb>
     private static readonly string[] AuthPages =
     [
         "AcceptInvite.razor", "ForgotPassword.razor", "Login.razor", "LoginChallenge.razor",
-        "MagicLogin.razor", "ResetPassword.razor", "Signup.razor", "SignupDetails.razor",
+        "MagicLogin.razor", "MagicLoginConfirm.razor", "ResetPassword.razor", "Signup.razor", "SignupDetails.razor",
     ];
 
     [Fact]

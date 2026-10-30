@@ -142,9 +142,9 @@ Sections, top to bottom:
    add another**, because with no import somebody types these in a few hundred times. A short list,
    one row each, edited in place with an **Add contact** button - not a grid.
 4. **Modules** (slice 3) - see below.
-5. **Who knows this customer** (slice 2) - `oe_project_people`: one of our users, a role
-   (`Consultant`, `Developer`, `ProjectLeader`, `Architect`) and free-text areas
-   ("finance, warehouse"). Separate from Teams on purpose: a team says who *may* change
+5. **Who knows this customer** (slice 2) - `oe_project_people`: one of our users, one or more roles
+   (`Consultant`, `Developer`, `ProjectLeader`, `Architect`; several since #1462, picked
+   as checkboxes) and free-text areas ("finance, warehouse"). Separate from Teams on purpose: a team says who *may* change
    the Solution, this says who to *ask*.
 6. **Integrations** (slice 2) - `oe_project_integrations`: a name and a direction
    (`Inbound`, `Outbound`, `Both`).
@@ -202,7 +202,12 @@ yet, or genuinely none of the catalogue's modules installed.
 
 The Solutions list has a **Has {module}** filter, shown once there is a catalogue. It is
 part of the list's GET form, so a filtered list is a shareable address; it counts a module
-either way (typed in, or installed in any current environment).
+either way (typed in, or installed in the environment the Modules card reads from). It
+reads the same environment as the card on purpose: an app installed only on a sandbox next
+to production is a trial or a copy, not something the customer runs, and a filter that
+listed it would name customers whose card then does not show the module (#1515). The
+catalogue's per-module count on `/admin/customer-modules` counts the same way, each
+Solution once.
 
 With modules in, **Customer is the first tab and the one an existing Solution opens on.**
 Links that mean another tab say so (`/solutions/{slug}/repositories`, `pipelines`, `bc`,

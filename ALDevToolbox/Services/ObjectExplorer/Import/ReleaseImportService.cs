@@ -40,6 +40,13 @@ public class ReleaseImportService
     /// </summary>
     private readonly ALDevToolbox.Services.GitHub.DependencyDriftService? _drift;
 
+    /// <summary>
+    /// The solution-visibility fence for the amend upload (#1430): a Private
+    /// solution's build release answers like an unknown id to someone outside its
+    /// teams. Required, so nothing can build the service without the fence.
+    /// </summary>
+    private readonly ProjectAccess _access;
+
     private static readonly HashSet<string> AllowedKinds = new(StringComparer.Ordinal)
     {
         "first_party",
@@ -59,6 +66,7 @@ public class ReleaseImportService
         TranslationImportService translations,
         CallSiteReferenceEmitter callSites,
         ILogger<ReleaseImportService> logger,
+        ProjectAccess access,
         ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
         ReleaseIngests? ingests = null)
     {
@@ -70,6 +78,7 @@ public class ReleaseImportService
         _logger = logger;
         _drift = drift;
         Ingests = ingests ?? new ReleaseIngests();
+        _access = access;
     }
 
     /// <summary>
@@ -370,11 +379,13 @@ public class ReleaseImportService
         // Pre-check the Release's current state so the operator gets a
         // field-keyed error instead of an unexpected status flip if they
         // try to amend an ingesting / failed / soft-deleted Release.
+        // Visibility first, so a hidden id and an unknown one run the same queries.
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })
             .SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (preview is null)
+        if (preview is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -751,12 +762,21 @@ public class ReleaseImportService
     /// non-deleted Release in this org with a field-keyed (<c>Retry</c>) error
     /// so the manage page renders it inline. See the <c>/retry</c> endpoint.
     /// </summary>
-    public async Task ReopenForRetryAsync(int releaseId, CancellationToken ct = default)
+    public Task ReopenForRetryAsync(int releaseId, CancellationToken ct = default) =>
+        ReopenForRetryAsync(releaseId, visible: true, ct);
+
+    /// <summary>
+    /// <see cref="ReopenForRetryAsync(int, CancellationToken)"/> for a caller that
+    /// has already asked the solution-visibility fence. A hidden release is read
+    /// like any other and then answered as not found, so a hidden id and an
+    /// unknown one run the same queries and get the same error.
+    /// </summary>
+    public async Task ReopenForRetryAsync(int releaseId, bool visible, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw RetryError($"Release {releaseId} not found in this organisation.");
+        var found = await _db.OeReleases
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
+        var release = (visible ? found : null) ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
         {
@@ -798,7 +818,7 @@ public class ReleaseImportService
         RequireOrganizationId();
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw RetryError($"Release {releaseId} not found in this organisation.");
+            ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
         {
@@ -823,6 +843,10 @@ public class ReleaseImportService
 
     private static PlanValidationException RetryError(string message) =>
         new(new Dictionary<string, string> { ["Retry"] = message });
+
+    /// <summary>The retry path's answer for a release that is not there, or that the caller may not see.</summary>
+    private static PlanValidationException RetryNotFound(int releaseId) =>
+        RetryError($"Release {releaseId} not found in this organisation.");
 
     /// <summary>
     /// Refuses a dedup key that's already in use by another active Release in the

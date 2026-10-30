@@ -75,7 +75,7 @@ public sealed class ReleasePipelinePaletteSource : IPaletteSource
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
         var rows = await _db.OeReleasePipelines.AsNoTracking()
-            .Where(r => r.DeletedAt == null)
+            .Where(r => r.DeletedAt == null && r.ArchivedAt == null)
             .Where(r => _db.OeProjects.Where(visible)
                 .Any(v => v.Id == r.ProjectId && v.DeletedAt == null))
             .OrderBy(r => r.Project!.Name).ThenBy(r => r.Name)

@@ -552,6 +552,15 @@ public class GenerationService
             .Select(d => new EmittableDependency(null, null, d.DepId, d.DepName, d.DepPublisher, d.DepVersion))
             .ToList();
 
+        // A module copied from a repository also carries what that repository's
+        // own app.json depended on (#1415), after the typed ones; a typed entry
+        // for the same app wins, so an Editor can pin a different version.
+        foreach (var dep in ModuleSourceColumns.ReadDependencies(module.SourceDependenciesJson))
+        {
+            if (deps.Any(d => string.Equals(d.LitId, dep.DepId, StringComparison.OrdinalIgnoreCase))) continue;
+            deps.Add(new EmittableDependency(null, null, dep.DepId, dep.DepName, dep.DepPublisher, dep.DepVersion));
+        }
+
         return new EmittableExtension(
             Path: module.ExtensionName,
             Name: name,
@@ -566,7 +575,9 @@ public class GenerationService
             ModuleName: module.ExtensionName,
             FolderRoots: BuildModuleFolderTree(module.ExtensionFolders),
             Dependencies: deps,
-            Required: false);
+            Required: false,
+            SourceRepository: module.SourceRepository,
+            SourceCommit: module.SourceRepository is null ? null : module.SourceCommitSha);
     }
 
     private static List<FolderNode> BuildFolderTree(IEnumerable<WorkspaceExtensionFolder> roots) =>

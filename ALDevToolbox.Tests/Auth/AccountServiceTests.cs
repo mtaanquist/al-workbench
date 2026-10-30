@@ -595,6 +595,153 @@ public sealed class AccountServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_reset_is_refused_when_the_account_is_disabled_while_the_submit_waits_for_the_lock()
+    {
+        // The disable lands after the consume has read the token and its user
+        // but before it holds the user-row lock, so only a check made under the
+        // lock can see it.
+        await SeedResettableUserAsync("racing@example.com");
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = (await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("racing@example.com", "10.0.0.1"))!;
+        }
+        // Just before the consume takes its user-row lock, sent as a statement or a query.
+        var disableBeforeLock = new BeforeCommand(sql => sql.Contains("FOR UPDATE"), async () =>
+        {
+            await using var disable = _db.NewContext();
+            await disable.Users.IgnoreQueryFilters().Where(u => u.Email == "racing@example.com")
+                .ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, UserStatus.Disabled));
+        });
+
+        PlanValidationException? refused = null;
+        await using (var consume = _db.NewContext(disableBeforeLock))
+        {
+            try
+            {
+                await NewPasswordReset(consume).ConsumePasswordResetTokenAsync(token, "verylongnewpassword!");
+            }
+            catch (PlanValidationException ex)
+            {
+                refused = ex;
+            }
+        }
+
+        // First, so a lock taken some other way fails on its cause, not on the refusal.
+        disableBeforeLock.Fired.Should().BeTrue("the disable has to land in the window under test");
+        refused.Should().NotBeNull("the account was disabled before the lock was taken");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "racing@example.com");
+        NewAuth(read).VerifyPassword("somelongpassword1", user.PasswordHash)
+            .Should().BeTrue("a disabled account must keep its old password");
+    }
+
+    [Fact]
+    public async Task A_reset_link_submitted_twice_at_once_sets_one_password()
+    {
+        // Both submits past the read before either wrote (#1455, as #1208
+        // for magic links).
+        await SeedResettableUserAsync("twice@example.com");
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = (await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("twice@example.com", "10.0.0.1"))!;
+        }
+
+        var passwords = new[] { "first-new-password-1", "second-new-password-2" };
+        var results = await Task.WhenAll(passwords.Select(async password =>
+        {
+            await using var ctx = _db.NewContext();
+            try
+            {
+                await NewPasswordReset(ctx).ConsumePasswordResetTokenAsync(token, password);
+                return password;
+            }
+            catch (PlanValidationException)
+            {
+                return null;
+            }
+        }));
+
+        var winner = results.Should().ContainSingle(r => r != null).Which!;
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "twice@example.com");
+        NewAuth(read).VerifyPassword(winner, user.PasswordHash)
+            .Should().BeTrue("the password is the one from the submit that claimed the link");
+    }
+
+    [Fact]
+    public async Task Two_reset_requests_at_once_leave_exactly_one_live_link()
+    {
+        // Each request retires what is live and adds its own; without the lock
+        // on the user row both retire nothing and both links stay live.
+        await SeedResettableUserAsync("burst@example.com");
+
+        var tokens = await Task.WhenAll(Enumerable.Range(0, 4).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            return await NewPasswordReset(ctx).CreatePasswordResetTokenAsync("burst@example.com", "10.0.0.1");
+        }));
+
+        tokens.Should().AllSatisfy(t => t.Should().NotBeNull());
+        await using var read = _db.NewContext();
+        (await read.PasswordResetTokens.IgnoreQueryFilters()
+                .CountAsync(t => t.User!.Email == "burst@example.com" && t.ConsumedAt == null))
+            .Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Requesting_a_reset_email_leaves_another_users_link_working()
+    {
+        await SeedResettableUserAsync("first@example.com");
+        await SeedResettableUserAsync("second@example.com");
+        await using var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var othersLink = await svc.CreatePasswordResetTokenAsync("second@example.com", "10.0.0.1");
+
+        await svc.CreatePasswordResetTokenAsync("first@example.com", "10.0.0.1");
+
+        await svc.ConsumePasswordResetTokenAsync(othersLink!, "second-users-new-password");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "second@example.com");
+        NewAuth(read).VerifyPassword("second-users-new-password", user.PasswordHash).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Requesting_a_new_reset_email_retires_the_earlier_link()
+    {
+        // The reset page promises this (#1455).
+        await SeedResettableUserAsync("again@example.com", password: "originalpasswordlong");
+        await using var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var first = await svc.CreatePasswordResetTokenAsync("again@example.com", "10.0.0.1");
+        var second = await svc.CreatePasswordResetTokenAsync("again@example.com", "10.0.0.1");
+
+        Func<Task> old = () => svc.ConsumePasswordResetTokenAsync(first!, "from-the-old-link-1");
+        (await old.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Token");
+
+        await svc.ConsumePasswordResetTokenAsync(second!, "from-the-new-link-1");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "again@example.com");
+        NewAuth(read).VerifyPassword("from-the-new-link-1", user.PasswordHash).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Requesting_a_reset_email_leaves_a_magic_link_alone()
+    {
+        // Only earlier reset links are retired; a sign-in link sent the same
+        // minute is a different credential and keeps working.
+        await SeedResettableUserAsync("both@example.com");
+        await using var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var magic = await svc.CreateMagicLoginTokenAsync("both@example.com", "10.0.0.1");
+        await svc.CreatePasswordResetTokenAsync("both@example.com", "10.0.0.1");
+
+        var user = await svc.ConsumeMagicLoginTokenAsync(magic!);
+        user.Email.Should().Be("both@example.com");
+    }
+
+    [Fact]
     public async Task Reset_requests_are_throttled_on_the_same_window_as_sign_in()
     {
         // Without a limit this is an unauthenticated way to make the site send

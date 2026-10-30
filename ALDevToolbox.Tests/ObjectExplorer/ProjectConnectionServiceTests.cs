@@ -341,7 +341,17 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         public TestClock(DateTimeOffset start) => _now = start;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+        public void Set(DateTimeOffset at) => _now = at;
     }
+
+    /// <summary>
+    /// Puts the clock on tomorrow at 12:00 UTC, for the window tests: 13:00 or 14:00 in
+    /// Copenhagen and 07:00 or 08:00 in New York, outside every night window they book
+    /// against and hours from a change of summer time, whatever time of day the suite
+    /// runs (#1439). Tomorrow rather than a fixed date, so it never falls into the past.
+    /// </summary>
+    private void AtNoonUtcTomorrow() =>
+        _clock.Set(new DateTimeOffset(DateTime.UtcNow.Date.AddDays(1).AddHours(12), TimeSpan.Zero));
 
     private async Task<int> SeedProjectAsync(string name = "CRONUS A/S")
     {
@@ -2249,6 +2259,65 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         verified.Should().BeNull("a sweep nobody asked for is not the consultant's own connection test");
     }
 
+    /// <summary>
+    /// Being told to slow down is neither a rejection nor a generic failure: the result
+    /// says so, in words, and carries the wait so the scheduled refresh can honour it.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_environment_list_reports_the_wait_it_was_given()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(10),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.Result.Should().Be(BcConnectionResult.Throttled);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(10));
+        result.Message.Should().Contain("slow down").And.Contain("10 minutes");
+    }
+
+    /// <summary>
+    /// Once Business Central has said slow down part-way through the detail reads, the
+    /// rest of that tenant's reads would only be refused too, so they are not sent. The
+    /// environment list itself was read, so the refresh still counts as a success.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_detail_read_stops_the_remaining_reads_and_reports_the_wait()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production"), new BcEnvironment("Sandbox", "Sandbox") },
+            OnUpdateSettings = _ => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(3),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.IsSuccess.Should().BeTrue("the environment list was read and saved");
+        result.EnvironmentCount.Should().Be(2);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(3));
+        admin.UpdateSettingsRequested.Should().ContainSingle("nothing more is asked of a tenant that said slow down");
+    }
+
     // ── The environment panel (live reads, never cached) ──────────────────
 
     /// <summary>Seeds a project with one environment and returns both ids.</summary>
@@ -2444,9 +2513,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         // Outside the window, so both bookings wait for its next 22:00 rather than running now.
-        var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
-        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(8));
+        AtNoonUtcTomorrow();
         var apps = AppsWithWaiting();
 
         await using var ctx = _db.NewContext();
@@ -2572,6 +2639,112 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var prerequisiteAlone = () => svc.BookAppUpdateAsync(projectId, envId, systemApp, "28.5.0.0", UploadAppTiming.Now);
         (await prerequisiteAlone.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
             .Should().Contain("Continia Core").And.Contain("Cancel that booking");
+    }
+
+    // Several updates booked together (the operations team's "these tonight").
+
+    private static FakeAppManagementClient AppsWithThreeWaiting(Guid systemApp, Guid banking) => new()
+    {
+        OnAvailable = () => new[]
+        {
+            new BcAvailableAppUpdate(WaitingAppId, "Continia Core", "Continia Software", "28.5.0.1",
+                new[] { new BcAppUpdateRequirement(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", "update") }),
+            new BcAvailableAppUpdate(banking, "Continia Banking", "Continia Software", "28.5.0.2", Array.Empty<BcAppUpdateRequirement>()),
+            new BcAvailableAppUpdate(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", Array.Empty<BcAppUpdateRequirement>()),
+        },
+    };
+
+    [Fact]
+    public async Task Several_app_updates_are_booked_as_one_batch_with_the_app_another_waits_for_first()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+        var slot = _clock.GetUtcNow().AddHours(8);
+
+        await using var ctx = _db.NewContext();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps).BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(WaitingAppId, "28.5.0.1", new[] { systemApp }),
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(systemApp, "28.5.0.0", Array.Empty<Guid>()),
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+        }, UploadAppTiming.AtTime, slot);
+
+        outcome.Count.Should().Be(3, "an app picked twice is booked once");
+        outcome.RunsAtUtc.Should().Be(slot.UtcDateTime);
+        apps.Updated.Should().BeNull("the worker sends them, never the page request");
+
+        await using var read = _db.NewContext();
+        var rows = await read.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == envId).OrderBy(a => a.BatchOrder).ToListAsync();
+        rows.Select(r => r.BcAppId).Should().Equal(new Guid?[] { systemApp, WaitingAppId, banking },
+            "Core waits for System Application, so that goes first; the others keep the order they were picked in");
+        rows.Select(r => r.BatchOrder).Should().Equal(0, 1, 2);
+        rows.Select(r => r.BatchId).Distinct().Should().ContainSingle().Which.Should().NotBeNull();
+        rows.Should().OnlyContain(r => r.Kind == UpgradeActionKind.UpdateApp && r.Status == UpgradeActionStatus.Pending);
+        rows.Select(r => r.ExecuteAfter).Distinct().Should().ContainSingle()
+            .Which.Should().BeCloseTo(slot.UtcDateTime, TimeSpan.FromMilliseconds(1), "all three wait for the one slot");
+        rows[1].PrerequisiteAppIds.Should().Equal(systemApp);
+    }
+
+    [Fact]
+    public async Task One_app_of_several_that_cannot_be_booked_books_none_of_them()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+
+        var gone = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(Guid.NewGuid(), "1.0.0.0", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await gone.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("one of the apps you picked");
+
+        var unagreed = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(WaitingAppId, "28.5.0.1", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await unagreed.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("Continia System Application");
+
+        var none = () => svc.BookAppUpdatesAsync(projectId, envId, Array.Empty<AppUpdatePick>(), UploadAppTiming.Now);
+        (await none.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("App");
+
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId))
+            .Should().BeFalse("nothing is booked when any app is refused");
+    }
+
+    [Fact]
+    public async Task Several_app_updates_are_refused_when_one_is_already_booked()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        await svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime,
+            _clock.GetUtcNow().AddHours(8), new[] { systemApp });
+
+        var again = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(systemApp, "28.5.0.0", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
+            .Should().Contain("Continia Core").And.Contain("one of these apps");
+
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().CountAsync(a => a.EnvironmentId == envId)).Should().Be(1);
     }
 
     [Fact]
@@ -2745,8 +2918,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         // Outside the window, so the booking waits for its next 22:00.
-        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(8));
+        AtNoonUtcTomorrow();
 
         await using var ctx = _db.NewContext();
         var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
@@ -2766,6 +2938,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     public async Task An_upload_while_the_delivery_window_is_open_is_booked_for_now()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
+        // An hour either side of now never wraps midnight or meets a change of summer time.
+        AtNoonUtcTomorrow();
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         var local = TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(_clock.GetUtcNow().UtcDateTime, copenhagen));
         await SetWindowsAsync(envId, deliveryStart: local.AddHours(-1), deliveryEnd: local.AddHours(1));
@@ -2784,8 +2958,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, bcStart: new TimeOnly(1, 0), bcEnd: new TimeOnly(5, 0), bcZone: "America/New_York");
         var newYork = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-        if (UpdateWindow.IsWithin(new TimeOnly(1, 0), new TimeOnly(5, 0), newYork, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(6));
+        // Outside Microsoft's window, so the booking waits for its next 01:00.
+        AtNoonUtcTomorrow();
         var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
@@ -3264,8 +3438,12 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     private const int PlainTeamUserId = 9601;
     private const int OrgAdminUserId = 9602;
 
-    private static readonly DateTimeOffset ScheduledDate = new(2026, 10, 1, 2, 0, 0, TimeSpan.Zero);
-    private static readonly DateTimeOffset Latest = new(2026, 10, 29, 2, 0, 0, TimeSpan.Zero);
+    // Relative to the day the suite runs, never fixed dates: the version-change tests reach
+    // DateForVersionChange, which compares Latest against the clock and refuses once it has
+    // passed, so a fixed Latest turned these tests red on a date with no code change.
+    private static readonly DateTimeOffset Today = new(DateTime.UtcNow.Date, TimeSpan.Zero);
+    private static readonly DateTimeOffset ScheduledDate = Today.AddDays(5).AddHours(2);
+    private static readonly DateTimeOffset Latest = Today.AddDays(33).AddHours(2);
 
     private static BcEnvironmentUpdate Update(
         DateTimeOffset? selectedDateTime, DateTimeOffset? latestSelectable, bool selected = true, bool ignoresWindow = false) =>
@@ -3509,11 +3687,11 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
     // ── The exclusive latest-selectable bound (issue #804) ────────────────
 
-    /// <summary>Microsoft's bound as the reporter saw it: midnight UTC, meaning "before 1 March".</summary>
-    private static readonly DateTimeOffset MidnightBound = new(2027, 3, 1, 0, 0, 0, TimeSpan.Zero);
+    /// <summary>Microsoft's bound as the reporter saw it: midnight UTC, meaning "before that day". Relative, so ScheduledDate stays before it.</summary>
+    private static readonly DateTimeOffset MidnightBound = Today.AddDays(120);
 
     /// <summary>The last moment inside that bound, and what the PATCH must carry.</summary>
-    private static readonly DateTimeOffset LastAllowedDay = new(2027, 2, 28, 0, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset LastAllowedDay = MidnightBound.AddDays(-1);
 
     [Fact]
     public async Task Pushing_the_date_sends_the_day_before_an_exclusive_midnight_bound()
@@ -3523,7 +3701,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // Business Central stores the date inside the customer's update window, so the day
         // it reads back carries a time of day the PATCH never named.
-        var landed = new DateTimeOffset(2027, 2, 28, 21, 0, 0, TimeSpan.Zero);
+        var landed = LastAllowedDay.AddHours(21);
         var admin = AdminWithUpdates(Update(ScheduledDate, MidnightBound), Update(landed, MidnightBound));
 
         await using (var ctx = _db.NewContext())
@@ -3546,7 +3724,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // The same day as the effective latest, at a different time of day: an exact-tick
         // guard misses this and re-PATCHes the customer's tenant on every sweep.
-        var onTheDay = new DateTimeOffset(2027, 2, 28, 21, 0, 0, TimeSpan.Zero);
+        var onTheDay = LastAllowedDay.AddHours(21);
         var admin = new FakeAdminClient { OnEnvironmentUpdates = _ => new[] { Update(onTheDay, MidnightBound) } };
 
         await using var ctx = _db.NewContext();
@@ -3566,7 +3744,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         // The customer's update window opens at 02:00 in Copenhagen, which is 01:00 UTC on
         // the following day. The date moved, so the action is done - checking that it
         // landed on the exact day we sent would fail a write that worked.
-        var landed = new DateTimeOffset(2027, 3, 1, 1, 0, 0, TimeSpan.Zero);
+        var landed = MidnightBound.AddHours(1);
         var admin = AdminWithUpdates(Update(ScheduledDate, MidnightBound), Update(landed, MidnightBound));
 
         await using (var ctx = _db.NewContext())
@@ -3588,7 +3766,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // Where the window put it a day beyond the bound: as late as it goes, and
         // re-sending would fail loudly on every sweep.
-        var pastTheBound = new DateTimeOffset(2027, 3, 1, 1, 0, 0, TimeSpan.Zero);
+        var pastTheBound = MidnightBound.AddHours(1);
         var admin = new FakeAdminClient { OnEnvironmentUpdates = _ => new[] { Update(pastTheBound, MidnightBound) } };
 
         await using var ctx = _db.NewContext();
@@ -4104,6 +4282,67 @@ public sealed class ProjectConnectionServiceTests : IDisposable
                 Content = new StringContent($"{{\"access_token\":\"tok-{tenant}\",\"expires_in\":3600}}"),
             });
         }
+    }
+
+    // ── An expired client secret, on the service's own clock (#1439) ─────
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(-1, true)]
+    public async Task A_solutions_own_secret_is_refused_for_deployments_from_the_second_it_expires(int expiresInSeconds, bool refused)
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        // To the whole second, so "expires now" survives the database's microseconds.
+        var now = _clock.GetUtcNow();
+        _clock.Set(now.AddTicks(-(now.UtcTicks % TimeSpan.TicksPerSecond)));
+        var expiry = _clock.GetUtcNow().UtcDateTime.AddSeconds(expiresInSeconds);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcClientSecretExpiresAt, expiry));
+        }
+
+        await using var read = _db.NewContext();
+        var acquire = () => Svc(read, TokenOk()).AcquireDeliveryContextAsync(id);
+
+        if (refused)
+        {
+            (await acquire.Should().ThrowAsync<BcApiException>()).Which.Message
+                .Should().StartWith("This solution's own Business Central client secret has expired.");
+        }
+        else
+        {
+            (await acquire()).AccessToken.Should().Be("tok");
+        }
+    }
+
+    [Fact]
+    public async Task The_organisations_secret_is_refused_for_deployments_the_second_it_expires_and_says_whose_it_is()
+    {
+        var id = await SeedProjectAsync();
+        await SaveOrgRegistrationAsAdminAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+                new BcConnectionInput(Guid.NewGuid(), null, null, null, null, UseOrganizationRegistration: true));
+        }
+        var now = _clock.GetUtcNow();
+        _clock.Set(now.AddTicks(-(now.UtcTicks % TimeSpan.TicksPerSecond)));
+        var expiry = _clock.GetUtcNow().UtcDateTime;
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OrganizationSettings.Where(o => o.OrganizationId == TestDb.DefaultOrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.BcClientSecretExpiresAt, expiry));
+        }
+
+        await using var read = _db.NewContext();
+        var acquire = () => Svc(read, TokenOk()).AcquireDeliveryContextAsync(id);
+
+        (await acquire.Should().ThrowAsync<BcApiException>()).Which.Message
+            .Should().StartWith("Your organisation's Business Central client secret has expired.");
     }
 
     [Fact]

@@ -82,14 +82,109 @@ public sealed class EmailMfaServiceTests : IDisposable
             code = await new EmailMfaService(ctx, _clock).IssueChallengeAsync(userId);
         }
 
+        var wrong = code == "000000" ? "111111" : "000000";
+
         await using var ctx2 = _db.NewContext();
         var svc = new EmailMfaService(ctx2, _clock);
         for (var i = 0; i < EmailMfaService.MaxVerifyAttempts; i++)
         {
-            (await svc.VerifyAsync(userId, "000000")).Should().BeFalse();
+            (await svc.VerifyAsync(userId, wrong)).Should().BeFalse();
         }
-        // The challenge is dead now — even the correct code is refused until re-issue.
-        (await svc.VerifyAsync(userId, code!)).Should().BeFalse("the live window is locked out after too many wrong guesses");
+        // The code is dead now - even the correct one is refused until a new code is sent.
+        (await svc.VerifyAsync(userId, code!)).Should().BeFalse("the code is locked out after too many wrong guesses");
+    }
+
+    [Fact]
+    public async Task A_new_code_lifts_the_lockout_and_retires_the_old_one()
+    {
+        var userId = await SeedUserAsync(9131);
+        await using var ctx = _db.NewContext();
+        var svc = new EmailMfaService(ctx, _clock);
+        var oldCode = (await svc.IssueChallengeAsync(userId))!;
+        var wrong = oldCode == "000000" ? "111111" : "000000";
+        for (var i = 0; i < EmailMfaService.MaxVerifyAttempts; i++)
+        {
+            (await svc.VerifyAsync(userId, wrong)).Should().BeFalse();
+        }
+
+        var newCode = (await svc.IssueChallengeAsync(userId))!;
+
+        if (newCode != oldCode)
+        {
+            (await svc.VerifyAsync(userId, oldCode)).Should().BeFalse("sending a new code retires the old one");
+        }
+        (await svc.VerifyAsync(userId, newCode)).Should().BeTrue("the new code starts with a full allowance (#1432)");
+    }
+
+    [Fact]
+    public async Task Only_the_latest_code_works()
+    {
+        var userId = await SeedUserAsync(9132);
+        await using var ctx = _db.NewContext();
+        var svc = new EmailMfaService(ctx, _clock);
+        var first = await svc.IssueChallengeAsync(userId);
+        var second = await svc.IssueChallengeAsync(userId);
+        // Two random codes can be the same. Send again until they differ, but only within
+        // the send limit: past it a send returns null, which the loop must not run into.
+        for (var sent = 2; second == first && sent < EmailMfaService.MaxIssuesPerWindow; sent++)
+        {
+            second = await svc.IssueChallengeAsync(userId);
+        }
+        first.Should().NotBeNull();
+        second.Should().NotBeNull().And.NotBe(first, "a code the same as the first could not tell the two apart");
+
+        (await svc.VerifyAsync(userId, first!)).Should().BeFalse("the later send retired the first code");
+        (await svc.VerifyAsync(userId, second!)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Parallel_sends_leave_one_live_code()
+    {
+        var userId = await SeedUserAsync(9133);
+
+        var codes = await Task.WhenAll(Enumerable.Range(0, EmailMfaService.MaxIssuesPerWindow).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            return await new EmailMfaService(ctx, _clock).IssueChallengeAsync(userId);
+        }));
+
+        codes.Should().AllSatisfy(c => c.Should().NotBeNull());
+        await using var read = _db.NewContext();
+        (await read.PasswordResetTokens.IgnoreQueryFilters()
+                .CountAsync(t => t.UserId == userId && t.ConsumedAt == null))
+            .Should().Be(1, "each send retires the codes before it, even when the sends race");
+    }
+
+    [Fact]
+    public async Task A_code_older_than_its_lifetime_is_refused()
+    {
+        var userId = await SeedUserAsync(9134);
+        await using var ctx = _db.NewContext();
+        var svc = new EmailMfaService(ctx, _clock);
+        var code = (await svc.IssueChallengeAsync(userId))!;
+
+        _clock.Advance(TimeSpan.FromMinutes(11));
+
+        (await svc.VerifyAsync(userId, code)).Should().BeFalse("codes last ten minutes");
+    }
+
+    [Fact]
+    public async Task Sending_works_again_once_the_throttle_window_has_passed()
+    {
+        var userId = await SeedUserAsync(9135);
+        await using var ctx = _db.NewContext();
+        var svc = new EmailMfaService(ctx, _clock);
+        for (var i = 0; i < EmailMfaService.MaxIssuesPerWindow; i++)
+        {
+            (await svc.IssueChallengeAsync(userId)).Should().NotBeNull();
+        }
+        (await svc.IssueChallengeAsync(userId)).Should().BeNull();
+
+        _clock.Advance(TimeSpan.FromMinutes(11));
+
+        var code = await svc.IssueChallengeAsync(userId);
+        code.Should().NotBeNull("the earlier sends have left the window");
+        (await svc.VerifyAsync(userId, code!)).Should().BeTrue();
     }
 
     [Fact]
@@ -129,7 +224,7 @@ public sealed class EmailMfaServiceTests : IDisposable
         }
         await using var ctx2 = _db.NewContext();
         (await new EmailMfaService(ctx2, _clock).VerifyAsync(userId, code))
-            .Should().BeFalse("the cap was reached, so even the right code is refused until a fresh one is sent");
+            .Should().BeFalse("the cap was reached, so even the right code is refused until a new one is sent");
     }
 
     [Fact]

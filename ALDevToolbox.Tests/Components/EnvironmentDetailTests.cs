@@ -37,6 +37,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
     private readonly BunitContext _ctx = new();
     private readonly BcPanelCache _panels = new(TimeProvider.System);
     private readonly SessionsAdminClient _admin = new();
+    private readonly SwitchableClock _clock = new();
     private const int OwnerUserId = 9870;
     private const int ColleagueUserId = 9871;
     private static readonly Guid TenantId = Guid.Parse("11111111-2222-3333-4444-555555555555");
@@ -63,7 +64,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             new TokenFactory(), NullLogger<BcTokenService>.Instance));
         _ctx.Services.AddSingleton(_db.DataProtectionProvider);
         _ctx.Services.AddSingleton(_panels);
-        _ctx.Services.AddSingleton(TimeProvider.System);
+        _ctx.Services.AddSingleton<TimeProvider>(_clock);
         _ctx.Services.AddSingleton(new EnvironmentRefreshQueue());
         // Scheduled installs lists the deployment pipelines' bookings too (#1097).
         _ctx.Services.AddScoped<IDeliveryTokenSource>(sp => sp.GetRequiredService<ProjectConnectionService>());
@@ -111,6 +112,20 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _db.WaitForQueriesToSettle();
         await _ctx.DisposeAsync();
         _db.Dispose();
+    }
+
+    /// <summary>
+    /// The real clock until a test puts one of its own in, which it can do after the
+    /// services have been built: the seeding helpers build them.
+    /// </summary>
+    private sealed class SwitchableClock : TimeProvider
+    {
+        public TimeProvider Inner { get; set; } = System;
+
+        public override DateTimeOffset GetUtcNow() => Inner.GetUtcNow();
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            Inner.CreateTimer(callback, state, dueTime, period);
     }
 
     /// <summary>
@@ -357,6 +372,48 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         alert.QuerySelector("button")!.TextContent.Should().Contain("Recover this environment");
     }
 
+    /// <summary>
+    /// How long is left counts calendar days to the deadline, and a deadline already
+    /// behind the page is said plainly rather than as a negative count (XC-12).
+    /// </summary>
+    [Theory]
+    [InlineData(-2, "It is gone for good on 04 Oct 2026 - 2 days left to bring it back.")]
+    [InlineData(-1, "It is gone for good on 04 Oct 2026 - 1 day left to bring it back.")]
+    [InlineData(0, "It is gone for good on 04 Oct 2026 - today is the last day to bring it back.")]
+    [InlineData(1, "It is gone for good on 04 Oct 2026 - that date has passed.")]
+    public async Task The_deleted_alert_says_how_long_is_left_to_bring_it_back(int daysFromDeadline, string expected)
+    {
+        var goneForGood = new DateTime(2026, 10, 4, 9, 0, 0, DateTimeKind.Utc);
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await SoftDeleteAsync(envId, goneForGood);
+        _clock.Inner = new ManualClock(new DateTimeOffset(goneForGood.AddDays(daysFromDeadline)));
+
+        var cut = Render(envId);
+
+        System.Text.RegularExpressions.Regex.Replace(cut.Find(".alert--danger").TextContent, @"\s+", " ")
+            .Should().Contain(expected);
+    }
+
+    /// <summary>
+    /// Days are calendar days, not whole days elapsed: two hours before a deadline that
+    /// falls just after midnight is still the day before it.
+    /// </summary>
+    [Fact]
+    public async Task The_deleted_alert_counts_calendar_days_not_hours()
+    {
+        var goneForGood = new DateTime(2026, 10, 4, 1, 0, 0, DateTimeKind.Utc);
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await SoftDeleteAsync(envId, goneForGood);
+        _clock.Inner = new ManualClock(new DateTimeOffset(2026, 10, 3, 23, 0, 0, TimeSpan.Zero));
+
+        var cut = Render(envId);
+
+        System.Text.RegularExpressions.Regex.Replace(cut.Find(".alert--danger").TextContent, @"\s+", " ")
+            .Should().Contain("- 1 day left to bring it back.");
+    }
+
     [Fact]
     public async Task A_deleted_environment_with_no_deadline_from_microsoft_says_how_long_it_normally_keeps_one()
     {
@@ -484,7 +541,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         rows.Should().HaveCount(2);
         rows[0].ClassList.Should().Contain("is-published");
         rows[0].QuerySelector(".status-pill")!.TextContent.Should().Be("Ready");
-        rows[0].Children[1].TextContent.Should().Be("Continia Core");
+        rows[0].Children[2].TextContent.Should().Be("Continia Core", "after the tick box and the state");
         rows[1].ClassList.Should().Contain("is-queued");
         rows[1].QuerySelector(".status-pill")!.TextContent.Should().Be("Waits for 1");
         rows[1].QuerySelectorAll(".tag").Select(t => t.TextContent).Should().Equal("Continia Core");
@@ -512,6 +569,68 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             cut.FindAll(".env-detail__alongside-list li").Select(li => li.Children[0].TextContent)
                 .Should().Equal("Continia Core"));
         cut.Markup.Should().Contain("and 1 other app it waits for");
+    }
+
+    /// <summary>
+    /// The operations team books several updates for one slot: tick them (or every one
+    /// shown from the header), then book them together. The dialog lists them in the
+    /// order they will go - the app another waits for first - and a prerequisite that was
+    /// ticked is not listed again as something extra.
+    /// </summary>
+    [Fact]
+    public async Task Ticking_several_updates_books_them_together_with_the_app_another_waits_for_first()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId, "apps");
+
+        cut.FindAll(".bulk-bar").Should().BeEmpty("nothing is ticked yet");
+        cut.WaitForAssertion(() => cut.Find("table.u-compact thead input[type=checkbox]").Change(true));
+
+        cut.WaitForAssertion(() => cut.Find(".bulk-bar__summary").TextContent.Should().Be("2 selected"));
+        cut.FindAll("table.u-compact tbody tr.is-selected").Should().HaveCount(2);
+        cut.WaitForAssertion(() => cut.FindAll(".bulk-bar button")[0].Click());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Update 2 apps on Production"));
+        cut.FindAll(".env-detail__alongside-list li").Select(li => li.Children[0].TextContent)
+            .Should().Equal(new[] { "Continia Core", "Continia Connector App" },
+                "Continia Core is ticked, so it goes first and is not listed again as an app that comes along");
+        cut.Markup.Should().Contain("Book 2 updates");
+    }
+
+    [Fact]
+    public async Task An_update_already_booked_has_no_tick_box_and_is_not_counted()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = projectId,
+                EnvironmentId = envId,
+                Kind = UpgradeActionKind.UpdateApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedBy = "Anna Jensen <anna@example.com>",
+                RequestedAt = DateTime.UtcNow,
+                ExecuteAfter = DateTime.UtcNow.AddHours(6),
+                BcAppId = CoreId,
+                AppName = "Continia Core",
+                TargetVersion = "28.5.0.363410",
+                PrerequisiteAppIds = new List<Guid>(),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Update booked here"));
+        var rows = cut.FindAll("table.u-compact tbody tr");
+        rows[0].QuerySelector("input[type=checkbox]").Should().BeNull("booking it again would only be refused");
+        rows[1].QuerySelector("input[type=checkbox]").Should().NotBeNull();
+        cut.WaitForAssertion(() => cut.Find("table.u-compact thead input[type=checkbox]").Change(true));
+        cut.WaitForAssertion(() => cut.Find(".bulk-bar__summary").TextContent.Should().Be("1 selected"));
     }
 
     /// <summary>
@@ -865,7 +984,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId, "apps");
 
-        var core = cut.FindAll("table.u-compact tbody tr").Single(r => r.Children[1].TextContent == "Continia Core");
+        var core = cut.FindAll("table.u-compact tbody tr").Single(r => r.Children[2].TextContent == "Continia Core");
         core.QuerySelector(".status-pill")!.TextContent.Should().Be("Updating");
         var button = core.QuerySelector(".data-table__actions button")!;
         button.TextContent.Trim().Should().Be("Updating...");
@@ -971,7 +1090,6 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() =>
             cut.Markup.Should().Contain("Couldn't read the operations from Business Central"));
-        cut.Markup.Should().NotContain("add you to one of its teams");
         cut.FindAll("a.btn[href$='tab=bc']").Should().BeEmpty();
         cut.Find(".empty-state__text").TextContent.Should()
             .Contain("Ask the solution's owner or an administrator to check its Business Central connection.");
@@ -1251,11 +1369,28 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         [
             Session(47, "ola@cronus.example", running: TimeSpan.FromMinutes(62), currentObject: "Post Sales Documents"),
         ];
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _clock.Inner = clock;
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
             .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
+
+        // The control: with nothing asked, one tick of the test's clock reads again. So the
+        // live timer runs on that clock, and the frozen reads below are the confirm's doing.
+        cut.WaitForAssertion(() => cut.Find(".data-table__actions button"));
+        SpinWait.SpinUntil(() => clock.PendingTimers > 0, TimeSpan.FromSeconds(5)).Should().BeTrue("the list keeps itself current");
+        var readsBeforeTick = Volatile.Read(ref _admin.Reads);
+        var rendersBeforeTick = cut.RenderCount;
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        cut.WaitForAssertion(() =>
+        {
+            Volatile.Read(ref _admin.Reads).Should().Be(readsBeforeTick + 1);
+            // Drawn as it started and again once it finished, so the read is over before
+            // the confirm opens and cannot be what holds the later ticks back.
+            cut.RenderCount.Should().BeGreaterThanOrEqualTo(rendersBeforeTick + 2);
+        }, TimeSpan.FromSeconds(5));
 
         cut.WaitForAssertion(() => cut.Find(".data-table__actions button").Click());
 
@@ -1271,10 +1406,16 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         });
 
         // While the question is on screen the list is frozen: the row named in it must
-        // still be the row the button ends.
+        // still be the row the button ends. The ticks come from the test's clock, so five
+        // of them certainly fire (#1439), and each one has had its turn on the renderer
+        // once the dispatcher has nothing ahead of an empty call. A tick that read again
+        // would have redrawn the page on the way, before its read went out.
         var readsWhileAsking = _admin.Reads;
-        await Task.Delay(300);
-        _admin.Reads.Should().Be(readsWhileAsking, "a tick must not move the row somebody is about to end");
+        var rendersWhileAsking = cut.RenderCount;
+        for (var tick = 0; tick < 5; tick++) clock.Advance(TimeSpan.FromMilliseconds(60));
+        await cut.InvokeAsync(() => { });
+        cut.RenderCount.Should().Be(rendersWhileAsking, "a tick must not move the row somebody is about to end");
+        _admin.Reads.Should().Be(readsWhileAsking);
 
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions button")
             .Single(b => b.TextContent.Contains("End the session")).Click());

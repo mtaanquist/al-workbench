@@ -1,0 +1,70 @@
+@*
+    To whoever created a Sealed link, when it is opened or locks after too many
+    wrong passphrases. See .design/sealed.md.
+*@
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="You received this because you created this Sealed link." SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    @if (LockedOut)
+    {
+        <EmailParagraph>
+            Your Sealed link <strong>@Name</strong> has locked after @MaxAttempts wrong passphrases, so nobody can open it now.
+            Whoever tried had the whole link. If you didn't expect that, send a new link and consider changing the secret.
+        </EmailParagraph>
+    }
+    else
+    {
+        <EmailParagraph>
+            Your Sealed link <strong>@Name</strong> was opened @OpenedLine.
+            @(ViewsLeft == 0 ? "It can't be opened again." : ViewsLeft == 1 ? "It can be opened once more." : $"It can be opened {ViewsLeft} more times.")
+        </EmailParagraph>
+        <EmailParagraph>If the person you sent it to says they didn't open it, someone else may have the link. Change the secret.</EmailParagraph>
+    }
+    <EmailButton Href="@LinksUrl">Open your Sealed links</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    /// <summary>The sender's note, or a stand-in when there is none.</summary>
+    [Parameter, EditorRequired] public string Name { get; set; } = string.Empty;
+    [Parameter] public bool LockedOut { get; set; }
+    /// <summary>When and from where, e.g. "at 12:40 UTC on 26 Oct 2026 from 203.0.113.4".</summary>
+    [Parameter] public string OpenedLine { get; set; } = string.Empty;
+    [Parameter] public int ViewsLeft { get; set; }
+    [Parameter] public int MaxAttempts { get; set; }
+    [Parameter, EditorRequired] public string LinksUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Preheader => SubjectFor(LockedOut, Name);
+
+    public static string SubjectFor(bool lockedOut, string name) => lockedOut
+        ? $"Sealed link locked: {name}"
+        : $"Sealed link opened: {name}";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        string name,
+        bool lockedOut,
+        string openedLine,
+        int viewsLeft,
+        int maxAttempts,
+        string linksUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<SealedLinkEmail>(
+            SubjectFor(lockedOut, name),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(Name)] = name,
+                [nameof(LockedOut)] = lockedOut,
+                [nameof(OpenedLine)] = openedLine,
+                [nameof(ViewsLeft)] = viewsLeft,
+                [nameof(MaxAttempts)] = maxAttempts,
+                [nameof(LinksUrl)] = linksUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

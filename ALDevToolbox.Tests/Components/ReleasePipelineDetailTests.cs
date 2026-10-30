@@ -1,3 +1,4 @@
+using System.Globalization;
 using ALDevToolbox.Components.Pages.Pipelines;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
@@ -410,7 +411,10 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         // A deployment is an instant, so it follows the organisation.
         await _db.NewOrganizationAdminService(_db.NewContext()).SetDisplayTimeZoneAsync("Asia/Tokyo");
         var seed = await SeedAsync();
-        var scheduled = new DateTime(2027, 1, 15, 12, 0, 0, DateTimeKind.Utc);
+        // Weeks ahead of the day the suite runs, never a fixed date: within a day of now the
+        // page says Today/Tomorrow/Yesterday instead, and a past date is a different state (#1423).
+        var scheduled = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(60).AddHours(12), DateTimeKind.Utc);
+        var day = scheduled.ToString("d MMM", CultureInfo.InvariantCulture);
         await AddDeliveryAsync(seed, ProjectDeliveryStatus.Scheduled, scheduled);
 
         var cut = Render(seed.ReleasePipelineId);
@@ -418,23 +422,28 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
         {
             var when = cut.Find(".rp-rel__outcome .cell-stack__sub");
-            when.TextContent.Should().Be("for 15 Jan 21:00", "noon UTC is 21:00 in Tokyo, not 13:00 in Copenhagen");
-            when.GetAttribute("title").Should().Be("2027-01-15 12:00:00 UTC");
-            cut.Find(".rp-summary__sentence").TextContent.Should().Contain("on 15 Jan at 21:00");
+            when.TextContent.Should().Be($"for {day} 21:00", "noon UTC is 21:00 in Tokyo, not 13:00 in Copenhagen");
+            when.GetAttribute("title").Should().Be(scheduled.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " UTC");
+            cut.Find(".rp-summary__sentence").TextContent.Should().Contain($"on {day} at 21:00");
             cut.Markup.Should().NotContain("Times are in", "the list no longer claims the solution's zone");
         });
     }
 
     [Theory]
-    [InlineData("2027-03-27T10:00:00", 9)] // before Copenhagen moves its clocks: UTC+1
-    [InlineData("2027-03-28T10:00:00", 8)] // after: UTC+2
-    public async Task Rescheduling_reads_the_picked_time_in_the_solutions_zone_across_the_March_change(string picked, int utcHour)
+    [InlineData(-1, 9)] // the day before Copenhagen moves its clocks: UTC+1
+    [InlineData(0, 8)]  // the day of the change: UTC+2
+    public async Task Rescheduling_reads_the_picked_time_in_the_solutions_zone_across_the_March_change(int daysFromChange, int utcHour)
     {
+        // Next year's change, never a fixed year: the reschedule refuses a time that has
+        // already passed, so a fixed date turns this red for good once it does (#1423).
+        var pickedDay = LastSundayOfMarch(DateTime.UtcNow.Year + 1).AddDays(daysFromChange);
+        var picked = pickedDay.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "T10:00:00";
+
         // The picker is a wall clock in the customer's zone, as its hint says, whatever
         // zone the organisation reads times in - so a Tokyo display zone must not move it.
         await _db.NewOrganizationAdminService(_db.NewContext()).SetDisplayTimeZoneAsync("Asia/Tokyo");
         var seed = await SeedAsync();
-        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Scheduled, new DateTime(2027, 1, 15, 12, 0, 0, DateTimeKind.Utc));
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddDays(2));
 
         var cut = Render(seed.ReleasePipelineId);
         cut.WaitForAssertion(() => cut.FindAll(".rp-rel__acts button").Single(b => b.TextContent == "Reschedule").Click());
@@ -449,8 +458,15 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         {
             using var ctx = _db.NewContext();
             var stored = ctx.OeProjectDeliveries.AsNoTracking().Single().ScheduledFor;
-            stored.Should().Be(new DateTime(2027, 3, int.Parse(picked[8..10]), utcHour, 0, 0));
+            stored.Should().Be(pickedDay.AddHours(utcHour));
         });
+    }
+
+    /// <summary>The day Europe moves its clocks forward: the last Sunday in March.</summary>
+    private static DateTime LastSundayOfMarch(int year)
+    {
+        var day = new DateTime(year, 3, 31);
+        return day.AddDays(-(int)day.DayOfWeek);
     }
 
     [Fact]

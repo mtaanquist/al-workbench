@@ -133,6 +133,17 @@ public sealed class FakeGitHubApi : HttpMessageHandler
     }
 
     /// <summary>
+    /// Registers a whole response built by the test - for a body that is a stream
+    /// rather than bytes, or content headers (a declared <c>Content-Length</c>)
+    /// that say something other than what the body holds.
+    /// </summary>
+    public FakeGitHubApi OnResponse(HttpMethod method, string path, Func<HttpResponseMessage> reply)
+    {
+        _routes.Add((method.Method, Normalise(path), _ => reply()));
+        return this;
+    }
+
+    /// <summary>
     /// Registers a reply computed from the request itself - for the routes whose
     /// answer depends on <em>which credential</em> asked, as GitHub's own do
     /// when two installations call the same path.
@@ -307,11 +318,20 @@ public sealed class FakeGitHubApi : HttpMessageHandler
     public TaskCompletionSource PauseUntilReleased(HttpMethod method, string path)
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _gates.Add((method.Method, Normalise(path), gate.Task));
+        _gates.Add((method.Method, Normalise(path), gate.Task,
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)));
         return gate;
     }
 
-    private readonly List<(string Method, string Path, Task Gate)> _gates = new();
+    /// <summary>
+    /// Completes once the first request is being held by the gate
+    /// <see cref="PauseUntilReleased"/> set on <paramref name="path"/>: the signal that the
+    /// call under test has got that far, which a sleep only hopes for.
+    /// </summary>
+    public Task HeldAt(HttpMethod method, string path) =>
+        _gates.Single(g => g.Method == method.Method && g.Path == Normalise(path)).Arrived.Task;
+
+    private readonly List<(string Method, string Path, Task Gate, TaskCompletionSource Arrived)> _gates = new();
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
@@ -320,6 +340,7 @@ public sealed class FakeGitHubApi : HttpMessageHandler
             && request.RequestUri!.AbsolutePath.StartsWith(g.Path, StringComparison.Ordinal));
         if (gate.Gate is not null)
         {
+            gate.Arrived.TrySetResult();
             await gate.Gate.WaitAsync(cancellationToken);
         }
 

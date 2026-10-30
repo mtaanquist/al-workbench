@@ -109,6 +109,17 @@ public sealed class ReleasePipelinePaletteSourceTests : PaletteSourceVisibilityT
     }
 
     [Fact]
+    public async Task An_archived_release_pipeline_is_left_out()
+    {
+        await SeedWorldAsync();
+        await AddAsync("Retired target", "Test", archivedAt: DateTime.UtcNow);
+
+        var results = await SearchAsync("retired target");
+
+        results.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_deleted_solutions_release_pipeline_is_left_out()
     {
         await SeedWorldAsync();
@@ -143,16 +154,16 @@ public sealed class ReleasePipelinePaletteSourceTests : PaletteSourceVisibilityT
 
     private async Task AddAsync(
         string name, string environmentName, bool missing = false,
-        string status = BcEnvironmentStatus.Active, DateTime? deletedAt = null)
+        string status = BcEnvironmentStatus.Active, DateTime? deletedAt = null, DateTime? archivedAt = null)
     {
         await using var ctx = Db.NewContext();
         await AddReleasePipelineAsync(
-            ctx, TestDb.DefaultOrgId, VisibleProjectId, name, environmentName, missing, status, deletedAt);
+            ctx, TestDb.DefaultOrgId, VisibleProjectId, name, environmentName, missing, status, deletedAt, archivedAt);
     }
 
     private static async Task AddReleasePipelineAsync(
         AppDbContext ctx, int organizationId, int projectId, string name, string environmentName,
-        bool missing = false, string status = BcEnvironmentStatus.Active, DateTime? deletedAt = null)
+        bool missing = false, string status = BcEnvironmentStatus.Active, DateTime? deletedAt = null, DateTime? archivedAt = null)
     {
         var now = DateTime.UtcNow;
         var environment = new OeProjectEnvironment
@@ -186,6 +197,8 @@ public sealed class ReleasePipelinePaletteSourceTests : PaletteSourceVisibilityT
             BuildPipelineId = buildPipeline.Id,
             ProjectEnvironmentId = environment.Id,
             DeletedAt = deletedAt,
+            DisabledAt = archivedAt,
+            ArchivedAt = archivedAt,
             CreatedAt = now,
             UpdatedAt = now,
         });

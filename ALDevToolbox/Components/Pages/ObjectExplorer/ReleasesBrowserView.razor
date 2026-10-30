@@ -11,9 +11,14 @@
     Lists the Microsoft, third-party, and C/AL reference releases to search
     and compare. Solution builds are NOT listed wholesale — there can be
     thousands, and they live in the Artifacts tool — but the latest ready
-    build of each pipeline IS surfaced on the Third-party tab so a pipeline's
-    current objects are findable without opening its solution first.
+    build of each pipeline IS surfaced on the Solutions tab so a pipeline's
+    current objects are findable without opening its solution first. That tab
+    is a table rather than cards, one row per pipeline, because it grows with
+    the number of customers, not with Business Central's release cadence.
     See .design/artifacts.md.
+
+    Typing in the search box looks across every category at once, grouped by
+    category, so a name finds its release without the user guessing the tab.
 
     Archetype 2 (list / browser), card view. The category tabs map onto
     .pill-tabs exactly as the Cookbook's type filter does, counts included, and
@@ -50,40 +55,46 @@
     else
     {
         var searching = !string.IsNullOrWhiteSpace(_search);
-        var rows = TabRows(_kind)
-            .Where(MatchesSearch)
-            .OrderByDescending(VersionKey)
-            .ThenByDescending(r => r.ImportedAt)
+        // Searching looks in every category until the user picks a tab, which
+        // narrows the same search to that tab; otherwise the active tab's rows.
+        var acrossTabs = searching && !_searchInTab;
+        var sections = VisibleTabs
+            .Select(t => (Tab: t, Rows: Rows(t.Kind)))
+            .Where(s => acrossTabs ? s.Rows.Count > 0 : s.Tab.Kind == _kind)
             .ToList();
-        var totalFiles = rows.Sum(r => (long)r.SourceFileCount);
+        var shown = sections.SelectMany(s => s.Rows).ToList();
+        var totalFiles = shown.Sum(r => (long)r.SourceFileCount);
 
         <div class="filter-bar">
             <span class="search filter-bar__search">
                 <Icon Name="search" Width="15" Height="15" Css="search__icon" />
-                <input type="search" class="input" @bind="_search" @bind:event="oninput"
-                       placeholder="Search by release name, version, or publisher..."
+                <input type="search" class="input" @bind="_search" @bind:event="oninput" @bind:after="SearchAcrossTabs"
+                       placeholder="Search all releases..."
                        aria-label="Search releases"
                        data-page-search aria-keyshortcuts="F3" title="Search releases (F3)" />
             </span>
             <div class="pill-tabs oe-tabs" role="tablist" aria-label="Release category">
-                @foreach (var t in _tabs.Where(t => t.Kind != "cal" || Count("cal") > 0))
+                @foreach (var t in VisibleTabs)
                 {
-                    var active = _kind == t.Kind;
+                    // While searching across tabs none is chosen: the results span
+                    // them all, and each tab's count is its share of the matches.
+                    // Clicking one narrows the search to it.
+                    var active = !acrossTabs && _kind == t.Kind;
                     <button type="button" class="pill-tab @(active ? "is-active" : "")"
                             role="tab" aria-selected="@(active ? "true" : "false")"
                             @onclick="() => SetKind(t.Kind)"
                             id="@($"oe-tab-{t.Kind}")" aria-controls="oe-releases">
                         <Icon Name="@t.Icon" Width="15" Height="15" />
                         <span>@t.Label</span>
-                        <span class="pill-tab__count">@Count(t.Kind)</span>
+                        <span class="pill-tab__count">@Rows(t.Kind).Count</span>
                     </button>
                 }
             </div>
             <span class="filter-bar__spacer"></span>
-            @if (rows.Count > 0)
+            @if (shown.Count > 0)
             {
                 <span class="oe-tally">
-                    <b>@rows.Count</b> release@(rows.Count == 1 ? "" : "s") @(searching ? "matched" : "imported")
+                    <b>@shown.Count</b> @(_kind == SolutionKind && !acrossTabs ? "build" : "release")@(shown.Count == 1 ? "" : "s") @(searching ? "matched" : _kind == SolutionKind ? "listed" : "imported")
                     · <b>@totalFiles.ToString("N0")</b> files indexed
                 </span>
             }
@@ -91,20 +102,29 @@
 
         @* .oe-panel is display:contents - it exists only to give role="tabpanel"
            something to attach to, and must not add a box to .page's grid. *@
-        <div id="oe-releases" role="tabpanel" aria-labelledby="@($"oe-tab-{_kind}")" class="oe-panel">
-        @if (rows.Count == 0)
+        <div id="oe-releases" role="tabpanel" class="oe-panel"
+             aria-labelledby="@(acrossTabs ? null : $"oe-tab-{_kind}")"
+             aria-label="@(acrossTabs ? "Search results" : null)">
+        @if (shown.Count == 0)
         {
             <div class="card">
                 @if (searching)
                 {
                     <div class="empty-state">
                         <span class="empty-state__icon"><Icon Name="funnel-x" Width="21" Height="21" /></span>
-                        <span class="empty-state__title">No @CategoryNoun releases match "@_search"</span>
+                        <span class="empty-state__title">No @(acrossTabs ? "" : CategoryNoun + " ")releases match "@_search"</span>
                         <span class="empty-state__text">
-                            Try a different name, version, or publisher. To search for an
+                            Try a different name, version, publisher, or solution. To search for an
                             object, open a release first.
                         </span>
-                        <button type="button" class="btn empty-state__action" @onclick="ClearSearch">Clear search</button>
+                        @if (acrossTabs)
+                        {
+                            <button type="button" class="btn empty-state__action" @onclick="ClearSearch">Clear search</button>
+                        }
+                        else
+                        {
+                            <button type="button" class="btn empty-state__action" @onclick="SearchAcrossTabs">Search all tabs</button>
+                        }
                     </div>
                 }
                 else
@@ -137,6 +157,30 @@
                 }
             </div>
         }
+        else if (acrossTabs)
+        {
+            // One section per category with a match, in tab order. Groups within
+            // a category (versions, publishers) would bury a short result list
+            // under headings, so each category is one flat run.
+            @foreach (var section in sections)
+            {
+                <section class="oe-group">
+                    @GroupHead(section.Tab.Label, section.Rows.Count)
+                    @if (section.Tab.Kind == SolutionKind)
+                    {
+                        @SolutionTable(section.Rows)
+                    }
+                    else
+                    {
+                        @CardGrid(section.Rows)
+                    }
+                </section>
+            }
+        }
+        else if (_kind == SolutionKind)
+        {
+            @SolutionTable(shown)
+        }
         else
         {
             // The "Latest release" hero only makes sense where a single newest
@@ -149,9 +193,9 @@
             // A preview build never takes the hero, and the hero never points at
             // one: featured there it would read as GA. The hero is the newest
             // shipped release; previews stay in the grid under their major, pilled.
-            var showHero = !searching && _kind == "first_party" && rows.Any(r => !r.IsPrerelease);
-            var featured = showHero ? rows.First(r => !r.IsPrerelease) : rows[0];
-            var gridRows = showHero ? rows.Where(r => r.Id != featured.Id).ToList() : rows;
+            var showHero = !searching && _kind == "first_party" && shown.Any(r => !r.IsPrerelease);
+            var featured = showHero ? shown.First(r => !r.IsPrerelease) : shown[0];
+            var gridRows = showHero ? shown.Where(r => r.Id != featured.Id).ToList() : shown;
 
             @if (showHero)
             {
@@ -208,43 +252,9 @@
                 <section class="oe-group">
                     @if (group.Title is not null)
                     {
-                        <div class="oe-group__head">
-                            <span class="section-label">@group.Title</span>
-                            <span class="oe-group__rule"></span>
-                            <span class="oe-group__count">
-                                @group.Items.Count release@(group.Items.Count == 1 ? "" : "s")
-                            </span>
-                        </div>
+                        @GroupHead(group.Title, group.Items.Count)
                     }
-                    <div class="card-grid">
-                        @foreach (var r in group.Items)
-                        {
-                            <a class="browse-card oe-card" href="@($"/object-explorer/release/{r.Id}")">
-                                <div class="browse-card__top">
-                                    <span class="browse-card__title">@(r.IsPrerelease ? BcArtifactIndex.StripPreviewSuffix(r.Label) : r.Label)</span>
-                                    @if (r.IsPrerelease)
-                                    {
-                                        <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
-                                    }
-                                    @if (!string.IsNullOrEmpty(r.BcVersion))
-                                    {
-                                        <span class="code">@r.BcVersion</span>
-                                    }
-                                </div>
-                                @if (!string.IsNullOrEmpty(r.PipelineName))
-                                {
-                                    <span class="browse-card__text">Built here · newest build from @r.PipelineName</span>
-                                }
-                                <div class="browse-card__foot">
-                                    <span class="oe-card__files">
-                                        <Icon Name="file-code" Width="13" Height="13" />
-                                        <span><b>@r.SourceFileCount.ToString("N0")</b> files</span>
-                                    </span>
-                                    <span class="oe-card__go">Explore<Icon Name="arrow-right" Width="13" Height="13" /></span>
-                                </div>
-                            </a>
-                        }
-                    </div>
+                    @CardGrid(group.Items)
                 </section>
             }
         }
@@ -253,6 +263,9 @@
 </div>
 
 @code {
+    /// <summary>The tab key for pipeline builds, stored as release kind "project" (see .design/object-explorer.md).</summary>
+    private const string SolutionKind = "solution";
+
     private List<ReleaseListItem>? _releases;
     private List<ReleaseListItem> _pipelineReleases = new();
     private string _kind = "first_party";
@@ -261,6 +274,7 @@
     private readonly (string Kind, string Label, string Icon)[] _tabs =
     {
         ("first_party", "Microsoft", "layers"),
+        (SolutionKind, "Solutions", "folder-git-2"),
         ("third_party", "Third-party", "box"),
         ("cal", "C/AL", "file-code"),
     };
@@ -270,8 +284,8 @@
     protected override async Task OnInitializedAsync()
     {
         // Solution builds are excluded by default — they live in the Artifacts
-        // tool — except each pipeline's latest ready build, which rides along
-        // on the Third-party tab. Only ready releases are browsable, so the
+        // tool — except each pipeline's latest ready build, which has its own
+        // Solutions tab. Only ready releases are browsable, so the
         // ingesting/failed rows the admin list needs are filtered out here
         // (the hero's "Ready" pill is honest by construction). Symbol packages a
         // build pulled from the feeds with no source in them are left out too
@@ -280,22 +294,52 @@
         _pipelineReleases = await ObjectExplorer.ListLatestPipelineBuildReleasesAsync();
     }
 
+    /// <summary>True once a tab is clicked during a search: the search then looks in that tab alone.</summary>
+    private bool _searchInTab;
+
+    /// <summary>
+    /// C/AL and Solutions show only while the org has some: most orgs never
+    /// import C/AL, and an org that does not use solutions has no builds.
+    /// </summary>
+    private IEnumerable<(string Kind, string Label, string Icon)> VisibleTabs =>
+        _tabs.Where(t => t.Kind is not ("cal" or SolutionKind) || TabRows(t.Kind).Any());
+
+    /// <summary>
+    /// Picking a tab keeps the search and narrows it to that tab, since the
+    /// tab's count is what invited the click.
+    /// </summary>
     private void SetKind(string kind)
     {
         _kind = kind;
-        _search = string.Empty;
+        _searchInTab = !string.IsNullOrWhiteSpace(_search);
     }
 
-    private void ClearSearch() => _search = string.Empty;
+    /// <summary>Typing searches every tab again.</summary>
+    private void SearchAcrossTabs() => _searchInTab = false;
 
-    /// <summary>The rows behind a tab — Third-party also carries the pipeline entries.</summary>
-    private IEnumerable<ReleaseListItem> TabRows(string kind)
+    private void ClearSearch()
     {
-        var own = _releases?.Where(r => r.Kind == kind) ?? Enumerable.Empty<ReleaseListItem>();
-        return kind == "third_party" ? own.Concat(_pipelineReleases) : own;
+        _search = string.Empty;
+        _searchInTab = false;
     }
 
-    private int Count(string kind) => TabRows(kind).Count();
+    /// <summary>The rows behind a tab — Solutions carries the pipeline entries, the rest their own kind.</summary>
+    private IEnumerable<ReleaseListItem> TabRows(string kind) => kind == SolutionKind
+        ? _pipelineReleases
+        : _releases?.Where(r => r.Kind == kind) ?? Enumerable.Empty<ReleaseListItem>();
+
+    /// <summary>
+    /// A tab's rows that match the search, in display order. Pipeline builds keep
+    /// the service's solution-then-pipeline order so one customer's rows sit
+    /// together; everything else runs newest version first.
+    /// </summary>
+    private List<ReleaseListItem> Rows(string kind)
+    {
+        var rows = TabRows(kind).Where(MatchesSearch);
+        return kind == SolutionKind
+            ? rows.ToList()
+            : rows.OrderByDescending(VersionKey).ThenByDescending(r => r.ImportedAt).ToList();
+    }
 
     /// <summary>Substring match (case-insensitive) over label, publisher, solution/pipeline name, and BC version.</summary>
     private bool MatchesSearch(ReleaseListItem r)
@@ -314,14 +358,111 @@
         "first_party" => "Microsoft",
         "third_party" => "third-party",
         "cal" => "C/AL",
+        SolutionKind => "solution",
         _ => "",
     };
+
+    private RenderFragment GroupHead(string title, int count) =>
+        @<div class="oe-group__head">
+            <span class="section-label">@title</span>
+            <span class="oe-group__rule"></span>
+            <span class="oe-group__count">@count release@(count == 1 ? "" : "s")</span>
+        </div>;
+
+    private RenderFragment CardGrid(List<ReleaseListItem> items) =>
+        @<div class="card-grid">
+            @foreach (var r in items)
+            {
+                <a class="browse-card oe-card" href="@($"/object-explorer/release/{r.Id}")">
+                    <div class="browse-card__top">
+                        <span class="browse-card__title">@(r.IsPrerelease ? BcArtifactIndex.StripPreviewSuffix(r.Label) : r.Label)</span>
+                        @if (r.IsPrerelease)
+                        {
+                            <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
+                        }
+                        @if (!string.IsNullOrEmpty(r.BcVersion))
+                        {
+                            <span class="code">@r.BcVersion</span>
+                        }
+                    </div>
+                    <div class="browse-card__foot">
+                        <span class="oe-card__files">
+                            <Icon Name="file-code" Width="13" Height="13" />
+                            <span><b>@r.SourceFileCount.ToString("N0")</b> files</span>
+                        </span>
+                        <span class="oe-card__go">Explore<Icon Name="arrow-right" Width="13" Height="13" /></span>
+                    </div>
+                </a>
+            }
+        </div>;
+
+    /// <summary>
+    /// The Solutions tab: one compact row per pipeline's newest build, a
+    /// solution's pipelines next to each other and the pipeline name the link. A card per pipeline stopped
+    /// being scannable at a few dozen customers.
+    /// </summary>
+    private RenderFragment SolutionTable(List<ReleaseListItem> items) =>
+        @<div class="card card--flush">
+            <table class="data-table oe-solutions">
+                <thead>
+                    <tr>
+                        <th scope="col">Solution</th>
+                        <th scope="col">Pipeline</th>
+                        <th scope="col">BC version</th>
+                        <th scope="col" class="data-table__num oe-solutions__files">Files</th>
+                        <th scope="col" class="oe-solutions__built">Built</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @for (var i = 0; i < items.Count; i++)
+                    {
+                        var r = items[i];
+                        // The solution is named once, on its first pipeline's row, so
+                        // each customer reads as one block however many pipelines it has.
+                        var firstOfSolution = i == 0
+                            || !string.Equals(items[i - 1].ProjectName, r.ProjectName, StringComparison.OrdinalIgnoreCase);
+                        var rowState = firstOfSolution ? "oe-solutions__first" : null;
+                        <tr class="@rowState">
+                            <td>
+                                @if (firstOfSolution)
+                                {
+                                    <strong>@r.ProjectName</strong>
+                                }
+                                else
+                                {
+                                    @* Shown once to the eye; a screen reader moving down the
+                                       column still hears whose pipeline each row is. *@
+                                    <span class="u-sr">@r.ProjectName</span>
+                                }
+                            </td>
+                            <td>
+                                <a class="oe-solutions__link" href="@($"/object-explorer/release/{r.Id}")"
+                                   aria-label="@($"Explore {r.ProjectName}, {r.PipelineName}")">@r.PipelineName</a>
+                            </td>
+                            <td>
+                                @if (!string.IsNullOrEmpty(r.BcVersion))
+                                {
+                                    <span class="code">@r.BcVersion</span>
+                                }
+                                else
+                                {
+                                    <span class="u-muted">—</span>
+                                }
+                            </td>
+                            <td class="data-table__num oe-solutions__files">@r.SourceFileCount.ToString("N0")</td>
+                            <td class="oe-solutions__built">@RelAgo(r.ImportedAt)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>;
 
     /// <summary>
     /// Microsoft releases are grouped by major version (descending), matching
     /// the design's version timeline. Third-party groups by publisher
-    /// (alphabetically; pipeline entries fall under their solution's name) so
-    /// one vendor's apps sit together. C/AL renders a single unlabelled group.
+    /// (alphabetically; an older manual import with no publisher falls under the
+    /// solution it was filed for) so one vendor's apps sit together. C/AL renders
+    /// a single unlabelled group.
     /// </summary>
     private List<ReleaseGroup> GroupReleases(List<ReleaseListItem> list)
     {

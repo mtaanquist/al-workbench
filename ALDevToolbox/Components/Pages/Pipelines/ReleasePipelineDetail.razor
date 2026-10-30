@@ -12,6 +12,8 @@
 @inject ILogger<ReleasePipelineDetail> Log
 @inject IServiceScopeFactory ScopeFactory
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@* Named Time, not Clock as elsewhere: this page already has a Clock(DateTime) formatting helper. *@
+@inject TimeProvider Time
 @using System.Globalization
 @using System.Text.RegularExpressions
 @using Microsoft.Extensions.DependencyInjection
@@ -66,7 +68,11 @@
         <StatusPill Tone="@(_isProduction ? "danger" : "muted")" title="Environment type">
             <span>@EnvType</span>
         </StatusPill>
-        @if (Disabled)
+        @if (Archived)
+        {
+            <StatusPill Tone="muted" title="Archived, kept for its history"><span>Archived</span></StatusPill>
+        }
+        else if (Disabled)
         {
             <StatusPill Tone="muted"><span>Disabled</span></StatusPill>
         }
@@ -94,15 +100,27 @@
     </SubtitleContent>
     <Actions>
         <a class="btn" href="/pipelines/deployments"><Icon Name="arrow-left" Width="15" Height="15" /><span>All deployment pipelines</span></a>
-        @if (_canManage)
+        @if (_canManage && !Archived)
         {
             <a class="btn" href="@($"/pipelines/deployments/{Id}/edit")">
                 <Icon Name="pencil" Width="15" Height="15" /><span>Edit</span>
             </a>
         }
-        @if (_canManage && Disabled)
+        @if (_canManage && Archived)
         {
-            @* Disabled, enabling it is the only thing left to do here, so it takes the primary. *@
+            @* Archived, restoring it is the only thing left to do here, so it takes the primary. *@
+            <button type="button" class="btn btn--primary" @onclick="() => SetArchivedAsync(false)" disabled="@_switching"
+                    title="Bring it back to the deployment pipelines list. It comes back disabled.">
+                <Icon Name="archive-restore" Width="15" Height="15" /><span>Restore pipeline</span>
+            </button>
+        }
+        else if (_canManage && Disabled)
+        {
+            <button type="button" class="btn" @onclick="() => SetArchivedAsync(true)" disabled="@_switching"
+                    title="Take it off the deployment pipelines list. Its history is kept.">
+                <Icon Name="archive" Width="15" Height="15" /><span>Archive pipeline</span>
+            </button>
+            @* Disabled, enabling it is the main thing left to do here, so it takes the primary. *@
             <button type="button" class="btn btn--primary" @onclick="() => SetDisabledAsync(false)" disabled="@_switching">
                 <Icon Name="circle-play" Width="15" Height="15" /><span>Enable pipeline</span>
             </button>
@@ -130,7 +148,17 @@
         {
             <Alert Tone="AlertTone.Danger"><span>@switchError</span></Alert>
         }
-        @if (Disabled)
+        @if (Archived)
+        {
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    This deployment pipeline is archived. It is kept so you can look back at its
+                    deployments, and nothing deploys through it.
+                    @(_canManage ? "Restore it to change or use it again; it comes back disabled." : "Ask someone who manages this solution to restore it.")
+                </span>
+            </Alert>
+        }
+        else if (Disabled)
         {
             <Alert Tone="AlertTone.Info">
                 <span>
@@ -155,14 +183,20 @@
             <Alert Tone="AlertTone.Danger">
                 <span>
                     Its build pipeline <b>@SourceName</b> was deleted, so no new builds will reach this deployment pipeline.
-                    @if (_canManage)
+                    @if (_canManage && !Archived)
                     {
-                        <a href="@($"/pipelines/deployments/{Id}/edit")">Point it at another build pipeline</a><text>, or delete it.</text>
+                        <a href="@($"/pipelines/deployments/{Id}/edit")">Point it at another build pipeline</a><text>, or disable and archive it.</text>
                     }
                 </span>
             </Alert>
         }
-        @if (_rp!.ProjectEnvironment!.MissingSince is not null)
+        @* An archived pipeline deploys nothing, so a gone or broken environment is no
+           longer something to fix here; often it is why the pipeline was archived. *@
+        @{ var targetMissing = _rp!.ProjectEnvironment!.MissingSince is not null; }
+        @if (Archived)
+        {
+        }
+        else if (targetMissing)
         {
             <Alert Tone="AlertTone.Danger">
                 <span>
@@ -187,7 +221,7 @@
         {
             <Alert Tone="AlertTone.Danger"><span>@gre</span></Alert>
         }
-        else if (_canManage && !HasSomethingToRelease && !SourceDeleted)
+        else if (_canManage && !Archived && !HasSomethingToRelease && !SourceDeleted)
         {
             <Alert Tone="AlertTone.Info">
                 @if (_fromReleases)
@@ -358,9 +392,13 @@
             {
                 <div class="card">
                     <div class="card__head"><h2 class="card__title">Deployments</h2></div>
-                    <EmptyState Icon="send" Title="No deployments yet">
+                    <EmptyState Icon="send" Title="@(Archived ? "No deployments" : "No deployments yet")">
                         <Text>
-                            @if (HasSomethingToRelease || !_canManage)
+                            @if (Archived)
+                            {
+                                <text>Nothing was installed by this pipeline before it was archived.</text>
+                            }
+                            else if (HasSomethingToRelease || !_canManage)
                             {
                                 <text>Nothing has been installed by this pipeline yet. Deploy the latest build to install it now.</text>
                             }
@@ -380,7 +418,7 @@
                                     <Icon Name="send" Width="16" Height="16" /><span>Deploy</span>
                                 </button>
                             }
-                            else if (_canManage && !_fromReleases && !SourceDeleted)
+                            else if (_canManage && !Archived && !_fromReleases && !SourceDeleted)
                             {
                                 <a class="btn" href="@SourceHref"><Icon Name="hammer" Width="16" Height="16" /><span>Open the build pipeline</span></a>
                             }
@@ -719,6 +757,9 @@
 </ConfirmDialog>
 
 <RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="OnRescheduledAsync" />
+<ConfirmDialog @ref="_archiveConfirm" Title="Archive deployment pipeline?"
+               ConfirmLabel="Archive deployment pipeline" ConfirmButtonClass="btn--primary" ConfirmIcon="archive" />
+
 <ConfirmDialog @ref="_disableConfirm" Title="Disable deployment pipeline?"
                ConfirmLabel="Disable deployment pipeline" ConfirmButtonClass="btn--primary" ConfirmIcon="circle-pause" />
 
@@ -759,6 +800,7 @@
     // Set when Reschedule on a handed-off row finds Business Central no longer holds it.
     private string? _rescheduleNotice;
     private ConfirmDialog? _disableConfirm;
+    private ConfirmDialog? _archiveConfirm;
     private bool _switching;
     private string? _switchError;
 
@@ -797,6 +839,7 @@
 
     /// <summary>True when someone disabled this deployment pipeline (#1131): nothing deploys through it.</summary>
     private bool Disabled => _rp?.DisabledAt is not null;
+    private bool Archived => _rp?.ArchivedAt is not null;
 
     /// <summary>True when the build pipeline this draws from is disabled, so no new builds arrive.</summary>
     private bool BuildPipelineDisabled => !_fromReleases && !SourceDeleted && _rp?.BuildPipeline?.DisabledAt is not null;
@@ -1099,6 +1142,52 @@
         }
     }
 
+    // ── Archive and restore (#1466) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Archiving asks first, with the list's words; restoring just does it and leaves the
+    /// pipeline disabled. Restoring is refused while another pipeline has taken its name.
+    /// </summary>
+    private async Task SetArchivedAsync(bool archived)
+    {
+        if (_rp is null || _switching) return;
+        if (archived)
+        {
+            if (_archiveConfirm is null) return;
+            if (!await _archiveConfirm.OpenAsync("Archive deployment pipeline?",
+                    ReleasePipelinesBrowser.ArchiveMessage(_rp.Name), "Archive deployment pipeline"))
+            {
+                return;
+            }
+        }
+
+        _switching = true;
+        _switchError = null;
+        try
+        {
+            await Releases.SetReleasePipelineArchivedAsync(Id, archived);
+            await LoadPipelineAsync();
+            await LoadHistoryAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _switchError = ex.Errors.Values.FirstOrDefault() ?? $"Couldn't {(archived ? "archive" : "restore")} this deployment pipeline.";
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _switchError = "You can't change this deployment pipeline. Ask someone who manages the solution.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to set deployment pipeline {ReleasePipelineId} archived={Archived}.", Id, archived);
+            _switchError = $"Couldn't {(archived ? "archive" : "restore")} this deployment pipeline. Try again, and if it keeps failing tell an administrator.";
+        }
+        finally
+        {
+            _switching = false;
+        }
+    }
+
     // ── Deploy again (failed deployments only, #931) ────────────────────────────
 
     /// <summary>A failed deployment can be deployed again by someone who manages the pipeline.</summary>
@@ -1148,7 +1237,7 @@
     {
         var env = _rp?.ProjectEnvironment;
         if (env is null || !UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd)) return null;
-        if (UpdateWindow.IsWithin(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays)) return null;
+        if (UpdateWindow.IsWithin(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, Time.GetUtcNow().UtcDateTime, env.UpdateWindowDays)) return null;
         return $"{EnvName}'s delivery window ({DeliveryWindow}) isn't open now. Deploying again installs outside the hours agreed with the customer, and the deployment history will record that.";
     }
 
@@ -1181,8 +1270,8 @@
         if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
             && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
         {
-            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays)
-                <= DateTime.UtcNow.AddMinutes(1);
+            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, Time.GetUtcNow().UtcDateTime, env.UpdateWindowDays)
+                <= Time.GetUtcNow().UtcDateTime.AddMinutes(1);
         }
         return !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_rp?.DeploymentSchedule));
     }
@@ -1194,8 +1283,8 @@
         if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
             && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
         {
-            var opening = UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow, env.UpdateWindowDays);
-            return opening <= DateTime.UtcNow.AddMinutes(1)
+            var opening = UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, Time.GetUtcNow().UtcDateTime, env.UpdateWindowDays);
+            return opening <= Time.GetUtcNow().UtcDateTime.AddMinutes(1)
                 ? "right away, while the delivery window is open"
                 : $"in the next delivery window ({WhenPhrase(opening)})";
         }
@@ -1482,6 +1571,18 @@
         }
 
         var last = LastRelease;
+        if (Archived)
+        {
+            // Kept for its history: no verdict on its health, only what it last did.
+            if (last is null)
+            {
+                return new HealthView("none", "archive", "Archived", Plain("Kept for its history. Nothing was installed through it."));
+            }
+            var lastAt = LastWhen(last);
+            var outcome = DeliveryLook(last.Status).Word.ToLowerInvariant();
+            return new HealthView("none", "archive", "Archived",
+                @<text>Kept for its history. Its last deployment, number @last.Number, @outcome <Timestamp Value="@lastAt" Relative="true" />.</text>);
+        }
         if (last is { Status: ProjectDeliveryStatus.Failed })
         {
             var failedApp = last.Apps.FirstOrDefault(a => a.Status == ProjectDeliveryResultStatus.Failed);
@@ -1693,10 +1794,10 @@
     private static DateTime? StartOf(DeliveryHistoryRow d) => d.ClaimedAt ?? d.StartedAt;
 
 
-    private static string? Took(DeliveryHistoryRow d) =>
+    private string? Took(DeliveryHistoryRow d) =>
         d.FinishedAt is { } end && (StartOf(d) ?? (d.Status is ProjectDeliveryStatus.Cancelled or ProjectDeliveryStatus.Dismissed ? null : d.CreatedAt)) is { } start
             ? Duration(end - start)
-            : d.IsActive && StartOf(d) is { } running ? Duration(DateTime.UtcNow - running) : null;
+            : d.IsActive && StartOf(d) is { } running ? Duration(Time.GetUtcNow().UtcDateTime - running) : null;
 
     private static string AppsSummary(DeliveryHistoryRow d)
     {
@@ -2028,7 +2129,7 @@
 
     /// <summary>Whole days between the instant and today, both counted in the display zone.</summary>
     private int DaysFromToday(DateTime utc) =>
-        (Zone.ToDisplay(utc).Date - Zone.ToDisplay(DateTime.UtcNow).Date).Days;
+        (Zone.ToDisplay(utc).Date - Zone.ToDisplay(Time.GetUtcNow().UtcDateTime).Date).Days;
 
     /// <summary>"Today 02:00", "Yesterday 15:02", "Tomorrow 22:00", else "20 Sep 11:40".</summary>
     private string When(DateTime utc, bool seconds = false)

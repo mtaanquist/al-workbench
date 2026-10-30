@@ -106,11 +106,108 @@ public sealed class DeliveryServiceTests : IDisposable
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
         await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
             .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Upgrading"));
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Upgrading" };
 
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
         var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironment"];
         error.Should().Contain("Upgrading", "the refusal names the status the consultant will see in Business Central");
+        _admin.Requested.Should().Equal(["Production"], "a refusing stored status is asked again before it turns anyone away");
+    }
+
+    [Fact]
+    public async Task ReleaseBuildNowAsync_does_not_ask_Business_Central_when_the_stored_status_is_active()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+
+        await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        _admin.Requested.Should().BeEmpty("only a refusing status is re-read; the run re-reads before uploading anyway");
+    }
+
+    /// <summary>A failed deployment whose environment was Preparing when last read.</summary>
+    private async Task<(Seed Seed, int FailedId)> FailedOnPreparingAsync()
+    {
+        var (seed, failedId) = await FailedReleaseAsync(new[] { "CRONUS Core" }, failOn: "CRONUS Core");
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Preparing"));
+        _admin.Requested.Clear();
+        return (seed, failedId);
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_rereads_a_Preparing_environment_and_deploys_once_it_is_active()
+    {
+        var (seed, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Active" };
+
+        int againId;
+        await using (var ctx = _db.NewContext()) againId = await NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == againId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        _admin.Requested.Should().Equal(["Production"]);
+        var env = await read.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == seed.EnvironmentId);
+        env.Status.Should().Be("Active", "the environment's page shows what Business Central just said");
+        env.StatusFetchedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_still_refuses_an_environment_that_is_still_Preparing()
+    {
+        var (seed, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Preparing" };
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing right now").And.Contain("Wait for it to finish");
+        _admin.Requested.Should().Equal(["Production"]);
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.CountAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().Be(1, "nothing new was queued");
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_keeps_the_stored_refusal_when_Business_Central_does_not_answer()
+    {
+        var (_, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = _ => throw new BcApiException(null, "Couldn't reach the Admin Center API.");
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("Preparing").And.Contain("couldn't be asked again just now");
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_says_what_to_fix_when_the_connection_cannot_sign_in()
+    {
+        var (_, failedId) = await FailedOnPreparingAsync();
+        _tokens.Throw = new BcApiException(null, "The Business Central client secret has expired.");
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Be("The Business Central client secret has expired.",
+                "waiting would never help, so the person is told what to fix rather than to try again");
+    }
+
+    [Fact]
+    public async Task ReleaseAgainAsync_says_so_when_the_environment_is_gone_from_Business_Central()
+    {
+        var (_, failedId) = await FailedOnPreparingAsync();
+        _admin.OnGet = _ => null;
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).ReleaseAgainAsync(failedId, forceSyncOnce: false);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ProjectEnvironment"].Should().Contain("no longer has an environment called 'Production'");
     }
 
     [Fact]
@@ -535,7 +632,7 @@ public sealed class DeliveryServiceTests : IDisposable
             case "pipeline disabled":
                 // Only the earlier one's pipeline: give the later one a pipeline of its own.
                 var other = await NewReleasePipelineService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
-                    seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+                    seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
                 await ctx.OeProjectDeliveries.Where(d => d.Id == later)
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.ReleasePipelineId, other));
                 if (why == "pipeline deleted")
@@ -743,7 +840,8 @@ public sealed class DeliveryServiceTests : IDisposable
             await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTimeZone, "Europe/Copenhagen"));
             await SetWindowAsync(ctx, seed.EnvironmentId, start, end);
-            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            // Scheduled on the clock the run below reads, so no step of the test sees today.
+            deliveryId = await NewService(ctx, clock: clock).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, utcNow.AddHours(1));
             await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(d => d.ScheduledFor, utcNow.AddMinutes(-90))
@@ -759,6 +857,7 @@ public sealed class DeliveryServiceTests : IDisposable
         var movedLocal = TimeZoneInfo.ConvertTimeFromUtc(delivery.ScheduledFor, tz);
         new TimeOnly(movedLocal.Hour, movedLocal.Minute).Should().Be(start, "it moves to the window's opening in the solution's own time");
         delivery.DiagnosticsLog.Should().Contain($"at {UpdateWindow.Clock(start)} (Europe/Copenhagen)");
+        delivery.DiagnosticsLog.Should().Contain("10:00:00  ", "the log is stamped on the same clock as the row");
     }
 
     [Fact]
@@ -987,10 +1086,10 @@ public sealed class DeliveryServiceTests : IDisposable
         enqueued.Should().Be(1);
     }
 
-    // ── Deleting a deployment pipeline (#1108) ────────────────────────────────
+    // ── Stopping a deployment pipeline (#1108, #1131) ─────────────────────────
 
     [Fact]
-    public async Task Deleting_the_pipeline_cancels_its_scheduled_and_dismisses_its_prepared_deployments()
+    public async Task Disabling_the_pipeline_cancels_its_scheduled_and_dismisses_its_prepared_deployments()
     {
         int scheduledId, proposedId;
         Seed seed;
@@ -1007,7 +1106,7 @@ public sealed class DeliveryServiceTests : IDisposable
         {
             var counts = await NewReleasePipelineService(ctx).CountWaitingDeploymentsAsync(seed.ReleasePipelineId);
             counts.Should().Be(new WaitingDeploymentCounts(2, 0));
-            await NewReleasePipelineService(ctx).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+            await NewReleasePipelineService(ctx).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
         }
 
         // The time comes: neither the sweep nor a stale queue entry runs it.
@@ -1021,9 +1120,9 @@ public sealed class DeliveryServiceTests : IDisposable
             .ToDictionaryAsync(d => d.Id);
         rows[scheduledId].Status.Should().Be(ProjectDeliveryStatus.Cancelled);
         rows[scheduledId].FinishedAt.Should().NotBeNull();
-        rows[scheduledId].DiagnosticsLog.Should().Contain("The deployment pipeline was deleted");
+        rows[scheduledId].DiagnosticsLog.Should().Contain("The deployment pipeline was disabled");
         rows[proposedId].Status.Should().Be(ProjectDeliveryStatus.Dismissed);
-        rows[proposedId].DismissReason.Should().Be("The deployment pipeline was deleted");
+        rows[proposedId].DismissReason.Should().Be("The deployment pipeline was disabled");
         rows.Values.SelectMany(d => d.Results).Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
     }
 
@@ -1176,7 +1275,7 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Someone_who_manages_the_solution_can_disable_a_deployment_pipeline_but_only_an_admin_can_delete_it()
+    public async Task Someone_who_manages_the_solution_can_disable_and_archive_a_deployment_pipeline()
     {
         await using var ctx = _db.NewContext();
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
@@ -1185,19 +1284,17 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var svc = NewReleasePipelineService(_db.NewContext());
         (await svc.CanManageAsync(seed.ReleasePipelineId)).Should().BeTrue("the solution is open to everyone in the organisation");
-        (await svc.CanDeleteAsync()).Should().BeFalse();
         await svc.SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
+        await NewReleasePipelineService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.ReleasePipelineId, true);
 
-        var delete = () => NewReleasePipelineService(_db.NewContext()).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
-
-        await delete.Should().ThrowAsync<ProjectAccessDeniedException>();
         var rp = await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId);
         rp.DeletedAt.Should().BeNull();
         rp.DisabledAt.Should().NotBeNull();
+        rp.ArchivedAt.Should().NotBeNull();
     }
 
     [Fact]
-    public async Task Deleting_the_pipeline_leaves_a_deployment_already_running_alone()
+    public async Task Disabling_the_pipeline_leaves_a_deployment_already_running_alone()
     {
         int deliveryId;
         Seed seed;
@@ -1213,7 +1310,7 @@ public sealed class DeliveryServiceTests : IDisposable
         {
             (await NewReleasePipelineService(ctx).CountWaitingDeploymentsAsync(seed.ReleasePipelineId))
                 .Should().Be(new WaitingDeploymentCounts(0, 0));
-            await NewReleasePipelineService(ctx).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+            await NewReleasePipelineService(ctx).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
         }
 
         await using var read = _db.NewContext();
@@ -1436,6 +1533,28 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Archiving_and_restoring_are_refused_without_manage_rights()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await NewReleasePipelineService(ctx).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
+        await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone else");
+
+        var archive = () => NewReleasePipelineService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.ReleasePipelineId, true);
+        await archive.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).ArchivedAt.Should().BeNull();
+
+        await _db.NewContext().OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+        var restore = () => NewReleasePipelineService(_db.NewContext()).SetReleasePipelineArchivedAsync(seed.ReleasePipelineId, false);
+        await restore.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).ArchivedAt.Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task CancelDeliveryAsync_is_refused_without_manage_rights()
     {
         await using var ctx = _db.NewContext();
@@ -1641,6 +1760,61 @@ public sealed class DeliveryServiceTests : IDisposable
         options!.CurrentTiming.Should().Be(RescheduleTiming.DeliveryWindow);
         options.NextWindowOpeningUtc.Should().NotBeNull();
         options.LaterUpdateUnavailable.Should().Contain("isn't installed");
+    }
+
+    // ── Boundaries, on a clock of the test's own (#1439) ─────────────────
+
+    /// <summary>A clock that stays at <paramref name="utc"/>, to the whole second, so a boundary can be met exactly.</summary>
+    private static ALDevToolbox.Tests.Auth.FakeTimeProvider ClockAt(DateTime utc) =>
+        new(new DateTimeOffset(utc.Ticks - utc.Ticks % TimeSpan.TicksPerSecond, TimeSpan.Zero));
+
+    [Theory]
+    [InlineData(-60, true)]
+    [InlineData(-61, false)]
+    public async Task A_picked_time_counts_as_now_for_the_minute_spent_in_the_dialog_and_no_longer(int secondsAgo, bool accepted)
+    {
+        var clock = ClockAt(DateTime.UtcNow);
+        var now = clock.GetUtcNow().UtcDateTime;
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx, clock: clock).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, now.AddHours(1));
+
+        var act = () => NewService(_db.NewContext(), clock: clock)
+            .RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, now.AddSeconds(secondsAgo));
+
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ScheduledFor")
+                .WhoseValue.Should().Contain("hasn't happened yet");
+        }
+    }
+
+    [Theory]
+    // A second before the 22:00-23:00 window opens, the moment it opens, its last
+    // second, and the moment it closes: the window is [start, end).
+    [InlineData("21:59:59", 0, "22:00:00")]
+    [InlineData("22:00:00", 0, "22:00:00")]
+    [InlineData("22:59:59", 0, "22:59:59")]
+    [InlineData("23:00:00", 1, "22:00:00")]
+    public async Task The_reschedule_dialog_offers_the_windows_next_opening(string at, int daysLater, string opening)
+    {
+        // Tomorrow rather than a fixed date, so the slot never falls into the past.
+        var day = DateTime.UtcNow.Date.AddDays(1);
+        var clock = ClockAt(day + TimeSpan.Parse(at, System.Globalization.CultureInfo.InvariantCulture));
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await SetWindowAsync(ctx, seed.EnvironmentId, new TimeOnly(22, 0), new TimeOnly(23, 0));
+        var deliveryId = await NewService(ctx, clock: clock)
+            .ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, clock.GetUtcNow().UtcDateTime.AddDays(3));
+
+        var options = await NewService(_db.NewContext(), clock: clock).GetRescheduleOptionsAsync(deliveryId);
+
+        options!.NextWindowOpeningUtc.Should().Be(
+            day.AddDays(daysLater) + TimeSpan.Parse(opening, System.Globalization.CultureInfo.InvariantCulture));
     }
 
     [Fact]
@@ -2068,6 +2242,7 @@ public sealed class DeliveryServiceTests : IDisposable
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().Contain("choose to install it right away");
         delivery.FailureMessage.Should().Contain("CRONUS Core").And.Contain("isn't installed");
         _apps.UploadedOrder.Should().BeEmpty("the rule is checked before anything is uploaded");
     }
@@ -2172,6 +2347,43 @@ public sealed class DeliveryServiceTests : IDisposable
         // The log keeps the response whole, for support and for the page to read back.
         delivery.DiagnosticsLog.Should().Contain(
             $"FAILED CRONUS Core {app.AppVersion}: Business Central reported the install as failed (ExtensionChangeFailed). {raw}");
+    }
+
+    [Fact]
+    public async Task ScheduleDeliveryAsync_can_install_several_apps_right_away_on_a_deferred_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" },
+            deploymentSchedule: BcDeploymentSchedule.NextMajorUpdate);
+
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow,
+            installRightAway: true);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        delivery.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
+        delivery.ScheduledByDeliveryWindow.Should().BeFalse();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId))
+            .DeploymentSchedule.Should().Be(BcDeploymentSchedule.NextMajorUpdate, "the choice is for this deployment only");
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_installs_a_first_app_chosen_to_install_right_away_on_a_deferred_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" },
+            deploymentSchedule: BcDeploymentSchedule.NextMinorUpdate);
+        // Nothing installed: a deferred schedule would be refused for this app.
+
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow,
+            installRightAway: true);
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId))
+            .Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        _apps.UploadedOrder.Should().Equal("CRONUS Core");
+        _apps.LastSchedule.Should().Be(BcDeploymentSchedule.Immediate);
     }
 
     // ── Deferred pre-checks: the app id, and a version already waiting (#936, #937) ──
@@ -2371,7 +2583,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
-        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
         results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
         results[0].Message.Should().Be("Unchanged; Production already has the newer 1.0.10.0.");
@@ -2402,7 +2614,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
-        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.HandedOff);
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
         results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
         results[0].Message.Should().Be("Unchanged; this version is already waiting for the update.");
@@ -2505,8 +2717,15 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
-        if (accepted) await act.Should().NotThrowAsync();
-        else await act.Should().ThrowAsync<PlanValidationException>();
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"].Should()
+                .Contain($"Build #{seed.BuildId} was built from").And.Contain("this deployment pipeline only deploys builds from");
+        }
     }
 
     [Fact]
@@ -3000,6 +3219,44 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ApproveProposalAsync_rereads_a_Preparing_environment_and_approves_once_it_is_active()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        var proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Preparing"));
+
+        await using (var approve = _db.NewContext()) await NewService(approve).ApproveProposalAsync(proposedId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == proposedId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        (await read.OeProjectEnvironments.SingleAsync(e => e.Id == seed.EnvironmentId)).Status.Should().Be("Active");
+        _admin.Requested.Should().Equal(["Production"]);
+    }
+
+    [Fact]
+    public async Task ApproveProposalAsync_does_not_ask_Business_Central_about_a_proposal_that_is_no_longer_waiting()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        var proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+        await ctx.OeProjectDeliveries.Where(d => d.Id == proposedId)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed));
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Status, "Preparing"));
+
+        await using var approve = _db.NewContext();
+        var act = () => NewService(approve).ApproveProposalAsync(proposedId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Delivery");
+        _admin.Requested.Should().BeEmpty("the customer's credential is not spent on a deployment nobody can approve");
+        _tokens.Acquired.Should().Be(0);
+    }
+
+    [Fact]
     public async Task ApproveProposalAsync_schedules_it_as_an_ordinary_release_run_by_the_approver()
     {
         await using var ctx = _db.NewContext();
@@ -3039,7 +3296,7 @@ public sealed class DeliveryServiceTests : IDisposable
     [InlineData("approve")]
     [InlineData("dismiss")]
     [InlineData("replace")]
-    [InlineData("delete the pipeline")]
+    [InlineData("disable the pipeline")]
     public async Task Settling_a_prepared_deployment_marks_everyones_approval_request_read(string how)
     {
         await using var ctx = _db.NewContext();
@@ -3064,11 +3321,11 @@ public sealed class DeliveryServiceTests : IDisposable
             case "dismiss":
                 await NewService(_db.NewContext()).DismissProposalAsync(id, null);
                 break;
-            case "delete the pipeline":
+            case "disable the pipeline":
                 await using (var del = _db.NewContext())
                 {
                     await new ReleasePipelineService(del, _db.OrgContext, new ProjectAccess(del, _db.OrgContext),
-                        _db.NewToolEnablement(del), NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+                        _db.NewToolEnablement(del), NullLogger<ReleasePipelineService>.Instance).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
                 }
                 break;
             default:
@@ -3579,8 +3836,8 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using (var run = _db.NewContext()) (await NewService(run).RunDeliveryAsync(id)).Should().BeTrue();
 
-        _apps.UploadedOrder.Should().NotBeEmpty();
-        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" });
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
     }
 
     [Fact]
@@ -3645,8 +3902,8 @@ public sealed class DeliveryServiceTests : IDisposable
         }
         else
         {
-            delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
-            _apps.UploadedOrder.Should().NotBeEmpty();
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+            _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" });
         }
     }
 

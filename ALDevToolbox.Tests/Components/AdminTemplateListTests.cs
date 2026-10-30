@@ -32,7 +32,7 @@ public sealed class AdminTemplateListTests : IDisposable
         // System org context: hides the cross-org import section, leaving
         // the page's main list as the surface under test. Mirrors the
         // bootstrap admin running inside the singleton system org.
-        _db.OrgContext.IsSystemOrganization = true;
+        _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
 
         var auth = _ctx.AddAuthorization();
         auth.SetAuthorized("admin@example.com");
@@ -80,8 +80,8 @@ public sealed class AdminTemplateListTests : IDisposable
     {
         await using (var seed = _db.NewContext())
         {
-            seed.RuntimeTemplates.Add(TemplateBuilder.Default(key: "runtime-15", runtime: "15"));
-            seed.RuntimeTemplates.Add(TemplateBuilder.Default(key: "runtime-14", runtime: "14"));
+            seed.RuntimeTemplates.Add(TemplateBuilder.Default(key: "runtime-15", runtime: "15", organizationId: TestDb.SystemOrgId));
+            seed.RuntimeTemplates.Add(TemplateBuilder.Default(key: "runtime-14", runtime: "14", organizationId: TestDb.SystemOrgId));
             await seed.SaveChangesAsync();
         }
 
@@ -107,8 +107,8 @@ public sealed class AdminTemplateListTests : IDisposable
     {
         await using (var seed = _db.NewContext())
         {
-            seed.RuntimeTemplates.Add(TemplateBuilder.Default(key: "live"));
-            var soft = TemplateBuilder.Default(key: "trashed");
+            seed.RuntimeTemplates.Add(TemplateBuilder.Default(key: "live", organizationId: TestDb.SystemOrgId));
+            var soft = TemplateBuilder.Default(key: "trashed", organizationId: TestDb.SystemOrgId);
             soft.DeletedAt = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
             seed.RuntimeTemplates.Add(soft);
             await seed.SaveChangesAsync();

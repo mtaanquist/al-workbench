@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -5,6 +6,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -410,16 +412,33 @@ public sealed class ReleaseVisibilityTests : IDisposable
         await LinkByBuildAsync(projectId, seeded.ReleaseId);
         var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
 
+        // The same reads, in the same order, as the non-member test above: each empty
+        // answer there is only proof of the fence if the same call answers here.
         ActAs(MemberUserId);
         await using (var ctx = _db.NewContext())
         {
             (await Explorer(ctx).GetReleaseAsync(seeded.ReleaseId)).Should().NotBeNull();
             (await Explorer(ctx).ListModulesAsync(seeded.ReleaseId, new ModuleListFilter())).Should().ContainSingle();
+            (await Explorer(ctx).ListModuleSummariesAsync(seeded.ReleaseId)).Should().ContainSingle();
+            (await Explorer(ctx).ListObjectsAsync(seeded.ModuleId, new ObjectListFilter(), 0, 50)).Rows.Should().ContainSingle();
             (await Explorer(ctx).GetObjectAsync(seeded.ObjectId)).Should().NotBeNull();
+            (await Explorer(ctx).GetObjectOutlineAsync(seeded.ReleaseId, "table", "Loyalty Card")).Should().NotBeNull();
+
             (await Search(ctx).SearchObjectsInReleaseAsync(
                 seeded.ReleaseId, new ObjectListFilter(Search: "Loyalty"))).Should().ContainSingle();
+            (await Search(ctx).ListObjectKindsInReleaseAsync(seeded.ReleaseId)).Should().NotBeEmpty();
+
             (await Viewer(ctx).GetFileAsync(seeded.FileId)).Should().NotBeNull();
+            (await Viewer(ctx).GetFileHeaderAsync(seeded.FileId)).Should().NotBeNull();
+            (await Tree(ctx).ListModuleFilesAsync(seeded.ModuleId)).Should().NotBeEmpty();
+            (await Tree(ctx).SearchTreeAsync(seeded.ReleaseId, "Loyalty")).Should().NotBeEmpty();
+
             (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Rows.Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleasesAsync(open.ReleaseId, seeded.ReleaseId)).Should().NotBeNull();
+            (await Comparison(ctx).FindObjectFileInReleaseAsync(seeded.ReleaseId, "table", 50100, "Loyalty Card"))
+                .Should().NotBeNull();
+
             (await Explorer(ctx).ListLatestPipelineBuildReleasesAsync())
                 .Should().ContainSingle(r => r.Id == seeded.ReleaseId);
         }
@@ -780,6 +799,377 @@ public sealed class ReleaseVisibilityTests : IDisposable
         session.Should().NotBeNull();
         sessions.Get(session!.Token, "user-b").Should().BeNull();
         sessions.Get(session.Token, "user-a").Should().NotBeNull();
+    }
+
+    // ── The admin writes (#1430) ────────────────────────────────────────
+
+    /// <summary>Every write keyed by a release id that the authoring endpoints reach.</summary>
+    public enum ReleaseWrite
+    {
+        SoftDelete, Restore, UpdateMetadata, HardDelete, Amend, TranslationFile, TranslationZip, Backfill,
+    }
+
+    public static TheoryData<ReleaseWrite, Linkage> AllWritesBothLinkages
+    {
+        get
+        {
+            var data = new TheoryData<ReleaseWrite, Linkage>();
+            foreach (var write in Enum.GetValues<ReleaseWrite>())
+            {
+                data.Add(write, Linkage.Build);
+                data.Add(write, Linkage.ImportJob);
+            }
+            return data;
+        }
+    }
+
+    public static TheoryData<ReleaseWrite, int> AllWritesForAllowedUsers
+    {
+        get
+        {
+            var data = new TheoryData<ReleaseWrite, int>();
+            foreach (var write in Enum.GetValues<ReleaseWrite>())
+            {
+                data.Add(write, MemberUserId);
+                data.Add(write, AdminUserId);
+            }
+            return data;
+        }
+    }
+
+    /// <summary>An id no release has, distinctive enough to find again inside an error message.</summary>
+    private const int UnknownReleaseId = 987_654_321;
+
+    private const string WriteLabel = "CRONUS on BC 26.0";
+
+    private static readonly string FixtureRoot =
+        Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
+
+    private ReleaseManagementService Management(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, Access(ctx), NullLogger<ReleaseManagementService>.Instance);
+
+    private TranslationImportService Translations(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext,
+            new ALDevToolbox.Services.Translation.TranslationMemoryService(
+                ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, Access(ctx));
+
+    private ReleaseImportService Importer(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), Translations(ctx),
+            new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
+            NullLogger<ReleaseImportService>.Instance, Access(ctx));
+
+    /// <summary>
+    /// A Private solution's release, linked by <paramref name="linkage"/>. Seeded
+    /// already soft-deleted for <see cref="ReleaseWrite.Restore"/> and
+    /// <see cref="ReleaseWrite.HardDelete"/>, which only act on a soft-deleted
+    /// release, so each write has something to change.
+    /// </summary>
+    private static bool SeedsSoftDeleted(ReleaseWrite write) =>
+        write is ReleaseWrite.Restore or ReleaseWrite.HardDelete;
+
+    private async Task<SeededRelease> SeedPrivateReleaseAsync(ReleaseWrite write, Linkage linkage = Linkage.Build)
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var seeded = await SeedReleaseAsync(WriteLabel);
+        await LinkAsync(linkage, projectId, seeded.ReleaseId);
+        if (SeedsSoftDeleted(write))
+        {
+            await using var ctx = _db.NewContext();
+            var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
+            release.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+        return seeded;
+    }
+
+    /// <summary>
+    /// Runs one write as the current user and returns the refusal it got, or null
+    /// when it went through. The backfill pre-check answers "absent" with false,
+    /// which the endpoint turns into a 404; that comes back as a <c>Status</c> entry.
+    /// </summary>
+    private async Task<Dictionary<string, string>?> RunWriteAsync(ReleaseWrite write, int releaseId, long moduleId)
+    {
+        await using var ctx = _db.NewContext();
+        try
+        {
+            switch (write)
+            {
+                case ReleaseWrite.SoftDelete: await Management(ctx).SoftDeleteAsync(releaseId); break;
+                case ReleaseWrite.Restore: await Management(ctx).RestoreAsync(releaseId); break;
+                case ReleaseWrite.UpdateMetadata: await Management(ctx).UpdateMetadataAsync(releaseId, "Renamed A/S", "Renamed"); break;
+                case ReleaseWrite.HardDelete: await Management(ctx).HardDeleteAsync(releaseId, WriteLabel); break;
+                case ReleaseWrite.Amend:
+                {
+                    await using var app = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+                    await Importer(ctx).AmendReleaseAsync(releaseId, new[] { new AppFileUpload("Microsoft_DK_Core.app", app, null) });
+                    break;
+                }
+                case ReleaseWrite.TranslationFile:
+                {
+                    await using var xlf = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+                    await Translations(ctx).ImportSingleAsync(releaseId, moduleId, xlf, "OIOUBL.daDK.xlf");
+                    break;
+                }
+                case ReleaseWrite.TranslationZip:
+                {
+                    using var zip = new MemoryStream();
+                    using (var archive = new ZipArchive(zip, ZipArchiveMode.Create, leaveOpen: true))
+                    {
+                        archive.CreateEntryFromFile(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"), "OIOUBL.daDK.xlf");
+                    }
+                    zip.Position = 0;
+                    await Translations(ctx).ImportZipAsync(releaseId, zip);
+                    break;
+                }
+                case ReleaseWrite.Backfill:
+                    if (!await Management(ctx).EnsureBackfillableAsync(releaseId))
+                    {
+                        return new Dictionary<string, string> { ["Status"] = "404" };
+                    }
+                    break;
+            }
+            return null;
+        }
+        catch (PlanValidationException ex)
+        {
+            return new Dictionary<string, string>(ex.Errors);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(AllWritesBothLinkages))]
+    public async Task Every_release_write_answers_a_non_member_exactly_as_it_answers_an_unknown_id(
+        ReleaseWrite write, Linkage linkage)
+    {
+        var seeded = await SeedPrivateReleaseAsync(write, linkage);
+
+        ActAs(OutsiderUserId);
+        var unknown = await RunWriteAsync(write, UnknownReleaseId, seeded.ModuleId);
+        var hidden = await RunWriteAsync(write, seeded.ReleaseId, seeded.ModuleId);
+
+        // Word for word, with only the id swapped, so the refusal confirms nothing.
+        unknown.Should().NotBeNull();
+        hidden.Should().Equal(unknown!.ToDictionary(
+            e => e.Key, e => e.Value.Replace(UnknownReleaseId.ToString(), seeded.ReleaseId.ToString())));
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
+        release.Should().NotBeNull("a refused hard delete removes nothing");
+        (release!.DeletedAt is not null).Should().Be(SeedsSoftDeleted(write), "the deleted flag is as seeded");
+        release.Publisher.Should().BeNull("a refused metadata edit changes nothing");
+        (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId))
+            .Should().Be(1, "a refused amend adds no module");
+        (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == seeded.ModuleId))
+            .Should().BeFalse("a refused translation upload stores nothing");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllWritesForAllowedUsers))]
+    public async Task Every_release_write_goes_through_for_a_team_member_and_an_org_Admin(ReleaseWrite write, int userId)
+    {
+        var seeded = await SeedPrivateReleaseAsync(write);
+
+        ActAs(userId);
+        (await RunWriteAsync(write, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
+        switch (write)
+        {
+            case ReleaseWrite.SoftDelete: release!.DeletedAt.Should().NotBeNull(); break;
+            case ReleaseWrite.Restore: release!.DeletedAt.Should().BeNull(); break;
+            case ReleaseWrite.UpdateMetadata: release!.Publisher.Should().Be("Renamed A/S"); break;
+            case ReleaseWrite.HardDelete: release.Should().BeNull(); break;
+            case ReleaseWrite.Amend:
+                (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId)).Should().Be(2);
+                break;
+            case ReleaseWrite.TranslationFile:
+                (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == seeded.ModuleId)).Should().BeTrue();
+                break;
+            // The ZIP's XLIFF names a module this release doesn't have, so it is
+            // skipped; getting a summary rather than a refusal is the point.
+            case ReleaseWrite.TranslationZip: break;
+            case ReleaseWrite.Backfill: break;
+        }
+    }
+
+    [Fact]
+    public async Task The_bulk_backfill_queues_only_the_releases_the_caller_can_see()
+    {
+        var (privateId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(privateId, hidden.ReleaseId);
+        var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+
+        async Task<List<int>> ListAsAsync(int userId)
+        {
+            ActAs(userId);
+            await using var ctx = _db.NewContext();
+            return await Management(ctx).ListBackfillableReleaseIdsAsync();
+        }
+
+        (await ListAsAsync(OutsiderUserId)).Should().Equal(open.ReleaseId);
+        (await ListAsAsync(MemberUserId)).Should().Equal(hidden.ReleaseId, open.ReleaseId);
+        (await ListAsAsync(AdminUserId)).Should().Equal(hidden.ReleaseId, open.ReleaseId);
+    }
+
+    // ── Retry (#1484) ───────────────────────────────────────────────────
+
+    private const string RetryArtifactUrl = "https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk";
+
+    private ReleaseImportRequestService Retries(AppDbContext ctx, ReleaseImportQueue queue)
+    {
+        var importer = Importer(ctx);
+        var management = Management(ctx);
+        var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
+        var projectBuilds = new ProjectBuildImporter(
+            importer, management, new ProjectBuildQueue(), persistedJobs, ctx, _db.OrgContext, Access(ctx),
+            new CloneCredentialResolver(
+                new ALDevToolbox.Services.Account.UserRepositoryTokenService(
+                    ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Account.UserRepositoryTokenService>.Instance,
+                    _db.DataProtectionProvider),
+                _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new ALDevToolbox.Tests.GitHub.FakeGitHubApi())),
+                _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance),
+            TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
+        var downloads = new DvdDownloadService(
+            new NoDownloads(), _db.NewSystemSettingsService(ctx), NullLogger<DvdDownloadService>.Instance);
+        return new ReleaseImportRequestService(
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds, Access(ctx));
+    }
+
+    /// <summary>How the release a retry acts on was last imported.</summary>
+    public enum RetryOrigin
+    {
+        /// <summary>A Microsoft artifact import, retried with nothing to upload: the saved source is reused.</summary>
+        Artifact,
+
+        /// <summary>The same, retried with a C/AL file: the release is reopened and wiped.</summary>
+        ArtifactWithFile,
+
+        /// <summary>A solution's pipeline build, which a retry rebuilds.</summary>
+        ProjectBuild,
+    }
+
+    /// <summary>
+    /// A failed Private-solution release. For the artifact origins it is linked by
+    /// its pipeline build and its latest import job is a Microsoft artifact import:
+    /// the retry path that does not go through the build's manage check. For a
+    /// project build, its latest job is the build's own import job.
+    /// </summary>
+    private async Task<SeededRelease> SeedFailedPrivateReleaseAsync(RetryOrigin origin = RetryOrigin.Artifact)
+    {
+        var seeded = await SeedPrivateReleaseAsync(ReleaseWrite.UpdateMetadata,
+            origin == RetryOrigin.ProjectBuild ? Linkage.ImportJob : Linkage.Build);
+        await using var ctx = _db.NewContext();
+        var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
+        release.Status = "failed";
+        await ctx.SaveChangesAsync();
+        if (origin != RetryOrigin.ProjectBuild)
+        {
+            await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.BcArtifact(RetryArtifactUrl), storeSymbolReference: false);
+        }
+        return seeded;
+    }
+
+    private static ReleaseRetrySubmission RetryWith(bool calFile) => new(
+        DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null,
+        CalTxtFile: calFile ? new UploadedFile("CRONUS.txt", 3, () => new MemoryStream("OBJ"u8.ToArray())) : null);
+
+    private async Task<(Dictionary<string, string>? Error, ReleaseImportOutcome? Outcome)> RetryAsAsync(
+        int releaseId, ReleaseRetrySubmission submission, ReleaseImportQueue queue)
+    {
+        await using var ctx = _db.NewContext();
+        try
+        {
+            return (null, await Retries(ctx, queue).RetryAsync(releaseId, submission));
+        }
+        catch (PlanValidationException ex)
+        {
+            return (new Dictionary<string, string>(ex.Errors), null);
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            // What a rebuild answers someone who cannot manage the solution:
+            // an answer an unknown id never gets.
+            return (new Dictionary<string, string> { ["Access"] = "denied" }, null);
+        }
+    }
+
+    [Theory]
+    [InlineData(RetryOrigin.Artifact)]
+    [InlineData(RetryOrigin.ArtifactWithFile)]
+    [InlineData(RetryOrigin.ProjectBuild)]
+    public async Task Retry_answers_a_non_member_exactly_as_it_answers_an_unknown_id(RetryOrigin origin)
+    {
+        // Without a file the saved artifact source would be reused; with one the
+        // release would be reopened and wiped; a build would be refused by the
+        // manage check, which says the release is there. None of that may happen
+        // for a release the caller cannot see.
+        var seeded = await SeedFailedPrivateReleaseAsync(origin);
+        var queue = new ReleaseImportQueue();
+        var calFile = origin == RetryOrigin.ArtifactWithFile;
+
+        ActAs(OutsiderUserId);
+        var unknown = await RetryAsAsync(UnknownReleaseId, RetryWith(calFile), queue);
+        var hidden = await RetryAsAsync(seeded.ReleaseId, RetryWith(calFile), queue);
+
+        unknown.Error.Should().NotBeNull();
+        hidden.Error.Should().Equal(unknown.Error!.ToDictionary(
+            e => e.Key, e => e.Value.Replace(UnknownReleaseId.ToString(), seeded.ReleaseId.ToString())));
+        queue.Reader.TryRead(out _).Should().BeFalse("a refused retry queues nothing");
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == seeded.ReleaseId)).Status.Should().Be("failed");
+        (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId))
+            .Should().Be(1, "a refused retry wipes nothing");
+    }
+
+    [Theory]
+    [InlineData(MemberUserId)]
+    [InlineData(AdminUserId)]
+    public async Task Retry_goes_through_for_a_team_member_and_an_org_Admin(int userId)
+    {
+        var seeded = await SeedFailedPrivateReleaseAsync();
+        var queue = new ReleaseImportQueue();
+
+        ActAs(userId);
+        var result = await RetryAsAsync(seeded.ReleaseId, RetryWith(calFile: false), queue);
+
+        result.Error.Should().BeNull();
+        result.Outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>()
+            .Which.ApplicationUrl.Should().Be(RetryArtifactUrl);
+    }
+
+    // ── Manual-symbols recovery (#1484) ─────────────────────────────────
+
+    [Fact]
+    public async Task Symbol_recovery_answers_a_non_member_exactly_as_it_answers_an_unknown_id()
+    {
+        var seeded = await SeedFailedPrivateReleaseAsync(RetryOrigin.ProjectBuild);
+
+        async Task<int?> FindAsAsync(int userId, int releaseId)
+        {
+            ActAs(userId);
+            await using var ctx = _db.NewContext();
+            return await Retries(ctx, new ReleaseImportQueue()).FindSymbolRecoveryProjectAsync(releaseId);
+        }
+
+        (await FindAsAsync(OutsiderUserId, UnknownReleaseId)).Should().BeNull();
+        (await FindAsAsync(OutsiderUserId, seeded.ReleaseId))
+            .Should().BeNull("a hidden build reads as no solution build at all");
+        (await FindAsAsync(MemberUserId, seeded.ReleaseId)).Should().NotBeNull();
+        (await FindAsAsync(AdminUserId, seeded.ReleaseId)).Should().NotBeNull();
+    }
+
+    // A retry here re-runs a saved artifact address, which is only queued, never fetched.
+    private sealed class NoDownloads : System.Net.Http.IHttpClientFactory
+    {
+        public System.Net.Http.HttpClient CreateClient(string name) =>
+            throw new InvalidOperationException("A retry must not download anything.");
     }
 
     private ReferenceSessionService Sessions(AppDbContext ctx) =>

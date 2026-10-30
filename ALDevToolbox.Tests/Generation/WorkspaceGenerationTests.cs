@@ -66,11 +66,10 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
-    public async Task AppSourceCop_omitted_when_no_per_extension_org_file_is_opted_in()
+    public async Task AppSourceCop_omitted_when_the_org_has_none()
     {
-        // No OrganizationFile at path AppSourceCop.json — the template
-        // doesn't opt into anything per-extension, so the file shouldn't
-        // land. The template-level AppSourceCop.Include flag is no longer
+        // No OrganizationFile at path AppSourceCop.json, so there is nothing
+        // to emit. The template-level AppSourceCop.Include flag is no longer
         // consulted by the generator (it's kept on the entity for the TOML
         // round-trip until the column gets dropped).
         await SeedTemplateAsync(TemplateBuilder.Default());
@@ -78,6 +77,22 @@ public sealed class WorkspaceGenerationTests : IDisposable
         using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
 
         zip.GetEntry("AcmeCustomer/Core/AppSourceCop.json").Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_org_file_the_template_did_not_opt_into_is_left_out()
+    {
+        // The files exist in the org but have no join row to this template,
+        // which is what the opt-in rule turns on (generation-engine.md).
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await AddOrgFileAsync("AppSourceCop.json", "{ }", OrganizationFileScope.EveryExtension);
+        await AddOrgFileAsync(".editorconfig", "root = true", OrganizationFileScope.WorkspaceRoot);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        zip.GetEntry("AcmeCustomer/Core/app.json").Should().NotBeNull("the opted-in files still ship");
+        zip.GetEntry("AcmeCustomer/Core/AppSourceCop.json").Should().BeNull();
+        zip.GetEntry("AcmeCustomer/.editorconfig").Should().BeNull();
     }
 
     [Fact]
@@ -183,7 +198,69 @@ public sealed class WorkspaceGenerationTests : IDisposable
         // Module clone gets an implicit dependency on the required Core extension.
         var moduleAppJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/DocumentCapture/app.json")!));
         var deps = moduleAppJson.RootElement.GetProperty("dependencies").EnumerateArray().ToList();
-        deps.Should().Contain(d => d.GetProperty("name").GetString() == "ACME Core");
+        var coreId = ReadId(zip.GetEntry("AcmeCustomer/Core/app.json")!);
+        deps.Should().ContainSingle(d => d.GetProperty("name").GetString() == "ACME Core")
+            .Which.GetProperty("id").GetString().Should().Be(coreId);
+    }
+
+    [Fact]
+    public async Task A_dependency_on_a_module_that_was_not_ticked_is_left_out()
+    {
+        // generation-engine.md: with the module unticked there is no app to
+        // depend on, and a placeholder GUID would not compile.
+        var template = TemplateBuilder.Default();
+        template.WorkspaceExtensions.Single().Dependencies.Add(new WorkspaceExtensionDependency
+        {
+            OrganizationId = template.OrganizationId,
+            RefModuleKey = "document-capture",
+            Ordering = 0,
+        });
+        await SeedTemplateAsync(template, ModuleBuilder.Default("document-capture", "Document Capture"));
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        zip.GetEntry("AcmeCustomer/DocumentCapture/app.json").Should().BeNull();
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/Core/app.json")!));
+        appJson.RootElement.GetProperty("dependencies").EnumerateArray().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_module_copied_from_a_repository_adds_its_dependencies_and_records_where_it_came_from()
+    {
+        // #1415: the repository's own app.json dependencies follow the typed
+        // ones, a typed entry for the same app wins, and the workspace file
+        // notes the repository and commit for whoever opens it later.
+        var module = ModuleBuilder.Default("document-capture", "Document Capture")
+            .WithExtensionFolder("src", ("Doc.al", "codeunit 91000 \"{{affix}} Doc\" { }"));
+        module.Dependencies.Add(new ModuleDependency
+        {
+            OrganizationId = module.OrganizationId,
+            DepId = "4b915d7e-c02a-435f-85ab-649086c1e002",
+            DepName = "Continia Core",
+            DepPublisher = "Continia Software",
+            DepVersion = "2.0.0.0",
+            Ordering = 0,
+        });
+        module.SourceRepository = "contoso/document-capture";
+        module.SourceCommitSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        module.SourceDependenciesJson = JsonSerializer.Serialize(new[]
+        {
+            new ModuleDependencyInput("4b915d7e-c02a-435f-85ab-649086c1e002", "Continia Core", "Continia Software", "1.0.0.0"),
+            new ModuleDependencyInput("9c8a4b3e-0000-4000-8000-000000000001", "Continia Delivery Network", "Continia Software", "1.0.0.0"),
+        }, ALDevToolbox.Data.PersistenceJson.Options);
+        await SeedTemplateAsync(TemplateBuilder.Default(), module);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(selectedModules: new[] { "document-capture" }));
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/DocumentCapture/app.json")!));
+        var deps = appJson.RootElement.GetProperty("dependencies").EnumerateArray()
+            .ToDictionary(d => d.GetProperty("name").GetString()!, d => d.GetProperty("version").GetString());
+        deps.Should().ContainKey("ACME Core");
+        deps["Continia Core"].Should().Be("2.0.0.0", "the typed dependency wins over the repository's");
+        deps.Should().ContainKey("Continia Delivery Network");
+
+        var toml = ReadEntry(zip.GetEntry($"AcmeCustomer/{WorkspaceConfigService.FileName}")!);
+        toml.Should().Contain("contoso/document-capture").And.Contain(module.SourceCommitSha);
     }
 
     [Fact]
@@ -341,6 +418,55 @@ public sealed class WorkspaceGenerationTests : IDisposable
 
         zip.GetEntry("AcmeCustomer/Core/src/Real.al").Should().NotBeNull();
         zip.GetEntry("AcmeCustomer/Core/src/Example.al").Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_empty_leaf_folder_ships_a_gitkeep()
+    {
+        var template = TemplateBuilder.Default().WithCoreFolder("src/permissionsets");
+        await SeedTemplateAsync(template);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        zip.GetEntry("AcmeCustomer/Core/src/permissionsets/.gitkeep").Should().NotBeNull(
+            "a ZIP carries no empty directory, so the placeholder is what keeps the folder");
+        zip.GetEntry("AcmeCustomer/Core/src/.gitkeep").Should().BeNull("src is not a leaf");
+    }
+
+    [Fact]
+    public async Task A_folder_left_empty_by_skipped_examples_ships_a_gitkeep()
+    {
+        var template = TemplateBuilder.Default()
+            .WithCoreFolder("src/samples", ("Example.al", "codeunit Example {}"));
+        template.WorkspaceExtensions.Single().Folders.Single().Folders.Single().Files.Single().IsExample = true;
+        await SeedTemplateAsync(template);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(includeExamples: false));
+
+        zip.GetEntry("AcmeCustomer/Core/src/samples/Example.al").Should().BeNull();
+        zip.GetEntry("AcmeCustomer/Core/src/samples/.gitkeep").Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Only_al_files_in_an_extension_folder_are_rendered()
+    {
+        // A .json or .xml file under an extension folder is written as
+        // authored; only .al files go through the placeholder renderer.
+        var template = TemplateBuilder.Default()
+            .WithCoreFolder("src/codeunits",
+                ("Marker.al", "// {{affix}} in {{namespace}}"),
+                ("settings.json", "{ \"affix\": \"{{affix}}\" }"),
+                ("Layout.xml", "<x>{{namespace}}</x>"));
+        await SeedTemplateAsync(template);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        ReadEntry(zip.GetEntry("AcmeCustomer/Core/src/codeunits/Marker.al")!)
+            .Should().Be("// ACME in src.codeunits");
+        ReadEntry(zip.GetEntry("AcmeCustomer/Core/src/codeunits/settings.json")!)
+            .Should().Be("{ \"affix\": \"{{affix}}\" }");
+        ReadEntry(zip.GetEntry("AcmeCustomer/Core/src/codeunits/Layout.xml")!)
+            .Should().Be("<x>{{namespace}}</x>");
     }
 
     [Fact]
@@ -868,6 +994,25 @@ public sealed class WorkspaceGenerationTests : IDisposable
         {
             await ctx.SaveChangesAsync();
         }
+    }
+
+    /// <summary>
+    /// Adds an organisation file after <see cref="SeedTemplateAsync"/> has run,
+    /// so the template is not opted into it.
+    /// </summary>
+    private async Task AddOrgFileAsync(string path, string content, OrganizationFileScope scope)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OrganizationFiles.Add(new OrganizationFile
+        {
+            OrganizationId = TemplateBuilder.DefaultOrganizationId,
+            Path = path,
+            Content = content,
+            Scope = scope,
+            Ordering = 3000,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     private async Task<ZipArchive> GenerateAsync(ProjectPlan plan)

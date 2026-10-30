@@ -22,6 +22,16 @@ internal sealed class ModuleConfiguration : IEntityTypeConfiguration<Module>
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
+        // Repository source (#1415). All null for a typed module.
+        entity.Property(e => e.SourceRepository).HasColumnName("source_repository").HasMaxLength(200);
+        entity.Property(e => e.SourceRef).HasColumnName("source_ref").HasMaxLength(255);
+        entity.Property(e => e.SourcePath).HasColumnName("source_path").HasMaxLength(500);
+        entity.Property(e => e.SourceCommitSha).HasColumnName("source_commit_sha").HasMaxLength(64);
+        entity.Property(e => e.SourceFetchedAt).HasColumnName("source_fetched_at");
+        entity.Property(e => e.SourceCheckedAt).HasColumnName("source_checked_at");
+        entity.Property(e => e.SourceError).HasColumnName("source_error");
+        entity.Property(e => e.SourceSkippedJson).HasColumnName("source_skipped_json").HasColumnType("jsonb");
+        entity.Property(e => e.SourceDependenciesJson).HasColumnName("source_dependencies_json").HasColumnType("jsonb");
 
         entity.HasOne(e => e.Organization)
             .WithMany()

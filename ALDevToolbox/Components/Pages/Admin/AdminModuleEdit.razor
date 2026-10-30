@@ -3,6 +3,7 @@
 @attribute [Authorize(Roles = "Admin,Editor")]
 @rendermode InteractiveServer
 @inject ModuleService Modules
+@inject ModuleSourceService Sources
 @inject CatalogService Catalog
 @inject NavigationManager Nav
 @inject ILogger<AdminModuleEdit> Log
@@ -28,13 +29,13 @@
         }
         else
         {
-            <span>Create a new module. Dependencies and the optional ID range size override can be edited later.</span>
+            <span>Create a new module: name it, pick its dependencies, and write its files or copy them from GitHub.</span>
         }
     </SubtitleContent>
     <Actions>
         <button type="button" class="btn btn--sm btn--primary"
                 @onclick="SaveAsync"
-                disabled="@(_saving || _form is null || _loadFailed)">
+                disabled="@(_saving || _updating || _form is null || _loadFailed)">
             <Icon Name="save" Width="14" Height="14" />
             <span>@(_saving ? "Saving..." : (IsEdit ? "Save changes" : "Create module"))</span>
         </button>
@@ -265,48 +266,246 @@
             <section class="card">
                 <div class="card__head">
                     <div>
-                        <h2 class="card__title">Folder structure</h2>
+                        <h2 class="card__title">Where the files come from</h2>
                         <p class="card__sub">
-                            Folders and files generated inside this module's extension
-                            whenever a workspace includes it.
+                            Write the module's folders and files here, or copy them from an
+                            extension that lives in a GitHub repository.
                         </p>
                     </div>
-                    <button type="button" class="btn btn--sm" @onclick="AddRootFolder">
-                        <Icon Name="folder-plus" Width="14" Height="14" />
-                        <span>Add folder</span>
-                    </button>
                 </div>
                 <div class="card__body form-sec">
-                    <MustacheVarsHint />
-                    @if (_form!.Folders.Count == 0)
+                    <fieldset class="check-list ms-choice">
+                        <legend class="u-sr">Where the module's files come from</legend>
+                        <label class="module-card @(!_form!.FromRepository ? "is-selected" : null)">
+                            <input type="radio" name="module-files-from" checked="@(!_form!.FromRepository)"
+                                   @onchange="() => _form!.FromRepository = false" disabled="@_saving" />
+                            <span class="module-card__title">Write them in AL Workbench</span>
+                            <span class="module-card__text">Add folders and files in the next section.</span>
+                            <span class="module-card__check"><Icon Name="check" Width="12" Height="12" /></span>
+                        </label>
+                        <label class="module-card @(_form!.FromRepository ? "is-selected" : null)">
+                            <input type="radio" name="module-files-from" checked="@_form!.FromRepository"
+                                   @onchange="() => _form!.FromRepository = true" disabled="@_saving" />
+                            <span class="module-card__title">Copied from a GitHub repository</span>
+                            <span class="module-card__text">
+                                AL Workbench keeps a copy of the repository's files and updates it when the
+                                branch changes. New workspaces get the files themselves, not a link to the repository.
+                            </span>
+                            <span class="module-card__check"><Icon Name="check" Width="12" Height="12" /></span>
+                        </label>
+                    </fieldset>
+
+                    @if (_form!.FromRepository)
                     {
-                        <EmptyState Title="No folders yet" Quiet="true">
-                            <Text>
-                                Add one (for example <code class="code">src</code>) to give this
-                                module a starting layout. Leaving it empty is fine too.
-                            </Text>
-                        </EmptyState>
-                    }
-                    else
-                    {
-                        <div class="folder-editor__list">
-                            @for (var f = 0; f < _form!.Folders.Count; f++)
-                            {
-                                var folderIndex = f;
-                                var folder = _form!.Folders[folderIndex];
-                                <RecursiveFolderEditor Folder="folder"
-                                                       Index="folderIndex"
-                                                       SiblingCount="_form!.Folders.Count"
-                                                       Depth="0"
-                                                       FieldKeyPrefix="@($"Folders[{folderIndex}]")"
-                                                       Errors="_fieldErrors"
-                                                       OnMove="d => MoveRootFolder(folderIndex, d)"
-                                                       OnRemove="() => RemoveRootFolder(folderIndex)" />
-                            }
+                        <div class="form-grid">
+                            <div class="field">
+                                <label class="field__label" for="mod-src-address">Repository</label>
+                                <input class="input" id="mod-src-address" type="text" required
+                                       @bind="_form!.SourceAddress" @bind:event="oninput"
+                                       placeholder="e.g. https://github.com/cronus-dk/document-capture" />
+                                <span class="field__hint">
+                                    A public repository, or a private one in the GitHub organisation an
+                                    admin has connected under Administration.
+                                </span>
+                                <FieldError Field="@("Source.Address")" Errors="_fieldErrors" />
+                            </div>
+
+                            <div class="field">
+                                <label class="field__label" for="mod-src-ref">Branch, tag or commit</label>
+                                <input class="input" id="mod-src-ref" type="text"
+                                       maxlength="@ModuleSourceLimits.MaxRefLength" pattern="[^\s~\^:?*\[\\]*"
+                                       @bind="_form!.SourceRef" @bind:event="oninput"
+                                       placeholder="e.g. main" />
+                                <span class="field__hint">
+                                    Leave blank for the default branch. A branch brings every new commit
+                                    into new workspaces; a tag or commit stays as it is.
+                                </span>
+                                <FieldError Field="@("Source.Ref")" Errors="_fieldErrors" />
+                            </div>
+
+                            <div class="field">
+                                <label class="field__label" for="mod-src-path">Folder in the repository</label>
+                                <input class="input" id="mod-src-path" type="text"
+                                       @bind="_form!.SourcePath" @bind:event="oninput"
+                                       placeholder="e.g. DocumentCapture" />
+                                <span class="field__hint">
+                                    The folder that holds the extension's <code class="code">app.json</code>.
+                                    Leave blank when it is at the top of the repository.
+                                </span>
+                                <FieldError Field="@("Source.Path")" Errors="_fieldErrors" />
+                            </div>
                         </div>
+
+                        @if (_saved is { } saved)
+                        {
+                            @if (saved.Error is not null)
+                            {
+                                <Alert Tone="AlertTone.Warn">
+                                    <span>
+                                        The last update failed, so new workspaces still get the copy from
+                                        @ShortSha(saved.CommitSha). @saved.Error Check the repository and
+                                        the branch, tag or commit above, then save changes or try Update now.
+                                    </span>
+                                </Alert>
+                            }
+                            <div class="ms-status">
+                                <p class="ms-status__line">
+                                    <span>Copied from</span>
+                                    <a href="@saved.WebUrl" target="_blank" rel="noopener noreferrer">@saved.Repository</a>
+                                    <span>at</span>
+                                    <CommitLink WebUrl="@saved.WebUrl" Sha="@saved.CommitSha" Chip="true" />
+                                    @if (saved.FetchedAt is { } fetchedAt)
+                                    {
+                                        <span>on <Timestamp Value="@fetchedAt" /></span>
+                                    }
+                                </p>
+                                @if (saved.CheckedAt is { } checkedAt)
+                                {
+                                    <p class="field__hint">Last checked for changes <Timestamp Value="@checkedAt" Relative="true" />.</p>
+                                }
+                                @if (saved.Dependencies.Count > 0)
+                                {
+                                    <p class="field__hint">
+                                        The repository's <code class="code">app.json</code> also depends on
+                                        @string.Join(", ", saved.Dependencies.Select(d => d.DepName)).
+                                        New workspaces get @(saved.Dependencies.Count == 1 ? "it" : "them")
+                                        automatically, so you don't need to add @(saved.Dependencies.Count == 1 ? "it" : "them") above.
+                                    </p>
+                                }
+                                <div class="ms-status__actions">
+                                    <button type="button" class="btn btn--sm" @onclick="UpdateNowAsync"
+                                            disabled="@(_updating || _saving || _isDeleted || SourceFieldsChanged)">
+                                        <Icon Name="refresh-cw" Width="14" Height="14" />
+                                        <span>@(_updating ? "Checking..." : "Update now")</span>
+                                    </button>
+                                    @if (SourceFieldsChanged)
+                                    {
+                                        <span class="field__hint">Save changes to copy from the new address.</span>
+                                    }
+                                    else if (_updateMessage is not null)
+                                    {
+                                        <span class="field__hint">@_updateMessage</span>
+                                    }
+                                </div>
+                            </div>
+                            @if (saved.Skipped.Count > 0)
+                            {
+                                <details class="ms-skipped">
+                                    @{ var leftOut = ModuleSourceSkippedFile.Total(saved.Skipped); }
+                                    <summary>@leftOut file@(leftOut == 1 ? " was" : "s were") left out</summary>
+                                    <ul>
+                                        @foreach (var skip in saved.Skipped)
+                                        {
+                                            @if (skip.More > 0)
+                                            {
+                                                <li>and @skip.More more, left out for the reasons above.</li>
+                                            }
+                                            else
+                                            {
+                                                <li><code class="code">@skip.Path</code> - @skip.Reason</li>
+                                            }
+                                        }
+                                    </ul>
+                                </details>
+                            }
+                        }
+                        else
+                        {
+                            <p class="field__hint">
+                                The files are copied when you save. Folders like
+                                <code class="code">.vscode</code> and <code class="code">.github</code>, binary
+                                files and the repository's own <code class="code">app.json</code> are left out. The
+                                dependencies listed in that <code class="code">app.json</code> are added to the module.
+                            </p>
+                        }
                     }
                 </div>
             </section>
+
+            @if (_form!.FromRepository)
+            {
+                <section class="card">
+                    <div class="card__head">
+                        <div>
+                            <h2 class="card__title">Files</h2>
+                            <p class="card__sub">
+                                What a new workspace gets in this module's extension. Change them in the repository. Template variables such as {{affix}} in these files are filled in too.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card__body form-sec">
+                        @if (_saved is null)
+                        {
+                            <EmptyState Title="Nothing copied yet" Quiet="true">
+                                <Text>Save the module to copy the repository's files.</Text>
+                            </EmptyState>
+                        }
+                        else if (_savedFiles.Count == 0)
+                        {
+                            <EmptyState Title="The repository has no files to copy" Quiet="true">
+                                <Text>
+                                    Check the folder above: the files have to be inside folders
+                                    such as <code class="code">src</code>, next to the extension's
+                                    <code class="code">app.json</code>.
+                                </Text>
+                            </EmptyState>
+                        }
+                        else
+                        {
+                            <MustacheVarsHint />
+                            <FileBrowser Files="_savedFiles" />
+                        }
+                    </div>
+                </section>
+            }
+            else
+            {
+                <section class="card">
+                    <div class="card__head">
+                        <div>
+                            <h2 class="card__title">Folder structure</h2>
+                            <p class="card__sub">
+                                Folders and files generated inside this module's extension
+                                whenever a workspace includes it.
+                            </p>
+                        </div>
+                        <button type="button" class="btn btn--sm" @onclick="AddRootFolder">
+                            <Icon Name="folder-plus" Width="14" Height="14" />
+                            <span>Add folder</span>
+                        </button>
+                    </div>
+                    <div class="card__body form-sec">
+                        <MustacheVarsHint />
+                        @if (_form!.Folders.Count == 0)
+                        {
+                            <EmptyState Title="No folders yet" Quiet="true">
+                                <Text>
+                                    Add one (for example <code class="code">src</code>) to give this
+                                    module a starting layout. Leaving it empty is fine too.
+                                </Text>
+                            </EmptyState>
+                        }
+                        else
+                        {
+                            <div class="folder-editor__list">
+                                @for (var f = 0; f < _form!.Folders.Count; f++)
+                                {
+                                    var folderIndex = f;
+                                    var folder = _form!.Folders[folderIndex];
+                                    <RecursiveFolderEditor Folder="folder"
+                                                           Index="folderIndex"
+                                                           SiblingCount="_form!.Folders.Count"
+                                                           Depth="0"
+                                                           FieldKeyPrefix="@($"Folders[{folderIndex}]")"
+                                                           Errors="_fieldErrors"
+                                                           OnMove="d => MoveRootFolder(folderIndex, d)"
+                                                           OnRemove="() => RemoveRootFolder(folderIndex)" />
+                                }
+                            </div>
+                        }
+                    </div>
+                </section>
+            }
 
             @* Hidden submit so pressing Enter inside an input still triggers
                SaveAsync - the visible Save button moved to the header. *@
@@ -320,6 +519,12 @@
         }
     </History>
 </EditPage>
+
+<ConfirmDialog @ref="_replaceConfirm"
+               Title="Replace this module's files?"
+               Message="Saving copies the repository's files into this module and removes the folders and files written here."
+               ConfirmLabel="Copy and replace"
+               ConfirmIcon="refresh-cw" />
 
 @code {
     [Parameter] public string? Key { get; set; }
@@ -337,6 +542,13 @@
     private IReadOnlyDictionary<string, string> _fieldErrors = new Dictionary<string, string>();
     private List<WellKnownDependency> _catalog = new();
     private string _pickerDepId = string.Empty;
+    private ConfirmDialog? _replaceConfirm;
+    private SavedSource? _saved;
+    private (string Address, string Ref, string Path) _savedSourceFields;
+    private IReadOnlyList<FileBrowser.Entry> _savedFiles = [];
+    private bool _savedHasTypedFiles;
+    private bool _updating;
+    private string? _updateMessage;
 
     protected override async Task OnParametersSetAsync()
     {
@@ -367,6 +579,78 @@
         _existingId = existing.Id;
         _isDeleted = existing.DeletedAt is not null;
         _form = FormState.From(existing);
+        ReadSaved(existing);
+    }
+
+    /// <summary>
+    /// What the page shows about the module as saved: its repository copy (status
+    /// and a read-only view of the files), or, for a typed module, whether it has
+    /// files that switching to a repository would replace.
+    /// </summary>
+    private void ReadSaved(Module module)
+    {
+        _saved = SavedSource.From(module);
+        _savedHasTypedFiles = module.SourceRepository is null && module.ExtensionFolders.Count > 0;
+        var files = new List<FileBrowser.Entry>();
+        foreach (var folder in module.ExtensionFolders.OrderBy(f => f.Ordering)) CollectFiles(folder, folder.Path, files);
+        _savedFiles = files;
+        var savedForm = FormState.From(module);
+        _savedSourceFields = (savedForm.SourceAddress, savedForm.SourceRef, savedForm.SourcePath);
+    }
+
+    /// <summary>
+    /// True while the repository fields differ from what is saved, so "Update now"
+    /// (which checks the saved address) is not mistaken for trying the new one.
+    /// </summary>
+    private bool SourceFieldsChanged =>
+        _form is { } form && _saved is not null
+        && (form.SourceAddress.Trim(), form.SourceRef.Trim(), form.SourcePath.Trim()) != _savedSourceFields;
+
+    private static string ShortSha(string sha) => sha.Length > 7 ? sha[..7] : sha;
+
+    private static void CollectFiles(ModuleExtensionFolder folder, string path, List<FileBrowser.Entry> into)
+    {
+        foreach (var file in folder.Files.OrderBy(f => f.Ordering)) into.Add(new FileBrowser.Entry(path, file.Path, file.Content));
+        foreach (var child in folder.Folders.OrderBy(f => f.Ordering)) CollectFiles(child, $"{path}/{child.Path}", into);
+    }
+
+    private async Task UpdateNowAsync()
+    {
+        if (_existingId is null || _updating) return;
+        _updating = true;
+        _updateMessage = null;
+        try
+        {
+            var outcome = await Sources.RefreshAsync(_existingId.Value);
+            _updateMessage = outcome switch
+            {
+                ModuleSourceRefreshOutcome.Updated => "Updated to the latest commit.",
+                ModuleSourceRefreshOutcome.Unchanged => "Already up to date.",
+                ModuleSourceRefreshOutcome.Failed => null,
+                ModuleSourceRefreshOutcome.Postponed => "GitHub is busy. Try again in a few minutes.",
+                _ => "Save the module first.",
+            };
+            if (await Modules.GetByKeyAsync(Key!) is { } reloaded)
+            {
+                ReadSaved(reloaded);
+                // The form's folder list is what "Written here" would save; keep it
+                // the current copy so switching over starts from what is stored.
+                _form?.Folders.Clear();
+                foreach (var folder in reloaded.ExtensionFolders.OrderBy(f => f.Ordering))
+                {
+                    _form?.Folders.Add(TemplateFolderForm.From(ModuleAuthoringMapper.BuildFolderAuthoring(folder)));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Unexpected error updating module '{Key}' from its repository.", Key);
+            _updateMessage = "Something went wrong. Try again in a moment.";
+        }
+        finally
+        {
+            _updating = false;
+        }
     }
 
     private void AddFromCatalogue()
@@ -437,24 +721,62 @@
 
     private async Task SaveAsync()
     {
-        if (_form is null || _saving) return;
+        if (_form is null || _saving || _updating) return;
         _saving = true;
         _saveError = null;
         _saveSuccess = null;
         _fieldErrors = new Dictionary<string, string>();
 
         var payload = _form.ToInput();
+        var source = _form.FromRepository
+            ? new ModuleSourceInput(_form.SourceAddress, _form.SourceRef, _form.SourcePath)
+            : null;
+
+        // Switching a module with typed files over to a repository throws those
+        // files away; say so before it happens.
+        if (source is not null && _savedHasTypedFiles && _replaceConfirm is not null
+            && !await _replaceConfirm.OpenAsync())
+        {
+            _saving = false;
+            return;
+        }
 
         try
         {
             if (IsEdit && _existingId is not null)
             {
-                await Modules.UpdateAsync(_existingId.Value, payload);
-                _saveSuccess = "Saved.";
+                // Same repository, branch and folder as saved: keep the copy as it
+                // is rather than downloading it again for a renamed module.
+                var keepCopy = source is not null && _saved is not null && !SourceFieldsChanged;
+                if (source is null || keepCopy)
+                {
+                    await Modules.UpdateAsync(_existingId.Value, payload, keepSourceCopy: keepCopy);
+                }
+                else
+                {
+                    await Sources.UpdateAsync(_existingId.Value, payload, source);
+                }
+                _saveSuccess = source is null || keepCopy ? "Saved." : "Saved. The repository's files were copied.";
+                if (await Modules.GetByKeyAsync(Key!) is { } reloaded)
+                {
+                    _form = FormState.From(reloaded);
+                    ReadSaved(reloaded);
+                }
             }
             else
             {
-                await Modules.CreateAsync(payload);
+                if (source is null)
+                {
+                    await Modules.CreateAsync(payload);
+                }
+                else
+                {
+                    // A repository module lands on its own page, so the Editor sees
+                    // what was copied and what was left out.
+                    await Sources.CreateAsync(payload, source);
+                    Nav.NavigateTo($"/admin/modules/{Uri.EscapeDataString(payload.Key)}");
+                    return;
+                }
                 // Land back on the list so admins can see the new row in
                 // context. Editing it further is one click away.
                 Nav.NavigateTo("/admin/modules");
@@ -491,6 +813,12 @@
         public bool Deprecated { get; set; }
         public List<DependencyRow> Dependencies { get; } = new();
 
+        /// <summary>True when the files are copied from a GitHub repository (#1415).</summary>
+        public bool FromRepository { get; set; }
+        public string SourceAddress { get; set; } = string.Empty;
+        public string SourceRef { get; set; } = string.Empty;
+        public string SourcePath { get; set; } = string.Empty;
+
         /// <summary>
         /// Recursive folder/file tree for the module's generated extension.
         /// Reuses the shared <see cref="TemplateFolderForm"/> the template
@@ -509,6 +837,10 @@
                 ExtensionName = module.ExtensionName,
                 IdRangeSize = module.IdRangeSize,
                 Deprecated = module.Deprecated,
+                FromRepository = module.SourceRepository is not null,
+                SourceAddress = module.SourceRepository is { } repository ? $"https://github.com/{repository}" : string.Empty,
+                SourceRef = module.SourceRef ?? string.Empty,
+                SourcePath = module.SourcePath ?? string.Empty,
             };
             foreach (var d in module.Dependencies.OrderBy(d => d.Ordering))
             {
@@ -537,6 +869,26 @@
                 .Select(d => new ModuleDependencyInput(d.DepId, d.DepName, d.DepPublisher, d.DepVersion))
                 .ToList(),
             Folders: Folders.Select(f => f.ToAuthoring()).ToList());
+    }
+
+    /// <summary>The saved repository copy's status, for the status line.</summary>
+    private sealed record SavedSource(
+        string Repository,
+        string CommitSha,
+        DateTime? FetchedAt,
+        DateTime? CheckedAt,
+        string? Error,
+        IReadOnlyList<ModuleSourceSkippedFile> Skipped,
+        IReadOnlyList<ModuleDependencyInput> Dependencies)
+    {
+        public string WebUrl => $"https://github.com/{Repository}";
+
+        public static SavedSource? From(Module module) =>
+            module.SourceRepository is { } repository && module.SourceCommitSha is { } sha
+                ? new SavedSource(repository, sha, module.SourceFetchedAt, module.SourceCheckedAt, module.SourceError,
+                    ModuleSourceColumns.ReadSkipped(module.SourceSkippedJson),
+                    ModuleSourceColumns.ReadDependencies(module.SourceDependenciesJson))
+                : null;
     }
 
     private sealed class DependencyRow

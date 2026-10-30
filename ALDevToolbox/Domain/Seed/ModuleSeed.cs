@@ -37,6 +37,22 @@ public class ModuleSeed
     /// matches a template extension's <c>[[extensions.folders]]</c> blocks.
     /// </summary>
     public List<FolderSeed> Folders { get; set; } = new();
+
+    /// <summary>
+    /// Where the files are copied from, for a module copied from a GitHub
+    /// repository (#1415); null for a typed module. <see cref="Folders"/> still
+    /// carries the copy itself.
+    /// </summary>
+    public ModuleSourceSeed? Source { get; set; }
+}
+
+/// <summary>The <c>[module.source]</c> table.</summary>
+public class ModuleSourceSeed
+{
+    public string Repository { get; set; } = string.Empty;
+    public string? Ref { get; set; }
+    public string? Path { get; set; }
+    public string? Commit { get; set; }
 }
 
 /// <summary>One <c>[[module.dependencies]]</c> entry.</summary>

@@ -45,11 +45,14 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
     [Fact]
     public async Task Retrying_a_project_build_is_refused_before_anything_is_wiped_for_someone_who_cannot_manage_it()
     {
+        // Read-only, so the release is visible but only the assigned teams may
+        // rebuild it. A Private solution's release is hidden outright and answers
+        // as an unknown id (ReleaseVisibilityTests).
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
         var project = new Domain.Entities.ObjectExplorer.OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", Visibility = Domain.Entities.ObjectExplorer.ProjectVisibility.Private,
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", Visibility = Domain.Entities.ObjectExplorer.ProjectVisibility.ReadOnly,
             CreatedAt = now, UpdatedAt = now,
         };
         ctx.OeProjects.Add(project);
@@ -66,7 +69,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         });
         await ctx.SaveChangesAsync();
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.ProjectBuild(project.Id), storeSymbolReference: false);
         _db.OrgContext.IsSiteAdmin = false;
         _db.OrgContext.CurrentUserId = 9632;
@@ -99,7 +102,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         // A full queue holds the retry at its last step, the enqueue, after the
         // release is reopened and wiped but before its job is queued.
         var queue = new ReleaseImportQueue();
-        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.Backfill());
         for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
 
@@ -138,7 +141,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         await ctx.SaveChangesAsync();
         const string artifactUrl = "https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk";
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.BcArtifact(artifactUrl), storeSymbolReference: false);
         var queue = new ReleaseImportQueue();
 
@@ -177,7 +180,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         settings.DefaultStorageQuotaMb = 0;
         await ctx.SaveChangesAsync();
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.BcArtifact("https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk"),
             storeSymbolReference: false);
         var queue = new ReleaseImportQueue();
@@ -208,7 +211,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         ctx.OeReleases.Add(release);
         await ctx.SaveChangesAsync();
         await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
-            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
             new ReleaseImportSource.Backfill(), storeSymbolReference: false);
         var queue = new ReleaseImportQueue();
 
@@ -444,13 +447,13 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance, ingests: ingests);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), ingests: ingests);
         var management = new ReleaseManagementService(
-            ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+            ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
         var downloads = new DvdDownloadService(
             new ThrowingHttpClientFactory(),
             _db.NewSystemSettingsService(ctx),
@@ -464,7 +467,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
                 _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance),
             TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
         return new ReleaseImportRequestService(
-            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds);
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds,
+            new ProjectAccess(ctx, _db.OrgContext));
     }
 
     private async Task SetAllowlistAsync(string hosts)

@@ -55,6 +55,8 @@ public enum EmailPurpose
     UpgradeNotification,
     /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
     SolutionNotification,
+    /// <summary>A Sealed link notification: a link the person sent was opened, or locked.</summary>
+    SealedLinkNotification,
 
     /// <summary>"A passkey was added to your account", to the account's own address. Queued, like every security notice.</summary>
     PasskeyAdded,

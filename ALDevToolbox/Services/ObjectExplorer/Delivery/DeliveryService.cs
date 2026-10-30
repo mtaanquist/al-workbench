@@ -88,7 +88,7 @@ public sealed class DeliveryService
     /// Thin wrapper over <see cref="ScheduleDeliveryAsync"/> with <c>scheduledFor = now</c>.
     /// </summary>
     public Task<int> ReleaseBuildNowAsync(int releasePipelineId, int projectBuildId, CancellationToken ct = default)
-        => ScheduleDeliveryAsync(releasePipelineId, projectBuildId, DateTime.UtcNow, ct);
+        => ScheduleDeliveryAsync(releasePipelineId, projectBuildId, _clock.GetUtcNow().UtcDateTime, ct);
 
     /// <summary>
     /// Creates a delivery of <paramref name="projectBuildId"/> through
@@ -103,9 +103,16 @@ public sealed class DeliveryService
     /// enqueue when due. Returns the new delivery id. Throws
     /// <see cref="PlanValidationException"/> on a bad request,
     /// <see cref="ProjectAccessDeniedException"/> when not permitted.
+    /// <para>
+    /// <paramref name="installRightAway"/> is the per-deployment way out of a pipeline that
+    /// hands installs to Business Central's next update (#1471): the apps install as soon
+    /// as they arrive, which is also what a first install and a build with several apps
+    /// need. It changes nothing for a pipeline that already installs on arrival.
+    /// </para>
     /// </summary>
-    public Task<int> ScheduleDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, CancellationToken ct = default)
-        => CreateDeliveryAsync(releasePipelineId, projectBuildId, scheduledForUtc, forceSyncOnce: false, ct);
+    public Task<int> ScheduleDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, CancellationToken ct = default,
+        bool installRightAway = false)
+        => CreateDeliveryAsync(releasePipelineId, projectBuildId, scheduledForUtc, forceSyncOnce: false, ct, installRightAway: installRightAway);
 
     /// <summary>
     /// <see cref="ReleaseBuildNowAsync"/> for an agent (the <c>deploy_build</c> MCP tool).
@@ -116,7 +123,7 @@ public sealed class DeliveryService
     /// immediately, unconfirmed (#1122).
     /// </summary>
     public Task<int> DeployNowForAgentAsync(int releasePipelineId, int projectBuildId, CancellationToken ct = default)
-        => CreateDeliveryAsync(releasePipelineId, projectBuildId, DateTime.UtcNow, forceSyncOnce: false, ct, forAgent: true);
+        => CreateDeliveryAsync(releasePipelineId, projectBuildId, _clock.GetUtcNow().UtcDateTime, forceSyncOnce: false, ct, forAgent: true);
 
     internal static string ProductionRefusedForAgents(string environmentName) =>
         $"{environmentName} is not a sandbox, and this organisation does not let AI assistants deploy to production. Deploy to it from the deployment pipeline's page, which asks you to confirm first.";
@@ -144,7 +151,7 @@ public sealed class DeliveryService
         {
             throw Validation("Delivery", "Only a failed deployment can be deployed again.");
         }
-        return await CreateDeliveryAsync(failed.ReleasePipelineId, failed.ProjectBuildId, DateTime.UtcNow, forceSyncOnce, ct);
+        return await CreateDeliveryAsync(failed.ReleasePipelineId, failed.ProjectBuildId, _clock.GetUtcNow().UtcDateTime, forceSyncOnce, ct);
     }
 
     /// <summary>
@@ -262,7 +269,7 @@ public sealed class DeliveryService
     internal TimeSpan OpenSessionsTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
     private async Task<int> CreateDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, bool forceSyncOnce, CancellationToken ct,
-        string? parkedLog = null, bool forAgent = false)
+        string? parkedLog = null, bool forAgent = false, bool installRightAway = false)
     {
         var orgId = RequireOrganizationId();
         // Deploying spends the customer's Business Central credential, and it
@@ -272,7 +279,7 @@ public sealed class DeliveryService
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         scheduledForUtc = DateTime.SpecifyKind(scheduledForUtc, DateTimeKind.Utc);
 
-        var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
+        var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct, installRightAway: installRightAway);
         var sandbox = BcEnvironmentTypes.IsSandbox(plan.EnvType);
         if (forAgent && !sandbox
             && !await _db.OrganizationSettings.AsNoTracking()
@@ -313,7 +320,7 @@ public sealed class DeliveryService
         int orgId, ReleasePlan plan, DateTime scheduledForUtc, bool forceSyncOnce, bool proposed, CancellationToken ct,
         string? openingLog = null, bool withoutApproval = false, bool startedByAgent = false)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var delivery = new OeProjectDelivery
         {
             OrganizationId = orgId,
@@ -356,6 +363,91 @@ public sealed class DeliveryService
     }
 
     /// <summary>
+    /// The status gate: throws when the environment's stored status refuses an install and
+    /// Business Central, asked again, still does (see <see cref="RecheckEnvironmentStatusAsync"/>).
+    /// </summary>
+    private async Task ThrowIfEnvironmentRefusesAsync(
+        int projectId, int environmentId, string envName, string? applicationFamily, string? storedStatus, CancellationToken ct)
+    {
+        if (BcEnvironmentStatus.RefusalMessage(envName, storedStatus) is { } storedRefusal
+            && await RecheckEnvironmentStatusAsync(projectId, environmentId, envName, applicationFamily, storedRefusal, ct) is { } stillRefused)
+        {
+            throw Validation("ProjectEnvironment", stillRefused);
+        }
+    }
+
+    /// <summary>How long a deployment waits for Business Central to re-read a refusing environment status. Shortened by tests.</summary>
+    internal TimeSpan StatusRecheckTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Asks Business Central for the environment's status when the stored one refuses a
+    /// deployment, writes the answer back to the environment row, and returns the refusal
+    /// that still stands, or null when the environment can take the install after all.
+    /// Without this, an environment that was Preparing when last read kept refusing every
+    /// deployment until the next refresh, however long ago it came up.
+    /// <para>
+    /// Only a refusing status is re-read, so an ordinary deployment costs Business Central
+    /// nothing extra. When the re-read fails the stored refusal stands, said to be the last
+    /// one read, since deploying on a guess is worse than asking the person to try again.
+    /// </para>
+    /// </summary>
+    private async Task<string?> RecheckEnvironmentStatusAsync(
+        int projectId, int environmentId, string envName, string? applicationFamily, string storedRefusal, CancellationToken ct)
+    {
+        // A person is usually waiting in a dialog for this, so it gets a short leash.
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(StatusRecheckTimeout);
+
+        BcDeliveryContext bc;
+        try
+        {
+            bc = await _tokens.AcquireDeliveryContextAsync(projectId, timeout.Token);
+        }
+        catch (BcApiException ex)
+        {
+            // The connection's own sentence (not set up, secret expired) says what to fix;
+            // waiting would not help, so it must not read as "try again".
+            _logger.LogWarning(ex, "Couldn't sign in to re-read environment {Env} (project {ProjectId}) before deploying.",
+                envName, projectId);
+            return ex.Message;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return CouldNotAsk();
+        }
+
+        BcEnvironment? live;
+        try
+        {
+            live = await _admin.GetEnvironmentAsync(bc.AccessToken, applicationFamily, envName, timeout.Token);
+        }
+        catch (Exception ex) when (ex is BcApiException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            _logger.LogWarning(ex, "Couldn't re-read environment {Env} (project {ProjectId}) before deploying.", envName, projectId);
+            return CouldNotAsk();
+        }
+
+        if (live is null)
+        {
+            return $"Business Central no longer has an environment called '{envName}'. Refresh the environments on the solution's Business Central page.";
+        }
+
+        await _db.OeProjectEnvironments.Where(e => e.Id == environmentId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(e => e.Status, live.Status)
+                .SetProperty(e => e.StatusFetchedAt, _clock.GetUtcNow().UtcDateTime), ct);
+        _panelCache.Invalidate(projectId, environmentId);
+
+        var refusal = BcEnvironmentStatus.RefusalMessage(envName, live.Status);
+        _logger.LogInformation("Re-read environment {Env} (project {ProjectId}) before deploying: {Status}, {Outcome}.",
+            envName, projectId, live.Status, refusal is null ? "deploying" : "still refused");
+        return refusal;
+
+        string CouldNotAsk() =>
+            storedRefusal + " Business Central couldn't be asked again just now, so this is the last status read. Try again in a moment.";
+    }
+
+    /// <summary>
     /// Everything a deployment of <paramref name="projectBuildId"/> through
     /// <paramref name="releasePipelineId"/> needs, checked the way every release is: the
     /// pipeline and its target still exist and can take an install, the build is a
@@ -366,7 +458,8 @@ public sealed class DeliveryService
     /// <see cref="PlanValidationException"/>; with <paramref name="checkAccess"/> also
     /// <see cref="ProjectAccessDeniedException"/>.
     /// </summary>
-    private async Task<ReleasePlan> ResolveReleaseAsync(int releasePipelineId, int projectBuildId, bool checkAccess, CancellationToken ct, bool checkEnvironmentStatus = true)
+    private async Task<ReleasePlan> ResolveReleaseAsync(int releasePipelineId, int projectBuildId, bool checkAccess, CancellationToken ct, bool checkEnvironmentStatus = true,
+        bool installRightAway = false)
     {
         var rp = await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.Id == releasePipelineId && r.DeletedAt == null)
@@ -389,6 +482,7 @@ public sealed class DeliveryService
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvMissing = r.ProjectEnvironment.MissingSince != null,
                 EnvStatus = r.ProjectEnvironment.Status,
+                EnvFamily = r.ProjectEnvironment.ApplicationFamily,
                 EnvType = r.ProjectEnvironment.Type,
                 WindowStart = r.ProjectEnvironment.UpdateWindowStart,
                 WindowEnd = r.ProjectEnvironment.UpdateWindowEnd,
@@ -418,9 +512,12 @@ public sealed class DeliveryService
         // one that catches an update that lands between scheduling and running.
         // Preparing a deployment skips it: an environment busy with an update when a build
         // lands is ready again long before anyone approves, and the approval checks again.
-        if (checkEnvironmentStatus && BcEnvironmentStatus.RefusalMessage(rp.EnvName, rp.EnvStatus) is { } statusRefusal)
+        // A cached status that refuses may be stale - a new environment reads as Preparing
+        // until the next refresh, long after it is up - so it is asked again before it
+        // turns anyone away.
+        if (checkEnvironmentStatus)
         {
-            throw Validation("ProjectEnvironment", statusRefusal);
+            await ThrowIfEnvironmentRefusesAsync(rp.ProjectId, rp.ProjectEnvironmentId, rp.EnvName, rp.EnvFamily, rp.EnvStatus, ct);
         }
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
@@ -517,6 +614,12 @@ public sealed class DeliveryService
             throw Validation("DeploymentSchedule",
                 "This deployment pipeline's install timing is no longer a valid option. Open the deployment pipeline, choose when installs should run, and save it.");
         }
+        // The person deploying chose to install this one right away rather than wait for
+        // the update the pipeline names; the pipeline itself is unchanged.
+        if (installRightAway && BcDeploymentSchedule.IsDeferred(wireSchedule))
+        {
+            wireSchedule = BcDeploymentSchedule.Immediate;
+        }
         if (!BcSyncMode.IsValid(rp.SchemaSyncMode))
         {
             throw Validation("SchemaSyncMode",
@@ -529,12 +632,12 @@ public sealed class DeliveryService
         {
             throw Validation("DeploymentSchedule",
                 $"This build has {artifacts.Count} apps, and Business Central chooses the order it installs them in when they wait for a later update. "
-                + "Set this deployment pipeline to install right away, or deploy the apps one at a time.");
+                + "Choose to install it right away when you deploy it, or deploy the apps one at a time.");
         }
 
         return new ReleasePlan(
             rp.Id, rp.ProjectId, rp.EnvName, rp.EnvType, wireSchedule,
-            BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule), rp.SchemaSyncMode,
+            BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule) && !installRightAway, rp.SchemaSyncMode,
             UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, rp.WindowDays, build.Id, artifacts);
     }
 
@@ -702,7 +805,7 @@ public sealed class DeliveryService
             {
                 opening += LogLine(DeliveryProposalLog.NotDeployedWithoutApproval(why));
             }
-            var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(DateTime.UtcNow), forceSyncOnce: false, proposed: true, ct, opening);
+            var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(_clock.GetUtcNow().UtcDateTime), forceSyncOnce: false, proposed: true, ct, opening);
             prepared.Add(delivery.Id);
             _logger.LogInformation(
                 "Prepared delivery {DeliveryId}: build {BuildId} → deployment pipeline {ReleasePipelineId} ({Env}), waiting for approval; replaced {Replaced} older.",
@@ -747,7 +850,7 @@ public sealed class DeliveryService
         var replacedReason = DeliveryProposalLog.ReplacedReason(newerBuildId);
         foreach (var id in waitingIds)
         {
-            var now = DateTime.UtcNow;
+            var now = _clock.GetUtcNow().UtcDateTime;
             await _db.OeProjectDeliveries
                 .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Proposed)
                 .ExecuteUpdateAsync(u => u
@@ -761,7 +864,7 @@ public sealed class DeliveryService
         }
         // The newer build's request replaces theirs; the old one has nothing left to approve.
         await NotificationSubject.MarkDoneAsync(
-            _db, waitingIds.Select(NotificationSubject.Delivery).ToList(), DateTime.UtcNow, _logger, ct);
+            _db, waitingIds.Select(NotificationSubject.Delivery).ToList(), _clock.GetUtcNow().UtcDateTime, _logger, ct);
     }
 
     // ── Deploying to a sandbox without approval (#1096) ─────────────────────────────
@@ -786,7 +889,7 @@ public sealed class DeliveryService
         var reason = DeliveryProposalLog.ReplacedReason(newerBuildId);
         foreach (var id in ids)
         {
-            var now = DateTime.UtcNow;
+            var now = _clock.GetUtcNow().UtcDateTime;
             var changed = await _db.OeProjectDeliveries
                 .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
                 .ExecuteUpdateAsync(u => u
@@ -914,7 +1017,7 @@ public sealed class DeliveryService
         // window) is replaced too, so a day's builds don't all install when it opens.
         await ReplaceWaitingDeploymentsWithoutApprovalAsync(releasePipelineId, projectBuildId, ct);
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var when = plan.RuleTime(now);
         var opening = LogLine(DeliveryProposalLog.DeployedWithoutApproval(projectBuildId, await CurrentUserNameAsync(ct)));
         var delivery = await WriteDeliveryAsync(orgId, plan, when, forceSyncOnce: false, proposed: false, ct, opening, withoutApproval: true);
@@ -948,7 +1051,11 @@ public sealed class DeliveryService
             ?? throw Validation("Delivery", "That deployment no longer exists.");
 
         // Access first, so somebody who may not approve learns that rather than the state.
-        var plan = await ResolveReleaseAsync(proposal.ReleasePipelineId, proposal.ProjectBuildId, checkAccess: true, ct);
+        // The environment's status waits until the step-up and the state have passed: when
+        // the stored one refuses it is asked of Business Central, which spends the
+        // customer's credential and writes the answer back.
+        var plan = await ResolveReleaseAsync(proposal.ReleasePipelineId, proposal.ProjectBuildId, checkAccess: true, ct,
+            checkEnvironmentStatus: false);
         // Approving spends the customer's Business Central credential as deploying does,
         // so it takes the same step-up rule rather than trusting the page's gate (#1127).
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
@@ -956,8 +1063,13 @@ public sealed class DeliveryService
         {
             throw Validation("Delivery", NoLongerWaiting);
         }
+        var env = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == proposal.ReleasePipelineId)
+            .Select(r => new { r.ProjectId, r.ProjectEnvironmentId, r.ProjectEnvironment!.Name, r.ProjectEnvironment.ApplicationFamily, r.ProjectEnvironment.Status })
+            .FirstAsync(ct);
+        await ThrowIfEnvironmentRefusesAsync(env.ProjectId, env.ProjectEnvironmentId, env.Name, env.ApplicationFamily, env.Status, ct);
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var when = plan.RuleTime(now);
         var outsideWindow = plan.IsOutsideWindow(when);
         var line = LogLine(DeliveryProposalLog.Approved(await CurrentUserNameAsync(ct)));
@@ -1020,7 +1132,7 @@ public sealed class DeliveryService
 
         var line = LogLine(DeliveryProposalLog.Dismissed(await CurrentUserNameAsync(ct), why));
         var userId = _orgContext.CurrentUserId;
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var changed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Proposed)
             .ExecuteUpdateAsync(u => u
@@ -1045,7 +1157,7 @@ public sealed class DeliveryService
     /// </summary>
     private async Task MarkAppsNotSentAsync(int deliveryId, string message, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         await _db.OeProjectDeliveryResults
             .Where(r => r.ProjectDeliveryId == deliveryId && r.Status == ProjectDeliveryResultStatus.Pending)
             .ExecuteUpdateAsync(u => u
@@ -1072,7 +1184,7 @@ public sealed class DeliveryService
             ?? throw Validation("Delivery", "That delivery no longer exists.");
         await _access.EnsureCanManageAsync(owner.ProjectId, owner.OwnerId, ct);
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var changed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
@@ -1108,7 +1220,7 @@ public sealed class DeliveryService
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
         var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
         DateTime? nextOpening = hasWindow
-            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, DateTime.UtcNow, info.WindowDays)
+            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, _clock.GetUtcNow().UtcDateTime, info.WindowDays)
             : null;
         var current = CurrentTiming(info.DeploymentSchedule, info.ScheduledByDeliveryWindow, info.ScheduledOutsideWindow, hasWindow);
         var update = await _db.OeProjectEnvironments.AsNoTracking()
@@ -1191,7 +1303,7 @@ public sealed class DeliveryService
             throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
         }
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
         if (!await ApplyTimingAsync(deliveryId, t, now, ct))
         {
@@ -1353,7 +1465,7 @@ public sealed class DeliveryService
     /// </summary>
     private async Task<int> MoveHeldDeliveryAsync(RescheduleInfo info, RescheduleTiming timing, DateTime? atUtc, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
         if (t.Schedule == BcDeploymentSchedule.Normalize(info.DeploymentSchedule))
         {
@@ -1485,7 +1597,7 @@ public sealed class DeliveryService
             : await query.ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, to)
                 .SetProperty(d => d.CancelledByUserId, (int?)null)
-                .SetProperty(d => d.UpdatedAt, DateTime.UtcNow), ct);
+                .SetProperty(d => d.UpdatedAt, _clock.GetUtcNow().UtcDateTime), ct);
         return changed > 0;
     }
 
@@ -1676,7 +1788,7 @@ public sealed class DeliveryService
             .ToListAsync(ct);
         if (stopped.Count == 0) return;
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var dismissed = new List<int>();
         foreach (var group in stopped.GroupBy(d => (d.Status, d.Reason)))
         {
@@ -1714,7 +1826,7 @@ public sealed class DeliveryService
             .ToListAsync(ct);
         if (orphans.Count == 0) return [];
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         foreach (var d in orphans)
         {
             d.Status = ProjectDeliveryStatus.Failed;
@@ -1976,7 +2088,7 @@ public sealed class DeliveryService
             return;
         }
 
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         delivery.Status = ProjectDeliveryStatus.Uploading;
         delivery.StartedAt = now;
         delivery.UpdatedAt = now;
@@ -2058,7 +2170,7 @@ public sealed class DeliveryService
             {
                 await FailAsync(delivery, log,
                     $"{string.Join(", ", missing)} isn't installed on {delivery.EnvironmentName} yet, and Business Central only accepts "
-                    + "\"next minor update\" or \"next major update\" for an app that's already there. Install it right away first.", ct);
+                    + "\"next minor update\" or \"next major update\" for an app that's already there. Deploy it again and choose to install it right away.", ct);
                 return;
             }
         }
@@ -2079,7 +2191,7 @@ public sealed class DeliveryService
             var olderRefusal = $"{ordered[i].AppName} {ordered[i].AppVersion} is older than {newerOn}, which is already installed in {delivery.EnvironmentName}. "
                 + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice;
             ordered[i].Status = ProjectDeliveryResultStatus.Failed;
-            ordered[i].FinishedAt = DateTime.UtcNow;
+            ordered[i].FinishedAt = _clock.GetUtcNow().UtcDateTime;
             ordered[i].UpdatedAt = ordered[i].FinishedAt!.Value;
             ordered[i].Message = olderRefusal;
             await FailAsync(delivery, log, olderRefusal, ct);
@@ -2121,7 +2233,7 @@ public sealed class DeliveryService
             if (failedIndex >= 0)
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 continue;
             }
 
@@ -2130,7 +2242,7 @@ public sealed class DeliveryService
             {
                 failedIndex = i;
                 result.Status = ProjectDeliveryResultStatus.Failed;
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.Message = "The build's deliverables changed under the delivery.";
                 Append(log, $"FAILED {label}: deliverable missing.");
                 break;
@@ -2145,7 +2257,7 @@ public sealed class DeliveryService
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
                 result.Message = $"Already on {onVersion}.";
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 Append(log, $"Skipped {label}: {delivery.EnvironmentName} already has this version.");
                 await SaveResultAsync(delivery, log, ct);
                 continue;
@@ -2155,7 +2267,7 @@ public sealed class DeliveryService
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
                 result.Message = $"Unchanged; {delivery.EnvironmentName} already has the newer {newerOn}.";
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 Append(log, $"Skipped {label}: unchanged in this build, and {delivery.EnvironmentName} already has {newerOn}.");
                 await SaveResultAsync(delivery, log, ct);
                 continue;
@@ -2167,7 +2279,7 @@ public sealed class DeliveryService
                 {
                     result.Status = ProjectDeliveryResultStatus.Skipped;
                     result.Message = "Unchanged; this version is already waiting for the update.";
-                    result.UpdatedAt = DateTime.UtcNow;
+                    result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                     Append(log, $"Skipped {label}: unchanged in this build and already waiting on {delivery.EnvironmentName}.");
                     await SaveResultAsync(delivery, log, ct);
                     continue;
@@ -2175,7 +2287,7 @@ public sealed class DeliveryService
                 failedIndex = i;
                 refusal = waitingRefusal;
                 result.Status = ProjectDeliveryResultStatus.Failed;
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.FinishedAt.Value;
                 result.Message = waitingRefusal;
                 Append(log, waitingRefusal);
@@ -2199,7 +2311,7 @@ public sealed class DeliveryService
                     .FirstAsync(ct);
 
                 result.Status = ProjectDeliveryResultStatus.Uploading;
-                result.StartedAt = DateTime.UtcNow;
+                result.StartedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.StartedAt.Value;
                 Append(log, $"Uploading {label} ({bytes.Length} bytes)...");
                 await SaveResultAsync(delivery, log, ct);
@@ -2219,7 +2331,7 @@ public sealed class DeliveryService
                 uploadedAny = true;
                 result.OperationId = operation.Id;
                 result.AppId = operation.AppId?.ToString();
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
                 // BC read the version out of the package it just accepted. If that isn't
                 // the version this delivery promised, something other than this build's
@@ -2229,7 +2341,7 @@ public sealed class DeliveryService
                 {
                     failedIndex = i;
                     result.Status = ProjectDeliveryResultStatus.Failed;
-                    result.FinishedAt = DateTime.UtcNow;
+                    result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                     result.Message = $"Business Central read version {operation.TargetAppVersion} from the uploaded app, but this build says {result.AppVersion}.";
                     Append(log, $"FAILED {label}: {result.Message}");
                     await SaveResultAsync(delivery, log, ct);
@@ -2241,17 +2353,17 @@ public sealed class DeliveryService
                     // Nothing left to watch: BC runs this in its own window, and no poll
                     // of ours would ever see it go terminal.
                     result.Status = ProjectDeliveryResultStatus.Scheduled;
-                    result.FinishedAt = DateTime.UtcNow;
+                    result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                     Append(log, $"Business Central has scheduled {label} (operation {operation.Id}).");
                     await SaveResultAsync(delivery, log, ct);
                     continue;
                 }
 
                 result.Status = ProjectDeliveryResultStatus.Installing;
-                result.UpdatedAt = DateTime.UtcNow;
+                result.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 delivery.Status = ProjectDeliveryStatus.Installing;
                 delivery.InstallStartedAt ??= result.UpdatedAt;
-                delivery.UpdatedAt = DateTime.UtcNow;
+                delivery.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
                 Append(log, $"Installing {label} (operation {operation.Id})...");
                 await SaveResultAsync(delivery, log, ct);
 
@@ -2279,7 +2391,7 @@ public sealed class DeliveryService
                         Append(log, $"FAILED {label}: {outcome.Message}");
                     }
                 }
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.FinishedAt.Value;
                 await SaveResultAsync(delivery, log, ct);
             }
@@ -2299,13 +2411,13 @@ public sealed class DeliveryService
                 {
                     result.Message = Short(ex.Message);
                 }
-                result.FinishedAt = DateTime.UtcNow;
+                result.FinishedAt = _clock.GetUtcNow().UtcDateTime;
                 result.UpdatedAt = result.FinishedAt.Value;
                 Append(log, $"FAILED {label}: {OneLine(ex.Message)}");
             }
         }
 
-        var endNow = DateTime.UtcNow;
+        var endNow = _clock.GetUtcNow().UtcDateTime;
         if (failedIndex >= 0)
         {
             var failed = results[failedIndex];
@@ -2416,7 +2528,7 @@ public sealed class DeliveryService
 
         if (env is not null)
         {
-            var stamped = DateTime.UtcNow;
+            var stamped = _clock.GetUtcNow().UtcDateTime;
             await _db.OeProjectEnvironments.Where(e => e.Id == env.Id)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(e => e.Status, live.Status)
@@ -2517,18 +2629,50 @@ public sealed class DeliveryService
     /// page that shows the latest few and extends the list on request. Each row carries
     /// its per-pipeline <see cref="DeliveryHistoryRow.Number"/> (1 for the pipeline's
     /// first deployment), so a row whose number is above 1 says there are older ones.
+    /// <paramref name="onlyDeliveryId"/> reads that one deployment of the pipeline, still
+    /// numbered by its place in the history, and an empty list when it is not this
+    /// pipeline's (#1525). <paramref name="beforeDeliveryId"/> reads the deployments older
+    /// than that one instead of the newest, so a caller can page back through a long
+    /// history; an empty list again when it is not this pipeline's (#1526).
     /// </summary>
-    public async Task<List<DeliveryHistoryRow>> ListDeliveryHistoryAsync(int releasePipelineId, int limit, CancellationToken ct = default)
+    public async Task<List<DeliveryHistoryRow>> ListDeliveryHistoryAsync(
+        int releasePipelineId, int limit, CancellationToken ct = default, int? onlyDeliveryId = null,
+        int? beforeDeliveryId = null)
     {
         await EnsureCanViewReleasePipelineAsync(releasePipelineId, ct);
-        var query = _db.OeProjectDeliveries.AsNoTracking()
+        var pipelineRows = _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.ReleasePipelineId == releasePipelineId);
 
         // "Deployment 49" is display-only: the position in this pipeline's history, not a
         // stored column. Counting once and numbering down from it is exact as long as
         // the order below is total, hence the id tie-break.
-        var total = await query.CountAsync(ct);
+        var total = await pipelineRows.CountAsync(ct);
         if (total == 0) return new List<DeliveryHistoryRow>();
+
+        var query = pipelineRows;
+        var newer = 0;
+        if (onlyDeliveryId is { } onlyId)
+        {
+            var anchor = await pipelineRows.Where(d => d.Id == onlyId)
+                .Select(d => new { d.CreatedAt })
+                .FirstOrDefaultAsync(ct);
+            if (anchor is null) return new List<DeliveryHistoryRow>();
+            newer = await pipelineRows
+                .CountAsync(d => d.CreatedAt > anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id > onlyId), ct);
+            query = pipelineRows.Where(d => d.Id == onlyId);
+        }
+        else if (beforeDeliveryId is { } beforeId)
+        {
+            var anchor = await pipelineRows.Where(d => d.Id == beforeId)
+                .Select(d => new { d.CreatedAt })
+                .FirstOrDefaultAsync(ct);
+            if (anchor is null) return new List<DeliveryHistoryRow>();
+            // The anchor itself counts as newer: the page starts one row past it.
+            newer = await pipelineRows
+                .CountAsync(d => d.CreatedAt > anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id >= beforeId), ct);
+            query = pipelineRows
+                .Where(d => d.CreatedAt < anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id < beforeId));
+        }
 
         var rows = await query
             .OrderByDescending(d => d.CreatedAt).ThenByDescending(d => d.Id)
@@ -2574,7 +2718,7 @@ public sealed class DeliveryService
             rows.Where(r => r.Status == ProjectDeliveryStatus.HandedOff).Select(r => r.Id).ToList(), ct);
         for (var i = 0; i < rows.Count; i++)
         {
-            rows[i] = rows[i] with { Number = total - i, StillHeld = stillHeld.Contains(rows[i].Id) };
+            rows[i] = rows[i] with { Number = total - newer - i, StillHeld = stillHeld.Contains(rows[i].Id) };
         }
         return rows;
     }
@@ -2718,11 +2862,11 @@ public sealed class DeliveryService
     internal const string InterruptedAppMessage =
         "Not confirmed: the deployment stopped while this app was on its way, and Business Central may still have installed it. Check the environment's installed apps.";
 
-    private static void Append(StringBuilder log, string line) => log.Append(LogLine(line));
+    private void Append(StringBuilder log, string line) => log.Append(LogLine(line));
 
     /// <summary>One line of a delivery's log as the run writes it: <c>HH:mm:ss  message</c>, UTC.</summary>
-    private static string LogLine(string line) =>
-        DateTime.UtcNow.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
+    private string LogLine(string line) =>
+        _clock.GetUtcNow().UtcDateTime.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + line + Environment.NewLine;
 
     /// <summary>The acting person's name for a history line, or "someone" once there is none to read.</summary>
     private async Task<string> CurrentUserNameAsync(CancellationToken ct)

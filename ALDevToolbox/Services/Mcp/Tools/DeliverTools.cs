@@ -56,6 +56,15 @@ public sealed class DeliverTools
     /// <summary>How many Workbench history lines <c>get_environment</c> carries; the rest are one call away.</summary>
     private const int RecentHistoryCount = 5;
 
+    // An environment row runs to about 900 characters and an upgrade line more, so a
+    // full page of 25 stays near what an assistant can read in one answer (#1509).
+    private const int DefaultEnvironmentLimit = 25;
+    private const int DefaultPlannedUpgradeLimit = 25;
+    private const int DefaultUpgradeLineLimit = 25;
+    private const int MaxFleetLimit = 50;
+    private const string FleetLimitDescription = "How many to return. At least 1, at most 50; pass a filter to narrow the list rather than raising it.";
+    private const int MaxCheckNoteLength = 300;
+
     public DeliverTools(
         ProjectService projects,
         ProjectCustomerInfoService customerInfo,
@@ -85,7 +94,7 @@ public sealed class DeliverTools
     // ── Solutions ───────────────────────────────────────────────────────
 
     [McpServerTool(Name = "get_solution", ReadOnly = true)]
-    [Description("Returns one solution's basics: where its Business Central runs (hosting, and whether that is on-premises), the Business Central version and web client address, visibility, license and user experience, the customer's Microsoft tenant id, whether the Business Central online connection is set up, and a one-line summary of each of its environments. For an online solution with a working connection, the version and address are what the production environment last reported (versionFromBusinessCentral = true, with versionReadAt); otherwise they are what somebody typed. Environment facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read. Use get_environment for one environment in full.")]
+    [Description("Returns one solution's basics: where its Business Central runs (hosting, and whether that is on-premises), the Business Central version and web client address, visibility, license and user experience, the customer's Microsoft tenant id, whether the Business Central online connection is set up, and a one-line summary of each of its environments. For an online solution with a working connection, the version and address are what the production environment last reported (versionFromBusinessCentral = true, with versionReadAt); otherwise they are what somebody typed. Environment facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read. Use get_environment for one environment in full. To read or search the solution's code, use list_releases with the solution's name as search.")]
     public async Task<SolutionDetail> GetSolutionAsync(
         [Description("Solution name or numeric id (from list_solutions).")] string solution,
         CancellationToken ct = default)
@@ -105,8 +114,7 @@ public sealed class DeliverTools
             }
         }
 
-        var environments = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct))
-            .Where(r => r.ProjectId == id)
+        var environments = (await _fleet.ListFleetAsync(includeSoftDeleted: true, projectId: id, ct: ct))
             .Select(r => new SolutionEnvironmentBrief(
                 r.EnvironmentId, r.EnvironmentName, r.EnvironmentType, r.Status, r.Version,
                 r.IsSoftDeleted, r.EnvironmentFetchedAt))
@@ -134,8 +142,8 @@ public sealed class DeliverTools
     // ── Environments ────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_environments", ReadOnly = true)]
-    [Description("Lists the Business Central environments of every solution you can see, with filters. Each row gives the solution, the environment's name, type (Production/Sandbox), status, version, database size and the customer tenant's storage use against its quota (tenantStorageUse is a fraction: 0.8 = 80%, above 1 = over the quota), Microsoft's update window, and the next platform update (target version, date, the latest date it can be moved to, and its status). Everything is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read: each row says when its facts were read (environmentReadAt, nextUpdateReadAt, updateWindowReadAt). Deleted environments are left out unless includeDeleted is true. Use an environmentId with get_environment.")]
-    public async Task<IReadOnlyList<EnvironmentSummary>> ListEnvironmentsAsync(
+    [Description("Lists the Business Central environments of every solution you can see, with filters. Each row gives the solution, the environment's name, type (Production/Sandbox), status, version, database size and the customer tenant's storage use against its quota (tenantStorageUse is a fraction: 0.8 = 80%, above 1 = over the quota), Microsoft's update window, and the next platform update (target version, date, the latest date it can be moved to, and its status). Everything is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read: each row says when its facts were read (environmentReadAt, nextUpdateReadAt, updateWindowReadAt). Deleted environments are left out unless includeDeleted is true. Returns at most 25 by default, ordered by solution with Production first; Truncated and Note say whether more were left out, so pass a filter to narrow it. Use an environmentId with get_environment.")]
+    public async Task<CappedRows<EnvironmentSummary>> ListEnvironmentsAsync(
         [Description("Optional solution name or numeric id, to list only that solution's environments.")] string? solution = null,
         [Description("Optional environment type, e.g. 'Production' or 'Sandbox'.")] string? type = null,
         [Description("Optional status as Business Central reports it, e.g. 'Active' or 'Upgrading'.")] string? status = null,
@@ -143,14 +151,16 @@ public sealed class DeliverTools
         [Description("Optional fraction: only environments whose tenant uses more than this share of its storage quota, e.g. 0.8 for over 80%.")] double? storageOver = null,
         [Description("Optional date (yyyy-MM-dd, UTC): only environments whose next platform update is scheduled before it.")] string? nextUpdateBefore = null,
         [Description("Include environments the customer has deleted but Business Central still keeps. Default false.")] bool includeDeleted = false,
+        [Description(FleetLimitDescription + " Default 25.")] int limit = DefaultEnvironmentLimit,
         CancellationToken ct = default)
     {
         int? projectId = string.IsNullOrWhiteSpace(solution) ? null : (await ResolveAsync(solution, ct)).Id;
         var before = ParseDate(nextUpdateBefore, "nextUpdateBefore");
         var prefix = version?.Trim();
 
-        IEnumerable<EnvironmentDetailRow> rows = await _fleet.ListFleetDetailsAsync(includeDeleted, ct);
-        if (projectId is { } pid) rows = rows.Where(r => r.Fleet.ProjectId == pid);
+        // The solution narrows the query; the other filters run here, over a fleet
+        // that is one row per environment the caller can see (a few hundred at most).
+        IEnumerable<EnvironmentDetailRow> rows = await _fleet.ListFleetDetailsAsync(includeDeleted, projectId, ct);
         if (!string.IsNullOrWhiteSpace(type))
             rows = rows.Where(r => string.Equals(r.Fleet.EnvironmentType, type.Trim(), StringComparison.OrdinalIgnoreCase));
         if (!string.IsNullOrWhiteSpace(status))
@@ -163,17 +173,22 @@ public sealed class DeliverTools
         if (before is { } cutoff)
             rows = rows.Where(r => r.Fleet.NextUpdateDate is { } date && date < cutoff);
 
-        return rows.Select(ToSummary).ToList();
+        var cap = Math.Clamp(limit, 1, MaxFleetLimit);
+        return CappedRows<EnvironmentSummary>.From(rows.Take(cap + 1).Select(ToSummary).ToList(), cap,
+            "environments", "ordered by solution, Production first, then name",
+            "Pass solution, type, status, version or nextUpdateBefore to narrow the list.");
     }
 
     [McpServerTool(Name = "get_environment", ReadOnly = true)]
-    [Description("Returns one Business Central environment in full: everything list_environments gives, plus its country and Azure region, the window our own deliveries prefer (its hours, and in days the weekdays it opens on - null days means every day; a window past midnight belongs to the day it opens), how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
+    [Description("Returns one Business Central environment in full: everything list_environments gives, plus its country and Azure region, the window our own deliveries prefer (its hours, and in days the weekdays it opens on - null days means every day; a window past midnight belongs to the day it opens), how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history. Microsoft's own apps (Base Application, System Application and the rest) are left out of installedApps unless includeMicrosoftApps is true; microsoftAppsLeftOut says how many were.")]
     public async Task<EnvironmentDetail> GetEnvironmentAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
+        [Description("Also list the apps Microsoft publishes. Default false: the environment's version already says which Microsoft release it runs.")] bool includeMicrosoftApps = false,
         CancellationToken ct = default)
     {
         var row = await _fleet.GetEnvironmentAsync(environmentId, ct) ?? throw EnvironmentNotFound(environmentId);
         var apps = await _fleet.ListInstalledAppsAsync(environmentId, ct) ?? [];
+        var listed = includeMicrosoftApps ? apps : apps.Where(a => !IsMicrosoftApp(a.Publisher)).ToList();
         var history = await Guard(environmentId, () => _upgradeActions.ListEnvironmentActivityAsync(row.Fleet.ProjectId, environmentId, ct));
 
         return new EnvironmentDetail(
@@ -184,10 +199,15 @@ public sealed class DeliverTools
                 ? new TimeWindow(Clock(s), Clock(e), row.Fleet.TimeZone ?? "UTC", DayNames(row.DeliveryWindowDays))
                 : null,
             row.AppSourceAppsUpdateCadence,
-            apps.Select(a => new InstalledApp(a.AppId, a.Name, a.Publisher, a.Version, a.DeliveredFromWorkbench)).ToList(),
+            listed.Select(a => new InstalledApp(a.AppId, a.Name, a.Publisher, a.Version, a.DeliveredFromWorkbench)).ToList(),
             apps.Count == 0 ? null : apps.Max(a => a.FetchedAt),
-            history.Take(RecentHistoryCount).Select(ToHistory).ToList());
+            history.Take(RecentHistoryCount).Select(ToHistory).ToList(),
+            apps.Count - listed.Count);
     }
+
+    /// <summary>Microsoft publishes its apps as "Microsoft"; a partner's app never carries that name alone.</summary>
+    private static bool IsMicrosoftApp(string? publisher) =>
+        string.Equals(publisher?.Trim(), "Microsoft", StringComparison.OrdinalIgnoreCase);
 
     [McpServerTool(Name = "list_environment_history", ReadOnly = true)]
     [Description("Lists an environment's Workbench history, newest first: what was done to it from this workbench and by whom - update dates moved, updates started or booked for a later slot (and cancelled), apps updated or uploaded, sessions ended, copies made, deleted environments recovered - with each line's status ('Pending', 'Sent', 'Failed', 'Cancelled') and outcome. Work done in Business Central's admin centre, or by Microsoft, is not in it. At most the latest 50 lines.")]
@@ -201,19 +221,39 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "list_upgrades", ReadOnly = true)]
-    [Description("Lists the Upgrades fleet: for every live environment of every solution you can see, the platform update Business Central has waiting - target version, when it is scheduled, the latest date it can be moved to, and its status - grouped by solution with Production first, plus any update move booked from this workbench that has not run yet. canChangeDate says whether you hold the environment-updates permission for that solution. Requires the environment-updates permission on at least one team, as the Upgrades page does. The update facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each row carries nextUpdateReadAt.")]
-    public async Task<IReadOnlyList<UpgradeSolutionGroup>> ListUpgradesAsync(CancellationToken ct = default)
+    [Description("Lists the Upgrades fleet: for every live environment of every solution you can see, the platform update Business Central has waiting - target version, when it is scheduled, the latest date it can be moved to, and its status - grouped by solution with Production first, plus any update move booked from this workbench that has not run yet. canChangeDate says whether you hold the environment-updates permission for that solution. Requires the environment-updates permission on at least one team, as the Upgrades page does. The update facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each row carries nextUpdateReadAt. Returns at most 25 environments by default; Truncated and Note say whether more were left out, so pass solution, type or nextUpdateBefore to narrow it.")]
+    public async Task<UpgradeListResult> ListUpgradesAsync(
+        [Description("Optional solution name or numeric id, to list only that solution's environments.")] string? solution = null,
+        [Description("Optional environment type, e.g. 'Production' or 'Sandbox'.")] string? type = null,
+        [Description("Optional date (yyyy-MM-dd, UTC): only environments whose next platform update is scheduled before it.")] string? nextUpdateBefore = null,
+        [Description(FleetLimitDescription + " Counts environments. Default 25.")] int limit = DefaultEnvironmentLimit,
+        CancellationToken ct = default)
     {
         await RequireEnvironmentOpsAsync(
             "You need permission to manage environment updates to see the Upgrades list. An administrator can grant it on one of your teams. list_environments shows the next update of every environment you can see.",
             ct);
 
-        var rows = await _fleet.ListFleetAsync(includeSoftDeleted: false, ct);
+        int? projectId = string.IsNullOrWhiteSpace(solution) ? null : (await ResolveAsync(solution, ct)).Id;
+        var before = ParseDate(nextUpdateBefore, "nextUpdateBefore");
+        IEnumerable<UpgradeFleetRow> fleet = await _fleet.ListFleetAsync(includeSoftDeleted: false, projectId, ct);
+        if (!string.IsNullOrWhiteSpace(type))
+            fleet = fleet.Where(r => string.Equals(r.EnvironmentType, type.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (before is { } cutoff)
+            fleet = fleet.Where(r => r.NextUpdateDate is { } date && date < cutoff);
+
+        var cap = Math.Clamp(limit, 1, MaxFleetLimit);
+        var rows = fleet.Take(cap + 1).ToList();
+        // The fleet row is near enough the answer's row to measure the budget by (#1524).
+        var shown = McpAnswerBudget.Fit(rows, cap);
+        var truncated = rows.Count > shown;
+        // When the cut falls inside a solution, its group would read as complete; say so.
+        var partial = truncated && rows[shown].ProjectId == rows[shown - 1].ProjectId ? rows[shown].ProjectName : null;
+        if (truncated) rows.RemoveRange(shown, rows.Count - shown);
         var pending = (await _upgradeActions.ListPendingAsync(ct)).ToLookup(a => a.EnvironmentId);
 
         // ListFleetAsync already orders by solution, Production first, then name - the
         // page's order - and GroupBy keeps it.
-        return rows
+        var groups = rows
             .GroupBy(r => (r.ProjectId, r.ProjectName, r.TimeZone))
             .Select(g => new UpgradeSolutionGroup(
                 g.Key.ProjectId,
@@ -232,15 +272,21 @@ public sealed class DeliverTools
                         .ToList(),
                     r.FetchedAt)).ToList()))
             .ToList();
+        return new UpgradeListResult(groups, truncated, truncated
+            ? $"Showing the first {shown} environments (ordered by solution, Production first); more were left out"
+              + (partial is null ? "." : $", including more of {partial}'s.")
+              + " Pass solution, type or nextUpdateBefore to narrow the list."
+            : null);
     }
 
     // ── Planned upgrades (#984) ─────────────────────────────────────────
 
     [McpServerTool(Name = "list_planned_upgrades", ReadOnly = true)]
-    [Description("Lists the planned upgrades: named waves of environments the upgrade team moves, starts and checks together (e.g. '28.5 in November 2026'). For each: its id, name, target Business Central version (Major.Minor), the planned slot if one was set, the note, who created it and when, who marked it done and when, its status, and how many of its environments are in each state. Status is 'Planned' (nothing has gone further than a moved date), 'InProgress' (something is booked or running, or the wave is part way through), 'Updated' (every environment has an answer and it waits for someone to mark it done) or 'Done' (marked done, in the archive). Open upgrades come first, soonest planned slot first; with includeArchived the done ones follow, most recently closed first. Only environments of solutions you can see are counted. Requires the environment-updates permission on at least one team, as the Upgrades page does. Use get_upgrade for one upgrade's environments.")]
-    public async Task<IReadOnlyList<PlannedUpgradeSummary>> ListPlannedUpgradesAsync(
+    [Description("Lists the planned upgrades: named waves of environments the upgrade team moves, starts and checks together (e.g. '28.5 in November 2026'). For each: its id, name, target Business Central version (Major.Minor), the planned slot if one was set, the note, who created it and when, who marked it done and when, its status, and how many of its environments are in each state. Status is 'Planned' (nothing has gone further than a moved date), 'InProgress' (something is booked or running, or the wave is part way through), 'Updated' (every environment has an answer and it waits for someone to mark it done) or 'Done' (marked done, in the archive). Open upgrades come first, soonest planned slot first; with includeArchived the done ones follow, most recently closed first. Only environments of solutions you can see are counted. Requires the environment-updates permission on at least one team, as the Upgrades page does. Returns at most 25 by default; Truncated and Note say whether more were left out. Use get_upgrade for one upgrade's environments.")]
+    public async Task<CappedRows<PlannedUpgradeSummary>> ListPlannedUpgradesAsync(
         [Description("Also list the upgrades marked done. Default false: open upgrades only.")] bool includeArchived = false,
         [Description("Optional text to match, case-insensitively, against the upgrade's name or target version, e.g. 'november' or '28.5'.")] string? search = null,
+        [Description(FleetLimitDescription + " Default 25.")] int limit = DefaultPlannedUpgradeLimit,
         CancellationToken ct = default)
     {
         await RequireEnvironmentOpsAsync(
@@ -256,13 +302,19 @@ public sealed class DeliverTools
             ? await _plannedUpgrades.ListArchivedAsync(term, ct)
             : [];
 
-        return open.Concat(archived).Select(ToPlannedSummary).ToList();
+        var cap = Math.Clamp(limit, 1, MaxFleetLimit);
+        return CappedRows<PlannedUpgradeSummary>.From(open.Concat(archived).Take(cap + 1).Select(ToPlannedSummary).ToList(), cap,
+            "upgrades", "open first, then the most recently closed",
+            "Pass search to narrow the list, or leave includeArchived off.");
     }
 
     [McpServerTool(Name = "get_upgrade", ReadOnly = true)]
-    [Description("Returns one planned upgrade in full: its name, target version, planned slot, note, who created it and who marked it done, its status and counts (as list_planned_upgrades describes them), and every environment on it. For each environment: the solution, the environment's name and type, whether the customer has deleted it, its current version, the platform update Business Central has waiting (the same fields list_upgrades uses), its state, the last action taken on it from this upgrade, who is assigned to check it, and the after-upgrade check (who ticked it, when, and their note). The state is one word: 'Planned' (on the upgrade and nothing done from it has taken effect yet; a booking that was cancelled lands here too), 'DateMoved' (its update date was moved out to the latest allowed, and that is the last thing done), 'Booked' (a start is booked for a later slot, or Business Central was told to start and has not yet), 'Running' (Business Central is updating it now), 'Updated' (it is on the target version or later), 'Failed' (the last action from this upgrade failed, or Business Central reports the update failed) or 'Checked' (someone did the after-upgrade check and ticked it). Left out: environments of solutions you cannot see, and environments Business Central no longer reports. An environment the customer has deleted but can still restore stays on the upgrade with deleted = true, although list_upgrades leaves those out. Facts about the environment are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each carries environmentReadAt and nextUpdateReadAt. Requires the environment-updates permission on at least one team. Read-only: moving, starting and checking are done on the upgrade's page in the web UI.")]
+    [Description("Returns one planned upgrade in full: its name, target version, planned slot, note, who created it and who marked it done, its status and counts (as list_planned_upgrades describes them), and every environment on it. For each environment: the solution, the environment's name and type, whether the customer has deleted it, its current version, the platform update Business Central has waiting (the same fields list_upgrades uses), its state, the last action taken on it from this upgrade, who is assigned to check it, and the after-upgrade check (who ticked it, when, and their note). The state is one word: 'Planned' (on the upgrade and nothing done from it has taken effect yet; a booking that was cancelled lands here too), 'DateMoved' (its update date was moved out to the latest allowed, and that is the last thing done), 'Booked' (a start is booked for a later slot, or Business Central was told to start and has not yet), 'Running' (Business Central is updating it now), 'Updated' (it is on the target version or later), 'Failed' (the last action from this upgrade failed, or Business Central reports the update failed) or 'Checked' (someone did the after-upgrade check and ticked it). Left out: environments of solutions you cannot see, and environments Business Central no longer reports. An environment the customer has deleted but can still restore stays on the upgrade with deleted = true, although list_upgrades leaves those out. Facts about the environment are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each carries environmentReadAt and nextUpdateReadAt. Requires the environment-updates permission on at least one team. Read-only: moving, starting and checking are done on the upgrade's page in the web UI. Lists at most 25 environments by default, with each check note cut at 300 characters; Truncated and Note say whether more were left out, and the counts always cover the whole upgrade, so pass state or solution to see the rest.")]
     public async Task<PlannedUpgradeDetail> GetUpgradeAsync(
         [Description("The upgrade's numeric id, from list_planned_upgrades.")] int upgradeId,
+        [Description("Optional state to keep, e.g. 'Failed' or 'Planned' (the states are listed above).")] string? state = null,
+        [Description("Optional solution: its numeric id, or text to match case-insensitively against its name.")] string? solution = null,
+        [Description(FleetLimitDescription + " Default 25.")] int limit = DefaultUpgradeLineLimit,
         CancellationToken ct = default)
     {
         await RequireEnvironmentOpsAsync(
@@ -273,7 +325,25 @@ public sealed class DeliverTools
             ?? throw new McpException(
                 $"Upgrade {upgradeId} does not exist or is not visible to you. Call list_planned_upgrades to see the upgrades you can read.");
 
-        var lines = detail.Lines.Select(l => new PlannedUpgradeLine(
+        var wantedState = string.IsNullOrWhiteSpace(state) ? null : state.Trim();
+        // By name: Enum.TryParse also takes "3" and "Planned,Failed", which match no line.
+        if (wantedState is not null
+            && !Enum.GetNames<UpgradeLineState>().Contains(wantedState, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new McpException(
+                $"'{state}' is not an upgrade state. Use one of: {string.Join(", ", Enum.GetNames<UpgradeLineState>())}.");
+        }
+        var solutionTerm = string.IsNullOrWhiteSpace(solution) ? null : solution.Trim();
+        int? solutionId = int.TryParse(solutionTerm, NumberStyles.None, CultureInfo.InvariantCulture, out var sid) ? sid : null;
+        var matching = detail.Lines
+            .Where(l => wantedState is null || string.Equals(l.State.ToString(), wantedState, StringComparison.OrdinalIgnoreCase))
+            .Where(l => solutionTerm is null
+                        || (solutionId is { } id ? l.Environment.ProjectId == id
+                            : l.Environment.ProjectName.Contains(solutionTerm, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var cap = Math.Clamp(limit, 1, MaxFleetLimit);
+
+        var lines = matching.Take(cap).Select(l => new PlannedUpgradeLine(
                 l.Environment.EnvironmentId,
                 l.Environment.ProjectId,
                 l.Environment.ProjectName,
@@ -287,11 +357,15 @@ public sealed class DeliverTools
                 l.AssigneeName is { Length: > 0 } assignee ? UpgradeActionRow.NameOf(assignee) : null,
                 l.CheckedAt,
                 l.CheckedBy is { Length: > 0 } who ? UpgradeActionRow.NameOf(who) : null,
-                l.Note,
+                l.Note is { Length: > MaxCheckNoteLength } note ? note[..MaxCheckNoteLength] + "..." : l.Note,
                 l.Environment.EnvironmentFetchedAt,
                 l.Environment.FetchedAt))
             .ToList();
-        return new PlannedUpgradeDetail(ToPlannedSummary(detail.Upgrade), lines);
+        lines = lines.Take(McpAnswerBudget.Fit(lines, cap)).ToList();
+        var truncated = matching.Count > lines.Count;
+        return new PlannedUpgradeDetail(ToPlannedSummary(detail.Upgrade), lines, truncated, truncated
+            ? $"Showing the first {lines.Count} of {matching.Count} environments; more were left out. Pass state or solution to narrow the list."
+            : null);
     }
 
     /// <summary>The Upgrades page's gate: the environment-updates grant on at least one team.</summary>
@@ -325,11 +399,12 @@ public sealed class DeliverTools
     // ── Deliveries ──────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_recent_deployments", ReadOnly = true)]
-    [Description("Lists deployments across every solution you can see, newest first: for each, the solution, the deployment pipeline, the target environment, the build, its status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve it in the web UI, with nothing sent yet; 'dismissed' is such a prepared deployment that a person dismissed or a newer build replaced before anyone approved it, so nothing was ever sent; 'handed_off' means Business Central accepted the apps and installs them in its own later window), when it was requested, started and finished, who triggered it, and - for a failed one - the failure message and each app's result. These are the workbench's own records of what it deployed. Use it for 'did the deployment go alright?' or 'what failed to deploy this week?'; list_deployments has one deployment pipeline's full history.")]
-    public async Task<IReadOnlyList<RecentDelivery>> ListRecentDeliveriesAsync(
+    [Description("Lists deployments across every solution you can see, newest first: for each, the solution, the deployment pipeline, the target environment, the build, its status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve it in the web UI, with nothing sent yet; 'dismissed' is such a prepared deployment that a person dismissed or a newer build replaced before anyone approved it, so nothing was ever sent; 'handed_off' means Business Central accepted the apps and installs them in its own later window), when it was requested, started and finished, who triggered it, and - for a failed one - the failure message and each app's result. These are the workbench's own records of what it deployed. Use it for 'did the deployment go alright?' or 'what failed to deploy this week?'; list_deployments has one deployment pipeline's full history, and with deploymentId one deployment's whole failure messages; here a long one is cut. Truncated and Note say whether the limit left deployments out.")]
+    public async Task<CappedRows<RecentDelivery>> ListRecentDeliveriesAsync(
         [Description("Optional status to keep, e.g. 'failed' or 'deployed'.")] string? status = null,
         [Description("Optional date (yyyy-MM-dd, UTC): only deployments requested on or after it.")] string? since = null,
-        [Description("How many to return, newest first. Default 50, at most 200.")] int limit = 50,
+        [Description("Optional solution name or numeric id, to list only that solution's deployments.")] string? solution = null,
+        [Description("How many to return, newest first. Default 20, at least 1, at most 50.")] int limit = McpListLimit.Default,
         CancellationToken ct = default)
     {
         var wanted = status?.Trim().ToLowerInvariant();
@@ -339,11 +414,19 @@ public sealed class DeliverTools
                 $"'{status}' is not a deployment status. Use one of: {string.Join(", ", KnownDeliveryStatuses)}.");
         }
 
-        var rows = await _deliveries.ListRecentAsync(wanted, ParseDate(since, "since"), limit, ct);
-        return rows.Select(d => new RecentDelivery(
+        int? projectId = string.IsNullOrWhiteSpace(solution) ? null : (await ResolveAsync(solution, ct)).Id;
+        var cap = McpListLimit.Clamp(limit);
+        var rows = await _deliveries.ListRecentAsync(wanted, ParseDate(since, "since"), cap + 1, projectId, ct);
+        var deployments = rows.Select(d => new RecentDelivery(
             d.Id, d.ProjectId, d.ProjectName, d.ReleasePipelineId, d.ReleasePipelineName, d.EnvironmentName,
-            d.BuildId, d.Status, d.CreatedAt, d.ScheduledFor, d.StartedAt, d.FinishedAt, d.FailureMessage,
-            d.TriggeredByName, d.Apps)).ToList();
+            d.BuildId, d.Status, d.CreatedAt, d.ScheduledFor, d.StartedAt, d.FinishedAt,
+            McpListLimit.ShortenFailure(d.FailureMessage, "list_deployments with deploymentId"),
+            d.TriggeredByName,
+            d.Apps.Select(a => a with { Message = McpListLimit.ShortenFailure(a.Message, "list_deployments with deploymentId") }).ToList()))
+            .ToList();
+        return CappedRows<RecentDelivery>.From(deployments, cap, "deployments", "newest first",
+            "Pass solution, status or since to narrow the list.",
+            cap < McpListLimit.Max ? CappedRows<RecentDelivery>.RaiseLimitHint : null);
     }
 
     // ── Customer information ────────────────────────────────────────────
@@ -391,7 +474,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "list_customer_knowledge", ReadOnly = true)]
-    [Description("Answers 'who here knows this customer?' or 'which customers does this colleague know?', from the Customer tab's list of colleagues who know a customer. Give exactly one of solution or person. With solution: each colleague's name, email, role ('Consultant', 'Developer', 'ProjectLeader', 'Architect') and the areas they know, plus the solution's free-text knowledge notes. With person (part of a name, or an exact email): every solution you can see that the matching colleague(s) are listed on, with their role and areas. Hand-kept by your colleagues.")]
+    [Description("Answers 'who here knows this customer?' or 'which customers does this colleague know?', from the Customer tab's list of colleagues who know a customer. Give exactly one of solution or person. With solution: each colleague's name, email, roles (one or more of 'Consultant', 'Developer', 'ProjectLeader', 'Architect') and the areas they know, plus the solution's free-text knowledge notes. With person (part of a name, or an exact email): every solution you can see that the matching colleague(s) are listed on, with their roles and areas. Hand-kept by your colleagues.")]
     public async Task<CustomerKnowledge> ListCustomerKnowledgeAsync(
         [Description("Solution name or numeric id - to list who knows this customer.")] string? solution = null,
         [Description("Colleague's name (or part of it) or exact email - to list which customers they know.")] string? person = null,
@@ -408,7 +491,7 @@ public sealed class DeliverTools
         {
             var known = await _customerInfo.ListCustomersKnownByAsync(person!, ct);
             return new CustomerKnowledge(
-                known.Select(k => new KnowledgeRow(k.ProjectId, k.ProjectName, k.Name, k.Email, k.Role.ToString(), k.Areas)).ToList(),
+                known.Select(k => new KnowledgeRow(k.ProjectId, k.ProjectName, k.Name, k.Email, Names(k.Roles), k.Areas)).ToList(),
                 null);
         }
 
@@ -416,7 +499,7 @@ public sealed class DeliverTools
         var people = await Guard(solution!, () => _customerInfo.ListPeopleAsync(id, ct));
         var notes = await Guard(solution!, () => _customerInfo.GetNotesAsync(id, ct));
         return new CustomerKnowledge(
-            people.Select(p => new KnowledgeRow(id, project.Name, p.Name, p.Email, p.Role.ToString(), p.Areas)).ToList(),
+            people.Select(p => new KnowledgeRow(id, project.Name, p.Name, p.Email, Names(p.Roles), p.Areas)).ToList(),
             notes?.KnowledgeNotes);
     }
 
@@ -569,6 +652,8 @@ public sealed class DeliverTools
         return (id, project);
     }
 
+    private static List<string> Names(IReadOnlyList<ProjectPersonRole> roles) => roles.Select(r => r.ToString()).ToList();
+
     /// <summary>
     /// Runs a gated service read and answers a refusal exactly as an unknown solution:
     /// a Private solution is absent, not locked. Resolution has already applied the same
@@ -674,7 +759,8 @@ public sealed record EnvironmentDetail(
     string? AppSourceAppsUpdateCadence,
     IReadOnlyList<InstalledApp> InstalledApps,
     DateTime? InstalledAppsReadAt,
-    IReadOnlyList<EnvironmentHistoryEntry> RecentHistory);
+    IReadOnlyList<EnvironmentHistoryEntry> RecentHistory,
+    int MicrosoftAppsLeftOut = 0);
 
 /// <summary>An app Business Central last reported installed.</summary>
 public sealed record InstalledApp(Guid AppId, string Name, string Publisher, string Version, bool DeliveredFromWorkbench);
@@ -694,6 +780,9 @@ public sealed record EnvironmentHistoryEntry(
     string? Outcome,
     string? CancelledBy,
     DateTime? CancelledAt);
+
+/// <summary>The Upgrades list, for <c>list_upgrades</c>, with whether the limit cut it.</summary>
+public sealed record UpgradeListResult(IReadOnlyList<UpgradeSolutionGroup> Solutions, bool Truncated, string? Note);
 
 /// <summary>One solution's environments on the Upgrades list.</summary>
 public sealed record UpgradeSolutionGroup(
@@ -740,7 +829,11 @@ public sealed record UpgradeStateCounts(
     int Planned, int DateMoved, int Booked, int Running, int Updated, int Failed, int Checked);
 
 /// <summary>One planned upgrade with its environments, for <c>get_upgrade</c>.</summary>
-public sealed record PlannedUpgradeDetail(PlannedUpgradeSummary Upgrade, IReadOnlyList<PlannedUpgradeLine> Environments);
+public sealed record PlannedUpgradeDetail(
+    PlannedUpgradeSummary Upgrade,
+    IReadOnlyList<PlannedUpgradeLine> Environments,
+    bool Truncated = false,
+    string? Note = null);
 
 /// <summary>One environment on a planned upgrade.</summary>
 /// <param name="Deleted">True when the customer has deleted the environment and it can still be restored.</param>
@@ -818,7 +911,7 @@ public sealed record CustomerKnowledge(IReadOnlyList<KnowledgeRow> People, strin
 
 /// <summary>A colleague who knows a customer, and what about.</summary>
 public sealed record KnowledgeRow(
-    int SolutionId, string SolutionName, string PersonName, string PersonEmail, string Role, string? Areas);
+    int SolutionId, string SolutionName, string PersonName, string PersonEmail, IReadOnlyList<string> Roles, string? Areas);
 
 /// <summary>
 /// A catalogue module, and - when the question named a module or a solution - one

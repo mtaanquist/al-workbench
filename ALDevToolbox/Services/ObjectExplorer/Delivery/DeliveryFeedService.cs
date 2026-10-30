@@ -34,7 +34,7 @@ public sealed class DeliveryFeedService
     /// status does not.
     /// </summary>
     public async Task<List<RecentDeliveryRow>> ListRecentAsync(
-        string? status, DateTime? sinceUtc, int limit, CancellationToken ct = default)
+        string? status, DateTime? sinceUtc, int limit, int? projectId = null, CancellationToken ct = default)
     {
         var take = Math.Clamp(limit, 1, MaxLimit);
         var snapshot = await _access.GetSnapshotAsync(ct);
@@ -50,6 +50,10 @@ public sealed class DeliveryFeedService
         if (sinceUtc is { } since)
         {
             query = query.Where(d => d.CreatedAt >= since);
+        }
+        if (projectId is { } pid)
+        {
+            query = query.Where(d => d.ProjectId == pid);
         }
 
         return await query

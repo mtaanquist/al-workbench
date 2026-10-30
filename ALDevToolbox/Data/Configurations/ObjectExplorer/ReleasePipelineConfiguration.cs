@@ -8,7 +8,11 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
 {
     public void Configure(EntityTypeBuilder<OeReleasePipeline> entity)
     {
-        entity.ToTable("oe_release_pipelines");
+        // An archived pipeline stays disabled: the delivery paths only check disabled_at, so
+        // this is what keeps an archive and an enable racing each other from leaving a hidden
+        // pipeline that still deploys (#1466).
+        entity.ToTable("oe_release_pipelines", t =>
+            t.HasCheckConstraint("ck_oe_release_pipelines_archived_is_disabled", "archived_at IS NULL OR disabled_at IS NOT NULL"));
         entity.HasKey(e => e.Id);
         entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
         entity.Property(e => e.OrganizationId).HasColumnName("organization_id").IsRequired();
@@ -30,6 +34,7 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DisabledAt).HasColumnName("disabled_at");
+        entity.Property(e => e.ArchivedAt).HasColumnName("archived_at");
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
 
         entity.HasOne(e => e.Organization)

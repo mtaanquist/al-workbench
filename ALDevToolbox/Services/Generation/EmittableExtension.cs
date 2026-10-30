@@ -23,7 +23,11 @@ internal sealed record EmittableExtension(
     // True for a template extension every workspace emits (Core, Hotfix);
     // false for a ticked optional one and for a module clone. Module clones
     // depend implicitly on the required ones only (generation-engine.md).
-    bool Required);
+    bool Required,
+    // For a module copied from a GitHub repository (#1415): where the copy came
+    // from, recorded in workspace.aldt.toml. A record, not a link.
+    string? SourceRepository = null,
+    string? SourceCommit = null);
 
 /// <summary>Folder + its files + its children (recursive). Built once at load time.</summary>
 internal sealed record FolderNode(

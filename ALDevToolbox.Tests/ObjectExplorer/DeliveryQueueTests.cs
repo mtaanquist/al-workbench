@@ -144,16 +144,13 @@ public sealed class DeliveryQueueTests
         (await queue.EnqueueAsync(Job(2))).Should().BeTrue();
 
         await worker.StartAsync(CancellationToken.None);
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline && logger.Errors.Count < 2)
-        {
-            await Task.Delay(20);
-        }
+        await logger.SecondError.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         await worker.StopAsync(CancellationToken.None);
 
         // The second logged failure is the proof the loop was not torn down by the first.
-        logger.Errors.Should().HaveCount(2);
-        logger.Errors.Should().AllSatisfy(m => m.Should().Contain("DeliveryId"));
+        var errors = logger.Snapshot();
+        errors.Should().HaveCount(2);
+        errors.Should().AllSatisfy(m => m.Should().Contain("DeliveryId"));
 
         // ...and the finally cleared both flags, so neither delivery id is wedged.
         (await queue.EnqueueAsync(Job(1))).Should().BeTrue("a failed delivery must be re-runnable");
@@ -171,12 +168,17 @@ public sealed class DeliveryQueueTests
         using var db = new TestDb();
         var seed = await DeliveryHost.SeedAsync(db, DateTime.UtcNow);
         var deliveryId = await DeliveryHost.AddDeliveryAsync(db, seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddMinutes(-1));
+        await using (var owner = db.NewContext())
+        {
+            await owner.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.CreatedByUserId, seed.PipelineCreatorId));
+        }
         var tokens = new TokensUntilShutdown();
         var queue = new DeliveryQueue();
         await using var services = DeliveryHost.Build(db, TimeProvider.System, () => tokens, queue);
         var worker = new DeliveryWorker(1, queue, services, new RecordingLogger(), new WorkerHeartbeatRegistry());
         // Queued by the scheduler: nobody started it, so it runs as nobody and is
-        // announced to the pipeline's creator.
+        // announced to the solution's followers, here only its owner (#1463).
         queue.TryEnqueue(new DeliveryJob(deliveryId,
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false))).Should().BeTrue();
 
@@ -202,6 +204,11 @@ public sealed class DeliveryQueueTests
         using var db = new TestDb();
         var seed = await DeliveryHost.SeedAsync(db, DateTime.UtcNow);
         var deliveryId = await DeliveryHost.AddDeliveryAsync(db, seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddMinutes(-1));
+        await using (var owner = db.NewContext())
+        {
+            await owner.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.CreatedByUserId, seed.PipelineCreatorId));
+        }
         var tokens = new TokensUntilShutdown();
         var queue = new DeliveryQueue();
         await using var services = DeliveryHost.Build(db, TimeProvider.System, () => tokens, queue);
@@ -248,7 +255,17 @@ public sealed class DeliveryQueueTests
     /// <summary>Captures the worker's error log so a drained-past-a-failure can be awaited deterministically.</summary>
     private sealed class RecordingLogger : ILogger<DeliveryWorker>
     {
-        public List<string> Errors { get; } = [];
+        private readonly List<string> _errors = [];
+        private readonly TaskCompletionSource _second = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes when the second error is logged.</summary>
+        public Task SecondError => _second.Task;
+
+        /// <summary>The errors so far, copied under the lock the worker writes them with.</summary>
+        public List<string> Snapshot()
+        {
+            lock (_errors) return [.. _errors];
+        }
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
@@ -257,7 +274,11 @@ public sealed class DeliveryQueueTests
             Func<TState, Exception?, string> formatter)
         {
             if (logLevel < LogLevel.Error) return;
-            lock (Errors) Errors.Add(formatter(state, exception));
+            lock (_errors)
+            {
+                _errors.Add(formatter(state, exception));
+                if (_errors.Count == 2) _second.TrySetResult();
+            }
         }
     }
 }

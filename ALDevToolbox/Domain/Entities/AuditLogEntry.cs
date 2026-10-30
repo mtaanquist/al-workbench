@@ -93,6 +93,13 @@ public enum AuditEntityType
     /// override. Filed under the organisation itself. See <c>.design/auth-and-audit.md</c>.
     /// </summary>
     Organization,
+
+    /// <summary>
+    /// A Sealed link created, extended or revoked. Written by <c>SealedLinkService</c> rather than
+    /// the interceptor: the row changes on every open, and those are kept with the link
+    /// for its sender instead. Named by the sender's note. See <c>.design/sealed.md</c>.
+    /// </summary>
+    SealedLink,
 }
 
 /// <summary>The kind of change captured by an audit row.</summary>

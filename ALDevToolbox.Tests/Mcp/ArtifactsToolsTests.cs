@@ -46,7 +46,7 @@ public sealed class ArtifactsToolsTests : IDisposable
         await using var read = _db.NewContext();
         var tools = NewTools(read);
 
-        (await tools.ListProjectsAsync()).Should().ContainSingle(p => p.Name == "CRONUS A/S");
+        (await tools.ListProjectsAsync()).Rows.Should().ContainSingle(p => p.Name == "CRONUS A/S");
         (await tools.ListProjectBuildsAsync("CRONUS A/S")).Should().ContainSingle();
         (await tools.ListProjectBuildsAsync(projectId.ToString())).Should().ContainSingle();
     }
@@ -231,6 +231,192 @@ public sealed class ArtifactsToolsTests : IDisposable
         (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 0)).Should().HaveCount(1, "a limit below one still returns the newest");
     }
 
+    [Fact]
+    public async Task List_builds_reads_further_back_from_the_oldest_build_returned()
+    {
+        int projectId;
+        var ids = new List<int>();
+        var start = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            for (var i = 0; i < 6; i++)
+            {
+                ids.Add(await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, start.AddHours(-i)));
+            }
+            // Two builds started in the same instant are told apart by id (#1526).
+            ids.Add(await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, start.AddHours(-5)));
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var newest = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3);
+        newest.Select(b => b.Id).Should().Equal(ids[0], ids[1], ids[2]);
+        var older = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3, beforeBuildId: newest[^1].Id);
+        older.Select(b => b.Id).Should().Equal(ids[3], ids[4], ids[6]);
+        var oldest = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3, beforeBuildId: older[^1].Id);
+        oldest.Select(b => b.Id).Should().Equal(ids[5]);
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", beforeBuildId: 999_999)).Should().BeEmpty("that build does not exist");
+    }
+
+    [Fact]
+    public async Task Build_cursors_only_accept_a_build_from_the_same_list()
+    {
+        int pipelineId, otherPipelineId, pipelineNewest, pipelineOlder, otherBuild;
+        var start = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            var otherProjectId = await SeedProjectAsync(ctx, "CRONUS International");
+            pipelineId = await SeedPipelineAsync(ctx, projectId, "main");
+            otherPipelineId = await SeedPipelineAsync(ctx, projectId, "test");
+            pipelineOlder = await SeedPipelineBuildAsync(ctx, projectId, pipelineId, start.AddHours(-1));
+            pipelineNewest = await SeedPipelineBuildAsync(ctx, projectId, pipelineId, start);
+            await SeedPipelineBuildAsync(ctx, projectId, otherPipelineId, start.AddHours(-2));
+            otherBuild = await SeedPipelineBuildAsync(ctx, otherProjectId, null, start.AddHours(1));
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        (await tools.ListPipelineBuildsAsync(pipelineId, beforeBuildId: pipelineNewest))
+            .Select(b => b.Id).Should().Equal(pipelineOlder);
+        var test = await tools.ListPipelineBuildsAsync(otherPipelineId);
+        (await tools.ListPipelineBuildsAsync(pipelineId, beforeBuildId: test.Single().Id))
+            .Should().BeEmpty("that build belongs to another pipeline");
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", beforeBuildId: otherBuild))
+            .Should().BeEmpty("that build belongs to another solution");
+    }
+
+    private static async Task<int> SeedPipelineBuildAsync(
+        Data.AppDbContext ctx, int projectId, int? pipelineId, DateTime startedAt)
+    {
+        var build = new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+            Status = ProjectBuildStatus.Ready, StartedAt = startedAt,
+        };
+        ctx.OeProjectBuilds.Add(build);
+        await ctx.SaveChangesAsync();
+        return build.Id;
+    }
+
+    [Fact]
+    public async Task List_pipelines_stops_at_the_limit_and_says_how_to_narrow_it()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            foreach (var name in new[] { "main", "test", "staging" })
+                await SeedPipelineAsync(ctx, projectId, name);
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var all = await tools.ListPipelinesAsync();
+        all.Rows.Should().HaveCount(3);
+        all.Truncated.Should().BeFalse();
+        var cut = await tools.ListPipelinesAsync(limit: 2);
+        cut.Rows.Should().HaveCount(2);
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 2 pipelines").And.Contain("search");
+    }
+
+    [Fact]
+    public async Task List_pipeline_builds_cuts_a_long_failure_message()
+    {
+        int pipelineId;
+        var longFailure = "Compilation failed: " + new string('x', 2_000);
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            pipelineId = await SeedPipelineAsync(ctx, projectId, "main");
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Status = ProjectBuildStatus.Failed, StartedAt = DateTime.UtcNow, FailureMessage = longFailure,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = (await NewTools(read).ListPipelineBuildsAsync(pipelineId)).Single();
+
+        row.FailureMessage!.Length.Should().BeLessThan(500);
+        row.FailureMessage.Should().StartWith("Compilation failed: ").And.Contain("get_solution_build");
+    }
+
+    [Fact]
+    public async Task List_solutions_stops_at_the_limit_and_says_how_to_narrow_it()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var name in new[] { "CRONUS A/S", "CRONUS Danmark", "CRONUS Sverige" })
+            {
+                await SeedProjectAsync(ctx, name);
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var cut = await tools.ListProjectsAsync(limit: 2);
+        cut.Rows.Select(r => r.Name).Should().Equal("CRONUS A/S", "CRONUS Danmark");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("search");
+
+        var all = await tools.ListProjectsAsync();
+        all.Rows.Should().HaveCount(3);
+        all.Truncated.Should().BeFalse();
+        all.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public void A_long_changelog_keeps_the_first_commits_and_counts_the_rest()
+    {
+        var commits = Enumerable.Range(1, ArtifactsTools.MaxChangelogCommits + 5)
+            .Select(i => new ChangelogRow($"abc{i:D4}", $"Commit {i}", "CRONUS dev", null))
+            .ToList();
+        var groups = new List<ChangelogGroup> { new("cronus-core", commits), new("cronus-small", commits.Take(2).ToList()) };
+
+        var capped = ArtifactsTools.CapChangelog(groups);
+
+        capped[0].Commits.Should().HaveCount(ArtifactsTools.MaxChangelogCommits + 1);
+        capped[0].Commits[^1].ShortHash.Should().BeEmpty("the summary row carries no hash, like the service's own notes");
+        capped[0].Commits[^1].Message.Should().StartWith("5 more commits");
+        capped[1].Commits.Should().HaveCount(2, "a short changelog is left alone");
+    }
+
+    [Fact]
+    public void A_changelog_the_service_already_cut_keeps_its_note_and_counts_only_commits()
+    {
+        var commits = Enumerable.Range(1, 100)
+            .Select(i => new ChangelogRow($"abc{i:D4}", $"Commit {i}", "CRONUS dev", null))
+            .Append(new ChangelogRow(string.Empty, "...and more commits not shown (the changelog is capped at 100)", string.Empty, null))
+            .ToList();
+
+        var capped = ArtifactsTools.CapChangelog([new ChangelogGroup("cronus-core", commits)]);
+
+        var rows = capped[0].Commits;
+        rows.Should().HaveCount(ArtifactsTools.MaxChangelogCommits + 2);
+        rows[ArtifactsTools.MaxChangelogCommits].Message.Should().StartWith("At least 80 more commits");
+        rows[^1].Message.Should().Contain("capped at 100", "the service's own note is kept");
+    }
+
+    [Fact]
+    public void A_list_row_failure_message_is_cut_and_says_where_the_rest_is()
+    {
+        McpListLimit.ShortenFailure(null, "get_solution_build").Should().BeNull();
+        McpListLimit.ShortenFailure("Short failure.", "get_solution_build").Should().Be("Short failure.");
+
+        var cut = McpListLimit.ShortenFailure(new string('x', 1000), "get_solution_build");
+        cut!.Should().StartWith(new string('x', McpListLimit.MaxListFailureMessage) + "...");
+        cut.Should().Contain("get_solution_build");
+        cut.Length.Should().BeLessThan(400);
+    }
+
     private async Task SeedUsersAsync()
     {
         await using var ctx = _db.NewContext();
@@ -335,7 +521,7 @@ public sealed class ArtifactsToolsTests : IDisposable
         {
             ActAs(userId, siteAdmin);
             await using var read = _db.NewContext();
-            var rows = await NewTools(read).ListProjectsAsync();
+            var rows = (await NewTools(read).ListProjectsAsync()).Rows;
             rows.Any(r => r.Name == "CRONUS Denmark").Should().Be(
                 expected, $"user {userId} (siteAdmin={siteAdmin}) on a {visibility} project");
             // Never a locked row: the agent surface has no use for a name it can't act on.
@@ -418,6 +604,18 @@ public sealed class ArtifactsToolsTests : IDisposable
             // Both releases are empty, so the diff is empty - but it runs.
             (await NewTools(read).CompareProjectBuildsAsync(firstBuild, secondBuild)).Rows.Should().BeEmpty();
         }
+    }
+
+    private static async Task<int> SeedPipelineAsync(Data.AppDbContext ctx, int projectId, string name)
+    {
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name, Branch = "main",
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OePipelines.Add(pipeline);
+        await ctx.SaveChangesAsync();
+        return pipeline.Id;
     }
 
     private static async Task<int> SeedProjectAsync(Data.AppDbContext ctx, string name)

@@ -63,8 +63,8 @@ public sealed class RecoveryCodeService
     /// </summary>
     public async Task<bool> ConsumeAsync(int userId, string code, CancellationToken ct = default)
     {
+        if (!IsWellFormed(code)) return false;
         var normalised = Normalise(code);
-        if (normalised.Length != GroupLength * 2) return false;
 
         // Fence category 4 (explicitly scoped user-id lookup): pinned to c.UserId == userId
         // (the half-authenticated MFA state).
@@ -86,6 +86,14 @@ public sealed class RecoveryCodeService
         }
         return false;
     }
+
+    /// <summary>
+    /// Whether <paramref name="code"/> has the shape of a recovery code: ten
+    /// characters once dashes and spaces are dropped. Anything else cannot match,
+    /// so the sign-in challenge checks this before it takes one of the person's
+    /// limited guesses.
+    /// </summary>
+    public static bool IsWellFormed(string? code) => Normalise(code ?? string.Empty).Length == GroupLength * 2;
 
     /// <summary>Count of still-usable codes — surfaced on the /account page.</summary>
     public async Task<int> RemainingAsync(int userId, CancellationToken ct = default) =>

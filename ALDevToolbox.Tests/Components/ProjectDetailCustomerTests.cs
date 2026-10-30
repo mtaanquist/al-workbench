@@ -20,7 +20,7 @@ namespace ALDevToolbox.Tests.Components;
 /// the named editor is the consultant who owns the customer. It reads first and edits
 /// second, which is why there is no input on screen until somebody asks for one.
 /// </summary>
-public sealed class ProjectDetailCustomerTests : IDisposable
+public sealed class ProjectDetailCustomerTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -53,10 +53,13 @@ public sealed class ProjectDetailCustomerTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 

@@ -1277,6 +1277,8 @@ function initOne(root) {
                     return onFindReferences(args[0]);
                 case "OnFindSystemReferences":
                     return mintObjectSystemSession(args[0]);
+                case "OnFindSystemReferencesAt":
+                    return onFindSystemReferencesAt(args[0], args[1]);
                 case "OnFindMemberReferences":
                     return mintMemberSession(args[0]);
                 case "OnFindReferencesAt":
@@ -1371,6 +1373,8 @@ function initOne(root) {
         folding: !isCompare,
         procedures,
         dotNetRef: jsBridge,
+        // This host answers "Find built-in calls" (OnFindSystemReferences*).
+        builtInCalls: true,
         // VS Code-style status bar at the bottom of the editor. Shows
         // cursor line/col, total lines, selection size when a range is
         // active, and — when the cursor sits inside a procedure — the
@@ -1519,7 +1523,7 @@ function initOne(root) {
             sysItem.type = "button";
             sysItem.className = "source-viewer__outline-menu-item";
             sysItem.setAttribute("role", "menuitem");
-            sysItem.textContent = "Find built-in calls (Insert, Modify, SetRange...)";
+            sysItem.textContent = "Find built-in calls";
             sysItem.addEventListener("click", async () => {
                 close(false);
                 await mintObjectSystemSession(objectId);
@@ -1575,7 +1579,7 @@ function initOne(root) {
 
     async function mintObjectSystemSession(objectId) {
         clearNotice();
-        busyStart("Searching system references...");
+        busyStart("Searching built-in calls...");
         try {
             const res = await fetch(
                 withFrom(`/api/object-explorer/system-references/sessions/from-object/${objectId}`),
@@ -1588,6 +1592,30 @@ function initOne(root) {
             applyReferenceSession(session);
         } catch (err) {
             console.warn("system-references from-object failed:", err);
+            showNotice("Couldn't reach the server.");
+        } finally {
+            busyEnd();
+        }
+    }
+
+    async function onFindSystemReferencesAt(line, column) {
+        clearNotice();
+        busyStart("Searching built-in calls...");
+        try {
+            const res = await fetch(
+                withFrom(`/api/object-explorer/system-references/sessions/at-position?fileId=${fileId}&line=${line}&column=${column}`),
+                { credentials: "same-origin" });
+            if (res.status === 204 || res.status === 404) {
+                showNotice("Built-in calls are found for an object. Right-click the name of a table, page, report or codeunit, or a variable of one.");
+                return;
+            }
+            if (!res.ok) {
+                showNotice("Couldn't look up built-in calls (server error).");
+                return;
+            }
+            applyReferenceSession(await res.json());
+        } catch (err) {
+            console.warn("Find built-in calls at position failed:", err);
             showNotice("Couldn't reach the server.");
         } finally {
             busyEnd();
@@ -1659,6 +1687,29 @@ function initOne(root) {
         url.searchParams.set("refSet", session.token);
         history.replaceState(null, "", url.pathname + url.search);
     }
+
+    // A built-in calls list too long to hold whole hands its method picker
+    // to the server: picking a method fetches every call to it.
+    root.addEventListener("sv-method-narrow", async (e) => {
+        const { token, method } = e.detail;
+        clearNotice();
+        busyStart("Searching built-in calls...");
+        try {
+            const res = await fetch(
+                `/api/object-explorer/system-references/sessions/${encodeURIComponent(token)}/narrow?method=${encodeURIComponent(method)}`,
+                { credentials: "same-origin" });
+            if (!res.ok) {
+                showNotice("Couldn't look up those calls. Run Find built-in calls again.");
+                return;
+            }
+            applyReferenceSession(await res.json());
+        } catch (err) {
+            console.warn("Narrowing built-in calls failed:", err);
+            showNotice("Couldn't reach the server.");
+        } finally {
+            busyEnd();
+        }
+    });
 
     async function onGoToDefinition(line, column) {
         clearNotice();
@@ -1942,6 +1993,16 @@ const SEARCH_ICON_SVG =
     '<svg class="search__icon" viewBox="0 0 24 24" width="15" height="15" fill="none" ' +
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>';
+// The caret on the built-in calls method picker. Pinned against
+// Resources/Icons/chevron-down.svg.
+const SELECT_CARET_ICON_SVG =
+    '<svg class="select-wrap__caret" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+// The tick in the references panel's "Hide temporary records" box. Pinned
+// against Resources/Icons/check.svg.
+const CHECK_ICON_SVG =
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 // The explorer tree's four glyphs, same rules as above. Pinned against
 // Resources/Icons/{package,folder,file-code,chevron-right}.svg.
 const PACKAGE_ICON_SVG =
@@ -2039,9 +2100,10 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     section.className = "pane__sec";
     panel.appendChild(section);
 
+    const builtInCalls = session.kind === "built_in_calls";
     const heading = document.createElement("div");
     heading.className = "pane__sec-h sv-sec-h";
-    heading.append("References to ");
+    heading.append(builtInCalls ? "Built-in calls on " : "References to ");
     heading.appendChild(sectionName(session.targetName || "this name"));
     const countChip = document.createElement("span");
     countChip.className = "pane__count";
@@ -2072,15 +2134,22 @@ function renderReferencesPanel(root, session, fileId, editorId) {
         const notice = document.createElement("p");
         notice.className = "u-muted source-viewer__refs-truncated";
         notice.setAttribute("role", "status");
-        notice.textContent =
-            `Showing the first ${count.toLocaleString()} matches. Use the filter box below to narrow the list.`;
+        // "Where set" filters the rows in hand, so on a cut list it can miss
+        // writes past the cap; say so where the switch is offered.
+        notice.textContent = builtInCalls
+            ? `Showing the first ${count.toLocaleString()} calls. Pick a method or use the filter box below to narrow the list.`
+            : session.results.some(r => r.usage)
+                ? `Showing the first ${count.toLocaleString()} matches, so "Where set" may miss some. Use the filter box below to narrow the list.`
+                : `Showing the first ${count.toLocaleString()} matches. Use the filter box below to narrow the list.`;
         section.appendChild(notice);
     }
 
     if (count === 0) {
         const p = document.createElement("p");
         p.className = "u-muted source-viewer__panel-empty";
-        p.textContent = "No references found in this release or the apps it depends on.";
+        p.textContent = builtInCalls
+            ? "No calls to Insert, Modify, Get, Run or the other built-in methods on this object in this release or the apps it depends on."
+            : "No references found in this release or the apps it depends on.";
         section.appendChild(p);
         return;
     }
@@ -2102,6 +2171,19 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     const tools = document.createElement("div");
     tools.className = "sv-sec-tools";
     tools.appendChild(search);
+    // Field and variable references know whether they read or set the value
+    // (and, for fields, whether the record is temporary): offer those as
+    // filters only when the list has something for them to act on.
+    const hasUsage = session.results.some(r => r.usage);
+    if (hasUsage) {
+        tools.appendChild(buildUsageFilter(session.results.some(r => r.isTemporary)));
+    }
+    // Built-in calls: pick one method (Insert, Modify, RunModal...) when the
+    // list holds more than one.
+    if (builtInCalls) {
+        const methodFilter = buildMethodFilter(session);
+        if (methodFilter) tools.appendChild(methodFilter);
+    }
     section.appendChild(tools);
 
     // Group references by their source object so every place that touches
@@ -2186,9 +2268,20 @@ function wireRefsFilter(panel) {
     // narrows the set" then costs a handful of style writes instead of 5000.
     const setHidden = (el, value) => { if (el.hidden !== value) el.hidden = value; };
 
+    // The read / set and temporary filters, when the panel offers them.
+    const usageTabs = Array.from(panel.querySelectorAll("[data-usage-filter]"));
+    const hideTemporary = panel.querySelector("[data-hide-temporary]");
+    const usageMode = () =>
+        usageTabs.find(t => t.classList.contains("is-active"))?.dataset.usageFilter ?? "all";
+
+    const methodSelect = panel.querySelector("[data-method-filter]");
+
     const run = () => {
         const needle = filter.value.trim().toLowerCase();
-        if (needle.length === 0) {
+        const setOnly = usageMode() === "set";
+        const noTemporary = hideTemporary?.checked === true;
+        const method = methodSelect?.dataset.narrowToken ? "" : (methodSelect?.value ?? "");
+        if (needle.length === 0 && !setOnly && !noTemporary && method === "") {
             // Same reason as wireOutlineFilter: clearing the box restores
             // everything, rather than leaving whatever held no rows hidden.
             for (let i = 0; i < sections.length; i++) {
@@ -2204,7 +2297,11 @@ function wireRefsFilter(panel) {
             let sectionVisible = false;
             for (const item of rowsBySection[i]) {
                 const hay = item.dataset.filter ?? "";
-                const match = hay.includes(needle);
+                const usage = item.dataset.usage;
+                const match = (needle.length === 0 || hay.includes(needle))
+                    && (!setOnly || (usage != null && usage !== "read"))
+                    && (!noTemporary || item.dataset.temporary !== "1")
+                    && (method === "" || item.dataset.method === method);
                 setHidden(item, !match);
                 if (match) sectionVisible = true;
             }
@@ -2230,6 +2327,136 @@ function wireRefsFilter(panel) {
         clearTimeout(timer);
         timer = setTimeout(run, SEARCH_DEBOUNCE_MS);
     });
+    for (const tab of usageTabs) {
+        tab.addEventListener("click", () => {
+            for (const t of usageTabs) {
+                const active = t === tab;
+                t.classList.toggle("is-active", active);
+                t.setAttribute("aria-pressed", active ? "true" : "false");
+            }
+            run();
+        });
+    }
+    hideTemporary?.addEventListener("change", run);
+    if (methodSelect?.dataset.narrowToken) {
+        // Rows past the cap are not in the panel, so ask the server.
+        methodSelect.addEventListener("change", () => {
+            methodSelect.dispatchEvent(new CustomEvent("sv-method-narrow", {
+                bubbles: true,
+                detail: { token: methodSelect.dataset.narrowToken, method: methodSelect.value },
+            }));
+        });
+    } else {
+        methodSelect?.addEventListener("change", run);
+    }
+}
+
+/// The method picker over a Find built-in calls list: every method the list
+/// holds, most used first, with its count. Null when there is only one.
+/// C/AL writes INSERT where AL writes Insert, so names are matched without
+/// regard to case and shown as most often written.
+function buildMethodFilter(session) {
+    if (session.methodNames?.length) return buildServerMethodFilter(session);
+    const rows = session.results;
+    const byMethod = new Map();
+    for (const r of rows) {
+        if (r.category !== "system_call" || !r.memberName) continue;
+        const key = r.memberName.toLowerCase();
+        const entry = byMethod.get(key) ?? { count: 0, spellings: new Map() };
+        entry.count++;
+        entry.spellings.set(r.memberName, (entry.spellings.get(r.memberName) ?? 0) + 1);
+        byMethod.set(key, entry);
+    }
+    if (byMethod.size < 2) return null;
+
+    const wrap = document.createElement("span");
+    wrap.className = "select-wrap sv-method-filter";
+    const select = document.createElement("select");
+    select.className = "select";
+    select.dataset.methodFilter = "";
+    select.setAttribute("aria-label", "Show calls to");
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = `All methods (${rows.length.toLocaleString()})`;
+    select.appendChild(all);
+    const sorted = Array.from(byMethod.entries())
+        .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]));
+    for (const [key, entry] of sorted) {
+        const label = Array.from(entry.spellings.entries()).sort((a, b) => b[1] - a[1])[0][0];
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = `${label} (${entry.count.toLocaleString()})`;
+        select.appendChild(option);
+    }
+    wrap.appendChild(select);
+    wrap.insertAdjacentHTML("beforeend", SELECT_CARET_ICON_SVG);
+    return wrap;
+}
+
+/// The method picker over a list cut at the cap: counting the rows in hand
+/// would undercount, so it lists the methods without counts and each pick
+/// asks the server for that method's calls (see wireRefsFilter).
+function buildServerMethodFilter(session) {
+    const wrap = document.createElement("span");
+    wrap.className = "select-wrap sv-method-filter";
+    const select = document.createElement("select");
+    select.className = "select";
+    select.dataset.methodFilter = "";
+    select.dataset.narrowToken = session.token;
+    select.setAttribute("aria-label", "Show calls to");
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All methods";
+    select.appendChild(all);
+    const current = (session.method ?? "").toLowerCase();
+    for (const name of session.methodNames) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name.toLowerCase() === current
+            ? `${name} (${session.results.length.toLocaleString()}${session.truncated ? "+" : ""})`
+            : name;
+        option.selected = name.toLowerCase() === current;
+        select.appendChild(option);
+    }
+    wrap.appendChild(select);
+    wrap.insertAdjacentHTML("beforeend", SELECT_CARET_ICON_SVG);
+    return wrap;
+}
+
+/// The read / set switch and the temporary-record box under the references
+/// filter. Both narrow the rows already in the panel; nothing is fetched.
+function buildUsageFilter(hasTemporary) {
+    const wrap = document.createElement("div");
+    wrap.className = "sv-usage-filter";
+
+    const tabs = document.createElement("div");
+    tabs.className = "pill-tabs pill-tabs--equal";
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Show uses");
+    for (const [mode, label] of [["all", "Read or set"], ["set", "Where set"]]) {
+        const tab = document.createElement("button");
+        tab.type = "button";
+        tab.className = mode === "all" ? "pill-tab is-active" : "pill-tab";
+        tab.dataset.usageFilter = mode;
+        tab.setAttribute("aria-pressed", mode === "all" ? "true" : "false");
+        tab.textContent = label;
+        tabs.appendChild(tab);
+    }
+    wrap.appendChild(tabs);
+
+    if (hasTemporary) {
+        const check = document.createElement("label");
+        check.className = "check";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.dataset.hideTemporary = "";
+        const box = document.createElement("span");
+        box.className = "check__box";
+        box.innerHTML = CHECK_ICON_SVG;
+        check.append(input, box, "Hide temporary records");
+        wrap.appendChild(check);
+    }
+    return wrap;
 }
 
 // Within an object, order rows by reference category (declarations first,
@@ -2417,8 +2644,28 @@ function buildRefsRow(r, session, fileId, editorId) {
             }
             : null,
     });
+    if (r.usage) row.dataset.usage = r.usage;
+    if (r.category === "system_call" && r.memberName) row.dataset.method = r.memberName.toLowerCase();
+    if (r.isTemporary) row.dataset.temporary = "1";
     attachRefsTooltip(row, r);
     return row;
+}
+
+/// What the reference does with the field or variable, as the hover card
+/// says it. Mirrors the ReferenceUsage values on the server.
+function usageLabel(usage, isTemporary) {
+    let text;
+    switch (usage) {
+        case "read":         text = "Reads the value"; break;
+        case "assign":       text = "Sets the value with :="; break;
+        case "validate":     text = "Sets the value with Validate"; break;
+        case "modify_all":   text = "Sets the value with ModifyAll"; break;
+        case "evaluate":     text = "Sets the value with Evaluate"; break;
+        case "clear":        text = "Clears the value"; break;
+        case "record_write": text = "Overwrites the record"; break;
+        default:             return "";
+    }
+    return isTemporary ? `${text}, on a temporary record` : text;
 }
 
 /// Plain-text fallback for the row's `title`, for keyboard users and for
@@ -2436,6 +2683,8 @@ function refsRowTitle(r) {
     if (r.sourceFilePath) parts.push(r.sourceFilePath);
     const kind = referenceKindLabel(r.referenceKind);
     if (kind) parts.push(kind);
+    const usage = usageLabel(r.usage, r.isTemporary);
+    if (usage) parts.push(usage);
     return parts.join(" - ");
 }
 
@@ -2823,6 +3072,16 @@ function showRefsTooltip(anchor, r) {
     kindRow.className = "source-viewer__refs-tooltip-kind u-muted";
     kindRow.textContent = describeReferenceCategory(r.category, r.referenceKind);
     el.appendChild(kindRow);
+
+    // Read or set, and through a temporary record - the two things the
+    // panel's filters work on, so the row says which side it fell on.
+    const usage = usageLabel(r.usage, r.isTemporary);
+    if (usage) {
+        const usageRow = document.createElement("div");
+        usageRow.className = "source-viewer__refs-tooltip-kind u-muted";
+        usageRow.textContent = usage;
+        el.appendChild(usageRow);
+    }
 
     positionRefsTooltip(el, anchor);
     el.hidden = false;

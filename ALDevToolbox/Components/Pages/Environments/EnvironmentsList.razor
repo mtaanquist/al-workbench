@@ -1,12 +1,13 @@
 @page "/environments"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
 @rendermode InteractiveServer
-@implements IDisposable
+@implements IAsyncDisposable
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ILogger<EnvironmentsList> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
@@ -587,7 +588,12 @@
         _ => "Every environment you can reach",
     };
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    /// <summary>The reads and ticks under way, so leaving the page can cancel them and wait.</summary>
+    private readonly PageCalls _calls = new();
+
+    // Tracked, like the click's refresh below: both read with the page's token, and a
+    // cancelled query still unwinding has to be waited for on the way out.
+    protected override Task OnInitializedAsync() => _calls.Track(LoadAsync());
 
     /// <summary>Counts the listings started, so an earlier one finishing late doesn't overwrite a later one.</summary>
     private int _loads;
@@ -602,13 +608,17 @@
         try
         {
             var rows = ownScope
-                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true))
-                : await Fleet.ListFleetAsync(includeSoftDeleted: true);
+                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true, ct: _calls.Token))
+                : await Fleet.ListFleetAsync(includeSoftDeleted: true, ct: _calls.Token);
             if (load != _loads) return;
             _rows = rows;
             _error = null;
             _loadFailed = false;
             _selection.Prune(Selectable(_rows).Select(r => r.EnvironmentId));
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            // The page was left mid-read; nobody is left to show the rows to.
         }
         catch (Exception ex)
         {
@@ -633,7 +643,7 @@
     /// reload - the same shape the Upgrades page uses. A pressed Refresh always asks:
     /// the person has decided the rows are too old, whatever the timestamps say.
     /// </summary>
-    private Task RefreshAsync() => RequestRefreshAsync(force: true);
+    private Task RefreshAsync() => _calls.Track(RequestRefreshAsync(force: true));
 
     /// <summary>
     /// The one path both Refresh and the auto-refresh tick take. Unforced, the service
@@ -651,7 +661,7 @@
             var projectIds = _rows.Select(r => r.ProjectId).Distinct().ToList();
             // On a scope of its own: the auto-refresh timer comes through here too, and
             // its tick can land while a click is still awaiting the circuit's context.
-            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force));
+            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force, _calls.Token));
             // Skipped rows are solutions this person may see but not act on. Saying
             // "asking about 3 customers" when 3 were asked and 5 were skipped is the
             // honest count, and it explains a table that only partly moves.
@@ -664,6 +674,10 @@
                 return;
             }
             StartPolling();
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            // The page was left while the request was on its way.
         }
         catch (Exception ex)
         {
@@ -715,17 +729,24 @@
     // few minutes rather than leaving a stale table with no way forward.
     private static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan PollFor = TimeSpan.FromMinutes(3);
-    private System.Threading.Timer? _poll;
+    private ITimer? _poll;
     private DateTime _pollUntilUtc;
 
-    private void StartPolling()
+    /// <summary>Whether the re-read timer is running, for the tests of leaving the page.</summary>
+    internal bool IsPolling => _poll is not null;
+
+    /// <summary>Internal so the tests of leaving the page can start it late; the page calls it after a refresh request.</summary>
+    internal void StartPolling()
     {
+        // A request that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         _poll?.Dispose();
-        _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = PollTickAsync(), null, PollEvery, PollEvery);
+        _pollUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(PollFor);
+        _poll = Clock.CreateTimer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
-    private async Task PollTickAsync()
+    /// <summary>One re-read. Internal so a test can drive it without waiting on the timer.</summary>
+    internal async Task PollTickAsync()
     {
         // On the renderer's context, so the rows land between a click's steps; the read
         // itself is on a scope of its own (see OnOwnScopeAsync).
@@ -733,9 +754,15 @@
         {
             // A re-read waits for the next tick rather than moving the rows under the
             // dialog while it works.
+            if (_calls.IsGone)
+            {
+                _poll?.Dispose();
+                _poll = null;
+                return;
+            }
             if (_bulkWindowDialog?.IsWorking == true) return;
             await LoadAsync(ownScope: true);
-            if (DateTime.UtcNow >= _pollUntilUtc)
+            if (Clock.GetUtcNow().UtcDateTime >= _pollUntilUtc)
             {
                 _poll?.Dispose();
                 _poll = null;
@@ -748,11 +775,14 @@
         });
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         _poll?.Dispose();
-        _searchDebounce.Dispose();
+        _searchDebounce?.Dispose();
         _autoTimer?.Dispose();
+        // A tick that had already fired may still be reading; wait for it, so leaving
+        // the page means nothing of its is still on its way to the database.
+        await _calls.LeaveAsync();
     }
 
     // ── Auto-refresh ─────────────────────────────────────────────────────
@@ -772,7 +802,7 @@
 
     private bool _autoRefresh;
     private bool _autoFromAddressDone;
-    private System.Threading.Timer? _autoTimer;
+    private ITimer? _autoTimer;
     private DateTime _autoUntilUtc;
 
     // After a render rather than in OnInitializedAsync: a prerender must never start a
@@ -805,15 +835,21 @@
 
     private void StartAutoRefresh()
     {
+        if (_calls.IsGone) return;
         _autoTimer?.Dispose();
         _autoRefresh = true;
-        _autoUntilUtc = DateTime.UtcNow.Add(AutoRefreshFor);
-        _autoTimer = new System.Threading.Timer(
-            _ => _ = InvokeAsync(async () =>
+        _autoUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(AutoRefreshFor);
+        _autoTimer = Clock.CreateTimer(
+            _ => _ = _calls.Track(InvokeAsync(async () =>
             {
+                if (_calls.IsGone)
+                {
+                    StopAutoRefresh();
+                    return;
+                }
                 await AutoRefreshTickAsync();
                 StateHasChanged();
-            }),
+            })),
             null, AutoRefreshEvery, AutoRefreshEvery);
     }
 
@@ -832,7 +868,7 @@
     internal async Task AutoRefreshTickAsync()
     {
         if (!_autoRefresh) return;
-        if (DateTime.UtcNow >= _autoUntilUtc)
+        if (Clock.GetUtcNow().UtcDateTime >= _autoUntilUtc)
         {
             StopAutoRefresh();
             _refreshNote = "Stopped refreshing every 5 minutes after two hours. Tick the box again to carry on.";
@@ -857,7 +893,10 @@
     /// <summary>How long the search box waits for typing to stop before it filters. Tests set it to zero.</summary>
     internal static TimeSpan SearchDebounce { get; set; } = TimeSpan.FromMilliseconds(200);
 
-    private readonly Debouncer _searchDebounce = new(SearchDebounce);
+    // Made on the first keystroke rather than with the page, because Clock is injected
+    // after the fields are set; a test moves that clock instead of waiting.
+    private Debouncer? _searchDebounce;
+    private Debouncer SearchDebouncer => _searchDebounce ??= new(SearchDebounce, Clock);
 
     // The box is bound to what is being typed; the table filters on _search, which
     // catches up once typing pauses (#981). Binding the box straight to _search would
@@ -865,7 +904,7 @@
     private string _searchInput = string.Empty;
 
     private void OnSearchInput() =>
-        _searchDebounce.Trigger(() => InvokeAsync(() =>
+        SearchDebouncer.Trigger(() => InvokeAsync(() =>
         {
             _search = _searchInput;
             StateHasChanged();
@@ -882,7 +921,7 @@
 
     private void ClearFilters()
     {
-        _searchDebounce.Cancel();
+        _searchDebounce?.Cancel();
         _search = _searchInput = string.Empty;
         _solutionFilter = string.Empty;
         _typeFilter = string.Empty;
@@ -1028,13 +1067,13 @@
     /// being recoverable is the bold line above; an unknown one is said plainly there
     /// rather than left as a dash the reader has to interpret as "no deadline".)
     /// </summary>
-    private static string RecoverWindow(UpgradeFleetRow row)
+    private string RecoverWindow(UpgradeFleetRow row)
     {
         if (row.HardDeletePendingOn is not { } gone)
         {
             return "Deleted";
         }
-        return (gone.Date - DateTime.UtcNow.Date).Days switch
+        return (gone.Date - Clock.GetUtcNow().UtcDateTime.Date).Days switch
         {
             < 0 => "Past the date Business Central gave",
             0 => "Today is the last day to bring it back",
@@ -1064,7 +1103,7 @@
         // the warning on for as long as one environment stays unreachable, and a
         // banner that never clears is one people stop seeing.
         var anyStale = rows.Any(r =>
-            r.EnvironmentFetchedAt is { } at && DateTime.UtcNow - at > StaleAfter);
+            r.EnvironmentFetchedAt is { } at && Clock.GetUtcNow().UtcDateTime - at > StaleAfter);
         if (anyStale) classes += "freshness--stale";
         if (_refreshing) classes += " is-refreshing";
         return classes.Trim();

@@ -123,6 +123,38 @@ public sealed class UpgradeActionServiceTests : IDisposable
         _f.Admin.Writes.Should().Be(0);
     }
 
+    /// <summary>
+    /// The grant is checked against the solution the request names, so the environment has
+    /// to be that solution's. Here the person holds the update grant on the first customer
+    /// only and names the second customer's environment under it. A booking would otherwise
+    /// land as a row on the first customer that the worker fires at the second.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_action_cannot_name_another_solutions_environment(bool booked)
+    {
+        var (projectId, _) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (otherProjectId, otherEnvId) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await using (var write = _f.Db.NewContext())
+        {
+            await write.OeProjectTeams.Where(t => t.ProjectId == otherProjectId).ExecuteDeleteAsync();
+        }
+        DateTimeOffset? slot = booked ? _f.Clock.GetUtcNow().AddHours(12) : null;
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, otherEnvId, UpgradeActionKind.RunNow, slot);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Environment"]
+                .Should().Be("That environment no longer exists. Refresh the list and try again.");
+        }
+
+        _f.Admin.Writes.Should().Be(0);
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(0);
+    }
+
     // ── Cancelling ──────────────────────────────────────────────────────
 
     [Fact]
