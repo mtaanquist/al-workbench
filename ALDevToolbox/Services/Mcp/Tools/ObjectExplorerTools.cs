@@ -42,16 +42,87 @@ public sealed class ObjectExplorerTools
         _comparison = comparison;
     }
 
+    /// <summary>Default row count for <c>list_releases</c>: enough for a version list, small enough to read in one response.</summary>
+    private const int DefaultReleaseListLimit = 50;
+
+    /// <summary>The <c>kind</c> values <c>list_releases</c> accepts; "solution" names the pipeline builds, stored as kind "project".</summary>
+    private static readonly string[] ReleaseListKinds = ["first_party", "third_party", "cal", "solution"];
+
     [McpServerTool(Name = "list_releases", ReadOnly = true)]
-    [Description("Lists the BC releases you can search (the version snapshots from which Object Explorer was populated) - the same list the Releases page shows - including Microsoft (kind 'first_party'), third-party ('third_party'), and legacy C/AL TXT imports ('cal'). Releases still importing or whose import failed are left out, as are the empty symbol packages builds fetch. Returns each release's id, Label (e.g. 'BC 28.1'), kind, BC version, status, and IsPrerelease — true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run.")]
-    public async Task<IReadOnlyList<ReleaseListItem>> ListReleasesAsync(CancellationToken ct = default) =>
-        // Project builds are excluded — they're served through the Artifacts surface
-        // (list_pipelines / list_pipeline_builds / get_solution_build), not the general
-        // Object Explorer release list. See .design/artifacts.md.
+    [Description("Lists the releases you can search with the other Object Explorer tools - the same list the Releases page shows. That is Microsoft's Business Central releases (kind 'first_party'), third-party apps ('third_party'), legacy C/AL TXT imports ('cal'), and the newest ready build of each solution's build pipeline ('solution'), which is where a customer's own extensions are: pass the customer or solution name as search to find them, and use the id, since builds of one solution on the same BC version share a label. Releases still importing or whose import failed are left out. Returns each release's id, label (e.g. 'BC 28.1'), kind, BC version, publisher, the release it was layered on, the solution and pipeline for a solution build, and IsPrerelease - true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run. Ordered Microsoft and other imported releases first, newest BC version first, then the solution builds by solution name; returns the first 50 unless you raise limit, and Truncated and Note say what was left out, so pass search or kind rather than paging. For an older build of a solution, use list_solution_builds and pass its releaseId.")]
+    public async Task<ReleaseListResult> ListReleasesAsync(
+        [Description("Optional case-insensitive substring of the release label, publisher, BC version, solution name or pipeline name: a customer's name finds their solution's build, 'Continia' that vendor's apps, '28.5' one version. Null lists every release up to limit.")] string? search = null,
+        [Description("Optional kind: 'first_party' (Microsoft), 'third_party', 'cal' or 'solution'. Null lists every kind.")] string? kind = null,
+        [Description("How many to return. Default 50, at least 1, at most 200.")] int limit = DefaultReleaseListLimit,
+        CancellationToken ct = default)
+    {
+        var wantedKind = kind?.Trim().ToLowerInvariant();
+        if (!string.IsNullOrEmpty(wantedKind) && !ReleaseListKinds.Contains(wantedKind))
+        {
+            throw new McpException($"Unknown kind '{kind}'. Use one of: {string.Join(", ", ReleaseListKinds)}.");
+        }
+        var cap = Math.Clamp(limit, 1, MaxResults);
+
+        // Project builds are otherwise served through the Artifacts tools; the one
+        // exception is the newest ready build per pipeline, which the Releases page
+        // lists on its Solutions tab. Leaving it out here sent agents looking
+        // for a customer's code on GitHub instead (see .design/artifacts.md).
         // browsableOnly: the Releases page's list. A failed or importing release
         // cannot be searched, and the empty symbol packages builds pull would grow
         // the list without bound (#1344).
-        await _explorer.ListReleasesAsync(includeSoftDeleted: false, browsableOnly: true, ct: ct);
+        var releases = await _explorer.ListReleasesAsync(includeSoftDeleted: false, browsableOnly: true, ct: ct);
+        var pipelineBuilds = await _explorer.ListLatestPipelineBuildReleasesAsync(ct);
+
+        var matched = releases.Concat(pipelineBuilds)
+            .Where(r => MatchesReleaseSearch(r, search))
+            .Select(ReleaseSummary.From)
+            .Where(r => string.IsNullOrEmpty(wantedKind) || r.Kind == wantedKind)
+            .ToList();
+        var truncated = matched.Count > cap;
+        return new ReleaseListResult(
+            matched.Take(cap).ToList(),
+            truncated,
+            truncated ? TruncationNote(matched, cap) : NoMatchNote(matched, search));
+    }
+
+    /// <summary>
+    /// The next step when a search finds nothing. The name an agent was given is
+    /// often a short name or a repository name, which list_solutions matches and
+    /// this list does not.
+    /// </summary>
+    private static string? NoMatchNote(List<ReleaseSummary> matched, string? search) =>
+        matched.Count == 0 && !string.IsNullOrWhiteSpace(search)
+            ? $"No release matches '{search.Trim()}'. If that is a customer, call list_solutions with it as search "
+              + "(it also matches short names and repository names), then list_solution_builds for the releaseId of its builds."
+            : null;
+
+    /// <summary>
+    /// The Releases page's search: a substring of label, publisher, BC version,
+    /// solution or pipeline name. Matched on the service row rather than the
+    /// summary, because an older manual import still carries the customer name
+    /// it was filed under, and the page finds it by that name too.
+    /// </summary>
+    private static bool MatchesReleaseSearch(ReleaseListItem r, string? search)
+    {
+        if (string.IsNullOrWhiteSpace(search)) return true;
+        var q = search.Trim();
+        return Has(r.Label, q) || Has(r.Publisher, q) || Has(r.BcVersion, q)
+            || Has(r.ProjectName, q) || Has(r.PipelineName, q);
+
+        static bool Has(string? value, string needle) =>
+            !string.IsNullOrEmpty(value) && value.Contains(needle, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Names what a cut release list left out, by kind, so an agent can tell the solution builds were among them.</summary>
+    private static string TruncationNote(List<ReleaseSummary> matched, int cap)
+    {
+        var leftOut = matched.Skip(cap)
+            .GroupBy(r => r.Kind)
+            .Select(g => $"{g.Count()} {g.Key}")
+            .ToList();
+        return $"Showing {cap} of {matched.Count} releases; left out: {string.Join(", ", leftOut)}. "
+            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list, or raise limit.";
+    }
 
     [McpServerTool(Name = "compare_releases", ReadOnly = true)]
     [Description("Diffs two releases at the object level, matched by (kind, object id). Returns each object's Status — 'added' (in the second only), 'removed' (in the first only), 'modified' (source differs), or 'unchanged' — plus the LeftFileId / RightFileId for a side-by-side source diff; Truncated and Note say whether anything was left out. Capped at 200 rows ordered by kind, then id — two Business Central versions differ in far more objects than that, so pass kind and/or namePattern to narrow it. Built for the legacy C/AL Base-vs-Customer comparison: pass the bare-Microsoft 'Base' release first and the customer export second.")]
@@ -463,6 +534,44 @@ public sealed record SymbolReferenceDownloadLink(
     string ContentHash,
     int ContentLength,
     string DownloadPath);
+
+/// <summary>
+/// What <c>list_releases</c> returns: at most the requested number of releases,
+/// with <see cref="Truncated"/> and <see cref="Note"/> saying what was left out.
+/// The list used to come back whole, and at a few hundred Microsoft releases it
+/// ran past what an agent can read in one response.
+/// </summary>
+public sealed record ReleaseListResult(
+    IReadOnlyList<ReleaseSummary> Rows,
+    bool Truncated,
+    string? Note);
+
+/// <summary>
+/// One row of <c>list_releases</c>: the fields an agent picks a release by. The
+/// web list's bookkeeping (status, file counts, deletion) stays out, since every
+/// row listed is ready and live. A pipeline build reports kind "solution" and
+/// names its solution and pipeline.
+/// </summary>
+public sealed record ReleaseSummary(
+    int Id,
+    string Label,
+    string Kind,
+    string? BcVersion,
+    string? Publisher,
+    string? ParentLabel,
+    string? SolutionName,
+    string? PipelineName,
+    DateTime ImportedAt,
+    bool IsPrerelease)
+{
+    internal static ReleaseSummary From(ReleaseListItem r) => new(
+        r.Id, r.Label,
+        r.Kind == "project" ? "solution" : r.Kind,
+        r.BcVersion, r.Publisher, r.ParentLabel,
+        SolutionName: r.Kind == "project" ? r.ProjectName : null,
+        PipelineName: r.PipelineName,
+        r.ImportedAt, r.IsPrerelease);
+}
 
 /// <summary>
 /// What <c>list_release_modules</c> returns: at most the tool's cap of modules,

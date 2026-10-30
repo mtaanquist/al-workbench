@@ -290,8 +290,11 @@ app). The **New build** action lets the user pick which to build:
   sorted by solution then pipeline) so a pipeline's current objects are findable without opening
   its project first. It is a table, not cards, because it grows with the number of customers, and
   like C/AL it is hidden while there is nothing to list. The page's search box looks across every
-  tab at once and groups the matches by tab; clicking a tab narrows the same search to it. Older builds remain
-  Artifacts-only, and MCP `list_releases` still excludes all project releases.
+  tab at once and groups the matches by tab; clicking a tab narrows the same search to it. Older
+  builds remain Artifacts-only. MCP `list_releases` lists the same latest-per-pipeline builds, as
+  kind `solution` with the solution and pipeline named, so an agent asked about a customer finds
+  that customer's code in the Object Explorer rather than going to GitHub for it; older builds are
+  reached through `list_solution_builds`.
 - **Comparing two builds of the same project is kept** — it's genuinely useful — but scoped to that
   project. Artifacts offers a "Compare builds" picker listing only *this project's* builds;
   selecting two reuses `ReleaseComparisonService.CompareReleases` on the underlying Release ids and
