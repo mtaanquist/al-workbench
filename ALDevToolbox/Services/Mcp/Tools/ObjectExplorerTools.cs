@@ -65,7 +65,7 @@ public sealed class ObjectExplorerTools
 
         // Project builds are otherwise served through the Artifacts tools; the one
         // exception is the newest ready build per pipeline, which the Releases page
-        // lists beside the third-party apps. Leaving it out here sent agents looking
+        // lists on its Solutions tab. Leaving it out here sent agents looking
         // for a customer's code on GitHub instead (see .design/artifacts.md).
         // browsableOnly: the Releases page's list. A failed or importing release
         // cannot be searched, and the empty symbol packages builds pull would grow

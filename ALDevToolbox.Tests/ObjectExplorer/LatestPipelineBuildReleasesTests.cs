@@ -14,7 +14,7 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// Pins the one sanctioned leak of project builds into the user-facing Object
 /// Explorer: <see cref="ObjectExplorerService.ListLatestPipelineBuildReleasesAsync"/>
 /// returns exactly one row per pipeline — its newest <c>ready</c> build's
-/// release — for the Third-party tab. Everything else about project builds
+/// release — for the Solutions tab. Everything else about project builds
 /// stays Artifacts-only (see the companion exclusion tests in
 /// <see cref="ObjectExplorerServiceTests"/>). Also pins that the plain release
 /// list carries the new <c>cal</c> kind.

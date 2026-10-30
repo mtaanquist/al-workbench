@@ -161,13 +161,12 @@ public class ObjectExplorerService
     /// <summary>
     /// The newest ready build's Release for each pipeline — the one exception to
     /// "project builds stay out of the Object Explorer" (see
-    /// <see cref="ListReleasesAsync"/>): the Third-party tab on
+    /// <see cref="ListReleasesAsync"/>): the Solutions tab on
     /// <c>/object-explorer</c> shows the latest ready build per pipeline so a
     /// pipeline's current objects are findable without going through the
     /// Artifacts tool first. Older builds stay Artifacts-only. One row per
     /// pipeline, <see cref="ReleaseListItem.PipelineName"/> and
-    /// <see cref="ReleaseListItem.ProjectName"/> filled for the card's context
-    /// line. See <c>.design/artifacts.md</c>.
+    /// <see cref="ReleaseListItem.ProjectName"/> filled for the tab's table. See <c>.design/artifacts.md</c>.
     /// </summary>
     public async Task<List<ReleaseListItem>> ListLatestPipelineBuildReleasesAsync(CancellationToken ct = default)
     {
