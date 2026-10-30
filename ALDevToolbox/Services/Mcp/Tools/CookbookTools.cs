@@ -181,7 +181,7 @@ public sealed class CookbookTools
             }
         }
         // The whole file's length, for a note that has to say where in it a cut fell.
-        var fileLength = files.Count == 1 ? files[0].Content.Length : 0;
+        var fileLength = files.Count > 0 ? files[0].Content.Length : 0;
         if (offset != 0)
         {
             if (files.Count != 1 || offset < 0 || offset >= files[0].Content.Length)
@@ -200,7 +200,7 @@ public sealed class CookbookTools
         if (fit.LeftOut > 0)
             notes.Add($"{fit.LeftOut} of {fit.Files.Count} files are listed without their body to keep the answer short. Call get_recipe again with path set to one of those files' Path to read it.");
         if (fit.CutAt is { } cutAt)
-            notes.Add($"{fit.Files[0].Path} was cut at character {offset + cutAt} of {(files.Count == 1 ? fileLength : files[0].Content.Length)}. Call get_recipe again with path set to it and offset {offset + cutAt} to read on.");
+            notes.Add($"{fit.Files[0].Path} was cut at character {offset + cutAt} of {fileLength}. Call get_recipe again with path set to it and offset {offset + cutAt} to read on.");
         return new RecipeDetail(
             row.Id, row.Title, row.Description, row.Keywords,
             row.Type.ToString(),
