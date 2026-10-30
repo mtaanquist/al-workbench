@@ -1688,6 +1688,29 @@ function initOne(root) {
         history.replaceState(null, "", url.pathname + url.search);
     }
 
+    // A built-in calls list too long to hold whole hands its method picker
+    // to the server: picking a method fetches every call to it.
+    root.addEventListener("sv-method-narrow", async (e) => {
+        const { token, method } = e.detail;
+        clearNotice();
+        busyStart("Searching built-in calls...");
+        try {
+            const res = await fetch(
+                `/api/object-explorer/system-references/sessions/${encodeURIComponent(token)}/narrow?method=${encodeURIComponent(method)}`,
+                { credentials: "same-origin" });
+            if (!res.ok) {
+                showNotice("Couldn't look up those calls. Run Find built-in calls again.");
+                return;
+            }
+            applyReferenceSession(await res.json());
+        } catch (err) {
+            console.warn("Narrowing built-in calls failed:", err);
+            showNotice("Couldn't reach the server.");
+        } finally {
+            busyEnd();
+        }
+    });
+
     async function onGoToDefinition(line, column) {
         clearNotice();
         try {
@@ -2114,7 +2137,7 @@ function renderReferencesPanel(root, session, fileId, editorId) {
         // "Where set" filters the rows in hand, so on a cut list it can miss
         // writes past the cap; say so where the switch is offered.
         notice.textContent = builtInCalls
-            ? `Showing the first ${count.toLocaleString()} calls, so the counts per method are partial. Use the filter box below to narrow the list.`
+            ? `Showing the first ${count.toLocaleString()} calls. Pick a method or use the filter box below to narrow the list.`
             : session.results.some(r => r.usage)
                 ? `Showing the first ${count.toLocaleString()} matches, so "Where set" may miss some. Use the filter box below to narrow the list.`
                 : `Showing the first ${count.toLocaleString()} matches. Use the filter box below to narrow the list.`;
@@ -2158,7 +2181,7 @@ function renderReferencesPanel(root, session, fileId, editorId) {
     // Built-in calls: pick one method (Insert, Modify, RunModal...) when the
     // list holds more than one.
     if (builtInCalls) {
-        const methodFilter = buildMethodFilter(session.results);
+        const methodFilter = buildMethodFilter(session);
         if (methodFilter) tools.appendChild(methodFilter);
     }
     section.appendChild(tools);
@@ -2257,7 +2280,7 @@ function wireRefsFilter(panel) {
         const needle = filter.value.trim().toLowerCase();
         const setOnly = usageMode() === "set";
         const noTemporary = hideTemporary?.checked === true;
-        const method = methodSelect?.value ?? "";
+        const method = methodSelect?.dataset.narrowToken ? "" : (methodSelect?.value ?? "");
         if (needle.length === 0 && !setOnly && !noTemporary && method === "") {
             // Same reason as wireOutlineFilter: clearing the box restores
             // everything, rather than leaving whatever held no rows hidden.
@@ -2315,14 +2338,26 @@ function wireRefsFilter(panel) {
         });
     }
     hideTemporary?.addEventListener("change", run);
-    methodSelect?.addEventListener("change", run);
+    if (methodSelect?.dataset.narrowToken) {
+        // Rows past the cap are not in the panel, so ask the server.
+        methodSelect.addEventListener("change", () => {
+            methodSelect.dispatchEvent(new CustomEvent("sv-method-narrow", {
+                bubbles: true,
+                detail: { token: methodSelect.dataset.narrowToken, method: methodSelect.value },
+            }));
+        });
+    } else {
+        methodSelect?.addEventListener("change", run);
+    }
 }
 
 /// The method picker over a Find built-in calls list: every method the list
 /// holds, most used first, with its count. Null when there is only one.
 /// C/AL writes INSERT where AL writes Insert, so names are matched without
 /// regard to case and shown as most often written.
-function buildMethodFilter(rows) {
+function buildMethodFilter(session) {
+    if (session.methodNames?.length) return buildServerMethodFilter(session);
+    const rows = session.results;
     const byMethod = new Map();
     for (const r of rows) {
         if (r.category !== "system_call" || !r.memberName) continue;
@@ -2351,6 +2386,36 @@ function buildMethodFilter(rows) {
         const option = document.createElement("option");
         option.value = key;
         option.textContent = `${label} (${entry.count.toLocaleString()})`;
+        select.appendChild(option);
+    }
+    wrap.appendChild(select);
+    wrap.insertAdjacentHTML("beforeend", SELECT_CARET_ICON_SVG);
+    return wrap;
+}
+
+/// The method picker over a list cut at the cap: counting the rows in hand
+/// would undercount, so it lists the methods without counts and each pick
+/// asks the server for that method's calls (see wireRefsFilter).
+function buildServerMethodFilter(session) {
+    const wrap = document.createElement("span");
+    wrap.className = "select-wrap sv-method-filter";
+    const select = document.createElement("select");
+    select.className = "select";
+    select.dataset.methodFilter = "";
+    select.dataset.narrowToken = session.token;
+    select.setAttribute("aria-label", "Show calls to");
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All methods";
+    select.appendChild(all);
+    const current = (session.method ?? "").toLowerCase();
+    for (const name of session.methodNames) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name.toLowerCase() === current
+            ? `${name} (${session.results.length.toLocaleString()}${session.truncated ? "+" : ""})`
+            : name;
+        option.selected = name.toLowerCase() === current;
         select.appendChild(option);
     }
     wrap.appendChild(select);

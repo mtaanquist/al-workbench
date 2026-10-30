@@ -104,6 +104,48 @@ public sealed class BuiltInCallsTests : IDisposable
     }
 
     [Fact]
+    public async Task Picking_a_method_queries_that_method_again()
+    {
+        // A list cut at the cap cannot be filtered in hand, so the picker asks
+        // the server; the answer keeps the methods to offer next.
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var (fileId, lines) = await SetterFileAsync(read, releaseId);
+        var line = Array.FindIndex(lines, l => l.Contains("ThingRec.Insert")) + 1;
+        var column = lines[line - 1].IndexOf("ThingRec", StringComparison.Ordinal) + 2;
+        var sessions = NewSessions(read);
+        var session = await sessions.CreateSystemReferencesAtPositionAsync(fileId, line, column, "owner");
+
+        var narrowed = await sessions.NarrowSystemReferencesAsync(session!.Token, "owner", "get");
+
+        narrowed.Should().NotBeNull();
+        narrowed!.Results.Should().ContainSingle().Which.MemberName.Should().Be("Get");
+        narrowed.Method.Should().Be("get");
+        narrowed.MethodNames.Should().BeEquivalentTo(["Insert", "Get"]);
+        narrowed.TargetName.Should().Be("CRONUS Thing");
+
+        var widened = await sessions.NarrowSystemReferencesAsync(narrowed.Token, "owner", "");
+        widened!.Results.Select(r => r.MemberName).Should().BeEquivalentTo(["Insert", "Get"]);
+        widened.Method.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Someone_elses_list_cannot_be_narrowed()
+    {
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var (fileId, lines) = await SetterFileAsync(read, releaseId);
+        var line = Array.FindIndex(lines, l => l.Contains("ThingRec.Insert")) + 1;
+        var column = lines[line - 1].IndexOf("ThingRec", StringComparison.Ordinal) + 2;
+        var sessions = NewSessions(read);
+        var session = await sessions.CreateSystemReferencesAtPositionAsync(fileId, line, column, "owner");
+
+        (await sessions.NarrowSystemReferencesAsync(session!.Token, "someone else", "Get")).Should().BeNull();
+    }
+
+    [Fact]
     public async Task A_name_that_is_not_an_object_finds_nothing()
     {
         var releaseId = await ImportAsync();

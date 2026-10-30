@@ -550,7 +550,13 @@ public sealed record ReferenceSession(
     string TargetName = "",
     // "references", or "built_in_calls" for a Find built-in calls search: the
     // panel heads and filters the two differently.
-    string Kind = "references");
+    string Kind = "references",
+    // Built-in calls only, once the list is too long to hold whole: the
+    // methods to offer in the picker, which then asks the server for one
+    // method's calls rather than filtering the rows in hand.
+    IReadOnlyList<string>? MethodNames = null,
+    // The method this list was narrowed to on the server, null for all.
+    string? Method = null);
 
 /// <summary>
 /// One row in the source-viewer outline's "Using" or "Used by" sections (#148).

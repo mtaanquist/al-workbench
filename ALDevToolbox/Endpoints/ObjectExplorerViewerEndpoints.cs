@@ -277,6 +277,21 @@ internal static class ObjectExplorerViewerEndpoints
             return session is null ? Results.NoContent() : Results.Ok(session);
         }).RequireAuthorization();
 
+        // The method picker on a long built-in calls list: one method's calls,
+        // queried again so the cap does not hide any.
+        app.MapGet("/api/object-explorer/system-references/sessions/{token}/narrow", async (
+            string token,
+            HttpContext ctx,
+            ReferenceSessionService sessions,
+            CancellationToken ct,
+            string? method = null) =>
+        {
+            var owner = OwnerKey(ctx);
+            if (owner is null) return Results.Unauthorized();
+            var session = await sessions.NarrowSystemReferencesAsync(token, owner, method, ct);
+            return session is null ? Results.NotFound() : Results.Ok(session);
+        }).RequireAuthorization();
+
         return app;
     }
 }

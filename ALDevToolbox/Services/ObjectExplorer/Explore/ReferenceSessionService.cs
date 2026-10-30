@@ -227,8 +227,52 @@ public sealed class ReferenceSessionService
         var label = objectId is { } oid
             ? $"built-in calls on {kind} {oid} {name}"
             : $"built-in calls on {kind} {name}";
-        return Store(label, seedReleaseId, results, ownerKey, name, kind: "built_in_calls");
+        var session = Store(label, seedReleaseId, results, ownerKey, name, kind: "built_in_calls", query: query);
+        if (!session.Truncated) return session;
+        // Counting per method over a cut list would undercount, so a long
+        // list hands the picker to the server: each method is fetched whole.
+        return CacheSession(session with { MethodNames = MethodNamesOf(session.Results) }, ownerKey, query);
     }
+
+    /// <summary>
+    /// A built-in calls list narrowed to one method (or widened back to all
+    /// of them when <paramref name="method"/> is empty), queried again rather
+    /// than filtered, so a list cut at the cap still finds every call to the
+    /// method. Null when the token is unknown, someone else's, or not a
+    /// built-in calls list.
+    /// </summary>
+    public async Task<ReferenceSession?> NarrowSystemReferencesAsync(
+        string token, string ownerKey, string? method, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(token)) return null;
+        if (!_cache.TryGetValue(CacheKey(token), out CachedSession? cached) || cached is null) return null;
+        if (!string.Equals(cached.OwnerKey, ownerKey, StringComparison.Ordinal)) return null;
+        if (cached.Query is not { } query) return null;
+        if (!await SeedVisibleAsync(cached.Session.ReleaseId, ct)) return null;
+
+        method = string.IsNullOrWhiteSpace(method) ? null : method.Trim();
+        var narrowed = query with { SystemMethodNames = method is null ? null : [method] };
+        var results = await _references.FindSystemReferencesAsync(cached.Session.ReleaseId, narrowed, ct: ct);
+        var session = Store(cached.Session.TargetLabel, cached.Session.ReleaseId, results, ownerKey,
+            cached.Session.TargetName, kind: "built_in_calls", query: query);
+        var methods = cached.Session.MethodNames ?? MethodNamesOf(cached.Session.Results);
+        if (method is not null
+            && !methods.Contains(method, StringComparer.OrdinalIgnoreCase)
+            && session.Results.Count > 0)
+        {
+            methods = [.. methods, session.Results[0].MemberName ?? method];
+        }
+        return CacheSession(session with { MethodNames = methods, Method = method }, ownerKey, query);
+    }
+
+    // Each method once, in its most used spelling, most used first.
+    private static IReadOnlyList<string> MethodNamesOf(IReadOnlyList<ReferenceMatch> rows) =>
+        rows.Where(r => !string.IsNullOrEmpty(r.MemberName))
+            .GroupBy(r => r.MemberName!, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.GroupBy(r => r.MemberName!, StringComparer.Ordinal)
+                .OrderByDescending(s => s.Count()).First().Key)
+            .ToList();
 
     /// <summary>
     /// Member-scoped variant: mints a session for a specific procedure /
@@ -549,7 +593,7 @@ public sealed class ReferenceSessionService
 
     private ReferenceSession Store(
         string label, int releaseId, IReadOnlyList<ReferenceMatch> results, string ownerKey,
-        string targetName, string kind = "references")
+        string targetName, string kind = "references", FindSystemReferencesQuery? query = null)
     {
         // The query methods fetch up to MaxReferenceMatches + 1 rows; if we got
         // more than the cap, trim to the cap and flag the session truncated so
@@ -565,14 +609,22 @@ public sealed class ReferenceSessionService
 
         var token = Guid.NewGuid().ToString("N");
         var session = new ReferenceSession(token, label, releaseId, results, truncated, targetName, kind);
+        return CacheSession(session, ownerKey, query);
+    }
+
+    // Caches the session under its own token, replacing what was there.
+    private ReferenceSession CacheSession(ReferenceSession session, string ownerKey, FindSystemReferencesQuery? query)
+    {
         _cache.Set(
-            CacheKey(token),
-            new CachedSession(session, ownerKey),
+            CacheKey(session.Token),
+            new CachedSession(session, ownerKey, query),
             new MemoryCacheEntryOptions { SlidingExpiration = SessionTtl });
         return session;
     }
 
     private static string CacheKey(string token) => "oe-refs:" + token;
 
-    private sealed record CachedSession(ReferenceSession Session, string OwnerKey);
+    // Query: the built-in calls search behind the session, kept so the
+    // method picker can ask for one method again (NarrowSystemReferencesAsync).
+    private sealed record CachedSession(ReferenceSession Session, string OwnerKey, FindSystemReferencesQuery? Query = null);
 }
