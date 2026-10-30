@@ -667,7 +667,7 @@ public sealed class McpToolTests : IDisposable
         var templates = new TemplateService(ctx2, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2));
         var modules = new ModuleService(ctx2, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2));
         var catalog = new CatalogService(ctx2, NullLogger<CatalogService>.Instance, _db.OrgContext);
-        var tools = new WorkspaceTools(templates, modules, catalog, generation: null!, delivery: null!, repositories: null!, Options);
+        var tools = new WorkspaceTools(templates, modules, catalog, generation: null!, delivery: null!, repositories: null!, _downloads, _db.OrgContext, Options);
 
         var active = await tools.ListTemplatesAsync(includeDeprecated: false);
         active.Select(t => t.Key).Should().Equal("runtime-15");
@@ -835,13 +835,15 @@ public sealed class McpToolTests : IDisposable
             CoreIdRangeTo: 90999));
 
         result.FileName.Should().EndWith(".zip");
-        result.ContentBase64.Should().NotBeNullOrEmpty();
+        result.DownloadPath.Should().StartWith(GeneratedDownloadStore.PathPrefix);
+        result.DownloadExpiresAt.Should().BeAfter(DateTime.UtcNow);
         result.SizeBytes.Should().BeGreaterThan(0);
         result.Sha256.Should().HaveLength(64);
 
-        // Round-trip: base64 → bytes → ZipArchive → recognisable entry.
-        var bytes = Convert.FromBase64String(result.ContentBase64);
+        // Round-trip: link → bytes → ZipArchive → recognisable entry.
+        var bytes = Downloaded(result);
         bytes.Length.Should().Be(result.SizeBytes);
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant().Should().Be(result.Sha256);
         using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
         zip.Entries.Should().Contain(e => e.FullName.EndsWith(".code-workspace"));
     }
@@ -888,14 +890,14 @@ public sealed class McpToolTests : IDisposable
         var tools = NewWorkspaceTools(ctx);
 
         var leftOut = await tools.GenerateWorkspaceAsync(Input(null));
-        using (var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String(leftOut.ContentBase64)), ZipArchiveMode.Read))
+        using (var zip = new ZipArchive(new MemoryStream(Downloaded(leftOut)), ZipArchiveMode.Read))
         {
             zip.Entries.Should().Contain(e => e.FullName == "CRONUSAS/Banking/src/Bank.Codeunit.al");
             zip.Entries.Should().NotContain(e => e.FullName.Contains("/Retired/"));
         }
 
         var none = await tools.GenerateWorkspaceAsync(Input(Array.Empty<string>()));
-        using (var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String(none.ContentBase64)), ZipArchiveMode.Read))
+        using (var zip = new ZipArchive(new MemoryStream(Downloaded(none)), ZipArchiveMode.Read))
         {
             zip.Entries.Should().NotContain(e => e.FullName.Contains("/Banking/"),
                 "an empty list is an agent asking for no modules");
@@ -1018,7 +1020,7 @@ public sealed class McpToolTests : IDisposable
                 CoreIdRangeFrom: 90000,
                 CoreIdRangeTo: 90999)))
             .Should().ThrowAsync<McpException>()
-            .Where(ex => ex.Message.Contains("MaxWorkspaceBytes"));
+            .Where(ex => ex.Message.Contains("more than the 1 this server hands out"));
     }
 
     // ---- ObjectExplorerTools ----------------------------------------------
@@ -1538,6 +1540,19 @@ public sealed class McpToolTests : IDisposable
             mustache,
             new ALDevToolbox.Services.Generation.WorkspaceZipBuilder(mustache, new WorkspaceConfigService(ctx)),
             NullLogger<GenerationService>.Instance);
-        return new WorkspaceTools(templates, modules, catalog, generation, delivery: null!, repositories: null!, options ?? Options);
+        // The download link belongs to whoever generated it, so a generating test needs a user.
+        _db.OrgContext.CurrentUserId ??= GeneratingUserId;
+        return new WorkspaceTools(templates, modules, catalog, generation, delivery: null!, repositories: null!,
+            _downloads, _db.OrgContext, options ?? Options);
     }
+
+    private const int GeneratingUserId = 4242;
+
+    private readonly GeneratedDownloadStore _downloads =
+        new(new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System);
+
+    /// <summary>The bytes a generate result's link serves to the user who generated it.</summary>
+    private byte[] Downloaded(WorkspaceResult result) =>
+        _downloads.Get(result.DownloadPath![GeneratedDownloadStore.PathPrefix.Length..],
+            _db.OrgContext.CurrentOrganizationId, _db.OrgContext.CurrentUserId)!.Content;
 }

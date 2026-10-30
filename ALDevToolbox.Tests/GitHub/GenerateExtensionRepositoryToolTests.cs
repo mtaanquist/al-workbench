@@ -69,7 +69,7 @@ public sealed class GenerateExtensionRepositoryToolTests : IDisposable
         var result = await tools.GenerateExtensionAsync(PlanInput());
 
         result.AddedToRepository.Should().BeNull();
-        result.ContentBase64.Should().NotBeEmpty();
+        result.DownloadPath.Should().StartWith(GeneratedDownloadStore.PathPrefix, "without a repository the link is how the user gets the ZIP");
     }
 
     [Fact]
@@ -88,7 +88,7 @@ public sealed class GenerateExtensionRepositoryToolTests : IDisposable
         result.AddedToRepository.BaseBranch.Should().Be("main");
         // The ZIP alongside it is the one that went into the pull request, not
         // a second generation with different extension GUIDs.
-        result.ContentBase64.Should().NotBeEmpty();
+        result.DownloadPath.Should().BeNull("the repository holds the files");
     }
 
     [Fact]
@@ -140,6 +140,9 @@ public sealed class GenerateExtensionRepositoryToolTests : IDisposable
             _db.NewGenerationService(ctx),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),
             _db.NewGitHubWorkspaceRepositoryService(ctx, client, access),
+            new GeneratedDownloadStore(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
+            _db.OrgContext,
             Options);
         return (tools, ctx);
     }
