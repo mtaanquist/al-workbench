@@ -2609,10 +2609,13 @@ public sealed class DeliveryService
     /// first deployment), so a row whose number is above 1 says there are older ones.
     /// <paramref name="onlyDeliveryId"/> reads that one deployment of the pipeline, still
     /// numbered by its place in the history, and an empty list when it is not this
-    /// pipeline's (#1525).
+    /// pipeline's (#1525). <paramref name="beforeDeliveryId"/> reads the deployments older
+    /// than that one instead of the newest, so a caller can page back through a long
+    /// history; an empty list again when it is not this pipeline's (#1526).
     /// </summary>
     public async Task<List<DeliveryHistoryRow>> ListDeliveryHistoryAsync(
-        int releasePipelineId, int limit, CancellationToken ct = default, int? onlyDeliveryId = null)
+        int releasePipelineId, int limit, CancellationToken ct = default, int? onlyDeliveryId = null,
+        int? beforeDeliveryId = null)
     {
         await EnsureCanViewReleasePipelineAsync(releasePipelineId, ct);
         var pipelineRows = _db.OeProjectDeliveries.AsNoTracking()
@@ -2635,6 +2638,18 @@ public sealed class DeliveryService
             newer = await pipelineRows
                 .CountAsync(d => d.CreatedAt > anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id > onlyId), ct);
             query = pipelineRows.Where(d => d.Id == onlyId);
+        }
+        else if (beforeDeliveryId is { } beforeId)
+        {
+            var anchor = await pipelineRows.Where(d => d.Id == beforeId)
+                .Select(d => new { d.CreatedAt })
+                .FirstOrDefaultAsync(ct);
+            if (anchor is null) return new List<DeliveryHistoryRow>();
+            // The anchor itself counts as newer: the page starts one row past it.
+            newer = await pipelineRows
+                .CountAsync(d => d.CreatedAt > anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id >= beforeId), ct);
+            query = pipelineRows
+                .Where(d => d.CreatedAt < anchor.CreatedAt || (d.CreatedAt == anchor.CreatedAt && d.Id < beforeId));
         }
 
         var rows = await query

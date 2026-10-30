@@ -232,6 +232,77 @@ public sealed class ArtifactsToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task List_builds_reads_further_back_from_the_oldest_build_returned()
+    {
+        int projectId;
+        var ids = new List<int>();
+        var start = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            for (var i = 0; i < 6; i++)
+            {
+                ids.Add(await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, start.AddHours(-i)));
+            }
+            // Two builds started in the same instant are told apart by id (#1526).
+            ids.Add(await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, start.AddHours(-5)));
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var newest = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3);
+        newest.Select(b => b.Id).Should().Equal(ids[0], ids[1], ids[2]);
+        var older = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3, beforeBuildId: newest[^1].Id);
+        older.Select(b => b.Id).Should().Equal(ids[3], ids[4], ids[6]);
+        var oldest = await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 3, beforeBuildId: older[^1].Id);
+        oldest.Select(b => b.Id).Should().Equal(ids[5]);
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", beforeBuildId: 999_999)).Should().BeEmpty("that build does not exist");
+    }
+
+    [Fact]
+    public async Task Build_cursors_only_accept_a_build_from_the_same_list()
+    {
+        int pipelineId, otherPipelineId, pipelineNewest, pipelineOlder, otherBuild;
+        var start = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            var otherProjectId = await SeedProjectAsync(ctx, "CRONUS International");
+            pipelineId = await SeedPipelineAsync(ctx, projectId, "main");
+            otherPipelineId = await SeedPipelineAsync(ctx, projectId, "test");
+            pipelineOlder = await SeedPipelineBuildAsync(ctx, projectId, pipelineId, start.AddHours(-1));
+            pipelineNewest = await SeedPipelineBuildAsync(ctx, projectId, pipelineId, start);
+            await SeedPipelineBuildAsync(ctx, projectId, otherPipelineId, start.AddHours(-2));
+            otherBuild = await SeedPipelineBuildAsync(ctx, otherProjectId, null, start.AddHours(1));
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        (await tools.ListPipelineBuildsAsync(pipelineId, beforeBuildId: pipelineNewest))
+            .Select(b => b.Id).Should().Equal(pipelineOlder);
+        var test = await tools.ListPipelineBuildsAsync(otherPipelineId);
+        (await tools.ListPipelineBuildsAsync(pipelineId, beforeBuildId: test.Single().Id))
+            .Should().BeEmpty("that build belongs to another pipeline");
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", beforeBuildId: otherBuild))
+            .Should().BeEmpty("that build belongs to another solution");
+    }
+
+    private static async Task<int> SeedPipelineBuildAsync(
+        Data.AppDbContext ctx, int projectId, int? pipelineId, DateTime startedAt)
+    {
+        var build = new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+            Status = ProjectBuildStatus.Ready, StartedAt = startedAt,
+        };
+        ctx.OeProjectBuilds.Add(build);
+        await ctx.SaveChangesAsync();
+        return build.Id;
+    }
+
+    [Fact]
     public async Task List_pipelines_stops_at_the_limit_and_says_how_to_narrow_it()
     {
         await using (var ctx = _db.NewContext())

@@ -1255,7 +1255,10 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
   solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
   solution and cuts long failure messages. `list_deployments` cuts them too (#1525), and
-  with a `deploymentId` returns that one deployment with every message whole.
+  with a `deploymentId` returns that one deployment with every message whole. Long
+  histories page back instead of growing the limit: `list_deployments` takes a
+  `beforeDeploymentId`, and `list_pipeline_builds` / `list_solution_builds` a
+  `beforeBuildId`, each returning the rows older than that one (#1526).
   `get_environment` leaves Microsoft's own apps out of the installed list unless asked, and
   says how many it left out. The solution filter narrows the fleet query itself; the other
   filters run over the visible fleet in memory, which is one row per environment. Each of
