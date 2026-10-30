@@ -608,8 +608,8 @@
         try
         {
             var rows = ownScope
-                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true, _calls.Token))
-                : await Fleet.ListFleetAsync(includeSoftDeleted: true, _calls.Token);
+                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true, ct: _calls.Token))
+                : await Fleet.ListFleetAsync(includeSoftDeleted: true, ct: _calls.Token);
             if (load != _loads) return;
             _rows = rows;
             _error = null;
