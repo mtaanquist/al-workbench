@@ -653,7 +653,8 @@ that names the environment and says what the click does there:
   holds. The worker sends the batch like an upload batch, one install per sweep, each
   after the one before has finished, and Install now moves the whole batch. A failed
   update stops only the rows that list it among their prerequisites ("wasn't updated,
-  because X, which it waits for, wasn't updated"); unrelated apps in the batch still
+  because X, which it waits for, wasn't updated"), or that share a prerequisite with
+  it, since asking for that app again would fail the same way; unrelated apps in the batch still
   go, since an upload batch's "anything before it may be what it needed" does not apply
   when the dependencies are known.
 - **Uploading apps** - `.app` files another company built, for which there is no pipeline
