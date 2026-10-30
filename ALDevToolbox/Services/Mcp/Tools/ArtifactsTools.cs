@@ -64,7 +64,8 @@ public sealed class ArtifactsTools
         // confusion to spare — drop them entirely.
         var visible = rows.Where(r => !r.IsLocked).ToList();
         return CappedRows<ProjectArtifactsRow>.From(visible, McpCatalogueLimit.Clamp(limit), "solutions", "ordered by name",
-            "Pass search (a customer, short name or repository name) to narrow the list, or raise limit.");
+            "Pass search (a customer, short name or repository name) to narrow the list.",
+            CappedRows<ProjectArtifactsRow>.RaiseLimitHint);
     }
 
     [McpServerTool(Name = "list_solution_builds", ReadOnly = true)]
@@ -92,7 +93,8 @@ public sealed class ArtifactsTools
     {
         var rows = await _artifacts.ListPipelinesAsync(search, ct);
         return CappedRows<PipelineArtifactsRow>.From(rows, McpCatalogueLimit.Clamp(limit), "pipelines", "ordered by solution",
-            "Pass search (a solution or pipeline name) to narrow the list, or raise limit.");
+            "Pass search (a solution or pipeline name) to narrow the list.",
+            CappedRows<PipelineArtifactsRow>.RaiseLimitHint);
     }
 
     [McpServerTool(Name = "list_pipeline_builds", ReadOnly = true)]
