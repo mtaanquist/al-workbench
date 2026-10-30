@@ -1,0 +1,112 @@
+@inject IHttpContextAccessor Http
+@inject ALDevToolbox.Endpoints.PublicOrigin Origin
+
+@*
+    What a chat app or mail client shows when someone pastes a link (#1501).
+    They fetch the link themselves, with no cookie, so a gated page answers
+    with the sign-in page and whatever is written here is effectively public.
+    That is why the title comes from the shape of the path alone and nothing
+    is read from the database: no solution name, customer or slug, even though
+    the slug is in the URL, because a preview card repeats it in large type and
+    the chat app caches it. Real cards are a signed-in Teams app (#1502).
+*@
+<meta property="og:site_name" content="AL Workbench" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="@_preview.Title" />
+<meta property="og:description" content="@_preview.Description" />
+<meta property="og:image" content="@_image" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="AL Workbench" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="@_preview.Title" />
+<meta name="twitter:description" content="@_preview.Description" />
+<meta name="twitter:image" content="@_image" />
+
+@code {
+    /// <summary>The card a link shows: a title and one sentence under it.</summary>
+    public sealed record Preview(string Title, string Description);
+
+    public const string ImagePath = "/link-preview.png";
+
+    private const string SignInToOpen = "Sign in to AL Workbench to open it.";
+
+    private static readonly Preview Site = new(
+        "AL Workbench",
+        "Build Business Central solutions and run the environments they land on.");
+
+    private static readonly Preview Sealed = new(
+        "A secure link from AL Workbench",
+        "Someone has shared something with you securely. Open the link to see it.");
+
+    /// <summary>
+    /// First segment(s) to the singular and plural noun the card names. Longest
+    /// prefix first, so /pipelines/deployments is not read as a pipeline.
+    /// </summary>
+    private static readonly (string Prefix, string One, string Many)[] Kinds =
+    [
+        ("/pipelines/deployments", "Deployment", "Deployments"),
+        ("/pipelines", "Pipeline", "Pipelines"),
+        ("/solutions", "Solution", "Solutions"),
+        ("/environments", "Environment", "Environments"),
+        ("/upgrades", "Upgrade", "Upgrades"),
+        ("/object-explorer", "Object Explorer", "Object Explorer"),
+        ("/cookbook", "Cookbook", "Cookbook"),
+        ("/templates", "Template", "Templates"),
+        ("/translator", "Translator", "Translator"),
+    ];
+
+    private Preview _preview = Site;
+    private string _image = ImagePath;
+
+    protected override void OnInitialized()
+    {
+        var ctx = Http.HttpContext;
+        if (ctx is null) return;
+        var query = ctx.Request.Query;
+        _preview = Describe(ctx.Request.Path, PickReturnUrl(query["return"], query["ReturnUrl"]));
+        _image = Origin.For(ctx) + ImagePath;
+    }
+
+    /// <summary>
+    /// The card for a request. An anonymous fetch of a gated page lands on the
+    /// sign-in page with the original path in the query, so there the card
+    /// describes where the link was going.
+    /// </summary>
+    public static Preview Describe(string? requestPath, string? returnUrl)
+    {
+        var path = requestPath ?? "/";
+        if (IsPath(path, "/login") && IsLocalPath(returnUrl))
+        {
+            path = returnUrl!.Split('?', '#')[0];
+        }
+
+        if (IsPath(path, "/s")) return Sealed;
+
+        foreach (var (prefix, one, many) in Kinds)
+        {
+            if (string.Equals(path.TrimEnd('/'), prefix, StringComparison.OrdinalIgnoreCase))
+                return new Preview($"{many} in AL Workbench", SignInToOpen);
+            if (path.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
+                return new Preview($"{one} in AL Workbench", SignInToOpen);
+        }
+        return Site;
+    }
+
+    /// <summary>
+    /// The cookie challenge sends <c>?ReturnUrl=</c>, the router's own redirect
+    /// <c>?return=</c>; a request never carries both unless someone typed it, and
+    /// then the router's wins.
+    /// </summary>
+    public static string? PickReturnUrl(string? routerReturn, string? challengeReturn) =>
+        string.IsNullOrEmpty(routerReturn) ? challengeReturn : routerReturn;
+
+    private static bool IsPath(string path, string segment) =>
+        string.Equals(path, segment, StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith(segment + "/", StringComparison.OrdinalIgnoreCase);
+
+    // The same rule the sign-in redirect applies: rooted, and not "//host" or "/\host".
+    private static bool IsLocalPath(string? url) =>
+        !string.IsNullOrEmpty(url) && url[0] == '/'
+        && (url.Length == 1 || (url[1] != '/' && url[1] != '\\'));
+}

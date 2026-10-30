@@ -362,6 +362,20 @@ public sealed class DeliveryService
         return delivery;
     }
 
+    /// <summary>
+    /// The status gate: throws when the environment's stored status refuses an install and
+    /// Business Central, asked again, still does (see <see cref="RecheckEnvironmentStatusAsync"/>).
+    /// </summary>
+    private async Task ThrowIfEnvironmentRefusesAsync(
+        int projectId, int environmentId, string envName, string? applicationFamily, string? storedStatus, CancellationToken ct)
+    {
+        if (BcEnvironmentStatus.RefusalMessage(envName, storedStatus) is { } storedRefusal
+            && await RecheckEnvironmentStatusAsync(projectId, environmentId, envName, applicationFamily, storedRefusal, ct) is { } stillRefused)
+        {
+            throw Validation("ProjectEnvironment", stillRefused);
+        }
+    }
+
     /// <summary>How long a deployment waits for Business Central to re-read a refusing environment status. Shortened by tests.</summary>
     internal TimeSpan StatusRecheckTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
@@ -501,10 +515,9 @@ public sealed class DeliveryService
         // A cached status that refuses may be stale - a new environment reads as Preparing
         // until the next refresh, long after it is up - so it is asked again before it
         // turns anyone away.
-        if (checkEnvironmentStatus && BcEnvironmentStatus.RefusalMessage(rp.EnvName, rp.EnvStatus) is { } statusRefusal
-            && await RecheckEnvironmentStatusAsync(rp.ProjectId, rp.ProjectEnvironmentId, rp.EnvName, rp.EnvFamily, statusRefusal, ct) is { } stillRefused)
+        if (checkEnvironmentStatus)
         {
-            throw Validation("ProjectEnvironment", stillRefused);
+            await ThrowIfEnvironmentRefusesAsync(rp.ProjectId, rp.ProjectEnvironmentId, rp.EnvName, rp.EnvFamily, rp.EnvStatus, ct);
         }
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
@@ -1038,7 +1051,11 @@ public sealed class DeliveryService
             ?? throw Validation("Delivery", "That deployment no longer exists.");
 
         // Access first, so somebody who may not approve learns that rather than the state.
-        var plan = await ResolveReleaseAsync(proposal.ReleasePipelineId, proposal.ProjectBuildId, checkAccess: true, ct);
+        // The environment's status waits until the step-up and the state have passed: when
+        // the stored one refuses it is asked of Business Central, which spends the
+        // customer's credential and writes the answer back.
+        var plan = await ResolveReleaseAsync(proposal.ReleasePipelineId, proposal.ProjectBuildId, checkAccess: true, ct,
+            checkEnvironmentStatus: false);
         // Approving spends the customer's Business Central credential as deploying does,
         // so it takes the same step-up rule rather than trusting the page's gate (#1127).
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
@@ -1046,6 +1063,11 @@ public sealed class DeliveryService
         {
             throw Validation("Delivery", NoLongerWaiting);
         }
+        var env = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == proposal.ReleasePipelineId)
+            .Select(r => new { r.ProjectId, r.ProjectEnvironmentId, r.ProjectEnvironment!.Name, r.ProjectEnvironment.ApplicationFamily, r.ProjectEnvironment.Status })
+            .FirstAsync(ct);
+        await ThrowIfEnvironmentRefusesAsync(env.ProjectId, env.ProjectEnvironmentId, env.Name, env.ApplicationFamily, env.Status, ct);
 
         var now = _clock.GetUtcNow().UtcDateTime;
         var when = plan.RuleTime(now);

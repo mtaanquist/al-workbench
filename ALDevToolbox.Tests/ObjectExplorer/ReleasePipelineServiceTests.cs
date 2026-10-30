@@ -339,18 +339,36 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateReleasePipelineAsync_rejects_an_environment_that_cannot_take_an_install()
+    public async Task CreateReleasePipelineAsync_rejects_an_environment_that_will_never_take_an_install()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
         var buildId = await SeedBuildPipelineAsync(ctx, projectId);
-        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Production", status: "Upgrading");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Production", status: "PreparingFailed");
 
         var act = () => NewService(ctx).CreateReleasePipelineAsync(
             new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
 
         var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironmentId"];
-        error.Should().Contain("Upgrading", "the same wording the delivery gate uses, just earlier");
+        error.Should().Contain("PreparingFailed", "the same wording the delivery gate uses, just earlier");
+    }
+
+    [Theory]
+    [InlineData("Preparing")]
+    [InlineData("Upgrading")]
+    public async Task CreateReleasePipelineAsync_accepts_a_busy_environment(string status)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        // A new environment reads as Preparing until the next refresh, long after it is
+        // up; it takes installs again on its own, and each deployment checks again.
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Development", status: status);
+
+        var id = await NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.NextMinorUpdate, BcSyncMode.Add));
+
+        id.Should().BeGreaterThan(0);
     }
 
     [Fact]
