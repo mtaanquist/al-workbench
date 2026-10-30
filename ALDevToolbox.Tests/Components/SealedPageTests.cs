@@ -169,7 +169,7 @@ public sealed class SealedPageTests : IAsyncDisposable
         {
             // The one error on the form, and it sits in the expiry field itself.
             var error = cut.FindAll("[role=alert]").Should().ContainSingle().Subject;
-            error.TextContent.Trim().Should().Be("Pick when the link expires: in an hour, a day or a week.");
+            error.TextContent.Trim().Should().Be("Pick when the link expires: in an hour, a day, three days or a week.");
             error.Closest(".field")!.QuerySelector("select").Should().BeSameAs(ExpirySelect(cut));
         });
         cut.Markup.Should().NotContain("Your link is ready");
@@ -215,6 +215,48 @@ public sealed class SealedPageTests : IAsyncDisposable
         link.ClosedReason.Should().Be(SealedLinkClosedReason.Revoked);
         link.Ciphertext.Should().BeNull();
     }
+
+    [Fact]
+    public async Task Only_the_senders_own_open_link_offers_extend()
+    {
+        await SeedLinkAsync(AlexUserId, "Payroll API key");
+        await SeedLinkAsync(AlexUserId, "Old SMTP password", revoked: true);
+
+        var cut = RenderLoaded("Payroll API key");
+
+        var rows = cut.FindAll("tbody tr");
+        ExtendIn(rows.Single(r => r.TextContent.Contains("Payroll API key"))).Should().ContainSingle();
+        ExtendIn(rows.Single(r => r.TextContent.Contains("Old SMTP password"))).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void The_form_starts_on_three_days()
+    {
+        var cut = RenderLoaded("Links you send will appear here");
+
+        ExpirySelect(cut).GetAttribute("value").Should().Be("72");
+    }
+
+    [Fact]
+    public async Task Extending_a_link_keeps_it_working_for_the_time_picked()
+    {
+        var id = await SeedLinkAsync(AlexUserId, "Payroll API key");
+        var cut = RenderLoaded("Payroll API key");
+
+        ExtendIn(cut.Find("tbody tr")).Single().Click();
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog select").GetAttribute("value").Should().Be("72"));
+        cut.FindAll(".confirm-dialog select option").Select(o => o.TextContent)
+            .Should().Equal("3 days from now", "7 days from now");
+        cut.Find(".confirm-dialog select").Change("168");
+        var before = DateTime.UtcNow;
+        cut.FindAll(".confirm-dialog__actions .btn").Single(b => b.TextContent.Trim() == "Extend link").Click();
+
+        cut.WaitForAssertion(() => StoredLinks().Single(l => l.Id == id).ExpiresAt
+            .Should().BeCloseTo(before.AddHours(168), TimeSpan.FromMinutes(1)));
+    }
+
+    private static IEnumerable<AngleSharp.Dom.IElement> ExtendIn(AngleSharp.Dom.IElement row) =>
+        row.QuerySelectorAll("button").Where(b => b.TextContent.Trim() == "Extend");
 
     private static IEnumerable<AngleSharp.Dom.IElement> RevokeIn(AngleSharp.Dom.IElement row) =>
         row.QuerySelectorAll("button").Where(b => b.TextContent.Trim() == "Revoke");
