@@ -607,7 +607,8 @@ one that matches how the file arrived.
   `downloadPath` instead, kept by `GeneratedDownloadStore` for 30 minutes and served
   only to the user who generated it, in their organisation, from a signed-in
   browser. The store holds at most 256 MB of archives at once and refuses a new one
-  past that, so a retry loop cannot fill the app's memory. The bytes are held
+  past that, so a retry loop cannot fill the app's memory; when it is full it also
+  drops its oldest links in the background, which can end one before its 30 minutes. The bytes are held
   rather than regenerated on fetch because generating a second time would mint
   different extension GUIDs. With a repository there is no link: the repository or
   pull request holds the files.

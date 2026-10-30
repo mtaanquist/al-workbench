@@ -232,6 +232,52 @@ public sealed class ArtifactsToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task List_pipelines_stops_at_the_limit_and_says_how_to_narrow_it()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            foreach (var name in new[] { "main", "test", "staging" })
+                await SeedPipelineAsync(ctx, projectId, name);
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var all = await tools.ListPipelinesAsync();
+        all.Rows.Should().HaveCount(3);
+        all.Truncated.Should().BeFalse();
+        var cut = await tools.ListPipelinesAsync(limit: 2);
+        cut.Rows.Should().HaveCount(2);
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 2 pipelines").And.Contain("search");
+    }
+
+    [Fact]
+    public async Task List_pipeline_builds_cuts_a_long_failure_message()
+    {
+        int pipelineId;
+        var longFailure = "Compilation failed: " + new string('x', 2_000);
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            pipelineId = await SeedPipelineAsync(ctx, projectId, "main");
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Status = ProjectBuildStatus.Failed, StartedAt = DateTime.UtcNow, FailureMessage = longFailure,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = (await NewTools(read).ListPipelineBuildsAsync(pipelineId)).Single();
+
+        row.FailureMessage!.Length.Should().BeLessThan(500);
+        row.FailureMessage.Should().StartWith("Compilation failed: ").And.Contain("get_solution_build");
+    }
+
+    [Fact]
     public async Task List_solutions_stops_at_the_limit_and_says_how_to_narrow_it()
     {
         await using (var ctx = _db.NewContext())
@@ -487,6 +533,18 @@ public sealed class ArtifactsToolsTests : IDisposable
             // Both releases are empty, so the diff is empty - but it runs.
             (await NewTools(read).CompareProjectBuildsAsync(firstBuild, secondBuild)).Rows.Should().BeEmpty();
         }
+    }
+
+    private static async Task<int> SeedPipelineAsync(Data.AppDbContext ctx, int projectId, string name)
+    {
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name, Branch = "main",
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OePipelines.Add(pipeline);
+        await ctx.SaveChangesAsync();
+        return pipeline.Id;
     }
 
     private static async Task<int> SeedProjectAsync(Data.AppDbContext ctx, string name)

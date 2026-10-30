@@ -324,7 +324,9 @@ public sealed class DeliverTools
                 $"Upgrade {upgradeId} does not exist or is not visible to you. Call list_planned_upgrades to see the upgrades you can read.");
 
         var wantedState = string.IsNullOrWhiteSpace(state) ? null : state.Trim();
-        if (wantedState is not null && !Enum.TryParse<UpgradeLineState>(wantedState, ignoreCase: true, out _))
+        // By name: Enum.TryParse also takes "3" and "Planned,Failed", which match no line.
+        if (wantedState is not null
+            && !Enum.GetNames<UpgradeLineState>().Contains(wantedState, StringComparer.OrdinalIgnoreCase))
         {
             throw new McpException(
                 $"'{state}' is not an upgrade state. Use one of: {string.Join(", ", Enum.GetNames<UpgradeLineState>())}.");

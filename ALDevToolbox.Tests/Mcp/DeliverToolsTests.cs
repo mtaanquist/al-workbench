@@ -381,6 +381,12 @@ public sealed class DeliverToolsTests : IDisposable
 
         var act = () => tools.GetUpgradeAsync(id, state: "Exploded");
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("Checked");
+        // Enum.TryParse takes both of these, and neither names a state (#1527).
+        foreach (var notAState in new[] { "3", "Planned,Failed" })
+        {
+            var refused = () => tools.GetUpgradeAsync(id, state: notAState);
+            (await refused.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("is not an upgrade state");
+        }
     }
 
     [Fact]
