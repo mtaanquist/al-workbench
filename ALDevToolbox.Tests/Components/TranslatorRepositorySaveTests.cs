@@ -75,6 +75,41 @@ public sealed class TranslatorRepositorySaveTests
         }, "a is unchanged since it was learned, and d has no text to learn");
     }
 
+    /// <summary>
+    /// #1540: "Export a copy" of a file opened from a repository used to teach the
+    /// memory its strings with no repository attached, so a Private solution's
+    /// translations were suggested to everyone in the organisation. A file from a
+    /// repository is learned only by Save to repository, which names it.
+    /// </summary>
+    [Fact]
+    public void An_export_of_a_file_opened_from_a_repository_teaches_the_memory_nothing()
+    {
+        var edits = new Dictionary<string, TargetEdit>(StringComparer.Ordinal)
+        {
+            ["a"] = new("Beloeb", "translated"),
+            ["b"] = new("Bogfoeringsdato", "translated"),
+        };
+
+        var learn = TranslatorPage.ExportLearning(edits, new Dictionary<string, string>(), openedFromRepository: true);
+
+        learn.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void An_export_of_a_file_from_elsewhere_teaches_the_memory_its_new_edits()
+    {
+        var edits = new Dictionary<string, TargetEdit>(StringComparer.Ordinal)
+        {
+            ["a"] = new("Beloeb", "translated"),
+            ["b"] = new("Bogfoeringsdato", "translated"),
+        };
+        var learned = new Dictionary<string, string>(StringComparer.Ordinal) { ["a"] = "Beloeb" };
+
+        var learn = TranslatorPage.ExportLearning(edits, learned, openedFromRepository: false);
+
+        learn.Should().BeEquivalentTo(new Dictionary<string, string> { ["b"] = "Bogfoeringsdato" });
+    }
+
     private static TranslatorPage.UnitVm Unit(string id, string target, string state) => new()
     {
         Id = id,

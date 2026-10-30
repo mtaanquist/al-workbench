@@ -2329,8 +2329,25 @@ else
     private Dictionary<string, string> PendingLearning(string editsJson)
     {
         var posted = JsonSerializer.Deserialize<Dictionary<string, EditDto>>(editsJson) ?? new();
-        return UnitsToLearn(posted.ToDictionary(e => e.Key, e => new TargetEdit(e.Value.T, e.Value.S)), _learnedLocally);
+        return ExportLearning(posted.ToDictionary(e => e.Key, e => new TargetEdit(e.Value.T, e.Value.S)),
+            _learnedLocally, openedFromRepository: _repoSource is not null);
     }
+
+    /// <summary>
+    /// What a download or an in-place save should teach the translation memory.
+    /// Nothing, for a file opened from a repository: the export endpoint learns
+    /// without a repository, and a pair with none is suggested to the whole
+    /// organisation - so "Export a copy" of a Private solution's file used to
+    /// hand its strings to people outside the solution's team (#1540). Save to
+    /// repository learns those units with the repository attached (#1324), and
+    /// the daily ingest picks up a copy committed by hand, so nothing is lost.
+    /// </summary>
+    internal static Dictionary<string, string> ExportLearning(
+        IReadOnlyDictionary<string, TargetEdit> edits, IReadOnlyDictionary<string, string> learned,
+        bool openedFromRepository) =>
+        openedFromRepository
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : UnitsToLearn(edits, learned);
 
     private void RememberLearned(Dictionary<string, string> scope, IReadOnlyDictionary<string, string> learned)
     {
