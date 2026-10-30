@@ -1,7 +1,6 @@
 using ALDevToolbox.Services.Mcp;
 using ALDevToolbox.Tests.Auth;
 using AwesomeAssertions;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace ALDevToolbox.Tests.Mcp;
 
@@ -9,7 +8,7 @@ namespace ALDevToolbox.Tests.Mcp;
 /// The link a generate_* tool hands back (#1508): it serves the archive to the person who
 /// generated it, in their organisation, until it expires, and to nobody else.
 /// </summary>
-public sealed class GeneratedDownloadStoreTests
+public sealed class GeneratedDownloadStoreTests : IDisposable
 {
     private const int OrgId = 7;
     private const int UserId = 42;
@@ -19,18 +18,20 @@ public sealed class GeneratedDownloadStoreTests
 
     public GeneratedDownloadStoreTests()
     {
-        _store = new GeneratedDownloadStore(new MemoryCache(new MemoryCacheOptions()), _clock);
+        _store = new GeneratedDownloadStore(_clock);
     }
 
-    private static string TokenOf(GeneratedDownloadLink link) =>
-        link.DownloadPath[GeneratedDownloadStore.PathPrefix.Length..];
+    public void Dispose() => _store.Dispose();
+
+    private static string TokenOf(GeneratedDownloadLink? link) =>
+        link!.DownloadPath[GeneratedDownloadStore.PathPrefix.Length..];
 
     [Fact]
     public void The_link_serves_the_archive_to_the_user_who_generated_it_until_it_expires()
     {
         var link = _store.Put(OrgId, UserId, "CRONUS.zip", [1, 2, 3]);
 
-        link.DownloadPath.Should().StartWith(GeneratedDownloadStore.PathPrefix);
+        link!.DownloadPath.Should().StartWith(GeneratedDownloadStore.PathPrefix);
         link.ExpiresAt.Should().Be(_clock.GetUtcNow().UtcDateTime + GeneratedDownloadStore.Lifetime);
         var file = _store.Get(TokenOf(link), OrgId, UserId);
         file!.FileName.Should().Be("CRONUS.zip");
@@ -61,5 +62,16 @@ public sealed class GeneratedDownloadStoreTests
         first.Should().NotBe(second);
         first.Length.Should().BeGreaterThanOrEqualTo(43, "256 random bits, base64url without padding");
         first.Should().MatchRegex("^[A-Za-z0-9_-]+$", "the token sits in a URL path");
+    }
+
+    [Fact]
+    public void A_full_store_refuses_a_new_archive_rather_than_growing()
+    {
+        using var small = new GeneratedDownloadStore(_clock, maxHeldBytes: 10);
+
+        var kept = small.Put(OrgId, UserId, "a.zip", new byte[6]);
+        kept.Should().NotBeNull();
+        small.Put(OrgId, UserId, "b.zip", new byte[6]).Should().BeNull("the two together are past the limit");
+        small.Get(TokenOf(kept), OrgId, UserId).Should().NotBeNull("the archive already held is not lost to make room");
     }
 }

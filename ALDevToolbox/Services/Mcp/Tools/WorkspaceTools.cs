@@ -266,7 +266,9 @@ public sealed class WorkspaceTools
             ?? throw new McpException("No organisation in scope; call this from an authenticated MCP session.");
         var userId = _orgContext.CurrentUserId
             ?? throw new McpException("No user in scope; call this from an authenticated MCP session.");
-        var link = _downloads.Put(orgId, userId, archive.FileName, bytes);
+        var link = _downloads.Put(orgId, userId, archive.FileName, bytes)
+            ?? throw new McpException(
+                "The server is holding too many generated archives to keep this one. Try again in a few minutes, or have it written to a GitHub repository instead.");
         return new WorkspaceResult(
             FileName: archive.FileName,
             DownloadPath: link.DownloadPath,

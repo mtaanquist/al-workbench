@@ -605,7 +605,9 @@ one that matches how the file arrived.
 - Since #1508 neither returns the ZIP's bytes: base64 made a typical workspace too
   large for an assistant's answer. Without a repository the result carries a
   `downloadPath` instead, kept by `GeneratedDownloadStore` for 30 minutes and served
-  only to the user who generated it, in their organisation. The bytes are held
+  only to the user who generated it, in their organisation, from a signed-in
+  browser. The store holds at most 256 MB of archives at once and refuses a new one
+  past that, so a retry loop cannot fill the app's memory. The bytes are held
   rather than regenerated on fetch because generating a second time would mint
   different extension GUIDs. With a repository there is no link: the repository or
   pull request holds the files.

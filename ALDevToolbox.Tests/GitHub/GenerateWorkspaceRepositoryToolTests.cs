@@ -272,8 +272,7 @@ public sealed class GenerateWorkspaceRepositoryToolTests : IDisposable
             _db.NewGenerationService(ctx),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),
             _db.NewGitHubWorkspaceRepositoryService(ctx, client, access),
-            new GeneratedDownloadStore(new Microsoft.Extensions.Caching.Memory.MemoryCache(
-                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
+            new GeneratedDownloadStore(TimeProvider.System),
             _db.OrgContext,
             Options);
         return (tools, ctx);

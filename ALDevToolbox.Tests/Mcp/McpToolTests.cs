@@ -1549,7 +1549,7 @@ public sealed class McpToolTests : IDisposable
     private const int GeneratingUserId = 4242;
 
     private readonly GeneratedDownloadStore _downloads =
-        new(new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System);
+        new(TimeProvider.System);
 
     /// <summary>The bytes a generate result's link serves to the user who generated it.</summary>
     private byte[] Downloaded(WorkspaceResult result) =>
