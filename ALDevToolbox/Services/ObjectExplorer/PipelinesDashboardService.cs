@@ -285,7 +285,7 @@ public sealed class PipelinesDashboardService
             // one never became a deployment, so it is not something that happened.
             var liveById = targets.Where(t => t.LiveDelivery is not null)
                 .ToDictionary(t => t.LiveDelivery!.DeliveryId, t => t.LiveDelivery!);
-            var deliveries = await _feed.ListRecentAsync(null, null, ActivityRows * 2, ct);
+            var deliveries = await _feed.ListRecentAsync(null, null, ActivityRows * 2, ct: ct);
             foreach (var d in deliveries.Where(d => d.Status != ProjectDeliveryStatus.Dismissed))
             {
                 var kind = d.Status switch

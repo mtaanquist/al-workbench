@@ -22,6 +22,9 @@ public static class McpRegistration
         services.AddSingleton<ALDevToolbox.Services.Mcp.IMcpAvailability>(
             sp => sp.GetRequiredService<ALDevToolbox.Services.Mcp.McpAvailabilityState>());
         services.AddScoped<ALDevToolbox.Services.Mcp.McpToolGate>();
+        // Holds no context, only the memory cache, and a link written by one MCP request
+        // is read by a later browser request - so one instance for the process.
+        services.AddSingleton<ALDevToolbox.Services.Mcp.GeneratedDownloadStore>();
         services.AddScoped<ALDevToolbox.Services.Mcp.Tools.WorkspaceTools>();
         services.AddScoped<ALDevToolbox.Services.Mcp.Tools.CookbookTools>();
         services.AddScoped<ALDevToolbox.Services.Mcp.Tools.ObjectExplorerTools>();

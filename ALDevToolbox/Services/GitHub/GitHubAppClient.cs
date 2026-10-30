@@ -583,6 +583,9 @@ public sealed partial class GitHubAppClient
     /// <summary>How many pages of a hundred an installation listing reads before it stops.</summary>
     private const int MaxRepositoryPages = 10;
 
+    /// <summary>How many of an installation's repositories one listing reads at most: ten pages of 100.</summary>
+    public const int MaxInstallationRepositories = MaxRepositoryPages * 100;
+
     /// <summary>
     /// The repositories of installation <paramref name="installationId"/> that
     /// <paramref name="userToken"/>'s owner can reach themselves, in one paged read
