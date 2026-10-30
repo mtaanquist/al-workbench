@@ -1249,8 +1249,9 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
 - **Bounded answers (#1509).** An assistant client refuses a response much past a few tens
   of thousands of characters, and a fleet of 165 environments ran well past that. So
   `list_environments`, `list_upgrades`, `list_planned_upgrades`, `get_upgrade` and
-  `list_recent_deployments` each take a `limit` and say in `truncated` and `note` when it
-  left rows out and how to narrow them. `list_upgrades` takes the solution, type and
+  `list_recent_deployments` each take a `limit` (25 by default, at most 50; for
+  `list_recent_deployments` 20 and 50, down from 50 and 200) and say in `truncated` and
+  `note` when it left rows out and how to narrow them. `list_upgrades` takes the solution, type and
   next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
   solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
   solution and cuts long failure messages, which `list_deployments` keeps whole.

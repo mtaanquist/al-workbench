@@ -298,7 +298,10 @@ public sealed class DeliverToolsTests : IDisposable
         var cut = await tools.ListUpgradesAsync(limit: 1);
         cut.Solutions.Should().ContainSingle().Which.Environments.Select(e => e.Name).Should().Equal("Production");
         cut.Truncated.Should().BeTrue();
-        cut.Note.Should().Contain("first 1 environments");
+        cut.Note.Should().Contain("first 1 environments").And.Contain("more of CRONUS Denmark's",
+            "the cut fell inside Denmark's group, which would otherwise read as complete");
+        (await tools.ListUpgradesAsync(limit: 2)).Note.Should().NotContain("more of",
+            "a cut on a solution boundary leaves every listed group whole");
         (await tools.ListUpgradesAsync()).Truncated.Should().BeFalse();
     }
 
@@ -367,6 +370,8 @@ public sealed class DeliverToolsTests : IDisposable
             .Should().Equal(_seed.SwedenProduction);
         (await tools.GetUpgradeAsync(id, solution: "denmark")).Environments.Select(e => e.EnvironmentId)
             .Should().Equal(_seed.DenmarkProduction);
+        (await tools.GetUpgradeAsync(id, solution: _seed.Sweden.ToString())).Environments.Select(e => e.EnvironmentId)
+            .Should().Equal(_seed.SwedenProduction); // a solution id works as it does on the other tools
 
         var cut = await tools.GetUpgradeAsync(id, limit: 1);
         cut.Environments.Should().ContainSingle();
