@@ -193,7 +193,7 @@ public sealed class McpToolTests : IDisposable
     [Fact]
     public async Task GetRecipe_cuts_a_file_too_large_for_one_answer_and_reads_on_from_an_offset()
     {
-        var huge = string.Concat(Enumerable.Range(0, 50_000).Select(i => (char)('a' + i % 26)));
+        var huge = string.Concat(Enumerable.Range(0, 70_000).Select(i => (char)('a' + i % 26)));
         int recipeId;
         await using (var ctx = _db.NewContext())
         {
@@ -210,13 +210,19 @@ public sealed class McpToolTests : IDisposable
         first.Truncated.Should().BeTrue();
         var cut = first.Files[0].Content!.Length;
         huge.Should().StartWith(first.Files[0].Content);
-        first.Note.Should().Contain($"cut after {cut} of 50000").And.Contain($"offset {cut}");
+        first.Note.Should().Contain($"cut at character {cut} of 70000").And.Contain($"offset {cut}");
 
-        var rest = await tools.GetAsync(recipeId, path: "Huge.al", offset: cut);
-        rest.Files[0].Content.Should().Be(huge[cut..]);
+        // A second read is cut too, and its note still counts in the whole file (#1527).
+        var middle = await tools.GetAsync(recipeId, path: "Huge.al", offset: cut);
+        var reached = cut + middle.Files[0].Content!.Length;
+        middle.Files[0].Content.Should().Be(huge[cut..reached]);
+        middle.Note.Should().Contain($"cut at character {reached} of 70000").And.Contain($"offset {reached}");
+
+        var rest = await tools.GetAsync(recipeId, path: "Huge.al", offset: reached);
+        rest.Files[0].Content.Should().Be(huge[reached..]);
         rest.Truncated.Should().BeFalse();
 
-        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Huge.al", offset: 60_000))
+        await FluentActions.Awaiting(() => tools.GetAsync(recipeId, path: "Huge.al", offset: 80_000))
             .Should().ThrowAsync<McpException>().WithMessage("*offset*");
     }
 
@@ -933,7 +939,7 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateWorkspace_returns_inline_base64_zip_with_sha256()
+    public async Task GenerateWorkspace_returns_a_download_link_to_the_zip_with_its_sha256()
     {
         await SeedDefaultTemplateAsync();
 
@@ -963,6 +969,27 @@ public sealed class McpToolTests : IDisposable
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant().Should().Be(result.Sha256);
         using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
         zip.Entries.Should().Contain(e => e.FullName.EndsWith(".code-workspace"));
+    }
+
+    [Fact]
+    public async Task GenerateWorkspace_says_so_when_the_download_store_is_full()
+    {
+        await SeedDefaultTemplateAsync();
+        using var full = new GeneratedDownloadStore(TimeProvider.System, maxHeldBytes: 1);
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewWorkspaceTools(ctx, downloads: full).GenerateWorkspaceAsync(new ProjectPlanInput(
+            TemplateKey: "runtime-test",
+            WorkspaceName: "CRONUS Customer",
+            ExtensionPrefix: "CRN",
+            Brief: "Brief",
+            Description: "Description",
+            ApplicationVersion: "24.0.0.0",
+            RuntimeVersion: "15",
+            CoreIdRangeFrom: 90000,
+            CoreIdRangeTo: 90999));
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("too many generated archives");
     }
 
     [Fact]
@@ -1530,6 +1557,59 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
+    public void Capped_rows_stop_at_the_character_budget_when_the_rows_are_long()
+    {
+        // 30 rows of 1,000 characters each is past the budget long before the cap of 50 (#1524).
+        var rows = Enumerable.Range(1, 30).Select(i => new string('x', 1_000)).ToList();
+
+        var cut = CappedRows<string>.From(rows, cap: 50, "lines", "in line order", "Narrow it.");
+
+        cut.Rows.Count.Should().BeLessThan(30).And.BeGreaterThan(0);
+        cut.Rows.Sum(r => r.Length + 3).Should().BeLessThanOrEqualTo(McpAnswerBudget.Characters);
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Be($"Showing the first {cut.Rows.Count} lines (in line order); the rest would make the answer too long to read in one go. Narrow it.");
+    }
+
+    [Fact]
+    public void The_character_budget_always_keeps_one_row()
+    {
+        McpAnswerBudget.Fit([new string('x', 50_000), "short"], cap: 10).Should().Be(1,
+            "an answer that matched something never comes back empty");
+        McpAnswerBudget.Fit(Array.Empty<string>(), cap: 10).Should().Be(0);
+    }
+
+    [Fact]
+    public void An_outline_of_long_signatures_stops_at_the_character_budget()
+    {
+        var signature = "procedure OnBeforePostSalesDoc(var SalesHeader: Record \"Sales Header\"; CommitIsSuppressed: Boolean; PreviewMode: Boolean; var HideProgressWindow: Boolean; var IsHandled: Boolean; var CalledBy: Integer)";
+        var symbols = Enumerable.Range(1, 150)
+            .Select(i => new ObjectSymbolRow(i, "event_publisher", $"OnBeforePost{i}", signature, null, null, i))
+            .ToList();
+        var outline = new ObjectOutline(1, "codeunit", 80, "Sales-Post", 1, "Microsoft", null, null, 1, symbols);
+
+        var result = ObjectOutlineResult.From(outline, memberKind: null, namePattern: null, cap: 150);
+
+        result.Outline.Symbols.Count.Should().BeLessThan(150);
+        result.TotalSymbols.Should().Be(150);
+        result.Truncated.Should().BeTrue();
+        result.Note.Should().Contain($"first {result.Outline.Symbols.Count} of 150");
+    }
+
+    [Fact]
+    public void An_outline_member_kind_may_be_written_with_a_space()
+    {
+        var symbols = new List<ObjectSymbolRow>
+        {
+            new(1, "local_procedure", "Helper", null, null, null, 1),
+            new(2, "procedure", "Run", null, null, null, 2),
+        };
+        var outline = new ObjectOutline(1, "codeunit", 80, "CRONUS Post", 1, "CRONUS", null, null, 1, symbols);
+
+        ObjectOutlineResult.From(outline, memberKind: "local procedure", namePattern: null, cap: 10)
+            .Outline.Symbols.Select(sym => sym.Name).Should().Equal("Helper");
+    }
+
+    [Fact]
     public async Task GetObjectOutline_throws_McpException_for_unknown_object()
     {
         var releaseId = await SeedDkCoreReleaseAsync();
@@ -1642,7 +1722,8 @@ public sealed class McpToolTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private WorkspaceTools NewWorkspaceTools(Data.AppDbContext ctx, IOptions<McpOptions>? options = null)
+    private WorkspaceTools NewWorkspaceTools(
+        Data.AppDbContext ctx, IOptions<McpOptions>? options = null, GeneratedDownloadStore? downloads = null)
     {
         var templates = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
         var modules = new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
@@ -1660,7 +1741,7 @@ public sealed class McpToolTests : IDisposable
         // The download link belongs to whoever generated it, so a generating test needs a user.
         _db.OrgContext.CurrentUserId ??= GeneratingUserId;
         return new WorkspaceTools(templates, modules, catalog, generation, delivery: null!, repositories: null!,
-            _downloads, _db.OrgContext, options ?? Options);
+            downloads ?? _downloads, _db.OrgContext, options ?? Options);
     }
 
     private const int GeneratingUserId = 4242;

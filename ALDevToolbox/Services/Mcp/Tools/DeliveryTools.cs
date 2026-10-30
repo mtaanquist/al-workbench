@@ -71,7 +71,8 @@ public sealed class DeliveryTools
                                   || Has(r.EnvironmentName, needle) || Has(r.EnvironmentType, needle)
                                   || Has(r.BuildPipelineName, needle) || Has(r.GithubReleaseRepositoryName, needle)).ToList();
             return CappedRows<ReleasePipelineRow>.From(matched, McpCatalogueLimit.Clamp(limit), "deployment pipelines",
-                "ordered by name", "Pass search or solutionId to narrow the list, or raise limit.");
+                "ordered by name", "Pass search or solutionId to narrow the list.",
+                CappedRows<ReleasePipelineRow>.RaiseLimitHint);
         }
         catch (ProjectAccessDeniedException)
         {
@@ -134,7 +135,7 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_github_releases", ReadOnly = true)]
-    [Description("Lists the GitHub releases a deployment pipeline can install, newest first, with each release's tag, title, publication date and the app files attached to it. Only works for a deployment pipeline whose apps come from a repository's GitHub releases - one that deploys a build pipeline's builds is refused, and you should use list_pipeline_builds for that. Releases with no app files attached cannot be installed. Requires permission to manage the solution, and a connected GitHub account that can see the repository.")]
+    [Description("Lists the newest 30 GitHub releases a deployment pipeline can install, newest first, with each release's tag, title, publication date and the app files attached to it. Only works for a deployment pipeline whose apps come from a repository's GitHub releases - one that deploys a build pipeline's builds is refused, and you should use list_pipeline_builds for that. Releases with no app files attached cannot be installed. Requires permission to manage the solution, and a connected GitHub account that can see the repository.")]
     public async Task<IReadOnlyList<GitHubReleaseOption>> ListGitHubReleasesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
         CancellationToken ct = default)

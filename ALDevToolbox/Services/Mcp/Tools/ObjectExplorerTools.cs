@@ -30,15 +30,16 @@ public sealed class ObjectExplorerTools
     // Per-tool row caps, sized so a full page of each tool's rows stays near
     // 25,000 characters: a response much past that is refused by assistant
     // clients (find_references returned 100,000 at 200 rows). The compare tools
-    // keep MaxResults, as their rows are narrow (#1510).
+    // keep MaxResults, as their rows are narrow (#1510). Each list also stops at
+    // McpAnswerBudget's character budget, so the caps are upper bounds (#1524).
     private const int MaxObjectMatches = 100;
     private const int MaxProcedureMatches = 75;
     private const int MaxContentMatches = 60;
-    private const int MaxContentSnippetLength = 300;
     private const int MaxReferenceRows = 50;
     private const int MaxProcedureCalls = 100;
     private const int MaxTranslationMatches = 50;
     private const int MaxModuleRows = 100;
+    private const int MaxReleaseListRows = 100;
     private const int MaxOutlineSymbols = 150;
 
     private readonly ObjectExplorerService _explorer;
@@ -67,7 +68,7 @@ public sealed class ObjectExplorerTools
     public async Task<ReleaseListResult> ListReleasesAsync(
         [Description("Optional case-insensitive substring of the release label, publisher, BC version, solution name or pipeline name: a customer's name finds their solution's build, 'Continia' that vendor's apps, '28.5' one version. Null lists every release up to limit.")] string? search = null,
         [Description("Optional kind: 'first_party' (Microsoft), 'third_party', 'cal' or 'solution'. Null lists every kind.")] string? kind = null,
-        [Description("How many to return. Default 50, at least 1, at most 200.")] int limit = DefaultReleaseListLimit,
+        [Description("How many to return. Default 50, at least 1, at most 100.")] int limit = DefaultReleaseListLimit,
         CancellationToken ct = default)
     {
         var wantedKind = kind?.Trim().ToLowerInvariant();
@@ -75,7 +76,7 @@ public sealed class ObjectExplorerTools
         {
             throw new McpException($"Unknown kind '{kind}'. Use one of: {string.Join(", ", ReleaseListKinds)}.");
         }
-        var cap = Math.Clamp(limit, 1, MaxResults);
+        var cap = Math.Clamp(limit, 1, MaxReleaseListRows);
 
         // Project builds are otherwise served through the Artifacts tools; the one
         // exception is the newest ready build per pipeline, which the Releases page
@@ -92,11 +93,12 @@ public sealed class ObjectExplorerTools
             .Select(ReleaseSummary.From)
             .Where(r => string.IsNullOrEmpty(wantedKind) || r.Kind == wantedKind)
             .ToList();
-        var truncated = matched.Count > cap;
+        var shown = McpAnswerBudget.Fit(matched, cap);
+        var truncated = matched.Count > shown;
         return new ReleaseListResult(
-            matched.Take(cap).ToList(),
+            matched.Take(shown).ToList(),
             truncated,
-            truncated ? TruncationNote(matched, cap) : NoMatchNote(matched, search));
+            truncated ? TruncationNote(matched, shown, budgetCut: shown < cap) : NoMatchNote(matched, search));
     }
 
     /// <summary>
@@ -128,14 +130,16 @@ public sealed class ObjectExplorerTools
     }
 
     /// <summary>Names what a cut release list left out, by kind, so an agent can tell the solution builds were among them.</summary>
-    private static string TruncationNote(List<ReleaseSummary> matched, int cap)
+    private static string TruncationNote(List<ReleaseSummary> matched, int cap, bool budgetCut)
     {
         var leftOut = matched.Skip(cap)
             .GroupBy(r => r.Kind)
             .Select(g => $"{g.Count()} {g.Key}")
             .ToList();
         return $"Showing {cap} of {matched.Count} releases; left out: {string.Join(", ", leftOut)}. "
-            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list, or raise limit.";
+            + "Pass search (a customer, solution, publisher or version) or kind to narrow the list"
+            // A higher limit would come back cut in the same place (#1524).
+            + (budgetCut ? "." : ", or raise limit.");
     }
 
     [McpServerTool(Name = "compare_releases", ReadOnly = true)]
@@ -233,7 +237,7 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_content", ReadOnly = true)]
-    [Description("Searches AL source content across a BC release for a free-text query. Returns the line containing the hit, cut at 300 characters, at most 3 lines per file and 60 lines in all; Truncated and Note say whether more were left out, so make the query more specific or pass moduleId to narrow it. The query must be at least 3 characters (a shorter term can't be trigram-indexed and returns no results).")]
+    [Description("Searches AL source content across a BC release for a free-text query. Returns the line containing the hit, cut at 200 characters, at most 3 lines per file and 60 lines in all; Truncated and Note say whether more were left out, so make the query more specific or pass moduleId to narrow it. The query must be at least 3 characters (a shorter term can't be trigram-indexed and returns no results).")]
     public async Task<CappedRows<ReleaseContentMatch>> SearchContentAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Free-text search query, at least 3 characters. Matched literally (case-insensitive substring) against .al source bodies.")] string query,
@@ -244,11 +248,8 @@ public sealed class ObjectExplorerTools
         // The service caps files, not lines: one past the cap in files is enough to
         // know whether more lines matched than are returned.
         var rows = await _search.SearchContentInReleaseAsync(releaseId, query, moduleId, MaxContentMatches + 1, 3, ct);
-        // Snippet is whatever the line carries; cap to keep responses bounded.
-        var trimmed = rows.Select(r => r.Snippet.Length > MaxContentSnippetLength
-            ? r with { Snippet = r.Snippet[..MaxContentSnippetLength] + "..." }
-            : r).ToList();
-        return CappedRows<ReleaseContentMatch>.From(trimmed, MaxContentMatches, "lines", "ordered by module, then file",
+        // The service already cuts each snippet at 200 characters.
+        return CappedRows<ReleaseContentMatch>.From(rows, MaxContentMatches, "lines", "ordered by module, then file",
             "Make the query more specific or pass moduleId to narrow the search.");
     }
 
@@ -524,9 +525,8 @@ public sealed record ReferenceSearchResult(
     /// <summary>Cuts <paramref name="matches"/> (fetched one past the cap) to <paramref name="cap"/> and says so.</summary>
     internal static ReferenceSearchResult From(IReadOnlyList<ReferenceMatch> matches, int cap, string narrowHint)
     {
-        if (matches.Count <= cap) return new(matches, false, null);
-        return new(matches.Take(cap).ToList(), true,
-            $"Showing the first {cap} references (ordered by module, then object); more were left out. {narrowHint}");
+        var capped = CappedRows<ReferenceMatch>.From(matches, cap, "references", "ordered by module, then object", narrowHint);
+        return new(capped.Rows, capped.Truncated, capped.Note);
     }
 }
 
@@ -564,19 +564,22 @@ public sealed record ObjectOutlineResult(
 {
     internal static ObjectOutlineResult From(ObjectOutline outline, string? memberKind, string? namePattern, int cap)
     {
-        var kinds = memberKind?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [];
+        // "local procedure" as an agent writes it, local_procedure as the outline stores it.
+        var kinds = memberKind?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(k => k.Replace(' ', '_')).ToArray() ?? [];
         var name = namePattern?.Trim();
         var matched = outline.Symbols
             .Where(sym => kinds.Length == 0 || kinds.Any(k => sym.Kind.Contains(k, StringComparison.OrdinalIgnoreCase)))
             .Where(sym => string.IsNullOrEmpty(name) || sym.Name.Contains(name, StringComparison.OrdinalIgnoreCase))
             .ToList();
-        var truncated = matched.Count > cap;
+        var shown = McpAnswerBudget.Fit(matched, cap);
+        var truncated = shown < matched.Count;
         return new ObjectOutlineResult(
-            outline with { Symbols = matched.Take(cap).ToList() },
+            outline with { Symbols = matched.Take(shown).ToList() },
             matched.Count,
             truncated,
             truncated
-                ? $"Showing the first {cap} of {matched.Count} members (in line order); more were left out. Pass memberKind or namePattern to narrow the outline."
+                ? $"Showing the first {shown} of {matched.Count} members (in line order); more were left out. Pass memberKind or namePattern to narrow the outline."
                 : null);
     }
 }

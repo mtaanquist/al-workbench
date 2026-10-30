@@ -147,6 +147,22 @@ public sealed class GitHubToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task A_search_says_when_github_had_more_repositories_than_were_read()
+    {
+        await ReadyAsync();
+        // Every page comes back full, so the listing stops at its last page with more to read.
+        var names = Enumerable.Range(1, 100).Select(i => $"{OrgLogin}/shop-{i:000}").ToArray();
+        var (tools, ctx) = NewTools(ListableApi(granted: names, visible: names));
+        await using var _ = ctx;
+
+        var result = await tools.ListRepositoriesAsync(search: "no-such-repository");
+
+        result.Repositories.Should().BeEmpty();
+        result.Truncated.Should().BeTrue("a search that found nothing has not looked everywhere (#1527)");
+        result.Note.Should().Contain("more repositories on GitHub than this server reads");
+    }
+
+    [Fact]
     public async Task An_unlinked_caller_is_offered_nothing_and_told_what_to_connect()
     {
         await ConfigureDeploymentAsync();
