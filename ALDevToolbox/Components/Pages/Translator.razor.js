@@ -310,20 +310,40 @@ async function superseded(r, all) {
 
 // Deletes the other sessions of `rec`'s file saved before it that no live tab
 // holds. A newer one is left alone: Continue on an older session must not
-// delete newer work.
+// delete newer work. An older one a live tab still holds is marked stale
+// instead: once that tab lets go, the newer session may already be closed
+// and gone, and nothing else would then tell the prompt the copy is out of
+// date.
 async function dropOlderCopies(rec) {
     try {
-        const live = await heldIds();
         const all = await withStore("readonly", (store, done) => {
             const req = store.getAll();
             req.onsuccess = () => done(req.result || []);
         });
         for (const r of all) {
-            if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;
+            if (!r || !r.openId || r.openId === rec.openId) continue;
             if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;
-            if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));
+            if (!(await sameFile(r, rec))) continue;
+            const gone = await whileUnheld(r.openId, async () => { await deleteKey(r.openId); return true; });
+            if (gone !== true) await markStale(r.openId);
         }
     } catch { /* best effort: the prompt also offers only the newest of each file */ }
+}
+
+// Flags a session whose file has been opened again since, so the prompt never
+// offers it. The tab that holds it clears the flag by saving the file, which
+// makes its copy the current one again (saveInPlace, or a repository save's
+// rebase, which writes a fresh record).
+function markStale(openId) {
+    return withStore("readwrite", (store) => {
+        const req = store.get(openId);
+        req.onsuccess = () => {
+            const r = req.result;
+            if (!r || r.openId !== openId || r.stale) return;
+            r.stale = true;
+            store.put(r, openId);
+        };
+    }).catch(() => {});
 }
 
 // Called once when a file is opened. The original XML arrives as a
@@ -420,8 +440,9 @@ export async function peek(maxAgeMs) {
         // A session with a newer record of its file, held or not, is out of
         // date, so it is never offered and goes with the rest (#1624).
         const current = [];
+        // So is one marked stale while a tab held it (dropOlderCopies).
         for (const r of free) {
-            if (!(await superseded(r, all))) current.push(r);
+            if (!r.stale && !(await superseded(r, all))) current.push(r);
         }
         const offerable = current
             .filter((r) => r.fileName && r.savedAt > 0 && now - r.savedAt <= maxAgeMs)
@@ -440,12 +461,14 @@ export async function peek(maxAgeMs) {
 // Continue on the restore prompt: takes over the session `openId` names, as
 // long as no live tab holds it, by moving its record to a fresh id this tab
 // then holds. Returns the small metadata (the original XML streams separately)
-// with the new id, or null when the session is gone or another tab has it.
+// with the new id, or { refused } saying why nothing was taken over: "held"
+// when another tab has it, "gone" when it was deleted (or went out of date)
+// since the prompt appeared, "error" when the browser's storage failed.
 export async function loadMeta(openId) {
     try {
-        return await whileUnheld(openId, async () => {
+        const result = await whileUnheld(openId, async () => {
             const rec = await getOwnRec(openId);
-            if (!rec) return null;
+            if (!rec || rec.stale) return { refused: "gone" };
             const newId = newOpenId();
             const moved = { ...rec, openId: newId };
             const ok = await startOpen(newId, (previousId) => withStore("readwrite", (store) => {
@@ -453,7 +476,7 @@ export async function loadMeta(openId) {
                 store.delete(openId);
                 if (previousId) store.delete(previousId);
             }));
-            if (!ok) return null;
+            if (!ok) return { refused: "error" };
             await dropOlderCopies(moved);
             return {
                 openId: newId,
@@ -465,8 +488,9 @@ export async function loadMeta(openId) {
                 repo: rec.repo || null,
             };
         });
+        return result || { refused: "held" };
     } catch {
-        return null;
+        return { refused: "error" };
     }
 }
 
@@ -655,11 +679,13 @@ export async function saveInPlace(openId, fileName, editsJson, learnJson) {
     // the save was in flight. Writing back the record read at the start used
     // to overwrite edits typed during the save (#1268, L44); a newer overlay
     // already holds everything this one does, so it is left as it is.
+    // Either way the file on disk is now this copy's, so it is no longer out
+    // of date even if the file was opened again elsewhere (markStale).
     try {
         const saved = JSON.parse(editsJson);
         await updateRec(openId, (latest) => {
-            if (JSON.stringify(latest.edits || {}) !== editsAtStart) return false;
-            latest.edits = saved;
+            delete latest.stale;
+            if (JSON.stringify(latest.edits || {}) === editsAtStart) latest.edits = saved;
         });
     } catch { /* best effort */ }
     return "saved";

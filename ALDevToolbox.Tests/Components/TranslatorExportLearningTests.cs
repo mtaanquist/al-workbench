@@ -309,7 +309,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
             .And.Contain("navigator.locks.request(LOCK_PREFIX + openId, { ifAvailable: true },")
             .And.Contain("const free = all.filter((r) => r && r.openId && !live.has(r.openId));")
             .And.Contain("return (await whileUnheld(openId, async () => { await deleteKey(openId); return true; })) === true;")
-            .And.Contain("return await whileUnheld(openId, async () => {\n            const rec = await getOwnRec(openId);");
+            .And.Contain("const result = await whileUnheld(openId, async () => {\n            const rec = await getOwnRec(openId);");
         // Continue moves the session to a fresh id and drops the old key.
         js.Should().Contain("const moved = { ...rec, openId: newId };")
             .And.Contain("store.delete(openId);");
@@ -359,15 +359,16 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
             .Should().BeGreaterThan(open.IndexOf("await startOpen(", StringComparison.Ordinal));
         var load = js[js.IndexOf("export async function loadMeta(openId) {", StringComparison.Ordinal)..];
         load = load[..load.IndexOf("\n}\n", StringComparison.Ordinal)];
-        load.Should().Contain("if (!ok) return null;\n            await dropOlderCopies(moved);");
+        load.Should().Contain("if (!ok) return { refused: \"error\" };\n            await dropOlderCopies(moved);");
 
         // Only older copies no live tab holds are deleted, and only under their
         // lock: Continue on an older session leaves a newer one alone.
         var drop = js[js.IndexOf("async function dropOlderCopies(rec) {", StringComparison.Ordinal)..];
         drop = drop[..drop.IndexOf("\n}\n", StringComparison.Ordinal)];
-        drop.Should().Contain("if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;")
+        drop.Should().Contain("if (!r || !r.openId || r.openId === rec.openId) continue;")
             .And.Contain("if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;")
-            .And.Contain("if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
+            .And.Contain("if (!(await sameFile(r, rec))) continue;")
+            .And.Contain("const gone = await whileUnheld(r.openId, async () => { await deleteKey(r.openId); return true; });")
             .And.NotContain("store.delete(");
 
         // The prompt offers a session only when no other record of its file,
@@ -375,10 +376,140 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         js.Should().Contain("if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;");
         var peek = js[js.IndexOf("export async function peek(maxAgeMs) {", StringComparison.Ordinal)..];
         peek = peek[..peek.IndexOf("\n}\n", StringComparison.Ordinal)];
-        peek.Should().Contain("if (!(await superseded(r, all))) current.push(r);")
+        peek.Should().Contain("if (!r.stale && !(await superseded(r, all))) current.push(r);")
             .And.Contain("const offerable = current")
             .And.Contain("if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
             .And.NotContain("superseded(r, free)", "a newer copy a live tab holds still makes an older free one out of date");
+    }
+
+    /// <summary>
+    /// The #1633 two-tab gap: tab A holds an older session of a file while
+    /// tab B opens the same file again. A's copy cannot be deleted while A has
+    /// it, and once B closes its own session nothing newer is left to show
+    /// A's copy is out of date. So B marks it stale, the prompt never offers a
+    /// stale session (and Continue refuses one), and A clears the mark only by
+    /// saving the file, which makes its copy the current one again.
+    /// </summary>
+    [Fact]
+    public void An_older_session_another_tab_holds_is_marked_stale_and_never_offered_once_let_go()
+    {
+        var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
+
+        var drop = js[js.IndexOf("async function dropOlderCopies(rec) {", StringComparison.Ordinal)..];
+        drop = drop[..drop.IndexOf("\n}\n", StringComparison.Ordinal)];
+        drop.Should().Contain("if (gone !== true) await markStale(r.openId);");
+
+        var mark = js[js.IndexOf("function markStale(openId) {", StringComparison.Ordinal)..];
+        mark = mark[..mark.IndexOf("\n}\n", StringComparison.Ordinal)];
+        mark.Should().Contain("return withStore(\"readwrite\", (store) => {")
+            .And.Contain("r.stale = true;\n            store.put(r, openId);")
+            .And.NotContain("savedAt", "marking a copy stale must not make it look newer");
+
+        var load = js[js.IndexOf("export async function loadMeta(openId) {", StringComparison.Ordinal)..];
+        load = load[..load.IndexOf("\n}\n", StringComparison.Ordinal)];
+        load.Should().Contain("if (!rec || rec.stale) return { refused: \"gone\" };");
+
+        var save = js[js.IndexOf("export async function saveInPlace(", StringComparison.Ordinal)..];
+        save = save[..save.IndexOf("\n}\n", StringComparison.Ordinal)];
+        save.Should().Contain("delete latest.stale;");
+    }
+
+    /// <summary>
+    /// A refused Continue says why: only a session another tab holds is "open
+    /// in another tab"; one deleted since the prompt appeared, or one the
+    /// browser could not read, says so instead (OEX5-4).
+    /// </summary>
+    [Fact]
+    public void The_browser_says_why_it_refused_continue()
+    {
+        var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
+        var load = js[js.IndexOf("export async function loadMeta(openId) {", StringComparison.Ordinal)..];
+        load = load[..load.IndexOf("\n}\n", StringComparison.Ordinal)];
+        load.Should().Contain("return result || { refused: \"held\" };")
+            .And.Contain("return { refused: \"error\" };")
+            .And.NotContain("return null;");
+    }
+
+    [Theory]
+    [InlineData("gone", "That session is no longer stored in this browser, so there is nothing to pick up.")]
+    [InlineData("error", "That session could not be read from this browser")]
+    public void Continue_on_a_session_that_is_not_stored_any_more_does_not_blame_another_tab(string refused, string message)
+    {
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true)
+            .SetResult(new TranslatorPage.SessionMeta { Refused = refused });
+        var cut = RenderWithStoredSession();
+
+        cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(message));
+        cut.Markup.Should().NotContain("open in another tab")
+            .And.NotContain("Pick up where you left off?");
+        _module.Invocations["loadOriginalStream"].Should().BeEmpty("there is no session to read");
+        cut.FindAll("textarea.tr-tgtarea").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Continue_on_a_session_another_tab_holds_still_says_so()
+    {
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true)
+            .SetResult(new TranslatorPage.SessionMeta { Refused = "held" });
+        var cut = RenderWithStoredSession();
+
+        cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("That file is open in another tab now, so its edits were kept."));
+    }
+
+    /// <summary>
+    /// OEX5-3: a picked or dropped file is stored before anything parses it.
+    /// One that does not open must not stay stored, or a later visit offers
+    /// it on the restore prompt.
+    /// </summary>
+    [Theory]
+    [InlineData("not xliff at all", "as XLIFF v1.2")]
+    [InlineData("", "Could not read")]
+    public async Task A_picked_file_that_does_not_open_is_not_kept_for_the_restore_prompt(string content, string error)
+    {
+        _module.Setup<bool>("clear", _ => true).SetResult(true);
+        _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true).SetResult(new TextStreamReference(content));
+        var cut = _ctx.Render<TranslatorPage>();
+
+        await cut.InvokeAsync(() => cut.Instance.OpenFromHandleAsync("broken.xlf", "open-picked"));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(error));
+        _module.Invocations["clear"].Should().ContainSingle()
+            .Which.Arguments.Should().Equal("open-picked");
+        cut.FindAll("textarea.tr-tgtarea").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_picked_file_that_opens_is_kept()
+    {
+        _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true).SetResult(new TextStreamReference(DanishXliff));
+        var cut = _ctx.Render<TranslatorPage>();
+
+        cut.InvokeAsync(() => cut.Instance.OpenFromHandleAsync("App.da-DK.xlf", "open-picked")).GetAwaiter().GetResult();
+
+        cut.WaitForElement("textarea.tr-tgtarea");
+        _module.Invocations["clear"].Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Continue_on_a_session_whose_stored_copy_is_empty_says_so()
+    {
+        _module.Setup<bool>("clear", _ => true).SetResult(true);
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true).SetResult(new TranslatorPage.SessionMeta
+        {
+            OpenId = RestoredOpenId,
+            FileName = "App.da-DK.xlf",
+        });
+        _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true).SetResult(new TextStreamReference(""));
+        var cut = RenderWithStoredSession();
+
+        cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Could not restore the saved session: the stored copy of"));
+        _module.Invocations["clear"].Single().Arguments.Should().Equal(RestoredOpenId);
     }
 
     // ── The restore prompt (#1609) ────────────────────────────────────────
