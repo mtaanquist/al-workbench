@@ -700,6 +700,25 @@ public sealed class UpgradeActionWorker : BackgroundService
             return RunOutcome.Skipped;
         }
 
+        // A deployment and a booked install never go to one Business Central environment
+        // at once (#1139, #1629): they share the delivery queue's gate, keyed the same way
+        // as the install turn. A busy environment leaves the row due for the next sweep,
+        // as a deployment waits for a booked install. Held until the install is settled.
+        IDisposable? environmentGate = null;
+        if (UpgradeActionService.IsAppInstall(action.Kind)
+            && scope.ServiceProvider.GetService<DeliveryQueue>() is { } deliveries)
+        {
+            environmentGate = deliveries.TryEnterEnvironment(action.TenantId, action.ProjectId, action.EnvironmentName);
+            if (environmentGate is null)
+            {
+                _logger.LogInformation(
+                    "Booked install {ActionId} ({FileName}) waits: a deployment to {Environment} is running.",
+                    action.Id, action.Label, action.EnvironmentName);
+                return RunOutcome.Skipped;
+            }
+        }
+        using var heldEnvironment = environmentGate;
+
         // Claim first, and this compare-and-set is what beats a racing cancel: stamping
         // sent_at while the row is still pending takes it out of both the due query and
         // the cancel's own WHERE clause, so exactly one of the two wins.
