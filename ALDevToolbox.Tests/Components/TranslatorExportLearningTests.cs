@@ -73,8 +73,10 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     private readonly FakeGitHubApi _api;
 
     // The browser stamps each open with an id and hands it back (#1595); these
-    // stand in for the ids it would return.
+    // stand in for the ids it would return. A restore offers the stored
+    // session's id and Continue moves it to a fresh one (#1609).
     private const string UploadOpenId = "open-upload";
+    private const string StoredOpenId = "open-stored";
     private const string RestoredOpenId = "open-restored";
     private readonly JSRuntimeInvocationHandler<string> _export;
     private readonly JSRuntimeInvocationHandler<string?> _openIds;
@@ -208,11 +210,11 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         export.Arguments[3].Should().Be(JsonSerializer.Serialize(new[] { UnitId }));
     }
 
-    // ── The tab's own record (#1595, #1574) ───────────────────────────────
-    // The browser keeps one session record for the whole site, so a second
-    // tab's open replaces the first tab's. Each open is stamped with an id;
-    // the tab passes it back on every export, save and overlay write, and the
-    // browser refuses when the record has become another open's.
+    // ── The tab's own record (#1595, #1574, #1609) ────────────────────────
+    // The browser keeps one session record per open, under the open's id. The
+    // tab passes it back on every export, save and overlay write, so it only
+    // ever touches its own record, and the browser answers "missing" if that
+    // record has gone.
 
     [Fact]
     public void An_upload_passes_the_id_its_open_was_given_to_export_and_to_the_overlay()
@@ -234,9 +236,9 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     }
 
     [Fact]
-    public void An_export_refused_because_another_tab_replaced_the_file_says_so_and_keeps_the_edits_unsaved()
+    public void An_export_refused_because_the_stored_copy_is_gone_says_so_and_keeps_the_edits_unsaved()
     {
-        _export.SetResult("replaced");
+        _export.SetResult("missing");
         var cut = _ctx.Render<TranslatorPage>();
         cut.FindComponent<InputFile>().UploadFiles(InputFileContent.CreateFromText(DanishXliff, "App.da-DK.xlf"));
         cut.WaitForElement("textarea.tr-tgtarea");
@@ -245,18 +247,19 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
 
         ExportCall(cut);
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(TranslatorPage.ReplacedInAnotherTab("export")));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(TranslatorPage.StoredCopyMissing("export", fromRepository: false)));
         cut.FindAll("button.btn--primary").Should().Contain(b => b.TextContent.Contains("Export .xlf (1)"),
             "nothing was exported, so the edit is still unsaved");
     }
 
     [Fact]
-    public void A_restored_session_takes_over_the_records_id_and_a_refused_save_says_so()
+    public void A_restored_session_uses_the_fresh_id_continue_gave_it_and_a_refused_save_says_so()
     {
         _module.Setup<bool>("hasHandle", _ => true).SetResult(true);
-        _module.Setup<string>("saveInPlace", _ => true).SetResult("replaced");
+        _module.Setup<string>("saveInPlace", _ => true).SetResult("missing");
         var cut = Restore(repo: null, primaryLabel: "Save (1)");
 
+        _module.Invocations["loadMeta"].Single().Arguments.Should().Equal(StoredOpenId);
         _module.Invocations["loadOriginalStream"].Single().Arguments.Should().Equal(RestoredOpenId);
         _module.Invocations["hasHandle"].Single().Arguments.Should().Equal(RestoredOpenId);
 
@@ -264,35 +267,183 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
 
         cut.WaitForAssertion(() => _module.Invocations["saveInPlace"].Should().ContainSingle());
         _module.Invocations["saveInPlace"].Single().Arguments[0].Should().Be(RestoredOpenId);
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(TranslatorPage.ReplacedInAnotherTab("save")));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(TranslatorPage.StoredCopyMissing("save", fromRepository: false)));
         cut.FindAll("button.btn--primary").Should().Contain(b => b.TextContent.Contains("Save (1)"),
             "nothing was written, so the edit is still unsaved");
     }
 
     /// <summary>
-    /// The browser half: the id is stamped on every open and checked before
-    /// the base or the handle is used, or the overlay is written. The module
-    /// has no JS test runner here, so this pins the checks in its source.
+    /// The browser half (#1595, #1609): each open's record is stored under its
+    /// own id, every reader and writer looks only at the tab's own key, and the
+    /// restore prompt never offers, discards or takes over a session a live tab
+    /// holds. The module has no JS test runner here, so this pins those rules
+    /// in its source.
     /// </summary>
     [Fact]
-    public void The_browser_module_checks_the_open_id_before_using_or_writing_the_record()
+    public void The_browser_module_keeps_one_record_per_open_and_leaves_live_tabs_alone()
     {
         var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
 
-        js.Should().Contain("await putRec({ openId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null });")
-            .And.Contain("await putRec({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });")
-            .And.Contain("export async function exportNow(openId, fileName, editsJson, learnJson)")
-            .And.Contain("export async function saveInPlace(openId, fileName, editsJson, learnJson)")
+        // One record per open, under its id; no single site-wide slot.
+        js.Should().Contain("store.put(rec, rec.openId);")
+            .And.Contain("return await openRecord({ openId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null })")
+            .And.Contain("await openRecord({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });")
+            .And.NotContain("store.put(rec, KEY)")
+            .And.NotContain("getRec()");
+        // Export and save read only the tab's own record.
+        Regex.Matches(js, @"const rec = await getOwnRec\(openId\);\s+const refused = notOwned\(rec, openId\);\s+if \(refused\) return refused;")
+            .Count.Should().Be(2);
+        js.Should().Contain("""return openId ? "missing" : "empty";""")
+            // Overlay and name writes read, compare and write in one transaction.
             .And.Contain("export async function putEdits(openId, editsJson, learnedJson)")
             .And.Contain("export async function putMeta(openId, fileName, targetLang)")
-            .And.Contain("rec.openId === openId")
-            // A missing record (another tab opened a file and closed it) is
-            // refused too, not reported as nothing to export.
-            .And.Contain("""return openId || rec ? "replaced" : "empty";""")
-            // A repository save's rebase writes nothing onto another open's record.
-            .And.Contain("if (arguments.length > 5 && !(await getOwnRec(replaceOpenId))) return null;");
-        // Both readers of the base refuse before anything is posted or written.
-        Regex.Matches(js, @"const refused = notOwned\(rec, openId\);\s+if \(refused\) return refused;").Count.Should().Be(2);
+            .And.Contain("if (!rec || rec.openId !== openId || change(rec) === false)");
+        // Each open is held by a Web Lock while its tab has it, taken before
+        // the record is written; the prompt skips held records, and Discard
+        // and Continue act only on a session nobody holds.
+        js.Should().Contain("navigator.locks.request(LOCK_PREFIX + openId, () => new Promise(")
+            // A lock that cannot be taken falls back to the heartbeat, and the
+            // heartbeat goes when the page does, so a reload sees its session.
+            .And.Contain("heartbeat(h);\n                granted();")
+            .And.Contain("window.addEventListener(\"pagehide\", gone);")
+            .And.Contain("navigator.locks.request(LOCK_PREFIX + openId, { ifAvailable: true },")
+            .And.Contain("const free = all.filter((r) => r && r.openId && !live.has(r.openId));")
+            .And.Contain("return (await whileUnheld(openId, async () => { await deleteKey(openId); return true; })) === true;")
+            .And.Contain("return await whileUnheld(openId, async () => {\n            const rec = await getOwnRec(openId);");
+        // Continue moves the session to a fresh id and drops the old key.
+        js.Should().Contain("const moved = { ...rec, openId: newId };")
+            .And.Contain("store.delete(openId);");
+        // A record from before #1609, under the old single key, is moved once.
+        js.Should().Contain("const LEGACY_KEY = \"current\";")
+            .And.Contain("store.delete(LEGACY_KEY);");
+        // Storage stays bounded: sessions past the age limit or beyond the
+        // newest few are deleted, and a tab's next open replaces its last.
+        js.Should().Contain("now - r.savedAt <= maxAgeMs")
+            .And.Contain("offerable.slice(0, MAX_KEPT)")
+            .And.Contain("if (previousId && previousId !== rec.openId) store.delete(previousId);");
+    }
+
+    // ── The restore prompt (#1609) ────────────────────────────────────────
+
+    [Fact]
+    public void The_restore_prompt_asks_for_sessions_within_the_age_limit_and_names_the_one_it_offers()
+    {
+        var cut = RenderWithStoredSession();
+
+        _module.Invocations["peek"].Single().Arguments.Should().Equal((long)TimeSpan.FromDays(7).TotalMilliseconds);
+        cut.Markup.Should().Contain("App.da-DK.xlf");
+    }
+
+    /// <summary>
+    /// The browser module outlives the component: after a resumed connection a
+    /// fresh, empty page renders in the same tab while the module still holds
+    /// the open the previous page had. Unless the page lets go of it before it
+    /// looks, its own session is hidden from it as if another tab had it.
+    /// </summary>
+    [Fact]
+    public void A_page_with_no_file_lets_go_of_any_open_the_tab_still_holds_before_looking_for_sessions()
+    {
+        RenderWithStoredSession();
+
+        _module.Invocations.Select(i => i.Identifier).Where(id => id is "release" or "peek")
+            .Should().Equal("release", "peek");
+    }
+
+    [Fact]
+    public void Discard_names_the_session_the_prompt_offered()
+    {
+        _module.Setup<bool>("clear", _ => true).SetResult(true);
+        var cut = RenderWithStoredSession();
+
+        cut.FindAll("button").First(b => b.TextContent.Trim() == "Discard those edits").Click();
+
+        cut.WaitForAssertion(() => _module.Invocations["clear"].Should().ContainSingle());
+        _module.Invocations["clear"].Single().Arguments.Should().Equal(StoredOpenId);
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Pick up where you left off?"));
+        cut.Markup.Should().NotContain("open in another tab");
+    }
+
+    [Fact]
+    public void Discard_of_a_session_another_tab_has_picked_up_keeps_it_and_says_so()
+    {
+        // The browser refuses: a tab took the session over after the prompt appeared.
+        _module.Setup<bool>("clear", _ => true).SetResult(false);
+        var cut = RenderWithStoredSession();
+
+        cut.FindAll("button").First(b => b.TextContent.Trim() == "Discard those edits").Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("That file is open in another tab now, so its edits were kept."));
+        cut.Markup.Should().NotContain("Pick up where you left off?");
+    }
+
+    [Fact]
+    public void Continue_on_a_session_another_tab_has_picked_up_opens_nothing()
+    {
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true).SetResult(null);
+        var cut = RenderWithStoredSession();
+
+        cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("That file is open in another tab now, so its edits were kept."));
+        cut.Markup.Should().NotContain("Pick up where you left off?");
+        _module.Invocations["loadMeta"].Single().Arguments.Should().Equal(StoredOpenId);
+        _module.Invocations["loadOriginalStream"].Should().BeEmpty("there is no session to read");
+        cut.FindAll("textarea.tr-tgtarea").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_restore_that_fails_after_continue_lets_go_of_the_session_so_it_can_be_offered_again()
+    {
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true).SetResult(new TranslatorPage.SessionMeta
+        {
+            OpenId = RestoredOpenId,
+            FileName = "App.da-DK.xlf",
+        });
+        _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true)
+            .SetException(new JSException("The stored copy could not be read."));
+        var cut = RenderWithStoredSession();
+        var releasesBefore = _module.Invocations["release"].Count;
+
+        var restore = () => cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+
+        restore.Should().Throw<JSException>();
+        _module.Invocations["release"].Should().HaveCount(releasesBefore + 1,
+            "the browser moved the session to an id this tab would otherwise go on holding");
+    }
+
+    [Fact]
+    public async Task Leaving_the_page_lets_go_of_the_open_so_another_tab_can_offer_it()
+    {
+        var cut = _ctx.Render<TranslatorPage>();
+        cut.FindComponent<InputFile>().UploadFiles(InputFileContent.CreateFromText(DanishXliff, "App.da-DK.xlf"));
+        cut.WaitForElement("textarea.tr-tgtarea");
+
+        await cut.InvokeAsync(() => cut.Instance.DisposeAsync().AsTask());
+
+        // Once on first render (nothing held yet) and once on leaving.
+        _module.Invocations["release"].Should().HaveCount(2);
+        _module.Invocations["clear"].Should().BeEmpty("leaving keeps the stored file for a restore");
+    }
+
+    [Fact]
+    public async Task A_repository_file_whose_stored_copy_is_gone_points_at_save_to_repository()
+    {
+        await ReadyAsync();
+        _export.SetResult("missing");
+        var cut = _ctx.Render<TranslatorPage>();
+        var picker = cut.FindComponent<RepositoryPicker>();
+        await cut.InvokeAsync(() => picker.Instance.SelectedChanged.InvokeAsync(new GitHubRepositorySummary(
+            Repo, OrgLogin, "private-app", "main", IsPrivate: true, Description: null,
+            HtmlUrl: $"https://github.com/{Repo}", CloneUrl: $"https://github.com/{Repo}.git")));
+        cut.WaitForElement(".trepo__file").Click();
+        Type(cut, "Beloeb");
+
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Export a copy")).Click();
+
+        ExportCall(cut);
+        var message = TranslatorPage.StoredCopyMissing("export", fromRepository: true);
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(message));
+        message.Should().Contain("Save to repository still works").And.NotContain("will be lost");
     }
 
     [Fact]
@@ -327,8 +478,8 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
             .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
             .On(HttpMethod.Post, $"/repos/{Repo}/pulls", HttpStatusCode.Created,
                 $$"""{"number":12,"html_url":"https://github.com/{{Repo}}/pull/12"}""");
-        // The rebase carries the tab's id; the browser answers null because
-        // another tab has opened a file over the record since.
+        // The rebase carries the tab's id; the browser answers null when it
+        // could not write the record.
         _module.Setup<string?>("putBaseStream", i => i.Arguments.Count > 5).SetResult(null);
 
         var cut = _ctx.Render<TranslatorPage>();
@@ -348,19 +499,29 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         rebase.Arguments.Should().HaveCount(6);
         rebase.Arguments[5].Should().Be(UploadOpenId, "the rebase names the open it may replace");
 
-        // The tab owns no record any more, so its next export is refused by the browser.
+        // The tab holds no id any more, so its next export sends none.
         cut.FindAll("button").Single(b => b.TextContent.Contains("Export a copy")).Click();
         ExportCall(cut).Arguments[0].Should().BeNull();
     }
 
-    private IRenderedComponent<TranslatorPage> Restore(TranslatorPage.RepositoryOriginDto? repo, string primaryLabel = "Export .xlf (1)")
+    /// <summary>Renders the page with a stored session for the restore prompt to offer.</summary>
+    private IRenderedComponent<TranslatorPage> RenderWithStoredSession()
     {
-        _module.Setup<TranslatorPage.SessionPeek?>("peek").SetResult(new TranslatorPage.SessionPeek
+        _module.Setup<TranslatorPage.SessionPeek?>("peek", _ => true).SetResult(new TranslatorPage.SessionPeek
         {
+            OpenId = StoredOpenId,
             FileName = "App.da-DK.xlf",
             SavedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         });
-        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta").SetResult(new TranslatorPage.SessionMeta
+        var cut = _ctx.Render<TranslatorPage>();
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Continue"));
+        return cut;
+    }
+
+    private IRenderedComponent<TranslatorPage> Restore(TranslatorPage.RepositoryOriginDto? repo, string primaryLabel = "Export .xlf (1)")
+    {
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true).SetResult(new TranslatorPage.SessionMeta
         {
             OpenId = RestoredOpenId,
             FileName = "App.da-DK.xlf",
@@ -371,9 +532,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         });
         _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true).SetResult(new TextStreamReference(DanishXliff));
 
-        var cut = _ctx.Render<TranslatorPage>();
-        cut.WaitForAssertion(() =>
-            cut.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Continue"));
+        var cut = RenderWithStoredSession();
         cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
         // The restored edit is already in the overlay, so the unsaved count shows on Export.
         cut.WaitForAssertion(() => cut.FindAll("button.btn--primary")

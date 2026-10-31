@@ -846,13 +846,15 @@ else
 
     internal sealed class SessionPeek
     {
+        /// <summary>The id of the session the prompt offers; Continue and Discard name it (#1609).</summary>
+        [JsonPropertyName("openId")] public string? OpenId { get; set; }
         [JsonPropertyName("fileName")] public string FileName { get; set; } = string.Empty;
         [JsonPropertyName("savedAt")] public long SavedAt { get; set; }
     }
 
     internal sealed class SessionMeta
     {
-        /// <summary>The id of the open the record belongs to; a restoring tab takes it over (#1595).</summary>
+        /// <summary>The fresh id the restoring tab now holds the session under (#1595, #1609).</summary>
         [JsonPropertyName("openId")] public string? OpenId { get; set; }
         [JsonPropertyName("fileName")] public string FileName { get; set; } = string.Empty;
         [JsonPropertyName("sourceLang")] public string? SourceLang { get; set; }
@@ -894,6 +896,8 @@ else
     private bool _busy;
     private string? _parseError;
     private string? _restoreName;
+    /// <summary>Which stored session the restore prompt offers; one per open, so it has to be named (#1609).</summary>
+    private string? _restoreOpenId;
     private string _restoreAge = "";
 
     // A saved session older than this is dropped on re-open rather than
@@ -1104,24 +1108,23 @@ else
         {
             try
             {
-                var session = await _module.InvokeAsync<SessionPeek?>("peek");
-                if (session is not null && !string.IsNullOrEmpty(session.FileName))
+                // A component that starts with no file holds no open, but the
+                // module may still hold the one a previous component in this
+                // tab had - after a resumed connection, say. Let go of it first,
+                // or that session would be hidden from this very tab (#1609).
+                await _module.InvokeVoidAsync("release");
+                // The newest session no other open tab is still working on.
+                // Sessions past the age limit are never offered - the browser
+                // deletes them here instead of surprising the user with a
+                // week-old file.
+                var session = await _module.InvokeAsync<SessionPeek?>("peek", (long)MaxSessionAge.TotalMilliseconds);
+                if (session is not null && !string.IsNullOrEmpty(session.FileName) && !string.IsNullOrEmpty(session.OpenId))
                 {
-                    var savedAt = DateTimeOffset.FromUnixTimeMilliseconds(session.SavedAt);
-                    var age = DateTimeOffset.UtcNow - savedAt;
-                    if (session.SavedAt <= 0 || age > MaxSessionAge)
-                    {
-                        // Too old to be useful (or a pre-timestamp record) -
-                        // drop it silently and start clean rather than surprise
-                        // the user with a week-old file.
-                        await _module.InvokeVoidAsync("clear");
-                    }
-                    else
-                    {
-                        _restoreName = session.FileName;
-                        _restoreAge = HumanizeAge(age);
-                        StateHasChanged();
-                    }
+                    var age = DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(session.SavedAt);
+                    _restoreName = session.FileName;
+                    _restoreOpenId = session.OpenId;
+                    _restoreAge = HumanizeAge(age < TimeSpan.Zero ? TimeSpan.Zero : age);
+                    StateHasChanged();
                 }
             }
             catch { /* storage unavailable */ }
@@ -1299,7 +1302,7 @@ else
         // Every open path stores the file and sets its own id afterwards.
         _openId = null;
         ForgetRepositorySource();
-        _restoreName = null;
+        ForgetRestore();
         Coordinator.ClearCaches();
         _filter = "todo";
         _kind = "All kinds";
@@ -1366,63 +1369,27 @@ else
         _busy = true;
         try
         {
-            var meta = await _module.InvokeAsync<SessionMeta?>("loadMeta");
-            if (meta is null) { _restoreName = null; return; }
-
-            var streamRef = await _module.InvokeAsync<IJSStreamReference>("loadOriginalStream", meta.OpenId);
-            string xml;
-            await using (var s = await streamRef.OpenReadStreamAsync(MaxFileBytes))
-            using (var reader = new StreamReader(s, Encoding.UTF8))
+            // The browser moves the session to a fresh id this tab then holds,
+            // and answers null when another tab took it over meanwhile.
+            var meta = await _module.InvokeAsync<SessionMeta?>("loadMeta", _restoreOpenId);
+            if (meta is null)
             {
-                xml = await reader.ReadToEndAsync();
-            }
-            if (string.IsNullOrEmpty(xml)) { _restoreName = null; return; }
-
-            XliffDocument parsed;
-            try
-            {
-                using var ps = new MemoryStream(Encoding.UTF8.GetBytes(xml));
-                parsed = AlXliffParser.Parse(ps);
-            }
-            catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
-            {
-                _parseError = $"Could not restore the saved session: {ex.Message}";
-                _restoreName = null;
+                ForgetRestore();
+                Flash(OpenInAnotherTab, ToastKind.Warn);
                 return;
             }
-
-            LoadParsed(meta.FileName, parsed);
-            _openId = meta.OpenId;
-            _restoredFromRepository = RestoredFromRepository(meta);
-            if (!string.IsNullOrEmpty(meta.TargetLang)) _targetLang = meta.TargetLang!;
-
-            // If the session was opened with a writable handle, it survives in
-            // IndexedDB — re-enable in-place Save. Write permission is re-checked
-            // (and re-prompted) on the Save gesture itself, not here. Never for
-            // the generated file, which only ever exports (#1325).
-            _canSaveInPlace = await _module.InvokeAsync<bool>("hasHandle", _openId);
-            await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: null);
-
-            // Re-apply the saved edit overlay.
-            var byId = _units.ToDictionary(u => u.Id, StringComparer.Ordinal);
-            foreach (var (id, ed) in meta.Edits)
+            try
             {
-                if (!byId.TryGetValue(id, out var vm)) continue;
-                vm.Target = ed.T;
-                if (!string.IsNullOrEmpty(ed.S)) vm.State = ed.S!;
-                vm.Dirty = true;
+                await LoadRestoredAsync(meta);
             }
-            // What the memory already learned from this session, so the next
-            // save does not teach it the same units again (#1343).
-            if (meta.Learned is { } learnedBefore)
+            catch
             {
-                foreach (var (id, target) in learnedBefore.Local) _learnedLocally[id] = target;
-                foreach (var (id, target) in learnedBefore.Repository) _learnedToRepository[id] = target;
+                // The browser moved the session to an id this tab now holds; let
+                // go of it so the prompt can offer it again (#1609).
+                try { await _module.InvokeVoidAsync("release"); } catch { }
+                _openId = null;
+                throw;
             }
-            // A restored session with edits is unsaved until it's exported.
-            if (meta.Edits.Count > 0) SetUnsaved(true);
-            RecomputeFiltered();
-            await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
         }
         finally
         {
@@ -1430,15 +1397,93 @@ else
         }
     }
 
+    private const string OpenInAnotherTab = "That file is open in another tab now, so its edits were kept.";
+
+    /// <summary>Reads and opens a session Continue has just moved to <paramref name="meta"/>'s fresh id.</summary>
+    private async Task LoadRestoredAsync(SessionMeta meta)
+    {
+        if (_module is null) return;
+        var streamRef = await _module.InvokeAsync<IJSStreamReference>("loadOriginalStream", meta.OpenId);
+        string xml;
+        await using (var s = await streamRef.OpenReadStreamAsync(MaxFileBytes))
+        using (var reader = new StreamReader(s, Encoding.UTF8))
+        {
+            xml = await reader.ReadToEndAsync();
+        }
+        if (string.IsNullOrEmpty(xml))
+        {
+            await _module.InvokeAsync<bool>("clear", meta.OpenId);
+            ForgetRestore();
+            return;
+        }
+
+        XliffDocument parsed;
+        try
+        {
+            using var ps = new MemoryStream(Encoding.UTF8.GetBytes(xml));
+            parsed = AlXliffParser.Parse(ps);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
+        {
+            _parseError = $"Could not restore the saved session: {ex.Message}";
+            // It would fail the same way next time, so it is not offered again.
+            await _module.InvokeAsync<bool>("clear", meta.OpenId);
+            ForgetRestore();
+            return;
+        }
+
+        LoadParsed(meta.FileName, parsed);
+        _openId = meta.OpenId;
+        _restoredFromRepository = RestoredFromRepository(meta);
+        if (!string.IsNullOrEmpty(meta.TargetLang)) _targetLang = meta.TargetLang!;
+
+        // If the session was opened with a writable handle, it survives in
+        // IndexedDB — re-enable in-place Save. Write permission is re-checked
+        // (and re-prompted) on the Save gesture itself, not here. Never for
+        // the generated file, which only ever exports (#1325).
+        _canSaveInPlace = await _module.InvokeAsync<bool>("hasHandle", _openId);
+        await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: null);
+
+        // Re-apply the saved edit overlay.
+        var byId = _units.ToDictionary(u => u.Id, StringComparer.Ordinal);
+        foreach (var (id, ed) in meta.Edits)
+        {
+            if (!byId.TryGetValue(id, out var vm)) continue;
+            vm.Target = ed.T;
+            if (!string.IsNullOrEmpty(ed.S)) vm.State = ed.S!;
+            vm.Dirty = true;
+        }
+        // What the memory already learned from this session, so the next
+        // save does not teach it the same units again (#1343).
+        if (meta.Learned is { } learnedBefore)
+        {
+            foreach (var (id, target) in learnedBefore.Local) _learnedLocally[id] = target;
+            foreach (var (id, target) in learnedBefore.Repository) _learnedToRepository[id] = target;
+        }
+        // A restored session with edits is unsaved until it's exported.
+        if (meta.Edits.Count > 0) SetUnsaved(true);
+        RecomputeFiltered();
+        await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
+    }
+
     private async Task DiscardAsync()
     {
-        if (_module is not null) await _module.InvokeVoidAsync("clear");
+        // Only the session the prompt named, and the browser keeps it when a
+        // tab has picked it up since the prompt appeared (#1609).
+        var discarded = _module is null || await _module.InvokeAsync<bool>("clear", _restoreOpenId);
+        ForgetRestore();
+        if (!discarded) Flash(OpenInAnotherTab, ToastKind.Warn);
+    }
+
+    private void ForgetRestore()
+    {
         _restoreName = null;
+        _restoreOpenId = null;
     }
 
     private async Task CloseFileAsync()
     {
-        // Only this tab's record: another tab may have opened a file since.
+        // Only this tab's own session record (#1595, #1609).
         if (_module is not null) await _module.InvokeVoidAsync("clear", _openId);
         _openId = null;
         SetUnsaved(false);
@@ -1667,9 +1712,9 @@ else
             // Rebase the browser's copy on what was just committed and drop the
             // edit overlay with it. Without this an "Export a copy" after two
             // saves would carry only the second batch of edits, because the
-            // overlay is what the export merges. Only while the record is still
-            // this tab's: one another tab opened since is left alone, and this
-            // tab's export then refuses rather than use it (#1595).
+            // overlay is what the export merges. The record is this tab's own
+            // and keeps its id (#1609); if the browser had lost it, this puts
+            // it back.
             using (var saved = new DotNetStreamReference(new MemoryStream(Encoding.UTF8.GetBytes(xml)), leaveOpen: false))
             {
                 _openId = await _module.InvokeAsync<string?>("putBaseStream", _fileName, _sourceLang, _targetLang, saved,
@@ -2336,10 +2381,10 @@ else
                 case "empty":
                     Flash("Nothing to save yet", ToastKind.Warn);
                     break;
-                case "replaced":
-                    // The stored file handle is now another tab's file; nothing
-                    // was written to it, and these edits are still unsaved.
-                    Flash(ReplacedInAnotherTab("save"), ToastKind.Danger);
+                case "missing":
+                    // The browser lost this file's stored copy and handle;
+                    // nothing was written, and these edits are still unsaved.
+                    Flash(StoredCopyMissing("save", fromRepository: _repoSource is not null), ToastKind.Danger);
                     break;
                 default:
                     Flash("Could not save the file - try Export a copy", ToastKind.Danger);
@@ -2370,12 +2415,13 @@ else
             case "exported":
                 RememberLearned(_learnedLocally, learn);
                 break;
-            case "replaced":
-                // The browser's stored copy is now another tab's file, or gone,
-                // so nothing was posted, and these edits are still unsaved.
+            case "missing":
+                // The browser's stored copy of the file is gone, so nothing
+                // was posted, and these edits are still unsaved.
                 SetUnsaved(wasUnsaved);
                 // The generated file's button says "Download translation".
-                Flash(ReplacedInAnotherTab(_fromGeneratedFile ? "download" : "export"), ToastKind.Danger);
+                Flash(StoredCopyMissing(_fromGeneratedFile ? "download" : "export", fromRepository: _repoSource is not null),
+                    ToastKind.Danger);
                 break;
             default:
                 // Nothing was posted either, so nothing was saved.
@@ -2386,13 +2432,17 @@ else
     }
 
     /// <summary>
-    /// What the page says when the browser refuses an export or save because
-    /// another tab has opened a file over this tab's stored copy (#1595).
-    /// Opening the file again starts from the file, so it says plainly that
-    /// the edits typed here go.
+    /// What the page says when the browser no longer has this tab's stored copy
+    /// of the file, so it cannot export or save it. Each open keeps its own
+    /// copy (#1609), so another tab no longer causes this; clearing the
+    /// browser's site data does. For a local file, opening it again starts
+    /// from the file on disk, so it says plainly that the edits typed here go.
+    /// A file from a repository is different: Save to repository works from the
+    /// copy the page itself holds, so the edits can still be kept (#1609, OEX4-4).
     /// </summary>
-    internal static string ReplacedInAnotherTab(string action) =>
-        $"This file was replaced by one opened in another tab - open it again to {action}. Unsaved edits in this tab will be lost.";
+    internal static string StoredCopyMissing(string action, bool fromRepository) => fromRepository
+        ? $"The browser no longer has a copy of this file, so it cannot {action} it. Save to repository still works and keeps your edits."
+        : $"The browser no longer has a copy of this file, so it cannot {action} it. Open the file again to {action} - unsaved edits in this tab will be lost.";
 
     /// <summary>The units in <paramref name="editsJson"/> the translation memory has not yet learned with their current text.</summary>
     private Dictionary<string, string> PendingLearning(string editsJson)
@@ -2645,11 +2695,10 @@ else
             {
                 await Task.Delay(400, token);
                 if (token.IsCancellationRequested || _module is null) return;
-                // The open id lets the browser refuse to write this overlay onto
-                // a record another tab has since replaced - even with a file of
-                // the same name (#1574). Read now, not when the save was queued,
-                // so a repository save that rebased the record in the meantime
-                // (which gives it a new id) does not refuse it.
+                // The open id names this tab's own record, so the overlay never
+                // lands on another tab's - even one with a file of the same
+                // name (#1574, #1609). Read now, not when the save was queued,
+                // so it is the id of the file open when the write happens.
                 await _module.InvokeVoidAsync("putEdits", _openId, json, learned);
             }
             catch { /* debounced away or storage unavailable */ }
@@ -2782,6 +2831,9 @@ else
             try { await _module.InvokeVoidAsync("teardownDropZone"); } catch { }
             try { await _module.InvokeVoidAsync("teardownPicker"); } catch { }
             try { await _module.InvokeVoidAsync("teardownSplit"); } catch { }
+            // The file stays stored, so another tab's restore prompt can now
+            // offer whatever was left unsaved here.
+            try { await _module.InvokeVoidAsync("release"); } catch { }
             try { await _module.DisposeAsync(); } catch { }
         }
         _selfRef?.Dispose();
