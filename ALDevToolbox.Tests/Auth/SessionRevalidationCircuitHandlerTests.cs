@@ -250,6 +250,51 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_promotion_while_the_page_is_open_leaves_the_page_alone()
+    {
+        // The person still has every right the page is using; reloading would
+        // drop the Save click and the unsaved edits with it (#1573).
+        var editorId = await SeedAsync(UserRole.Editor);
+        var handler = NewHandler(PrincipalFor(editorId, UserRole.Editor));
+        await UpdateAsync(editorId, u => { u.Role = UserRole.Admin; u.IsSiteAdmin = true; });
+
+        (await DispatchAsync(handler)).Should().BeTrue();
+        _navigation.Navigations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_failed_read_lets_events_through_for_a_while_then_drops_them()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = new SessionRevalidationCircuitHandler(
+            new FixedAuthState(PrincipalFor(adminId, UserRole.Admin)), new ThrowingContextFactory(), _db.OrgContext,
+            _navigation, _clock, new MaintenanceModeState(), NullLogger<SessionRevalidationCircuitHandler>.Instance);
+
+        (await DispatchAsync(handler)).Should().BeTrue("a brief hiccup should not take the page down");
+
+        _clock.Advance(SessionRevalidationCircuitHandler.FailClosedAfter);
+        (await DispatchAsync(handler)).Should().BeFalse("nobody has re-read this principal for too long (#1573)");
+        _navigation.Navigations.Should().BeEmpty("the refresh would need the same database that just failed");
+    }
+
+    [Fact]
+    public void A_principal_with_no_more_than_the_row_grants_still_matches()
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var admin = new SessionRevalidationCircuitHandler.UserSnapshot(UserStatus.Active, UserRole.Admin, true, null);
+
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.User), admin).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), admin).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin, siteAdmin: true), admin).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), admin with { Role = UserRole.Editor })
+            .Should().BeFalse("a demotion is still caught");
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin, siteAdmin: true), admin with { IsSiteAdmin = false })
+            .Should().BeFalse("a lost SiteAdmin flag is still caught");
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), admin with { CredentialsChangedAt = now.AddMinutes(1) })
+            .Should().BeFalse("a credential change after sign-in is still caught");
+    }
+
+    [Fact]
     public void A_matching_principal_matches_and_an_extra_org_role_does_not()
     {
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -328,6 +373,11 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     {
         public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
             Task.FromResult(new AuthenticationState(principal));
+    }
+
+    private sealed class ThrowingContextFactory : IDbContextFactory<AppDbContext>
+    {
+        public AppDbContext CreateDbContext() => throw new InvalidOperationException("The database is unreachable.");
     }
 
     private sealed class FixtureContextFactory(TestDb db) : IDbContextFactory<AppDbContext>

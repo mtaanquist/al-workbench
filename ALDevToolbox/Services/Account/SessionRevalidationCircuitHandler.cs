@@ -50,6 +50,15 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
     /// </summary>
     public static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// How long a circuit may go on without a successful check before a
+    /// failed one drops its events instead of letting them through (#1573).
+    /// A brief database hiccup still lets the page work; a long outage no
+    /// longer lets a circuit act indefinitely on a principal nobody has
+    /// re-read.
+    /// </summary>
+    public static readonly TimeSpan FailClosedAfter = TimeSpan.FromMinutes(1);
+
     private readonly AuthenticationStateProvider _authState;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly IOrganizationContext _orgContext;
@@ -59,6 +68,7 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
     private readonly ILogger<SessionRevalidationCircuitHandler> _logger;
 
     private DateTime? _lastCheckedAt;
+    private readonly DateTime _openedAt;
     private volatile bool _stale;
     private int _redirected;
 
@@ -79,6 +89,7 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         _clock = clock;
         _maintenance = maintenance;
         _logger = logger;
+        _openedAt = clock.GetUtcNow().UtcDateTime;
         // The guard lets a SiteAdmin's circuit use the database during a restore
         // only while it shows a SiteAdmin console page (#1571).
         if (databaseGuard is not null) databaseGuard.CircuitOnSiteAdminConsole = OnSiteAdminConsole;
@@ -104,10 +115,15 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         Func<CircuitInboundActivityContext, Task> next) =>
         async context =>
         {
-            if (await IsStaleAsync(CancellationToken.None))
+            switch (await CheckAsync(CancellationToken.None))
             {
-                SendToRefresh();
-                return;
+                case SessionCheck.Stale:
+                    SendToRefresh();
+                    return;
+                case SessionCheck.Unverified:
+                    // Dropped without a reload: the refresh endpoint would
+                    // need the same database that just failed.
+                    return;
             }
             // The users table may be empty or gone during a restore, so the claim
             // decides, as it does in the maintenance middleware.
@@ -124,18 +140,30 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
             await next(context);
         };
 
-    /// <summary>
-    /// True once the circuit's principal no longer matches the user's row.
-    /// Sticky: a stale circuit stays stale until the browser leaves it.
-    /// </summary>
-    internal async Task<bool> IsStaleAsync(CancellationToken ct)
+    /// <summary>What a check concluded about the circuit's principal.</summary>
+    internal enum SessionCheck
     {
-        if (_stale) return true;
+        /// <summary>The principal matches the row, or there is nothing to check.</summary>
+        Current,
+        /// <summary>The principal has more than the row grants. Sticky until the browser leaves.</summary>
+        Stale,
+        /// <summary>The row could not be read and the last good check is too old to lean on.</summary>
+        Unverified,
+    }
+
+    /// <summary>
+    /// Compares the circuit's principal with the user's row, at most once per
+    /// <see cref="CheckInterval"/>. Stale is sticky: a stale circuit stays
+    /// stale until the browser leaves it.
+    /// </summary>
+    internal async Task<SessionCheck> CheckAsync(CancellationToken ct)
+    {
+        if (_stale) return SessionCheck.Stale;
         var now = _clock.GetUtcNow().UtcDateTime;
-        if (_lastCheckedAt is { } last && now - last < CheckInterval) return false;
+        if (_lastCheckedAt is { } last && now - last < CheckInterval) return SessionCheck.Current;
         // A restore empties the users table while it runs; reading it now
         // would mistake that for a deleted account (#1269).
-        if (_maintenance.IsActive) return false;
+        if (_maintenance.IsActive) return SessionCheck.Current;
 
         var principal = (await _authState.GetAuthenticationStateAsync()).User;
         // Anonymous pages have no rights to lose. Without an organisation the
@@ -145,7 +173,7 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
             || !int.TryParse(principal.FindFirstValue(HttpOrganizationContext.UserIdClaim), out var userId))
         {
             _lastCheckedAt = now;
-            return false;
+            return SessionCheck.Current;
         }
 
         UserSnapshot? row;
@@ -160,10 +188,17 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         }
         catch (Exception ex)
         {
-            // The services keep their own checks; a database hiccup should
-            // not take every open page down with it.
-            _logger.LogWarning(ex, "Could not re-check the session for user {UserId}; trying again on the next event.", userId);
-            return false;
+            // A hiccup should not take every open page down with it, so the
+            // last good check (or the request that opened the circuit) is
+            // trusted for a while. Past that the event is dropped (#1573).
+            var trustedSince = _lastCheckedAt ?? _openedAt;
+            if (now - trustedSince < FailClosedAfter)
+            {
+                _logger.LogWarning(ex, "Could not re-check the session for user {UserId}; trying again on the next event.", userId);
+                return SessionCheck.Current;
+            }
+            _logger.LogWarning(ex, "Could not re-check the session for user {UserId} and the last check is too old; dropping the event.", userId);
+            return SessionCheck.Unverified;
         }
 
         _lastCheckedAt = now;
@@ -172,15 +207,18 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
             _stale = true;
             _logger.LogInformation("Session for user {UserId} no longer matches the account; reloading the page.", userId);
         }
-        return _stale;
+        return _stale ? SessionCheck.Stale : SessionCheck.Current;
     }
 
     /// <summary>
-    /// Whether the principal a circuit connected with still describes the
-    /// account: active, the same organisation role, the same SiteAdmin flag,
-    /// and no credential change since the session signed in (a password reset
-    /// or an email change stamps one). The comparison is with the session's
-    /// sign-in moment, mirrored on the principal, not with when the circuit
+    /// Whether the principal a circuit connected with is still covered by the
+    /// account: active, an organisation role no higher than the row's, no
+    /// SiteAdmin claim the row has lost, and no credential change since the
+    /// session signed in. A gain of rights (a promotion, a SiteAdmin flag
+    /// granted) is left for the next page load: reloading for it would drop
+    /// the click and any unsaved edits of someone who still has every right
+    /// they are using (#1573). A credential change (a password reset or an
+    /// email change stamps one) is compared with the session's sign-in moment, mirrored on the principal, not with when the circuit
     /// opened: a page opened just after a reset, while the cookie re-check
     /// was still throttled, would otherwise keep the old session (#1567). A
     /// principal without the claim (a cookie from before it existed) counts
@@ -194,12 +232,14 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
             .Select(c => c.Value)
             .Where(v => v != HttpOrganizationContext.SiteAdminRole)
             .ToList();
-        if (orgRoles.Count != 1 || orgRoles[0] != row.Role.ToString()) return false;
-        var claimsSiteAdmin = principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) == "true";
-        if (claimsSiteAdmin != row.IsSiteAdmin || principal.IsInRole(HttpOrganizationContext.SiteAdminRole) != row.IsSiteAdmin)
+        // UserRole is declared in rank order: User, Editor, Admin.
+        if (orgRoles.Count != 1 || !Enum.TryParse<UserRole>(orgRoles[0], out var claimedRole) || claimedRole > row.Role)
         {
             return false;
         }
+        var claimsSiteAdmin = principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) == "true"
+            || principal.IsInRole(HttpOrganizationContext.SiteAdminRole);
+        if (claimsSiteAdmin && !row.IsSiteAdmin) return false;
         return row.CredentialsChangedAt is not { } changedAt || EndpointHelpers.SignedInAt(principal) >= changedAt;
     }
 

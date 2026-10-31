@@ -294,8 +294,14 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             string.Empty, "1.0.0.0", null, string.Empty, string.Empty, string.Empty,
             false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow);
 
+        /// <summary>The token each poll of an install was sent with, in order.</summary>
+        public List<string> PolledWith { get; } = [];
+
         public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
-            => Task.FromResult(OnOperation(operationId));
+        {
+            PolledWith.Add(accessToken);
+            return Task.FromResult(OnOperation(operationId));
+        }
     }
 
     private sealed class StubHandler : HttpMessageHandler
@@ -3042,6 +3048,43 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         apps.Installed!.Value.Schedule.Should().Be(BcDeploymentSchedule.Immediate);
         result.Completed.Should().BeFalse();
         result.Message.Should().Contain("Continia Core");
+    }
+
+    /// <summary>
+    /// A booked install can be polled for longer than a cached token has left. A 401 mid-wait
+    /// fetches a new token and asks again, rather than giving the install up as unconfirmed.
+    /// </summary>
+    [Fact]
+    public async Task Checking_a_booked_install_again_signs_in_again_when_the_token_runs_out_mid_wait()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var apps = new FakeAppManagementClient();
+        apps.OnOperation = id => apps.PolledWith.Count == 1
+            ? throw new BcApiException(HttpStatusCode.Unauthorized, "The access token has expired.")
+            : new BcAppOperation(id, Guid.NewGuid(), "install", BcAppOperationStatus.Succeeded, "succeeded",
+                string.Empty, "1.0.0.0", null, string.Empty, string.Empty, string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow);
+        var tokens = new BcTokenService(new StubFactory(new SequenceTokenHandler()), NullLogger<BcTokenService>.Instance);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, tokens, new FakeAdminClient(), apps);
+        svc.UploadPollDelay = TimeSpan.Zero;
+        svc.UploadPollTimeout = UpgradeActionTestFixture.TestUploadPollTimeout;
+        var result = await svc.ConfirmBookedInstallAsync(projectId, envId, Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None);
+
+        result.Completed.Should().BeTrue();
+        apps.PolledWith.Should().Equal("tok1", "tok2");
+    }
+
+    /// <summary>A sign-in that hands out a new token each time: tok1, tok2, ...</summary>
+    private sealed class SequenceTokenHandler : HttpMessageHandler
+    {
+        private int _issued;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{{\"access_token\":\"tok{Interlocked.Increment(ref _issued)}\",\"expires_in\":3600}}"),
+            });
     }
 
     [Fact]

@@ -255,13 +255,13 @@ function notOwned(rec, openId) {
 // Stores a new open's record and deletes the tab's previous one in the same
 // transaction: the tab has moved on from that file. Then drops the older
 // copies of the same file nobody holds (#1624).
-async function openRecord(rec) {
+async function openRecord(rec, dropOlder = true) {
     rec.savedAt = Date.now();
     const ok = await startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
         store.put(rec, rec.openId);
         if (previousId && previousId !== rec.openId) store.delete(previousId);
     }));
-    if (ok) await dropOlderCopies(rec);
+    if (ok && dropOlder) await dropOlderCopies(rec);
     return ok;
 }
 
@@ -324,6 +324,14 @@ async function dropOlderCopies(rec) {
             if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));
         }
     } catch { /* best effort: the prompt also offers only the newest of each file */ }
+}
+
+// For a file picked or dropped from disk, which is stored before anything
+// parses it: drops the older copies of its file only once the page has
+// opened it, so a file that fails to open touches no other session.
+export async function opened(openId) {
+    const rec = await getOwnRec(openId);
+    if (rec) await dropOlderCopies(rec);
 }
 
 // Called once when a file is opened. The original XML arrives as a
@@ -440,12 +448,14 @@ export async function peek(maxAgeMs) {
 // Continue on the restore prompt: takes over the session `openId` names, as
 // long as no live tab holds it, by moving its record to a fresh id this tab
 // then holds. Returns the small metadata (the original XML streams separately)
-// with the new id, or null when the session is gone or another tab has it.
+// with the new id, or { refused } saying why nothing was taken over: "held"
+// when another tab has it, "gone" when it was deleted since the prompt
+// appeared, "error" when the browser's storage failed.
 export async function loadMeta(openId) {
     try {
-        return await whileUnheld(openId, async () => {
+        const result = await whileUnheld(openId, async () => {
             const rec = await getOwnRec(openId);
-            if (!rec) return null;
+            if (!rec) return { refused: "gone" };
             const newId = newOpenId();
             const moved = { ...rec, openId: newId };
             const ok = await startOpen(newId, (previousId) => withStore("readwrite", (store) => {
@@ -453,7 +463,7 @@ export async function loadMeta(openId) {
                 store.delete(openId);
                 if (previousId) store.delete(previousId);
             }));
-            if (!ok) return null;
+            if (!ok) return { refused: "error" };
             await dropOlderCopies(moved);
             return {
                 openId: newId,
@@ -465,8 +475,9 @@ export async function loadMeta(openId) {
                 repo: rec.repo || null,
             };
         });
+        return result || { refused: "held" };
     } catch {
-        return null;
+        return { refused: "error" };
     }
 }
 
@@ -548,7 +559,8 @@ async function adoptHandle(handle) {
     const file = await handle.getFile();
     const originalXml = await file.text();
     const openId = newOpenId();
-    const ok = await openRecord({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });
+    // Older copies of the file are dropped once the page has opened it (opened).
+    const ok = await openRecord({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle }, false);
     return ok ? { fileName: file.name, openId } : null;
 }
 

@@ -262,6 +262,49 @@ public sealed class SelectVersionActionTests : IDisposable
     }
 
     [Fact]
+    public async Task A_booked_version_change_does_not_fire_once_the_booker_is_off_the_update_team()
+    {
+        // The solution's owner is also on the update team, so they pass both gates when booking.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        int teamId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            teamId = await ctx.OeProjectTeams.Where(t => t.ProjectId == projectId).Select(t => t.TeamId).SingleAsync();
+            ctx.TeamMembers.Add(new ALDevToolbox.Domain.Entities.TeamMember
+            {
+                OrganizationId = TestDb.DefaultOrgId, TeamId = teamId, UserId = UpgradeActionTestFixture.OwnerUserId,
+                ManagesUpdates = true, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var row = await _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, envId, UpgradeActionKind.SelectVersion,
+                _f.Clock.GetUtcNow().AddHours(4), targetVersion: "27.7");
+            actionId = row.Id;
+        }
+
+        // That afternoon they are taken off the update team, but still manage the solution.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.TeamMembers
+                .Where(m => m.TeamId == teamId && m.UserId == UpgradeActionTestFixture.OwnerUserId)
+                .ExecuteUpdateAsync(u => u.SetProperty(m => m.ManagesUpdates, false));
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(5));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(0, "the booking was made on the update-team grant, which is gone");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("no longer had permission");
+    }
+
+    [Fact]
     public async Task The_feed_and_the_pending_list_carry_the_version()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();

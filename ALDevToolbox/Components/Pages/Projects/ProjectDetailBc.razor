@@ -93,7 +93,7 @@
                     <section class="field">
                         <label class="field__label" for="bc-secret">Client secret</label>
                         <input id="bc-secret" type="password" class="input" @bind="_bcEdit.Secret" disabled="@_bcSaving"
-                               placeholder="@(_bc?.HasSecret == true ? "•••••••• (leave blank to keep)" : "the app registration's client secret")" />
+                               placeholder="@(_bc?.HasSecret == true ? "Stored - leave blank to keep it" : "the app registration's client secret")" />
                         <small class="field__hint">@(_bc?.HasSecret == true ? "A secret is stored. Enter a new one only to replace it." : "Stored encrypted; never shown again.")</small>
                     </section>
                     <section class="field">

@@ -219,9 +219,14 @@ public sealed class PerTenantBackupService
         // user snapshot any org. (Verified: the only Scheduled call site is
         // BackupScheduler; every endpoint passes AdHoc.)
         if (kind == BackupKind.AdHoc) _orgContext.RequireSiteAdmin();
-        // While a failed full restore holds the site closed, the organisation's
-        // rows are gone or half-loaded: a snapshot of them is useless, and the
-        // retention prune after it would delete good snapshots (#1610).
+        // The snapshot reads on a connection of its own, which the restore's wait
+        // for running work cannot see. Holding the backup lock keeps a full restore
+        // from dropping the schema under the read, or closing the site between the
+        // maintenance check below and the read (#1628).
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
+        // Checked under the lock. While a failed full restore holds the site closed,
+        // the organisation's rows are gone or half-loaded: a snapshot of them is
+        // useless, and the retention prune after it would delete good snapshots (#1610).
         BackupService.RefuseWhileInMaintenance(_maintenance);
         var org = await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == organizationId, ct)
@@ -527,6 +532,9 @@ public sealed class PerTenantBackupService
     public async Task DeleteAsync(int id, CancellationToken ct = default)
     {
         _orgContext.RequireSiteAdmin();
+        // Under the backup lock, so a delete cannot unlink a snapshot a restore is
+        // reading (#1628).
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
         var row = await _db.PerTenantBackups
             .Include(b => b.Organization)
             .FirstOrDefaultAsync(b => b.Id == id, ct);
