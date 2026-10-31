@@ -719,15 +719,23 @@ that names the environment and says what the click does there:
   add-on solution's upload booked after the base solution's it depends on goes after it.
   So an Install now on an environment where an earlier booking is still waiting waits
   for that booking too, the whole batch if it is one; it only goes ahead of other
-  environments' bookings. A batch a window chose the time for that has started (any of
-  its apps sent) keeps the turn until it is done, ahead of other environments' bookings a
-  window chose (#1608): when the window closes the rest of every batch not yet started
-  moves whole to the next opening, so at most the customer whose batch was running is
-  left with part of it installed, rather than every customer with a batch booked for
-  that window. A booking whose time a person picked - an Install now, an upload for now,
-  or a time they set - still goes ahead of that batch on the next sweep, and such
-  bookings rotate with each other as above, because no window holds them back and none
-  is ever moved part-way. A row moved to
+  environments' bookings. Which environment gets the turn is decided by the best of its
+  due installs (#1608): first the environments with any due booking whose time a person
+  picked - an Install now, an upload for now, or a time they set - then those holding a
+  batch a window chose the time for that has started (any of its apps sent), then those
+  with only window bookings not yet started; within each group the rotation above
+  decides, except that among environments with a started batch the one served most
+  recently carries on. Once an environment has the turn its installs still go in the
+  order above, so an Install now there can give its environment the turn but still goes
+  after the bookings ahead of it. So a started window batch keeps the turn until it is
+  done, ahead of other environments' window bookings: when the window closes the rest
+  of every batch not yet started moves whole to the next opening, and at most the
+  customer whose batch was running is left with part of it installed, rather than every
+  customer with a batch booked for that window. Bookings whose time a person picked still
+  go ahead of that batch on the next sweep and rotate with each other, because no window
+  holds them back and none is ever moved part-way. The rotation looks back 30 days for
+  an environment's last install; one not served in that time counts as never served. A
+  row moved to
   a window's next opening ties on time with everything booked for that opening, so its
   booking time is what keeps its place: a single booking moved past a closed window goes
   ahead of the leftovers of a batch booked after it and of a batch booked for the new

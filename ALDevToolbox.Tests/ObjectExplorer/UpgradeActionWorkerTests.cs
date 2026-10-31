@@ -1845,6 +1845,74 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task Install_now_behind_an_earlier_window_booking_on_its_environment_still_takes_the_turn_from_a_started_batch()
+    {
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(dEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await SetWindowsAsync(wEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await BookInWindowAsync(dProject, dEnv, UploadAppTiming.DeliveryWindow, "D1.app", "D2.app", "D3.app");
+        await BookInWindowAsync(wProject, wEnv, UploadAppTiming.DeliveryWindow, "WWindow.app");
+        var urgent = (await BookUploadAsync(wProject, wEnv, hoursAhead: 24, "Hotfix.app"))
+            .Last();
+        _f.Clock.Advance(new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Svc(ctx).RunBookedInstallNowAsync(urgent);
+        await SweepUntilQuietAsync();
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "D1.app", "WWindow.app", "Hotfix.app", "D2.app", "D3.app" },
+            "the Install now gives its environment the turn, and the booking ahead of it there still goes first");
+    }
+
+    [Fact]
+    public async Task A_started_window_batch_keeps_the_turn_when_another_booking_on_its_environment_sorts_ahead_of_it()
+    {
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (sProject, sEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(dEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await SetWindowsAsync(sEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await BookInWindowAsync(dProject, dEnv, UploadAppTiming.DeliveryWindow, "D1.app", "D2.app", "D3.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        await BookInWindowAsync(sProject, sEnv, UploadAppTiming.DeliveryWindow, "S1.app", "S2.app");
+        _f.Clock.Advance(new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        // A single booking for the same window on the running customer, booked before
+        // either batch (as one moved past last night's window would be), now sorts first there.
+        var ids = await BookInWindowAsync(dProject, dEnv, UploadAppTiming.DeliveryWindow, "DLate.app");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var late = await ctx.OeEnvironmentUpgradeActions.Where(a => a.PackageFileName == "DLate.app").Select(a => a.Id).SingleAsync();
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == late)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.RequestedAt, a => a.RequestedAt.AddDays(-1)));
+        }
+        for (var i = 0; i < 3; i++)
+        {
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        }
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "D1.app", "DLate.app", "D2.app", "D3.app" },
+            "the environment with a started batch keeps the turn, whichever of its rows comes first");
+    }
+
+    [Fact]
+    public void Solutions_with_no_tenant_yet_each_count_as_their_own_environment()
+    {
+        // A solution with no tenant cannot install yet, so this is the key on its own: two
+        // such solutions never share a turn, and one tenant's environment ignores case.
+        UpgradeActionWorker.EnvironmentKey(null, 5, "Production")
+            .Should().NotBe(UpgradeActionWorker.EnvironmentKey(null, 6, "Production"));
+        UpgradeActionWorker.EnvironmentKey(null, 5, "Production")
+            .Should().Be(("solution:5", "PRODUCTION"));
+        var tenant = Guid.NewGuid();
+        UpgradeActionWorker.EnvironmentKey(tenant, 5, "Production")
+            .Should().Be(UpgradeActionWorker.EnvironmentKey(tenant, 6, "PRODUCTION"));
+    }
+
+    [Fact]
     public async Task The_install_turn_rotates_between_organisations_so_a_long_batch_does_not_starve_another()
     {
         // This organisation booked two ten-app batches for 09:00...

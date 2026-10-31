@@ -301,7 +301,7 @@ public sealed class UpgradeActionWorker : BackgroundService
 
             if (uploads)
             {
-                due = await InEnvironmentTurnOrderAsync(db, due, ct).ConfigureAwait(false);
+                due = await InEnvironmentTurnOrderAsync(db, due, now, ct).ConfigureAwait(false);
             }
         }
 
@@ -347,7 +347,7 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// rows are numbered, and the name is matched ignoring case. A solution with no tenant
     /// yet keys on itself.
     /// </summary>
-    private static (string Tenant, string Environment) EnvironmentKey(Guid? tenantId, int projectId, string name) =>
+    internal static (string Tenant, string Environment) EnvironmentKey(Guid? tenantId, int projectId, string name) =>
         (tenantId?.ToString() ?? $"solution:{projectId}", name.ToUpperInvariant());
 
     /// <summary>
@@ -360,67 +360,94 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// in Business Central, not on the solution's row for it, and bookings for one
     /// environment never rotate among themselves: a later upload may need an app an
     /// earlier one brings, even when the two came from different solutions on one tenant.
-    /// The sort is stable, so the SQL order (#1568) holds inside each environment. And a
-    /// batch a window chose the time for that has started keeps the turn until it is done,
-    /// ahead of other bookings a window chose: when the window closes, the rest of every
-    /// unstarted batch moves to the next opening whole, so at most the customers whose
-    /// batch was running are left part-installed, not every customer who had one booked.
-    /// A row whose time a person picked - Install now, an upload for now, or a time they
-    /// set - still goes ahead of such a batch, because nobody asked it to wait for a window.</para>
+    /// The sort is stable, so the SQL order (#1568) holds inside each environment. And an
+    /// environment holding a window batch that has started keeps the turn until it is
+    /// done, ahead of environments with only window bookings: when the window closes, the
+    /// rest of every unstarted batch moves to the next opening whole, so at most the
+    /// customers whose batch was running are left part-installed, not every customer who
+    /// had one booked. An environment with any due row whose time a person picked -
+    /// Install now, an upload for now, or a time they set - still goes ahead of it,
+    /// because nobody asked that row to wait for a window.</para>
     /// </summary>
-    private static async Task<List<DueAction>> InEnvironmentTurnOrderAsync(AppDbContext db, List<DueAction> due, CancellationToken ct)
+    private static async Task<List<DueAction>> InEnvironmentTurnOrderAsync(
+        AppDbContext db, List<DueAction> due, DateTime now, CancellationToken ct)
     {
-        // The first due install of each environment, in the SQL order: what that
-        // environment would send if it had the turn.
-        var heads = due.Where(a => UpgradeActionService.IsAppInstall(a.Kind))
+        var byEnvironment = due.Where(a => UpgradeActionService.IsAppInstall(a.Kind))
             .GroupBy(a => a.BcEnvironment)
-            .ToDictionary(g => g.Key, g => g.First());
-        if (heads.Count < 2) return due;
+            .ToDictionary(g => g.Key, g => g.ToList());
+        if (byEnvironment.Count < 2) return due;
 
-        var tenants = heads.Values.Where(a => a.TenantId != null).Select(a => a.TenantId!.Value).Distinct().ToList();
-        var untenanted = heads.Values.Where(a => a.TenantId == null).Select(a => a.ProjectId).Distinct().ToList();
+        // Every solution's row for those environments - a shared environment's history is
+        // on the other solution's row too - then each row's latest install, through the
+        // environment index and only as far back as the rotation needs.
+        var installing = byEnvironment.Values.SelectMany(rows => rows).ToList();
+        var tenants = installing.Where(a => a.TenantId != null).Select(a => a.TenantId!.Value).Distinct().ToList();
+        var untenanted = installing.Where(a => a.TenantId == null).Select(a => a.ProjectId).Distinct().ToList();
+        var environmentRows = (await db.OeProjectEnvironments.AsNoTracking()
+                .Where(e => (e.Project!.BcTenantId != null && tenants.Contains(e.Project.BcTenantId.Value))
+                            || (e.Project.BcTenantId == null && untenanted.Contains(e.ProjectId)))
+                .Select(e => new { e.Id, e.ProjectId, e.Project!.BcTenantId, e.Name })
+                .ToListAsync(ct).ConfigureAwait(false))
+            .Select(e => (e.Id, Key: EnvironmentKey(e.BcTenantId, e.ProjectId, e.Name)))
+            .Where(e => byEnvironment.ContainsKey(e.Key))
+            .ToDictionary(e => e.Id, e => e.Key);
+        var rowIds = environmentRows.Keys.ToList();
+        var since = now - RotationHistory;
         var sentPerRow = await db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
-                        && a.SentAt != null
-                        && ((a.Project!.BcTenantId != null && tenants.Contains(a.Project.BcTenantId.Value))
-                            || (a.Project.BcTenantId == null && untenanted.Contains(a.ProjectId))))
-            .GroupBy(a => new { a.ProjectId, a.Project!.BcTenantId, a.Environment!.Name })
-            .Select(g => new { g.Key.ProjectId, g.Key.BcTenantId, g.Key.Name, LastSentAt = g.Max(a => a.SentAt) })
+            .Where(a => rowIds.Contains(a.EnvironmentId)
+                        && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
+                        && a.SentAt != null && a.SentAt >= since)
+            .GroupBy(a => a.EnvironmentId)
+            .Select(g => new { EnvironmentId = g.Key, LastSentAt = g.Max(a => a.SentAt) })
             .ToListAsync(ct).ConfigureAwait(false);
         var lastSent = sentPerRow
-            .GroupBy(x => EnvironmentKey(x.BcTenantId, x.ProjectId, x.Name))
+            .GroupBy(x => environmentRows[x.EnvironmentId])
             .ToDictionary(g => g.Key, g => g.Max(x => x.LastSentAt));
 
-        var windowBatches = heads.Values
+        // A batch's rows all sit on one environment row, so the index finds them.
+        var windowBatches = installing
             .Where(a => a.ScheduledByWindow != null && a.BatchId != null)
             .Select(a => a.BatchId!.Value).Distinct().ToList();
+        var batchRowIds = installing.Where(a => a.ScheduledByWindow != null && a.BatchId != null)
+            .Select(a => a.EnvironmentId).Distinct().ToList();
         var started = windowBatches.Count == 0
             ? new HashSet<Guid>()
             : (await db.OeEnvironmentUpgradeActions.AsNoTracking()
-                .Where(a => a.BatchId != null && windowBatches.Contains(a.BatchId.Value) && a.SentAt != null)
+                .Where(a => batchRowIds.Contains(a.EnvironmentId)
+                            && a.BatchId != null && windowBatches.Contains(a.BatchId.Value) && a.SentAt != null)
                 .Select(a => a.BatchId!.Value).Distinct()
                 .ToListAsync(ct).ConfigureAwait(false)).ToHashSet();
 
-        // 0: its next install has a time a person picked; 1: a window batch already
-        // part-sent, which keeps the turn; 2: everything else a window chose.
-        int Tier(DueAction head) =>
-            head.ScheduledByWindow == null ? 0
-            : head.BatchId is { } b && started.Contains(b) ? 1
+        // An environment's tier is the best of its due installs: 0 when any has a time a
+        // person picked; 1 when any is in a window batch already part-sent, which keeps
+        // the turn; 2 when all are window bookings not yet started. The tier only picks
+        // the environment; inside it the installs still go in the order above.
+        int Tier(DueAction a) =>
+            a.ScheduledByWindow == null ? 0
+            : a.BatchId is { } b && started.Contains(b) ? 1
             : 2;
-        var rank = heads
-            .OrderBy(h => Tier(h.Value))
-            .ThenBy(h => Tier(h.Value) == 1
+        var tiers = byEnvironment.ToDictionary(e => e.Key, e => e.Value.Min(Tier));
+        var rank = byEnvironment.Keys
+            .OrderBy(k => tiers[k])
+            .ThenBy(k => tiers[k] == 1
                 // The started batch served most recently is the one running: it carries on.
-                ? -(lastSent.GetValueOrDefault(h.Key) ?? DateTime.MinValue).Ticks
-                : (lastSent.GetValueOrDefault(h.Key) ?? DateTime.MinValue).Ticks)
-            .Select((h, i) => (h.Key, i))
-            .ToDictionary(x => x.Key, x => x.i);
+                ? -(lastSent.GetValueOrDefault(k) ?? DateTime.MinValue).Ticks
+                : (lastSent.GetValueOrDefault(k) ?? DateTime.MinValue).Ticks)
+            .Select((k, i) => (k, i))
+            .ToDictionary(x => x.k, x => x.i);
 
         return due
             .OrderBy(a => UpgradeActionService.IsAppInstall(a.Kind))
             .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind) ? rank[a.BcEnvironment] : 0)
             .ToList();
     }
+
+    /// <summary>
+    /// How far back the install turn looks for an environment's last install. An
+    /// environment not served within it counts as never served; that only reorders
+    /// environments idle for weeks, and keeps a sweep from reading the whole history.
+    /// </summary>
+    private static readonly TimeSpan RotationHistory = TimeSpan.FromDays(30);
 
     /// <summary>
     /// Tells the people checking environments on this org's planned upgrades which ones
