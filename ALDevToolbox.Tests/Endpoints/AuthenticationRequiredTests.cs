@@ -13,21 +13,17 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// and never leaks a service-level stack trace. A regression that drops
 /// <c>.RequireAuthorization()</c> from a Map call would otherwise ship —
 /// service-layer tests can't see it.
+///
+/// <para>Every case is an anonymous request that changes nothing, so they share
+/// one host (#1536).</para>
 /// </summary>
-public sealed class AuthenticationRequiredTests : IDisposable
+public sealed class AuthenticationRequiredTests : IClassFixture<SharedEndpointHost>
 {
-    private readonly TestDb _db = new();
     private readonly EndpointFactory _factory;
 
-    public AuthenticationRequiredTests()
+    public AuthenticationRequiredTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _factory = host.Factory;
     }
 
     /// <summary>

@@ -16,21 +16,21 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// arrays (not double-encoded strings) so the client can apply them directly,
 /// report the identical case, and refuse an over-cap paste with a friendly
 /// error rather than a stack trace.
+///
+/// <para>The cases share one host (#1536): the route is stateless and each
+/// sends a request or two, well inside the rate limit. The two that take the
+/// host's diff slots or drain its rate limit on purpose boot a host of their
+/// own, so they cannot leave a later case busy or throttled.</para>
 /// </summary>
-public sealed class CompareEndpointTests : IDisposable
+public sealed class CompareEndpointTests : IClassFixture<SharedEndpointHost>
 {
-    private readonly TestDb _db = new();
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public CompareEndpointTests()
+    public CompareEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Fact]
@@ -243,14 +243,15 @@ public sealed class CompareEndpointTests : IDisposable
     /// A diff cannot be stopped once it starts, so the number running at once
     /// is capped app-wide whoever is asking. With every slot taken, a request
     /// waits briefly and is then told the server is busy rather than queuing
-    /// behind work it cannot see. The gate is this factory's own singleton, so
-    /// holding it cannot starve another test class's requests.
+    /// behind work it cannot see. The gate is a singleton of this test's own host,
+    /// so holding it cannot starve another test's requests.
     /// </summary>
     [Fact]
     public async Task With_every_diff_slot_taken_a_request_is_answered_busy()
     {
-        var gate = _factory.Services.GetRequiredService<CompareDiffGate>();
-        using var client = _factory.CreateClient();
+        using var factory = new EndpointFactory(_db);
+        var gate = factory.Services.GetRequiredService<CompareDiffGate>();
+        using var client = factory.CreateClient();
         var held = 0;
         try
         {
@@ -287,7 +288,8 @@ public sealed class CompareEndpointTests : IDisposable
     [Fact]
     public async Task A_sustained_burst_is_throttled_with_429()
     {
-        using var client = _factory.CreateClient();
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
         var sawTooManyRequests = false;
 
         for (var i = 0; i < 120 && !sawTooManyRequests; i++)

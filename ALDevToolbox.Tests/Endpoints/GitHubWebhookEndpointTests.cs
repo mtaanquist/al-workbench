@@ -25,33 +25,83 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// malformed". So each refusal is asserted for its own status, not merely for
 /// not-success.</para>
 /// </summary>
-public sealed class GitHubWebhookEndpointTests : IDisposable
+public sealed class GitHubWebhookEndpointTests : IClassFixture<GitHubWebhookEndpointTests.Host>
 {
     private const string Secret = "swordfish";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
     private readonly EndpointFactory _factory;
-
-    private readonly GitHubWebhookBodyGate _gate = new(
-        GitHubWebhookBodyGate.DefaultSlots,
-        waitTimeout: TimeSpan.FromMilliseconds(300),
-        readDeadline: TimeSpan.FromSeconds(3));
+    private readonly GitHubWebhookBodyGate _gate;
 
     /// <summary>
-    /// GitHub's webhook ranges, loaded as the daily refresh would (#1201), so every
-    /// test below runs with the address check in force. A test that needs the list
-    /// unloaded swaps the field before its first request.
+    /// The tests share one host (#1536), but not the state a delivery leaves behind:
+    /// each test gets its own queue, large-body gate and sender list, installed here
+    /// before its first request. The webhook secret is the same in every test that
+    /// stores one, so storing it again is a no-op; the one test that needs no secret
+    /// at all boots a host of its own.
     /// </summary>
-    private GitHubHookAddressAllowList _senders = LoadedSenders();
-
-    public GitHubWebhookEndpointTests()
+    public GitHubWebhookEndpointTests(Host host)
     {
-        // The real worker would drain the queue as fast as the endpoint fills it,
-        // so "was this delivery queued?" would be a race. These tests are about the
-        // endpoint - what it accepts, what it refuses, and what it hands on - so
-        // the drain is taken out and the channel left to be read by the test.
-        _factory = new EndpointFactory(_db, services =>
+        _host = host;
+        _factory = host.Factory;
+        host.StartTest();
+        _gate = host.Gate;
+    }
+
+    /// <summary>
+    /// The shared host. The queue, the gate and the sender list are read through
+    /// <see cref="Holder"/> each time they are resolved, so the endpoint sees the
+    /// running test's own instances and nothing one test left behind - a queued
+    /// delivery, a held slot, a full channel, a remembered head - reaches the next.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
+    {
+        private readonly Holder _holder;
+
+        public Host()
+            : this(new Holder())
         {
+        }
+
+        private Host(Holder holder)
+            : base(services => Configure(services, holder))
+        {
+            _holder = holder;
+            StartTest();
+        }
+
+        public GitHubWebhookQueue Queue => _holder.Queue;
+
+        public GitHubWebhookBodyGate Gate => _holder.Gate;
+
+        /// <summary>
+        /// GitHub's webhook ranges, loaded as the daily refresh would (#1201), so every
+        /// test runs with the address check in force. A test that needs the list
+        /// unloaded replaces it before its first request.
+        /// </summary>
+        public GitHubHookAddressAllowList Senders
+        {
+            get => _holder.Senders;
+            set => _holder.Senders = value;
+        }
+
+        /// <summary>Fresh per-test state, as a new host would start with.</summary>
+        public void StartTest()
+        {
+            _holder.Queue = new GitHubWebhookQueue(TimeProvider.System);
+            _holder.Gate = new GitHubWebhookBodyGate(
+                GitHubWebhookBodyGate.DefaultSlots,
+                waitTimeout: TimeSpan.FromMilliseconds(300),
+                readDeadline: TimeSpan.FromSeconds(3));
+            _holder.Senders = LoadedSenders();
+        }
+
+        private static void Configure(IServiceCollection services, Holder holder)
+        {
+            // The real worker would drain the queue as fast as the endpoint fills it,
+            // so "was this delivery queued?" would be a race. These tests are about the
+            // endpoint - what it accepts, what it refuses, and what it hands on - so
+            // the drain is taken out and the channel left to be read by the test.
             var worker = services.FirstOrDefault(d =>
                 d.ServiceType == typeof(IHostedService)
                 && d.ImplementationType == typeof(GitHubPullRequestBuildWorker));
@@ -62,20 +112,24 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
                 d.ServiceType == typeof(IHostedService)
                 && d.ImplementationType == typeof(GitHubHookAddressRefreshScheduler));
             if (refresh is not null) services.Remove(refresh);
-            services.AddSingleton(_ => _senders);
+            services.AddTransient(_ => holder.Senders);
             services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, SenderAddressFilter>();
+
+            // One queue per test, so a test reads only its own deliveries.
+            services.AddTransient(_ => holder.Queue);
 
             // The large-body slots with timings a test can wait out, and one gate
             // per test so holding its slots cannot leak into another test (#1174).
-            services.AddSingleton(_gate);
+            services.AddTransient(_ => holder.Gate);
             services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, SlowBodyFilter>();
-        });
-    }
+        }
 
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        private sealed class Holder
+        {
+            public GitHubWebhookQueue Queue { get; set; } = null!;
+            public GitHubWebhookBodyGate Gate { get; set; } = null!;
+            public GitHubHookAddressAllowList Senders { get; set; } = null!;
+        }
     }
 
     /// <param name="authorAssociation">
@@ -230,13 +284,15 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     public async Task Without_a_stored_secret_every_delivery_is_refused()
     {
         // Nothing is configured, so nothing can be verified - and an unverifiable
-        // delivery is refused rather than trusted.
-        using var client = _factory.CreateClient();
+        // delivery is refused rather than trusted. The shared host has a secret
+        // stored, so this one gets a host and database of its own.
+        using var host = new Host();
+        using var client = host.Factory.CreateClient();
 
         using var response = await client.SendAsync(Delivery(PullRequestPayload(), Secret));
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        _factory.Services.GetRequiredService<GitHubWebhookQueue>()
+        host.Factory.Services.GetRequiredService<GitHubWebhookQueue>()
             .Reader.TryRead(out _).Should().BeFalse();
     }
 
@@ -615,7 +671,7 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     {
         // Fail open: refusing before GitHub's list could be read would lose deliveries
         // to a GitHub outage or a host with no way out.
-        _senders = new GitHubHookAddressAllowList(TimeProvider.System);
+        _host.Senders = new GitHubHookAddressAllowList(TimeProvider.System);
         await StoreSecretAsync();
         using var client = _factory.CreateClient();
 

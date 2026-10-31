@@ -2,12 +2,11 @@ using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Palette;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ALDevToolbox.Tests.Palette;
 
@@ -19,13 +18,19 @@ namespace ALDevToolbox.Tests.Palette;
 /// <para>The property names are asserted as literal strings on purpose. They
 /// are a contract with a file that is not compiled against this one, so a
 /// rename here would not break a build - it would quietly empty the palette.</para>
+///
+/// <para>The cases share one host (#1536). Each test installs fresh fake sources
+/// on the fixture, which the host resolves per request, so one test's call
+/// counts and gates never reach another; and each signs in a user of its own.</para>
 /// </summary>
-public sealed class PaletteEndpointTests : IDisposable
+public sealed class PaletteEndpointTests : IClassFixture<PaletteEndpointTests.Host>
 {
-    private const string UserEmail = "palette@cronus.test";
     private const string UserPassword = "correct-horse-battery-staple";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _userEmail = SharedEndpointHost.UniqueEmail("palette");
     private readonly FakePaletteSource _solutions = new(
         "solutions", "Solutions", PaletteGroupOrder.Solutions,
         new PaletteCandidate("solution", "Contoso Coffee", "CONCOF - Microsoft cloud", "/solutions/12", "CONCOF"),
@@ -33,21 +38,51 @@ public sealed class PaletteEndpointTests : IDisposable
     private readonly FakePaletteSource _recipes = new(
         "recipes", "Recipes", PaletteGroupOrder.Recipes,
         new PaletteCandidate("recipe", "Contoso posting routine", null, "/cookbook/7"));
-    private readonly EndpointFactory _factory;
 
-    public PaletteEndpointTests()
+    public PaletteEndpointTests(Host host)
     {
-        _factory = new EndpointFactory(_db, services =>
-        {
-            services.AddScoped<IPaletteSource>(_ => _solutions);
-            services.AddScoped<IPaletteSource>(_ => _recipes);
-        });
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+        host.Solutions = _solutions;
+        host.Recipes = _recipes;
     }
 
-    public void Dispose()
+    /// <summary>
+    /// The shared host, with the palette's real sources replaced by whichever
+    /// fakes the running test installed.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
     {
-        _factory.Dispose();
-        _db.Dispose();
+        public Host()
+            : this(new Holder())
+        {
+        }
+
+        private Host(Holder holder)
+            : base(services =>
+            {
+                // Only the fakes: the real sources would search the shared database,
+                // where other tests' solutions live.
+                services.RemoveAll<IPaletteSource>();
+                services.AddScoped<IPaletteSource>(_ => holder.Solutions!);
+                services.AddScoped<IPaletteSource>(_ => holder.Recipes!);
+            })
+        {
+            _holder = holder;
+        }
+
+        private readonly Holder _holder;
+
+        public FakePaletteSource? Solutions { get => _holder.Solutions; set => _holder.Solutions = value; }
+
+        public FakePaletteSource? Recipes { get => _holder.Recipes; set => _holder.Recipes = value; }
+
+        private sealed class Holder
+        {
+            public FakePaletteSource? Solutions { get; set; }
+            public FakePaletteSource? Recipes { get; set; }
+        }
     }
 
     // ── Auth ────────────────────────────────────────────────────────────
@@ -255,10 +290,9 @@ public sealed class PaletteEndpointTests : IDisposable
             seed.Users.Add(new User
             {
                 OrganizationId = TestDb.DefaultOrgId,
-                Email = UserEmail,
+                Email = _userEmail,
                 DisplayName = "Pat Palette",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                    .HashPassword(UserPassword),
+                PasswordHash = _host.HashPassword(UserPassword),
                 Role = UserRole.User,
                 Status = UserStatus.Active,
                 CreatedAt = DateTime.UtcNow,
@@ -274,7 +308,7 @@ public sealed class PaletteEndpointTests : IDisposable
 
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new[]
         {
-            new KeyValuePair<string, string>("Email", UserEmail),
+            new KeyValuePair<string, string>("Email", _userEmail),
             new KeyValuePair<string, string>("Password", UserPassword),
             new KeyValuePair<string, string>("__RequestVerificationToken", token.Groups[1].Value),
         }));

@@ -268,6 +268,45 @@ collection to serialise them.
   registered. Those are the real schedulers: a host built that way that
   lives past their 20-second startup delay starts ticking them, network calls
   included. Keep such a host short-lived.
+- **One host per class.** Booting a host costs about a second and its first
+  page render most of another; every request after that takes milliseconds
+  (#1536). So a class whose tests can share a host takes
+  `IClassFixture<SharedEndpointHost>` and gets one `TestDb` and one
+  `EndpointFactory` for all its tests, through the constructor. The tests of
+  one class run one after another, so sharing costs isolation only between
+  them, and these rules keep that safe:
+  - Don't rely on an empty database. Seed what the test needs and assert only
+    on what it seeded: a user from `SharedEndpointHost.UniqueEmail(...)`, rows
+    looked up by the id the test got back. Sign-in is rate limited per email
+    address, so a constant address signed in from every test locks the class
+    out part way through. `HashPassword` gives the bcrypt hash once per
+    fixture instead of once per test.
+  - Keep a host per test (an `EndpointFactory` in the test, or in the class
+    constructor as before) when a test changes state the host or the whole
+    database shares: a `system_settings` value the tests set differently
+    (every webhook test stores the same secret, so that class shares; its
+    one test without a secret boots a host of its own), maintenance mode, an
+    organisation-wide setting another test asserts on, a singleton the test
+    configures, or a rate limiter or slot gate it drains on purpose. When only
+    one or two tests in a class do, give just those a host of their own
+    (`CompareEndpointTests` does).
+  - Don't leave background work running in a shared host. A test that queues
+    a job (an import, a backfill, a build) runs on a fixture that takes that
+    queue's worker out of the host, the way
+    `ObjectExplorerLowsEndpointTests.Host` removes the release import worker,
+    or gives that test a host of its own. Otherwise the job keeps writing to
+    the shared database while later tests run.
+  - Per-test state that lives in a singleton (a queue, a slot gate, an
+    allow-list) can still be shared safely. Register it as a transient that
+    reads the running test's instance off the fixture, and install fresh ones
+    in the test class constructor (`GitHubWebhookEndpointTests.Host`). A
+    per-caller rate limiter most of the tests hit gets a caller address per
+    test instead of a host per test (`OAuthRedirectUriTests.Host`).
+  - Fakes a class swaps in go through a fixture that derives from
+    `SharedEndpointHost` and passes `configureServices` or `settings` to its
+    protected constructor. Fakes with per-test state are read through the
+    fixture at resolve time, so each test can install fresh ones
+    (`PaletteEndpointTests.Host`).
 - **Key files.** `KeyDirectoryDefaults` points every host at a key folder of
   the test process's own and creates the OAuth keys there before any host
   boots, so parallel first boots only read them. Don't set

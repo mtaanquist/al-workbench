@@ -3,13 +3,13 @@ using System.Text;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Diff;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Hosting;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -18,15 +18,43 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// the system-reference backfill refuses releases it cannot work on, and the
 /// file compare page refuses to diff files that are too long and says so
 /// when every diff slot is taken.
+///
+/// <para>The cases share one host (#1536), each signed in as an editor of its
+/// own and looking only at the releases it seeded. The busy-slot case swaps the
+/// host's diff gate, so it boots a host of its own.</para>
 /// </summary>
-public sealed class ObjectExplorerLowsEndpointTests : IDisposable
+public sealed class ObjectExplorerLowsEndpointTests : IClassFixture<ObjectExplorerLowsEndpointTests.Host>
 {
     private const string Password = "correct horse battery staple";
-    private const string EditorEmail = "erik@cronus.example";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
+    private readonly string _editorEmail = SharedEndpointHost.UniqueEmail("erik");
 
-    public void Dispose() => _db.Dispose();
+    public ObjectExplorerLowsEndpointTests(Host host)
+    {
+        _host = host;
+        _db = host.Db;
+    }
+
+    /// <summary>
+    /// The shared host, without the release import worker. A queued backfill is the
+    /// row and the queue entry these tests look at; run for real, it would keep
+    /// working in the shared host while later tests run.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
+    {
+        public Host()
+            : base(services =>
+            {
+                var worker = services.FirstOrDefault(d =>
+                    d.ServiceType == typeof(IHostedService)
+                    && d.ImplementationType == typeof(ReleaseImportWorker));
+                if (worker is not null) services.Remove(worker);
+            })
+        {
+        }
+    }
 
     // ── Backfill system references ──────────────────────────────────────
 
@@ -34,8 +62,7 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
     public async Task Backfill_of_a_missing_release_is_not_found()
     {
         await SeedEditorAsync();
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync(_host.Factory);
 
         using var response = await PostBackfillAsync(client, 987_654);
 
@@ -48,8 +75,7 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
     {
         await SeedEditorAsync();
         var foreignId = await SeedReleaseAsync(TestDb.OtherOrgId, "ready");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync(_host.Factory);
 
         using var response = await PostBackfillAsync(client, foreignId);
 
@@ -65,8 +91,7 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
     {
         await SeedEditorAsync();
         var releaseId = await SeedReleaseAsync(TestDb.DefaultOrgId, status, deleted);
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync(_host.Factory);
 
         using var response = await PostBackfillAsync(client, releaseId);
 
@@ -83,8 +108,7 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
     {
         await SeedEditorAsync();
         var releaseId = await SeedReleaseAsync(TestDb.DefaultOrgId, "ready");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync(_host.Factory);
 
         using var response = await PostBackfillAsync(client, releaseId);
 
@@ -101,8 +125,7 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
         await SeedEditorAsync();
         var longText = string.Join('\n', Enumerable.Range(0, 15_001).Select(i => $"// line {i}"));
         var (left, right) = await SeedFilePairAsync(longText, "codeunit 50100 \"CRONUS Short\" { }\n");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync(_host.Factory);
 
         var html = await client.GetStringAsync($"/object-explorer/compare/file?left={left}&right={right}");
 
@@ -240,9 +263,9 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
         ctx.Users.Add(new User
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Email = EditorEmail,
+            Email = _editorEmail,
             DisplayName = "Erik Hansen",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.Editor,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -250,13 +273,13 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private static async Task<HttpClient> SignInAsync(EndpointFactory factory)
+    private async Task<HttpClient> SignInAsync(EndpointFactory factory)
     {
         var client = factory.CreateClient();
         var token = await TokenFromAsync(client, "/login");
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
         [
-            new("Email", EditorEmail), new("Password", Password), new("__RequestVerificationToken", token),
+            new("Email", _editorEmail), new("Password", Password), new("__RequestVerificationToken", token),
         ]));
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");
