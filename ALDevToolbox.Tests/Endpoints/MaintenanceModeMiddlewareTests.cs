@@ -5,6 +5,7 @@ using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -147,6 +148,74 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         {
             maintenance.Exit();
         }
+    }
+
+    /// <summary>
+    /// A request that was already running when a restore began, or one that tries to
+    /// write during it, has its database command refused by the guard. That refusal
+    /// answers with the maintenance page and its Retry-After, not a 500, at both the
+    /// outermost middleware and the gate (#1599).
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task A_command_the_database_guard_refuses_gets_the_maintenance_page_not_an_error(bool atTheGate, bool asAWrite)
+    {
+        var maintenance = new MaintenanceModeState();
+        using var services = new ServiceCollection().AddSingleton(maintenance).BuildServiceProvider();
+        var app = new Microsoft.AspNetCore.Builder.ApplicationBuilder(services);
+        if (atTheGate) ALDevToolbox.Endpoints.MaintenanceModeMiddleware.UseMaintenanceMode(app);
+        else ALDevToolbox.Endpoints.MaintenanceModeMiddleware.UseMaintenanceDatabaseAllowance(app);
+        app.Run(ctx =>
+        {
+            // The request started while the site was open; the restore began under it.
+            maintenance.Enter("Restoring from a backup.");
+            ctx.Response.Headers["X-Half-Written"] = "yes";
+            // A refused write reaches the request wrapped, as SaveChanges reports it.
+            throw asAWrite
+                ? new Microsoft.EntityFrameworkCore.DbUpdateException("An error occurred while saving.", new DatabaseClosedForMaintenanceException())
+                : new DatabaseClosedForMaintenanceException();
+        });
+        var pipeline = app.Build();
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = services };
+        context.Request.Path = "/admin/templates";
+        context.Response.Body = new MemoryStream();
+
+        await pipeline(context);
+
+        context.Response.StatusCode.Should().Be(503);
+        context.Response.Headers.RetryAfter.ToString().Should().Be("30");
+        context.Response.Headers.ContainsKey("X-Half-Written").Should().BeFalse("the half-built response is cleared");
+        context.Response.Headers.XContentTypeOptions.ToString().Should().Be("nosniff", "the security headers survive the clear");
+        context.Response.Body.Position = 0;
+        (await new StreamReader(context.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken))
+            .Should().Contain(MaintenancePage);
+    }
+
+    /// <summary>
+    /// A refused restore reopens the site at once, so a request the guard refused may
+    /// answer once maintenance mode is already off: the page then neither promises a
+    /// restore nor prints an empty start time.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_answered_after_the_site_reopened_does_not_print_an_empty_start_time()
+    {
+        var maintenance = new MaintenanceModeState();
+        using var services = new ServiceCollection().AddSingleton(maintenance).BuildServiceProvider();
+        var app = new ApplicationBuilder(services);
+        ALDevToolbox.Endpoints.MaintenanceModeMiddleware.UseMaintenanceMode(app);
+        app.Run(_ => throw new DatabaseClosedForMaintenanceException());
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = services };
+        context.Response.Body = new MemoryStream();
+
+        await app.Build()(context);
+
+        context.Response.StatusCode.Should().Be(503);
+        context.Response.Body.Position = 0;
+        var body = await new StreamReader(context.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken);
+        body.Should().Contain("briefly closed").And.NotContain("Started:").And.NotContain("being restored");
     }
 
     private static async Task AssertGatedAsync(HttpClient client, string path)

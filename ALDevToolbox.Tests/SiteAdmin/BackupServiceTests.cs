@@ -951,10 +951,7 @@ public sealed class BackupServiceTests : IDisposable
         var worker = new ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker(
             queue, services, _maintenance,
             NullLogger<ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker>.Instance,
-            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry())
-        {
-            MaintenanceRetryDelay = TimeSpan.FromMilliseconds(20),
-        };
+            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry());
         var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         worker.Deferring += _ => deferred.TrySetResult();
         queue.TryEnqueue(new ALDevToolbox.Services.GitHub.GitHubPushJob(
