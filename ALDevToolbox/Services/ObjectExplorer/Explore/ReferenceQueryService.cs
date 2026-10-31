@@ -472,6 +472,42 @@ public sealed class ReferenceQueryService
     }
 
     /// <summary>
+    /// The chain walk plus the <c>matched</c> CTE behind Find built-in calls:
+    /// every system-reference row on the target in the release's winning
+    /// modules, before any join or row limit. Shared by
+    /// <see cref="FindSystemReferencesAsync"/> and
+    /// <see cref="ListSystemReferenceMethodsAsync"/> so the method list counts
+    /// exactly the rows the list is cut from. Parameters: <c>{0}</c> seed
+    /// release, <c>{1}</c> app id, <c>{2}</c> kind, <c>{3}</c> object id,
+    /// <c>{4}</c> object name, <c>{5}</c> lower-cased method names or null.
+    /// </summary>
+    private const string SystemReferencesMatchedSql = ReleaseAncestrySql.WinningModules + "\n" + """
+        ,
+        matched AS (
+            SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
+                   sr.reference_kind, sr.line_number, sr.system_method_name
+            FROM oe_module_system_references sr
+            WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
+              AND {3}::int IS NOT NULL
+              AND sr.target_app_id      = {1}::uuid
+              AND sr.target_object_kind = {2}
+              AND sr.target_object_id   = {3}::int
+              AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
+            UNION ALL
+            SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
+                   sr.reference_kind, sr.line_number, sr.system_method_name
+            FROM oe_module_system_references sr
+            WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
+              AND {3}::int IS NULL
+              AND sr.target_app_id      = {1}::uuid
+              AND sr.target_object_kind = {2}
+              AND sr.target_object_id   IS NULL
+              AND sr.target_object_name = {4}
+              AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
+        )
+        """;
+
+    /// <summary>
     /// "Find System References": every call to a built-in / system method
     /// (<c>Insert</c>, <c>Modify</c>, <c>SetRange</c>, …) on the target object,
     /// read from the separate <c>oe_module_system_references</c> table. Same
@@ -492,30 +528,7 @@ public sealed class ReferenceQueryService
         // index (ix_oe_module_system_references_module_target /
         // ix_oe_module_system_references_module_target_name) instead of the
         // app-keyed indexes that match the receiver in every imported Release.
-        string sql = ReleaseAncestrySql.WinningModules + "\n" + $$"""
-            ,
-            matched AS (
-                SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
-                       sr.reference_kind, sr.line_number, sr.system_method_name
-                FROM oe_module_system_references sr
-                WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
-                  AND {3}::int IS NOT NULL
-                  AND sr.target_app_id      = {1}::uuid
-                  AND sr.target_object_kind = {2}
-                  AND sr.target_object_id   = {3}::int
-                  AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
-                UNION ALL
-                SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
-                       sr.reference_kind, sr.line_number, sr.system_method_name
-                FROM oe_module_system_references sr
-                WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
-                  AND {3}::int IS NULL
-                  AND sr.target_app_id      = {1}::uuid
-                  AND sr.target_object_kind = {2}
-                  AND sr.target_object_id   IS NULL
-                  AND sr.target_object_name = {4}
-                  AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
-            )
+        string sql = SystemReferencesMatchedSql + "\n" + $$"""
             SELECT
                 sr.id                    AS "Id",
                 sr.module_id             AS "SourceModuleId",
@@ -567,6 +580,50 @@ public sealed class ReferenceQueryService
             query.SystemMethodNames is null ? null : string.Join(",", query.SystemMethodNames), matches.Count);
 
         return matches;
+    }
+
+    /// <summary>
+    /// Every built-in method called on the target, with how often, counted over
+    /// the whole matched set rather than the rows <see cref="FindSystemReferencesAsync"/>
+    /// keeps. A list cut at the cap holds the alphabetically first objects only,
+    /// so a method called only from later ones would be missing from a picker
+    /// built from the rows in hand, with no way to reach it (#1543). One
+    /// grouped pass, no joins or snippets, so it stays cheap on Sales Line.
+    /// <see cref="FindSystemReferencesQuery.SystemMethodNames"/> is ignored:
+    /// this lists every method. Each method once, without regard to case, in
+    /// its most used spelling, most used first.
+    /// </summary>
+    public async Task<List<SystemMethodCount>> ListSystemReferenceMethodsAsync(
+        int releaseId, FindSystemReferencesQuery query, CancellationToken ct = default)
+    {
+        if (!await ReleaseVisibleAsync(releaseId, ct)) return new();
+
+        const string sql = SystemReferencesMatchedSql + "\n" + """
+            SELECT
+                mode() WITHIN GROUP (ORDER BY system_method_name) AS "Name",
+                count(*)::int                                     AS "Count"
+            FROM matched
+            WHERE system_method_name <> ''
+            GROUP BY lower(system_method_name)
+            ORDER BY 2 DESC, lower(system_method_name)
+            """;
+
+        var methods = await _db.Database
+            .SqlQueryRaw<SystemMethodCount>(
+                sql,
+                releaseId,
+                query.TargetAppId,
+                query.TargetObjectKind,
+                (object?)query.TargetObjectId ?? DBNull.Value,
+                query.TargetObjectName,
+                DBNull.Value)
+            .ToListAsync(ct);
+
+        _logger.LogInformation(
+            "ListSystemReferenceMethods ReleaseId={ReleaseId} TargetAppId={TargetAppId} Kind={Kind} Id={Id} Name={Name} Methods={Count}",
+            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName, methods.Count);
+
+        return methods;
     }
 
     /// <summary>
