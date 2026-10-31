@@ -296,7 +296,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
                     a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow,
-                    a.Project!.BcTenantId, a.Environment!.Name))
+                    a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt))
                 .ToListAsync(ct).ConfigureAwait(false);
 
             if (uploads)
@@ -362,11 +362,14 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// earlier one brings, even when the two came from different solutions on one tenant.
     /// The sort is stable, so the SQL order (#1568) holds inside each environment. And an
     /// environment holding a window batch that has started keeps the turn until it is
-    /// done, ahead of environments with only window bookings: when the window closes, the
-    /// rest of every unstarted batch moves to the next opening whole, so at most the
-    /// customers whose batch was running are left part-installed, not every customer who
-    /// had one booked. An environment with any due row whose time a person picked -
-    /// Install now, an upload for now, or a time they set - still goes ahead of it,
+    /// done, ahead of environments with only unstarted window batches: when the window
+    /// closes, the rest of every unstarted batch moves to the next opening whole, so at
+    /// most the customers whose batch was running are left part-installed, not every
+    /// customer who had one booked. A single window booking shares that place with the
+    /// started batches, first booked first (#1625): it is one install and can never be
+    /// left part-installed, so making it wait behind another customer's batch, night after
+    /// night, protected nobody. An environment with any due row whose time a person picked -
+    /// Install now, an upload for now, or a time they set - still goes ahead of both,
     /// because nobody asked that row to wait for a window.</para>
     /// </summary>
     private static async Task<List<DueAction>> InEnvironmentTurnOrderAsync(
@@ -420,17 +423,47 @@ public sealed class UpgradeActionWorker : BackgroundService
 
         // An environment's tier is the best of its due installs: 0 when any has a time a
         // person picked; 1 when any is in a window batch already part-sent, which keeps
-        // the turn; 2 when all are window bookings not yet started. The tier only picks
-        // the environment; inside it the installs still go in the order above.
-        int Tier(DueAction a) =>
-            a.ScheduledByWindow == null ? 0
-            : a.BatchId is { } b && started.Contains(b) ? 1
-            : 2;
-        var tiers = byEnvironment.ToDictionary(e => e.Key, e => e.Value.Min(Tier));
+        // the turn, or is a single window booking (#1625); 2 when all are window batches
+        // not yet started. The tier only picks the environment; inside it the installs
+        // still go in the order above. So a single booking counts as tier 1 only while no
+        // unstarted batch sits ahead of it on its environment: that batch's first app is
+        // what the turn would send, and starting it would leave a second customer
+        // part-installed when the window closes.
+        var tiers = new Dictionary<(string, string), int>();
+        var bookedAt = new Dictionary<(string, string), DateTime>();
+        foreach (var (key, rows) in byEnvironment)
+        {
+            var tier = 2;
+            var firstBooked = DateTime.MaxValue;
+            var unstartedAhead = false;
+            foreach (var a in rows)
+            {
+                if (a.ScheduledByWindow == null)
+                {
+                    tier = 0;
+                }
+                else if (a.BatchId is { } b ? started.Contains(b) : !unstartedAhead)
+                {
+                    tier = Math.Min(tier, 1);
+                    if (a.RequestedAt < firstBooked) firstBooked = a.RequestedAt;
+                }
+                else if (a.BatchId != null)
+                {
+                    unstartedAhead = true;
+                }
+            }
+            tiers[key] = tier;
+            bookedAt[key] = firstBooked;
+        }
         var rank = byEnvironment.Keys
             .OrderBy(k => tiers[k])
+            // Tier 1 goes first booked, first served, as on one environment (#1568): a
+            // single booking booked before a started batch goes between two of its apps,
+            // one booked after it waits for the batch.
+            .ThenBy(k => tiers[k] == 1 ? bookedAt[k] : DateTime.MinValue)
             .ThenBy(k => tiers[k] == 1
-                // The started batch served most recently is the one running: it carries on.
+                // Of two started batches booked together, the one served most recently is
+                // the one running: it carries on.
                 ? -(lastSent.GetValueOrDefault(k) ?? DateTime.MinValue).Ticks
                 : (lastSent.GetValueOrDefault(k) ?? DateTime.MinValue).Ticks)
             .Select((k, i) => (k, i))
@@ -1094,7 +1127,7 @@ public sealed class UpgradeActionWorker : BackgroundService
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
         string? Label, Guid? BatchId, int? BatchOrder, UploadAppTiming? ScheduledByWindow,
-        Guid? TenantId, string EnvironmentName)
+        Guid? TenantId, string EnvironmentName, DateTime RequestedAt)
     {
         /// <summary>The environment in Business Central this row installs into (see <see cref="EnvironmentKey"/>).</summary>
         public (string Tenant, string Environment) BcEnvironment => EnvironmentKey(TenantId, ProjectId, EnvironmentName);
