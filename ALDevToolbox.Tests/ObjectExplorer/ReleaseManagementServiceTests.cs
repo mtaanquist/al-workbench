@@ -34,14 +34,16 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     private ReleaseManagementService NewManagement(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
 
-    private async Task<int> SeedReleaseAsync(string label = "Test Release", int? parentId = null, string kind = "first_party")
+    private async Task<int> SeedReleaseAsync(
+        string label = "Test Release", int? parentId = null, string kind = "first_party", bool storeSymbolReference = false)
     {
         await using var ctx = _db.NewContext();
         var svc = NewImporter(ctx);
         await using var s = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
         var summary = await svc.ImportReleaseAsync(new ReleaseImportRequest(
             Label: label, Kind: kind, ParentReleaseId: parentId, ApplicationVersionId: null,
-            Uploads: new[] { new AppFileUpload($"{label}.app", s, null) }));
+            Uploads: new[] { new AppFileUpload($"{label}.app", s, null) },
+            StoreSymbolReference: storeSymbolReference));
         return summary.ReleaseId;
     }
 
@@ -227,6 +229,145 @@ public sealed class ReleaseManagementServiceTests : IDisposable
         await using var read = _db.NewContext();
         (await read.OeReleases.AsNoTracking().CountAsync(r => r.Id == parentId || r.Id == childId)).Should().Be(2);
         (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == parentId)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// #1616: a vendor symbols release that solution builds link as a third-party
+    /// dependency is not deleted from under them; the link would cascade away and
+    /// their references into the vendor objects would stop resolving.
+    /// </summary>
+    [Fact]
+    public async Task HardDeleteAsync_refuses_while_a_solution_build_links_the_release_as_a_dependency()
+    {
+        var vendorId = await SeedReleaseAsync(label: "CRONUS Vendor 24.0 (symbols)", kind: "third_party");
+        var buildId = await SeedReleaseAsync(label: "CRONUS build 1", kind: "project");
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeReleaseDependencies.Add(new OeReleaseDependency
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = buildId, DependencyReleaseId = vendorId, CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(vendorId);
+            var act = async () => await svc.HardDeleteAsync(vendorId, confirmLabel: "CRONUS Vendor 24.0 (symbols)");
+
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("third-party symbols").And.Contain("\"CRONUS build 1\"");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Id == vendorId)).Should().BeTrue();
+        (await read.OeReleaseDependencies.AsNoTracking().AnyAsync(d => d.DependencyReleaseId == vendorId)).Should().BeTrue();
+    }
+
+    /// <summary>#1616: a release still importing is not deleted from under the running import.</summary>
+    [Fact]
+    public async Task HardDeleteAsync_refuses_a_release_that_is_still_importing()
+    {
+        int id;
+        await using (var seed = _db.NewContext())
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 25.0 (DK)", Kind = "first_party", Status = "ingesting",
+                DeletedAt = DateTime.UtcNow, ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            seed.OeReleases.Add(release);
+            await seed.SaveChangesAsync();
+            id = release.Id;
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "CRONUS 25.0 (DK)");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("still importing");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Id == id)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// #1616: a stored SymbolReference.json blob is reclaimed with the release,
+    /// not left in the shared content table for good.
+    /// </summary>
+    [Fact]
+    public async Task HardDeleteAsync_reclaims_the_stored_symbol_reference_blobs()
+    {
+        var id = await SeedReleaseAsync(label: "With symbols", storeSymbolReference: true);
+        List<string> symbolHashes;
+        await using (var read = _db.NewContext())
+        {
+            symbolHashes = await read.OeModules.AsNoTracking()
+                .Where(m => m.ReleaseId == id && m.SymbolReferenceContentHash != null)
+                .Select(m => m.SymbolReferenceContentHash!)
+                .ToListAsync();
+        }
+        symbolHashes.Should().NotBeEmpty("the import was asked to keep each module's SymbolReference.json");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(id);
+            await svc.HardDeleteAsync(id, confirmLabel: "With symbols");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OeFileContents.AsNoTracking().AnyAsync(c => symbolHashes.Contains(c.ContentHash)))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_keeps_a_symbol_reference_blob_another_release_still_uses()
+    {
+        var keepId = await SeedReleaseAsync(label: "Keeps symbols", storeSymbolReference: true);
+        var dropId = await SeedReleaseAsync(label: "Drops symbols", storeSymbolReference: true);
+        List<string> shared;
+        await using (var read = _db.NewContext())
+        {
+            shared = await read.OeModules.AsNoTracking()
+                .Where(m => m.ReleaseId == keepId && m.SymbolReferenceContentHash != null)
+                .Select(m => m.SymbolReferenceContentHash!)
+                .ToListAsync();
+        }
+        shared.Should().NotBeEmpty("both imports stored the same .app's SymbolReference.json");
+
+        // A file only the deleted release uses, so its blob must go. It is offered in
+        // the same reclaim as the shared symbol blobs: without the reclaim's check on
+        // stored symbol references, the foreign key refuses that whole batch and this
+        // blob would be left too.
+        var onlyHere = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        await using (var seed = _db.NewContext())
+        {
+            var moduleId = await seed.OeModules.Where(m => m.ReleaseId == dropId).Select(m => m.Id).FirstAsync();
+            seed.OeFileContents.Add(new OeFileContent { ContentHash = onlyHere, Content = "// x", ContentLength = 4, LineCount = 1 });
+            seed.OeModuleFiles.Add(new OeModuleFile
+            {
+                OrganizationId = TestDb.DefaultOrgId, ModuleId = moduleId, Path = "src/OnlyHere.al", ContentHash = onlyHere, LineCount = 1,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(dropId);
+            await svc.HardDeleteAsync(dropId, confirmLabel: "Drops symbols");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OeFileContents.AsNoTracking().CountAsync(c => shared.Contains(c.ContentHash)))
+            .Should().Be(shared.Distinct().Count());
+        (await after.OeFileContents.AsNoTracking().AnyAsync(c => c.ContentHash == onlyHere))
+            .Should().BeFalse("a blob only the deleted release used is reclaimed alongside the kept ones");
     }
 
     [Fact]
