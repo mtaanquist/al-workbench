@@ -4,6 +4,7 @@
 @using ALDevToolbox.Data
 @using ALDevToolbox.Endpoints
 @using ALDevToolbox.Services
+@using ALDevToolbox.Services.Account
 @using Microsoft.AspNetCore.DataProtection
 @using Microsoft.EntityFrameworkCore
 @inject IHttpContextAccessor Http
@@ -66,7 +67,7 @@ else
                         {
                             <strong>@label:</strong>
                         }
-                        @Message
+                        @FormErrorReasons.MessageFor(Reason)
                     </span>
                 </Alert>
             }
@@ -116,7 +117,9 @@ else
 @code {
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
     [SupplyParameterFromQuery(Name = "field")] public string? Field { get; set; }
-    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    // A code, not the sentence: the copy lives in FormErrorReasons so an
+    // edited link can't make this page say anything (#1544).
+    [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
 
     private string _email = string.Empty;
     private bool _domainMatched;

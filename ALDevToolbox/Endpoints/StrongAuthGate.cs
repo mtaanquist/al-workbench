@@ -207,6 +207,12 @@ internal static class StrongAuthGate
         "/.well-known",
         "/login",
         "/signup",
+        // A Sealed link's recipient half is anonymous by design and spends no
+        // credential of whoever opens it, so a signed-in member who hasn't
+        // enrolled yet can open a link a stranger could (#1544). "/s" matches
+        // by segment, so the creator's "/sealed" tool stays gated.
+        "/s",
+        "/api/sealed",
         "/_blazor",
         "/_framework",
         "/_content",

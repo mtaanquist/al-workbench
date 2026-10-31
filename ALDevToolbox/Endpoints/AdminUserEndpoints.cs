@@ -322,7 +322,7 @@ internal static class AdminUserEndpoints
                 await displayZone.EnsureLoadedAsync(ct);
                 var confirmableFrom = FormatEmailTime(displayZone, request.ConfirmableFrom);
                 var expiresAt = FormatEmailTime(displayZone, request.ExpiresAt);
-                var confirmUrl = $"{origin}/auth/account/email-change/confirm?token={Uri.EscapeDataString(request.ConfirmToken)}";
+                var confirmUrl = $"{origin}/account/email-change/confirm?token={Uri.EscapeDataString(request.ConfirmToken)}";
                 var confirm = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, request.DisplayName, confirmUrl,
                     confirmableFrom, expiresAt, ct);
                 await email.SendAsync(request.NewEmail, confirm, EmailPurpose.EmailChangeConfirmation, ct);

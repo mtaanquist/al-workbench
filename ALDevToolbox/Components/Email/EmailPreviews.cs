@@ -86,7 +86,7 @@ public static class EmailPreviews
         new("email-change", "New email address confirmation",
             "To the new address when an administrator changes someone's email.",
             typeof(EmailChangeConfirmEmail),
-            (r, ct) => EmailChangeConfirmEmail.RenderAsync(r, Person, $"{SampleOrigin}/auth/account/email-change/confirm?{SampleToken}",
+            (r, ct) => EmailChangeConfirmEmail.RenderAsync(r, Person, $"{SampleOrigin}/account/email-change/confirm?{SampleToken}",
                 "15 Oct 2026, 09:00 (Europe/Copenhagen)", "17 Oct 2026, 09:00 (Europe/Copenhagen)", ct)),
         new("email-change-requested", "Email change notice - change requested",
             "To the current address when an administrator asks to change someone's email, with a link to stop the change.",
