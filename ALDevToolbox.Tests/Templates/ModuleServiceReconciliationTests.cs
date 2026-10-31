@@ -165,8 +165,20 @@ public sealed class ModuleServiceReconciliationTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Creating_a_module_over_the_storage_quota_is_refused()
+    {
+        await _db.SetZeroStorageQuotaAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => NewService(ctx).CreateAsync(ModuleInputFor("quota-module"));
+
+        (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
+            .Which.Errors.Should().ContainKey("storage");
+    }
+
     private ModuleService NewService(ALDevToolbox.Data.AppDbContext ctx) =>
-        new(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+        new(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
 
     private static ModuleInput ModuleInputFor(string key, params ModuleDependencyInput[] deps) =>
         new(

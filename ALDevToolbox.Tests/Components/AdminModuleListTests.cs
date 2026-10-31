@@ -35,6 +35,7 @@ public sealed class AdminModuleListTests : IDisposable
                 .AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<FolderTreeHydrator>();
         _ctx.Services.AddScoped<ModuleService>();
+        _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>),

@@ -636,7 +636,7 @@ public sealed class McpToolTests : IDisposable
         return new CookbookTools(
             new RecipeService(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx)),
             ctx,
-            new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext),
+            new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx)),
             _db.OrgContext,
             _db.DataProtectionProvider,
             _clock,
@@ -1077,8 +1077,8 @@ public sealed class McpToolTests : IDisposable
         }
 
         await using var ctx2 = _db.NewContext();
-        var templates = new TemplateService(ctx2, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2));
-        var modules = new ModuleService(ctx2, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2));
+        var templates = new TemplateService(ctx2, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2), _db.NewQuotaGuard(ctx2));
+        var modules = new ModuleService(ctx2, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2), _db.NewQuotaGuard(ctx2));
         var catalog = new CatalogService(ctx2, NullLogger<CatalogService>.Instance, _db.OrgContext);
         var tools = new WorkspaceTools(templates, modules, catalog, generation: null!, delivery: null!, repositories: null!, _downloads, _db.OrgContext, Options);
 
@@ -2015,8 +2015,8 @@ public sealed class McpToolTests : IDisposable
     private WorkspaceTools NewWorkspaceTools(
         Data.AppDbContext ctx, IOptions<McpOptions>? options = null, GeneratedDownloadStore? downloads = null)
     {
-        var templates = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
-        var modules = new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+        var templates = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
+        var modules = new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
         var catalog = new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext);
         var mustache = new ALDevToolbox.Services.Generation.MustacheRenderer(
             NullLogger<ALDevToolbox.Services.Generation.MustacheRenderer>.Instance);

@@ -283,6 +283,16 @@ public sealed class ValidateOnlyTests : IDisposable
     /// generator page would refuse a name the service happily generates.
     /// </summary>
     [Fact]
+    public async Task A_standalone_extension_name_over_200_characters_is_reported_and_refused()
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.ExtensionPlan(extensionName: "A" + new string('b', 200));
+
+        (await NewService().ValidateExtensionAsync(plan)).Should().ContainKey("ExtensionName");
+        await AssertGenerateRefusesAsync(plan, "ExtensionName");
+    }
+
+    [Fact]
     public async Task An_extension_name_with_a_space_is_accepted()
     {
         await SeedTemplateAsync();

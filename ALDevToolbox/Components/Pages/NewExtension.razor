@@ -148,6 +148,7 @@
                     <label class="field__label" for="ext-name">Extension name <span class="req">*</span></label>
                     <input class="input" id="ext-name" type="text" name="ExtensionName" placeholder="@ExtensionNamePlaceholder"
                            pattern="^[A-Za-z][A-Za-z0-9 ]*$" required
+                           maxlength="@CustomerNaming.MaxExtensionNameLength"
                            title="Letters, digits and spaces only; must start with a letter."
                            @bind="_extensionName" @bind:event="oninput" />
                     @if (BuildSiblingContext() is { } joining)

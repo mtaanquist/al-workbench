@@ -89,6 +89,36 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task Submitting_over_the_storage_quota_is_refused()
+    {
+        var user = await SeedUserAsync(userId: 731);
+        _db.OrgContext.CurrentUserId = user.Id;
+        await _db.SetZeroStorageQuotaAsync();
+
+        await using var ctx = _db.NewContext();
+        Func<Task> act = () => NewSuggestionService(ctx).SubmitAsync(new RecipeSuggestionInput(
+            "Idea", "Body.", "", RecipeType.Snippet, new[] { new RecipeFileInput("A.al", "// a") }));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
+    }
+
+    [Fact]
+    public async Task A_suggestion_with_more_files_than_a_recipe_may_hold_is_refused()
+    {
+        var user = await SeedUserAsync(userId: 732);
+        _db.OrgContext.CurrentUserId = user.Id;
+
+        await using var ctx = _db.NewContext();
+        var files = Enumerable.Range(0, RecipeService.MaxFiles + 1)
+            .Select(i => new RecipeFileInput($"File{i}.al", "// x"))
+            .ToArray();
+        Func<Task> act = () => NewSuggestionService(ctx).SubmitAsync(new RecipeSuggestionInput(
+            "Idea", "Body.", "", RecipeType.Snippet, files));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Files");
+    }
+
+    [Fact]
     public async Task Approve_promotes_suggestion_to_recipe_and_stamps_decision()
     {
         var user = await SeedUserAsync(userId: 702);
@@ -751,5 +781,5 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
     }
 
     private RecipeSuggestionService NewSuggestionService(ALDevToolbox.Data.AppDbContext ctx) =>
-        new(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext);
+        new(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx));
 }

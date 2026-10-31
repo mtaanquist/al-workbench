@@ -116,7 +116,7 @@ path = "codeunits"
         // 2) Persist through the unified write path.
         await using (var ctx = _db.NewContext())
         {
-            var service = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+            var service = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
             await service.CreateAsync(authoring);
         }
 

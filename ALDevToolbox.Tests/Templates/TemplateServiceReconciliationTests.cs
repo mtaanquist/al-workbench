@@ -570,7 +570,7 @@ public sealed class TemplateServiceWriteSideTests : IDisposable
     // ===== Helpers =====
 
     private TemplateService NewService(Data.AppDbContext ctx) =>
-        new(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+        new(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
 
     private static IReadOnlyList<ExtensionAuthoring> SingleCoreExtension() => new[]
     {
@@ -583,6 +583,48 @@ public sealed class TemplateServiceWriteSideTests : IDisposable
             Folders: Array.Empty<FolderAuthoring>(),
             Dependencies: Array.Empty<DependencyAuthoring>()),
     };
+
+    /// <summary>
+    /// The editor page keeps its context between saves. Another tab's save
+    /// rebuilds the extensions in between, and the page's next save must not
+    /// cascade deletes onto the rows that save already removed (#1600).
+    /// </summary>
+    [Fact]
+    public async Task A_page_that_saved_once_can_save_again_after_another_save_rebuilt_the_extensions()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).CreateAsync(NewAuthoring("runtime-stale"));
+        }
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            id = await ctx.RuntimeTemplates.Where(t => t.Key == "runtime-stale").Select(t => t.Id).SingleAsync();
+        }
+
+        await using var page = _db.NewContext();
+        var pageService = NewService(page);
+        await pageService.UpdateAsync(id, NewAuthoring("runtime-stale") with { Name = "First" });
+        await using (var other = _db.NewContext())
+        {
+            await NewService(other).UpdateAsync(id, NewAuthoring("runtime-stale") with { Name = "Other tab" });
+        }
+        await pageService.UpdateAsync(id, NewAuthoring("runtime-stale") with { Name = "Second" });
+
+        await using var read = _db.NewContext();
+        (await read.RuntimeTemplates.SingleAsync(t => t.Id == id)).Name.Should().Be("Second");
+    }
+
+    [Fact]
+    public async Task Creating_a_template_over_the_storage_quota_is_refused()
+    {
+        await _db.SetZeroStorageQuotaAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => NewService(ctx).CreateAsync(NewAuthoring("runtime-quota"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
+    }
 
     /// <summary>Builds a minimally-valid TemplateAuthoring with sensible defaults so each test only spells out the field it cares about.</summary>
     private static TemplateAuthoring NewAuthoring(

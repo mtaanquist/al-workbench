@@ -157,7 +157,7 @@ public sealed class ApplyRecipeToolTests : IDisposable
         var tools = new CookbookTools(
             _db.NewRecipeService(ctx),
             ctx,
-            new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext),
+            new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx)),
             _db.OrgContext,
             _db.DataProtectionProvider,
             TimeProvider.System,
