@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using ALDevToolbox.Services.Email;
 using System.Net;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
@@ -245,7 +247,7 @@ public sealed class McpEnabledToggleTests : IDisposable
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
 
-        var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, NullLogger<PersonalAccessTokenService>.Instance);
+        var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
         var issued = await svc.IssueAsync(user.Id, user.OrganizationId, "test", expiresAt: null);
         return issued.Plaintext;
     }

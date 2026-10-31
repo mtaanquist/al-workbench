@@ -35,6 +35,37 @@ internal static class AccountPasskeyEndpoints
     public const string CreateTokenAfterStepUpUrl = "/account/ai?" + RouteConstants.OkQuery + "=confirmed-token";
 
     /// <summary>
+    /// The expiry choices the create-token form offers, in days; 0 is no
+    /// expiry. The endpoint accepts these and nothing else, so a hand-made
+    /// post can't ask for an expiry past what a date can hold (#1627).
+    /// </summary>
+    public static readonly int[] AccessTokenTtlDays = [30, 90, 180, 365, 0];
+
+    /// <summary>The create form's <c>maxlength</c> on the token name.</summary>
+    public const int AccessTokenNameMaxLength = 80;
+
+    /// <summary>The expiry the form starts on.</summary>
+    public const int DefaultAccessTokenTtlDays = 90;
+
+    /// <summary>
+    /// <see cref="CreateTokenAfterStepUpUrl"/> carrying what the person had
+    /// typed, so a form sent after the step-up window closed comes back
+    /// filled in rather than empty (#1627).
+    /// </summary>
+    public static string CreateTokenAfterStepUpUrlWith(string? name, string? ttlDays)
+    {
+        var url = CreateTokenAfterStepUpUrl;
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            // The form's maxlength; a longer hand-made name can't be saved anyway.
+            var trimmed = name.Trim();
+            url += "&name=" + Uri.EscapeDataString(trimmed.Length > AccessTokenNameMaxLength ? trimmed[..AccessTokenNameMaxLength] : trimmed);
+        }
+        if (int.TryParse(ttlDays, out var ttl) && AccessTokenTtlDays.Contains(ttl)) url += "&ttl=" + ttl;
+        return url;
+    }
+
+    /// <summary>
     /// The current password from the registration-options body
     /// (<c>{"password": "..."}</c>; JSON because the caller is a fetch), or
     /// null when there is none. Antiforgery has already been read from the
@@ -241,6 +272,7 @@ internal static class AccountPasskeyEndpoints
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
             ALDevToolbox.Services.Tools.ToolEnablement tools,
+            PublicOrigin publicOrigin,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -257,23 +289,25 @@ internal static class AccountPasskeyEndpoints
             // the organisation has marked any tool (#1611). The page sends a
             // stale session to step up before showing the form; this is the
             // backstop for a form left open past the window.
-            if (await tools.AnyStepUpAsync(ct) && !await tools.IsFreshAsync(ctx.User, ct))
-            {
-                ctx.Response.Redirect(StepUpEndpoints.Url(CreateTokenAfterStepUpUrl));
-                return;
-            }
             var form = await ctx.Request.ReadFormAsync(ct);
             var name = form["Name"].ToString();
-            DateTime? expiresAt = null;
             var ttlDaysRaw = form["TtlDays"].ToString();
-            if (int.TryParse(ttlDaysRaw, out var ttlDays) && ttlDays > 0)
+            if (await tools.AnyStepUpAsync(ct) && !await tools.IsFreshAsync(ctx.User, ct))
             {
-                expiresAt = DateTime.UtcNow.AddDays(ttlDays);
+                ctx.Response.Redirect(StepUpEndpoints.Url(CreateTokenAfterStepUpUrlWith(name, ttlDaysRaw)));
+                return;
             }
+            if (!int.TryParse(ttlDaysRaw, out var ttlDays) || !AccessTokenTtlDays.Contains(ttlDays))
+            {
+                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString("Choose one of the expiry options offered.")}");
+                return;
+            }
+            DateTime? expiresAt = ttlDays > 0 ? DateTime.UtcNow.AddDays(ttlDays) : null;
 
             try
             {
-                var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct);
+                var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct,
+                    noticeUrl: $"{publicOrigin.For(ctx)}/account/ai");
                 SetOneShotPatCookie(ctx, protection, new OneShotPat(
                     issued.Id, issued.Plaintext, name.Trim(), issued.CreatedAt, issued.ExpiresAt));
                 ctx.Response.Redirect("/account/access-tokens/created");

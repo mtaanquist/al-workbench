@@ -1,10 +1,12 @@
 using System.Security.Cryptography;
 using System.Text;
+using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using ALDevToolbox.Services.Email;
 
 namespace ALDevToolbox.Services.Account;
 
@@ -50,10 +52,17 @@ public sealed class PersonalAccessTokenService
     private readonly TimeProvider _clock;
     private readonly ILogger<PersonalAccessTokenService> _logger;
 
-    public PersonalAccessTokenService(AppDbContext db, TimeProvider clock, ILogger<PersonalAccessTokenService> logger)
+    private readonly IEmailService _email;
+    private readonly EmailRenderer _emailRenderer;
+
+    public PersonalAccessTokenService(
+        AppDbContext db, TimeProvider clock, IEmailService email, EmailRenderer emailRenderer,
+        ILogger<PersonalAccessTokenService> logger)
     {
         _db = db;
         _clock = clock;
+        _email = email;
+        _emailRenderer = emailRenderer;
         _logger = logger;
     }
 
@@ -63,8 +72,15 @@ public sealed class PersonalAccessTokenService
     /// appears — the caller must show it to the user immediately and then
     /// discard it. Throws <see cref="PlanValidationException"/> when
     /// <paramref name="name"/> is empty or longer than 80 characters.
+    /// <para>
+    /// When <paramref name="noticeUrl"/> is given (the person's AI assistants
+    /// tab), the owner is emailed that a token was made, with a link there:
+    /// a token acts as them until it expires or is revoked, so, like a new
+    /// passkey, one they did not make must not go unnoticed (#1627).
+    /// </para>
     /// </summary>
-    public async Task<IssuedToken> IssueAsync(int userId, int orgId, string name, DateTime? expiresAt, CancellationToken ct = default)
+    public async Task<IssuedToken> IssueAsync(
+        int userId, int orgId, string name, DateTime? expiresAt, CancellationToken ct = default, string? noticeUrl = null)
     {
         var trimmed = (name ?? string.Empty).Trim();
         var errors = new Dictionary<string, string>();
@@ -106,7 +122,36 @@ public sealed class PersonalAccessTokenService
             "Issued personal access token {TokenId} (prefix {TokenPrefix}) for user {UserId} in org {OrgId}, expires {ExpiresAt}",
             row.Id, row.TokenPrefix, userId, orgId, expiresAt);
 
+        if (noticeUrl is not null) await NotifyCreatedAsync(userId, row, noticeUrl);
         return new IssuedToken(row.Id, plaintext, row.TokenPrefix, row.CreatedAt, row.ExpiresAt);
+    }
+
+    /// <summary>
+    /// Queues the "an access token was created" email. A failure is logged,
+    /// not thrown: the token is already saved and the person is about to copy
+    /// it, as with the passkey-added email (<c>PasskeyService.NotifyAddedAsync</c>).
+    /// </summary>
+    private async Task NotifyCreatedAsync(int userId, PersonalAccessToken token, string tokensUrl)
+    {
+        try
+        {
+            // Filtered: the token's own user, inside the organisation it was made in.
+            var owner = await _db.Users.AsNoTracking()
+                .Where(u => u.Id == userId)
+                .Select(u => new { u.Email, u.DisplayName })
+                .FirstAsync(CancellationToken.None);
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            var content = await AccessTokenCreatedEmail.RenderAsync(_emailRenderer,
+                owner.DisplayName, token.Name,
+                token.CreatedAt.ToString("d MMM yyyy, HH:mm 'UTC'", culture),
+                token.ExpiresAt?.ToString("d MMM yyyy", culture),
+                tokensUrl, CancellationToken.None);
+            await _email.SendAsync(owner.Email, content, EmailPurpose.AccessTokenCreated, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not queue the access-token email for user {UserId}.", userId);
+        }
     }
 
     /// <summary>

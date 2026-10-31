@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using ALDevToolbox.Services.Email;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -312,7 +314,7 @@ public sealed class McpRequestFilterTests : IClassFixture<SharedEndpointHost>
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
 
-        var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, NullLogger<PersonalAccessTokenService>.Instance);
+        var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
         return (await svc.IssueAsync(user.Id, user.OrganizationId, "test", expiresAt: null)).Plaintext;
     }
 

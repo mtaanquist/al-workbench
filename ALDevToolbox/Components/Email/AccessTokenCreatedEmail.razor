@@ -1,0 +1,33 @@
+@* Sent to the account's own address whenever an access token is created for it. *@
+<EmailLayout Preheader="If this wasn't you, revoke the token and change your password." Reason="You received this because an access token was created for the AL Workbench account for this address.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>An access token called "@TokenName" was created for your AL Workbench account on @CreatedAt. @ExpiryText It lets an AI assistant or another tool act as you.</EmailParagraph>
+    <EmailParagraph>If this was you, there is nothing else to do.</EmailParagraph>
+    <EmailParagraph>If it wasn't you, open AI assistants on your Account page, revoke that token, then change your password.</EmailParagraph>
+    <EmailButton Href="@TokensUrl">Open AI assistants</EmailButton>
+</EmailLayout>
+
+@code {
+    public const string Subject = "An access token was created for your AL Workbench account";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string TokenName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string CreatedAt { get; set; } = string.Empty;
+    /// <summary>The expiry date as shown, or null for a token that never expires.</summary>
+    [Parameter] public string? ExpiresOn { get; set; }
+    [Parameter, EditorRequired] public string TokensUrl { get; set; } = string.Empty;
+
+    private string ExpiryText => ExpiresOn is null ? "It does not expire." : $"It expires on {ExpiresOn}.";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string displayName, string tokenName, string createdAt, string? expiresOn, string tokensUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<AccessTokenCreatedEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(TokenName)] = tokenName,
+            [nameof(CreatedAt)] = createdAt,
+            [nameof(ExpiresOn)] = expiresOn,
+            [nameof(TokensUrl)] = tokensUrl,
+        }, ct);
+}

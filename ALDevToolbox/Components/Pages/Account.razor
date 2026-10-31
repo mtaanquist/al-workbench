@@ -102,7 +102,10 @@ else
             }
             @* The return banner below says "connected" and what to do next, so the
                generic flash would be the same news twice in two green boxes. *@
-            @if (Ok is not null && !(CameFromRepositoriesTab && _github is { IsLinked: true }))
+            @* "You're confirmed" is wrong while the token step-up is still needed
+               (the session went stale again, or the step-up was skipped). *@
+            @if (Ok is not null && !(CameFromRepositoriesTab && _github is { IsLinked: true })
+                 && !(Ok == "confirmed-token" && _tokenNeedsStepUp))
             {
                 <Alert Tone="AlertTone.Success">
                     <span>@FlashFor(Ok)</span>
@@ -542,10 +545,13 @@ else
                             @* The organisation asks for a recent second step before a
                                token is made; this goes through it and comes back here
                                with the form open. *@
-                            <a class="btn btn--sm" href="@ALDevToolbox.Endpoints.StepUpEndpoints.Url(ALDevToolbox.Endpoints.AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl)">
-                                <Icon Name="plus" Width="14" Height="14" />
-                                <span>Create token</span>
-                            </a>
+                            <div class="u-row">
+                                <span class="form-actions__note u-nowrap">We'll ask you to confirm it's you first.</span>
+                                <a class="btn btn--sm" href="@ALDevToolbox.Endpoints.StepUpEndpoints.Url(ALDevToolbox.Endpoints.AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl)">
+                                    <Icon Name="plus" Width="14" Height="14" />
+                                    <span>Create token</span>
+                                </a>
+                            </div>
                         }
                         else
                         {
@@ -565,18 +571,18 @@ else
                                     <label class="field">
                                         <span class="field__label">Name</span>
                                         <input class="input" type="text" name="Name" required minlength="1" maxlength="80"
-                                               placeholder="e.g. Cursor on laptop" />
+                                               placeholder="e.g. Cursor on laptop" value="@_prefillTokenName" />
                                         <span class="field__hint">A label that helps you remember where this token is used.</span>
                                     </label>
                                     <label class="field">
                                         <span class="field__label">Expires</span>
                                         <SelectBox>
                                             <select class="select" name="TtlDays">
-                                                <option value="30">30 days</option>
-                                                <option value="90" selected>90 days</option>
-                                                <option value="180">180 days</option>
-                                                <option value="365">1 year</option>
-                                                <option value="0">No expiry</option>
+                                                <option value="30" selected="@(_prefillTokenTtl == 30)">30 days</option>
+                                                <option value="90" selected="@(_prefillTokenTtl == 90)">90 days</option>
+                                                <option value="180" selected="@(_prefillTokenTtl == 180)">180 days</option>
+                                                <option value="365" selected="@(_prefillTokenTtl == 365)">1 year</option>
+                                                <option value="0" selected="@(_prefillTokenTtl == 0)">No expiry</option>
                                             </select>
                                         </SelectBox>
                                         <span class="field__hint">You can revoke a token at any time.</span>
@@ -1228,6 +1234,12 @@ else
     // marked any tool for a second step, making one needs a recent step-up -
     // the same rule as approving an assistant on the permission screen (#1611).
     private bool _tokenNeedsStepUp;
+    // What a create form sent after the step-up window closed had in it, carried
+    // through the step-up so the form comes back filled in (#1627).
+    [SupplyParameterFromQuery(Name = "name")] public string? TokenNameParam { get; set; }
+    [SupplyParameterFromQuery(Name = "ttl")] public int? TokenTtlParam { get; set; }
+    private string? _prefillTokenName;
+    private int _prefillTokenTtl = ALDevToolbox.Endpoints.AccountPasskeyEndpoints.DefaultAccessTokenTtlDays;
 
     // Repository access
     private bool _repoLoading = true;
@@ -1299,6 +1311,14 @@ else
                 && !await Tools.IsFreshAsync((await AuthStateTask).User);
         }
         _showCreateToken = Ok == "confirmed-token" && !_tokenNeedsStepUp;
+        if (_showCreateToken)
+        {
+            _prefillTokenName = string.IsNullOrWhiteSpace(TokenNameParam) ? null : TokenNameParam.Trim();
+            if (TokenTtlParam is { } ttl && ALDevToolbox.Endpoints.AccountPasskeyEndpoints.AccessTokenTtlDays.Contains(ttl))
+            {
+                _prefillTokenTtl = ttl;
+            }
+        }
         _tokens = await Pats.ListForUserAsync(_user.Id);
         _clients = await OAuthClients.ListForUserAsync(_user.Id);
 
