@@ -462,7 +462,7 @@ public sealed class PerTenantBackupServiceTests : IDisposable
         }).Build();
         return new PerTenantBackupService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
-            NullLogger<PerTenantBackupService>.Instance, _clock, _options, maintenance: maintenance);
+            NullLogger<PerTenantBackupService>.Instance, _clock, maintenance ?? new MaintenanceModeState(), _options);
     }
 
     private async Task<PerTenantBackup> CreateAsync(int organizationId)

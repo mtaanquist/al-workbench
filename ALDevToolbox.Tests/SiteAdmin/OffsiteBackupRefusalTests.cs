@@ -173,7 +173,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
             NullLogger<BackupService>.Instance, TimeProvider.System);
         var perTenant = new PerTenantBackupService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
-            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System);
+            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System, new MaintenanceModeState());
         var systemSettings = new SystemSettingsService(
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, TimeProvider.System);
         // A throwaway persistent identity in a scratch dir — the refusals never

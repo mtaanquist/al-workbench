@@ -86,7 +86,7 @@ public sealed class PerTenantBackupService
     private readonly string _connectionString;
     private readonly string _backupsRoot;
     private readonly DeploymentIdentity? _deployment;
-    private readonly MaintenanceModeState? _maintenance;
+    private readonly MaintenanceModeState _maintenance;
 
     public PerTenantBackupService(
         AppDbContext db,
@@ -96,15 +96,15 @@ public sealed class PerTenantBackupService
         IConfiguration configuration,
         ILogger<PerTenantBackupService> logger,
         TimeProvider clock,
+        // Required, not optional: a snapshot is refused while the site is closed
+        // (#1610), and an optional parameter would let a caller silently skip that.
+        MaintenanceModeState maintenance,
         // Optional so the tests that build this service by hand keep compiling.
         // In production DI it is always the instance registered from configuration.
         BackupOptions? options = null,
         // Optional for the same reason. Stamped into every manifest and checked
         // on restore, so a snapshot another deployment took is refused (#1257).
-        DeploymentIdentity? deployment = null,
-        // Optional for the same reason; production DI always supplies the
-        // singleton. A snapshot is refused while the site is closed (#1610).
-        MaintenanceModeState? maintenance = null)
+        DeploymentIdentity? deployment = null)
     {
         _db = db;
         _maintenance = maintenance;
@@ -223,7 +223,7 @@ public sealed class PerTenantBackupService
         // rows are gone or half-loaded: a snapshot of them is useless, and the
         // retention prune after it would delete good snapshots (#1610).
         BackupService.RefuseWhileInMaintenance(_maintenance);
-        var org =await _db.Organizations.AsNoTracking()
+        var org = await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == organizationId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {

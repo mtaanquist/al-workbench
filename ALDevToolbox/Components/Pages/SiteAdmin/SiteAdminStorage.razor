@@ -25,6 +25,27 @@
         </Alert>
     }
 
+    @* A snapshot taken while the site is closed after a failed restore copies rows
+       that are gone or half-loaded and pushes good snapshots out of retention (#1610). *@
+    @if (Maintenance.IsHeldAfterFailedRestore)
+    {
+        <Alert Tone="AlertTone.Danger" Role="alert">
+            <span>
+                A restore failed and the site is closed to everyone except site administrators.
+                "Back up now" is paused until a backup is restored on the
+                <a href="/site-admin/backup-storage/database">Database backups</a> tab.
+            </span>
+        </Alert>
+    }
+    else if (Maintenance.IsActive)
+    {
+        <Alert Tone="AlertTone.Warn" Role="alert">
+            <span>
+                The site is closed for maintenance. "Back up now" is paused until it reopens.
+            </span>
+        </Alert>
+    }
+
     <section class="card">
         <div class="card__head">
             <div>

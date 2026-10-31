@@ -63,7 +63,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             sp.GetRequiredService<AppDbContext>(), _db.OrgContext,
             _db.NewQuotaGuard(sp.GetRequiredService<AppDbContext>()),
             _db.NewOrganizationConfigService(sp.GetRequiredService<AppDbContext>()), config,
-            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System));
+            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System, _maintenance));
         _ctx.Services.AddSingleton<IOffsiteStorageProviderFactory>(new OffsiteStorageProviderFactory(NullLoggerFactory.Instance));
         _ctx.Services.AddSingleton(DeploymentIdentity.LoadOrCreate(_deploymentDir, NullLogger.Instance));
         _ctx.Services.AddScoped<OffsiteBackupService>();

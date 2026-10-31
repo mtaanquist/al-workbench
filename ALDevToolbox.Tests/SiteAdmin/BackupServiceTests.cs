@@ -805,7 +805,7 @@ public sealed class BackupServiceTests : IDisposable
         _maintenance.IsActive.Should().BeFalse();
     }
 
-    private Task<BackupLockHolder> HoldBackupLockAsync() =>BackupLockHolder.AcquireAsync(_db.ConnectionString);
+    private Task<BackupLockHolder> HoldBackupLockAsync() => BackupLockHolder.AcquireAsync(_db.ConnectionString);
 
     private string WriteFakeTool(string name, string body)
     {
