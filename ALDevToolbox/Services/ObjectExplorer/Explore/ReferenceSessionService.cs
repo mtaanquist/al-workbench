@@ -241,7 +241,11 @@ public sealed class ReferenceSessionService
         // The methods to offer come from the whole matched set too, since the
         // rows in hand miss any method called only past the cut (#1543).
         var methods = await _references.ListSystemReferenceMethodsAsync(seedReleaseId, query, ct);
-        return CacheSession(session with { MethodNames = methods.Select(m => m.Name).ToList() }, ownerKey, query);
+        return CacheSession(session with
+        {
+            MethodNames = methods.Select(m => m.Name).ToList(),
+            MethodCounts = methods.Select(m => m.Count).ToList(),
+        }, ownerKey, query);
     }
 
     /// <summary>
@@ -266,13 +270,15 @@ public sealed class ReferenceSessionService
         var session = Store(cached.Session.TargetLabel, cached.Session.ReleaseId, results, ownerKey,
             cached.Session.TargetName, kind: "built_in_calls", query: query);
         var methods = cached.Session.MethodNames ?? MethodNamesOf(cached.Session.Results);
+        var counts = cached.Session.MethodCounts;
         if (method is not null
             && !methods.Contains(method, StringComparer.OrdinalIgnoreCase)
             && session.Results.Count > 0)
         {
             methods = [.. methods, session.Results[0].MemberName ?? method];
+            counts = null; // no whole count for a method the list did not hold
         }
-        return CacheSession(session with { MethodNames = methods, Method = method }, ownerKey, query);
+        return CacheSession(session with { MethodNames = methods, MethodCounts = counts, Method = method }, ownerKey, query);
     }
 
     // Each method once, in its most used spelling, most used first.

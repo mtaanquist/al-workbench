@@ -149,11 +149,26 @@ public sealed class BuiltInCallsTests : IDisposable
         session!.Truncated.Should().BeTrue();
         session.Results.Should().HaveCount(2).And.OnlyContain(r => r.SourceObjectName == "CRONUS Alpha");
         session.MethodNames.Should().Equal("Insert", "Delete", "Modify");
+        session.MethodCounts.Should().Equal(3, 1, 1);
 
         var narrowed = await sessions.NarrowSystemReferencesAsync(session.Token, "owner", "Delete");
 
         narrowed!.Results.Should().ContainSingle().Which.SourceObjectName.Should().Be("CRONUS Zulu");
         narrowed.MethodNames.Should().Equal("Insert", "Delete", "Modify");
+        narrowed.MethodCounts.Should().Equal(3, 1, 1);
+    }
+
+    [Fact]
+    public async Task The_method_list_is_empty_for_a_release_in_another_organisation()
+    {
+        var releaseId = await ImportAsync();
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+
+        await using var read = _db.NewContext();
+        var methods = await NewReferences(read).ListSystemReferenceMethodsAsync(releaseId,
+            new FindSystemReferencesQuery(Guid.Parse(AppId), "table", 50104, "CRONUS Entry"));
+
+        methods.Should().BeEmpty();
     }
 
     [Fact]

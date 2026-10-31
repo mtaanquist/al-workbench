@@ -562,7 +562,10 @@ public sealed record ReferenceSession(
     // method's calls rather than filtering the rows in hand.
     IReadOnlyList<string>? MethodNames = null,
     // The method this list was narrowed to on the server, null for all.
-    string? Method = null);
+    string? Method = null,
+    // How many calls each of MethodNames has, in the same order, counted over
+    // every match rather than the rows kept (#1543). Null when unknown.
+    IReadOnlyList<int>? MethodCounts = null);
 
 /// <summary>
 /// One row in the source-viewer outline's "Using" or "Used by" sections (#148).

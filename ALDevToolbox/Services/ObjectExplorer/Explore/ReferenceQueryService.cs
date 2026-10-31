@@ -608,7 +608,7 @@ public sealed class ReferenceQueryService
             ORDER BY 2 DESC, lower(system_method_name)
             """;
 
-        return await _db.Database
+        var methods = await _db.Database
             .SqlQueryRaw<SystemMethodCount>(
                 sql,
                 releaseId,
@@ -618,6 +618,12 @@ public sealed class ReferenceQueryService
                 query.TargetObjectName,
                 DBNull.Value)
             .ToListAsync(ct);
+
+        _logger.LogInformation(
+            "ListSystemReferenceMethods ReleaseId={ReleaseId} TargetAppId={TargetAppId} Kind={Kind} Id={Id} Name={Name} Methods={Count}",
+            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName, methods.Count);
+
+        return methods;
     }
 
     /// <summary>
