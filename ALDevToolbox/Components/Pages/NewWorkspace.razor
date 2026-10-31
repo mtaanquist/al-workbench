@@ -193,6 +193,7 @@
                     <div class="field">
                         <label class="field__label" for="ws-prefix">Extension prefix</label>
                         <input class="input" id="ws-prefix" type="text" name="ExtensionPrefix"
+                               maxlength="@CustomerNaming.MaxShortNameLength"
                                placeholder="e.g. CRONUS"
                                value="@ExtensionPrefix" @oninput="OnExtensionPrefixInput" />
                         <span class="field__hint">
@@ -207,6 +208,7 @@
                                 </text>
                             }
                         </span>
+                        <FieldError Field="ExtensionPrefix" Errors="_errors" />
                     </div>
                 }
                 <div class="field field--full">
@@ -1233,6 +1235,9 @@
         _errors = errors;
         _unfieldedErrors = errors
             .Where(e => !FieldedKeys.Contains(e.Key)
+                // The prefix field, and its error slot, only exist when the
+                // organisation leaves the prefix to each workspace.
+                && !(e.Key == "ExtensionPrefix" && ShowExtensionPrefix)
                 // The checkbox list, and the slot under it, only exist when the
                 // template has optional extensions to tick.
                 && !(e.Key == "SelectedExtensionPaths" && _optionalExtensions.Count > 0))

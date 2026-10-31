@@ -173,7 +173,7 @@ public sealed class ProjectBuildService
         }
         else if (build is { PipelineId: not null })
         {
-            await EnsurePipelineStillBuildsAsync(build, ct).ConfigureAwait(false);
+            await EnsurePipelineStillBuildsAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
         }
         if (build is not null)
         {
@@ -1112,16 +1112,25 @@ public sealed class ProjectBuildService
     /// Refuses a pipeline build whose pipeline was deleted or disabled while it waited
     /// in the queue: the part of <see cref="EnsureAutomationStillOnAsync"/> that holds
     /// for every build, by hand or rerun as well (#1335). The worker fails the build
-    /// with the reason.
+    /// with the reason. The person the build runs as is held to what an automatic build's
+    /// is (#1551): a build by hand can wait in the queue too, and it clones with their
+    /// credentials, so one whose account was disabled or who can no longer manage the
+    /// solution by the time it starts is refused rather than run as them.
     /// </summary>
-    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, CancellationToken ct)
+    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, int? projectOwnerId, CancellationToken ct)
     {
         var pipeline = await _db.OePipelines.AsNoTracking()
             .Where(p => p.Id == build.PipelineId && p.DeletedAt == null)
             .Select(p => new { Disabled = p.DisabledAt != null })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var runsAs = _orgContext.CurrentUserId;
         var reason = pipeline is null ? PipelineDeletedRefusal
             : pipeline.Disabled ? PipelineDisabledRefusal
+            : runsAs is not { } userId ? null
+            : !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct).ConfigureAwait(false)
+                ? InactiveRefusal
+            : !await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct).ConfigureAwait(false)
+                ? NoAccessRefusal
             : null;
         if (reason is not null)
         {

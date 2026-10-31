@@ -1042,6 +1042,34 @@ public sealed class ObjectExplorerServiceTests : IDisposable
         hits.Should().Contain(h => h.Id == target.Id && h.ProcedureKind == kind);
     }
 
+    /// <summary>
+    /// OEX2-4: "View source" on a procedure hit opens the file at the
+    /// procedure, not at the first line of its object; a procedure with no
+    /// line of its own (symbols only) falls back to the object's.
+    /// </summary>
+    [Fact]
+    public async Task SearchProceduresInReleaseAsync_links_to_the_procedures_own_line()
+    {
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+        var expected = await read.OeModuleSymbols.AsNoTracking()
+            .Where(s => s.Module!.ReleaseId == releaseId && ProcedureKinds.All.Contains(s.Kind))
+            .Select(s => new { s.Id, s.LineNumber, ObjectLine = s.Object!.LineNumber })
+            .ToDictionaryAsync(s => s.Id);
+        expected.Values.Should().Contain(s => s.LineNumber > 0 && s.LineNumber != s.ObjectLine,
+            because: "the fixtures must hold a procedure below its object's first line for this to prove anything");
+
+        var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
+            releaseId, search: null, moduleId: null, take: 500);
+
+        hits.Should().NotBeEmpty();
+        foreach (var hit in hits)
+        {
+            var e = expected[hit.Id];
+            hit.LineNumber.Should().Be(e.LineNumber > 0 ? e.LineNumber : e.ObjectLine);
+        }
+    }
+
     [Fact]
     public async Task SearchContentInReleaseAsync_finds_lines_matching_a_substring()
     {

@@ -64,6 +64,9 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
     /// <summary>Frees the slot a paced bulk job held on the queue, so the feed can write the next one.</summary>
     protected override void OnJobStarting(ReleaseImportJob job) => _queue?.MarkPickedUp(job);
 
+    /// <summary>A job held across a restore and then dropped never runs, so its staged upload is deleted here.</summary>
+    protected override void OnJobDropped(ReleaseImportJob job) => ReleaseImportQueue.DeleteStagedUpload(job);
+
     /// <summary>
     /// Publishes the finished build as a GitHub Release when its pipeline names a
     /// repository to publish to. Runs inside the job's own DI scope and organisation

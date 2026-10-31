@@ -114,10 +114,20 @@
                             <label class="field__label" for="mod-id-range-size">ID range size override</label>
                             <input class="input" id="mod-id-range-size" type="number" min="1"
                                    @bind="_form!.IdRangeSize" @bind:event="oninput"
-                                   placeholder="(inherit from template)" />
+                                   placeholder="@IdRangeSizePlaceholder" />
                             <span class="field__hint">
-                                Optional. Leave blank and this module takes the size
-                                set on the template it is generated with.
+                                @if (_form!.FromRepository)
+                                {
+                                    <text>Optional. Leave blank and this module takes the size of the
+                                    ID ranges in the repository's app.json, kept up to date with the
+                                    repository. If app.json has no ranges, it takes the size set on
+                                    the template it is generated with.</text>
+                                }
+                                else
+                                {
+                                    <text>Optional. Leave blank and this module takes the size
+                                    set on the template it is generated with.</text>
+                                }
                             </span>
                             <FieldError Field="IdRangeSize" Errors="_fieldErrors" />
                         </div>
@@ -544,6 +554,7 @@
     private string _pickerDepId = string.Empty;
     private ConfirmDialog? _replaceConfirm;
     private SavedSource? _saved;
+    private int? _savedIdRangeSize;
     private (string Address, string Ref, string Path) _savedSourceFields;
     private IReadOnlyList<FileBrowser.Entry> _savedFiles = [];
     private bool _savedHasTypedFiles;
@@ -590,6 +601,7 @@
     private void ReadSaved(Module module)
     {
         _saved = SavedSource.From(module);
+        _savedIdRangeSize = module.IdRangeSize;
         _savedHasTypedFiles = module.SourceRepository is null && module.ExtensionFolders.Count > 0;
         var files = new List<FileBrowser.Entry>();
         foreach (var folder in module.ExtensionFolders.OrderBy(f => f.Ordering)) CollectFiles(folder, folder.Path, files);
@@ -605,6 +617,11 @@
     private bool SourceFieldsChanged =>
         _form is { } form && _saved is not null
         && (form.SourceAddress.Trim(), form.SourceRef.Trim(), form.SourcePath.Trim()) != _savedSourceFields;
+
+    private string IdRangeSizePlaceholder =>
+        _form is { FromRepository: true } && !SourceFieldsChanged && _saved?.IdRangeSize is int size
+            ? $"(from repository: {size})"
+            : _form is { FromRepository: true } ? "(from repository)" : "(inherit from template)";
 
     private static string ShortSha(string sha) => sha.Length > 7 ? sha[..7] : sha;
 
@@ -747,7 +764,10 @@
             {
                 // Same repository, branch and folder as saved: keep the copy as it
                 // is rather than downloading it again for a renamed module.
-                var keepCopy = source is not null && _saved is not null && !SourceFieldsChanged;
+                // Clearing the size of a module saved before the repository's own
+                // size was recorded needs a fresh copy to read it from (#1631).
+                var keepCopy = source is not null && _saved is not null && !SourceFieldsChanged
+                    && !ModuleSourceService.NeedsCopyForIdRangeSize(_savedIdRangeSize, _saved.IdRangeSize, payload.IdRangeSize);
                 if (source is null || keepCopy)
                 {
                     await Modules.UpdateAsync(_existingId.Value, payload, keepSourceCopy: keepCopy);
@@ -879,7 +899,8 @@
         DateTime? CheckedAt,
         string? Error,
         IReadOnlyList<ModuleSourceSkippedFile> Skipped,
-        IReadOnlyList<ModuleDependencyInput> Dependencies)
+        IReadOnlyList<ModuleDependencyInput> Dependencies,
+        int? IdRangeSize)
     {
         public string WebUrl => $"https://github.com/{Repository}";
 
@@ -887,7 +908,8 @@
             module.SourceRepository is { } repository && module.SourceCommitSha is { } sha
                 ? new SavedSource(repository, sha, module.SourceFetchedAt, module.SourceCheckedAt, module.SourceError,
                     ModuleSourceColumns.ReadSkipped(module.SourceSkippedJson),
-                    ModuleSourceColumns.ReadDependencies(module.SourceDependenciesJson))
+                    ModuleSourceColumns.ReadDependencies(module.SourceDependenciesJson),
+                    module.SourceIdRangeSize)
                 : null;
     }
 

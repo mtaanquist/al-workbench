@@ -520,6 +520,7 @@ public sealed class TemplateImportService
             SourceCheckedAt = sourceModule.SourceCheckedAt,
             SourceSkippedJson = sourceModule.SourceSkippedJson,
             SourceDependenciesJson = sourceModule.SourceDependenciesJson,
+            SourceIdRangeSize = sourceModule.SourceIdRangeSize,
             Dependencies = sourceModule.Dependencies.Select((d, i) => new ModuleDependency
             {
                 OrganizationId = actingOrgId,

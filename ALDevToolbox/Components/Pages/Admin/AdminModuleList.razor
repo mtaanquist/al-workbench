@@ -169,7 +169,7 @@
                             </span>
                         </td>
                         <td class="data-table__num">@m.Dependencies.Count</td>
-                        <td class="data-table__num">@(m.IdRangeSize?.ToString() ?? "—")</td>
+                        <td class="data-table__num">@((m.IdRangeSize ?? m.SourceIdRangeSize)?.ToString() ?? "—")</td>
                         <td><Timestamp Value="@m.UpdatedAt" Format="yyyy-MM-dd HH:mm:ss" /></td>
                         <td class="data-table__actions">
                             <RowActions Label="@($"Actions for {m.Name}")">

@@ -307,6 +307,24 @@ public sealed class GitHubWebhookEndpointTests : IClassFixture<GitHubWebhookEndp
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         host.Factory.Services.GetRequiredService<GitHubWebhookQueue>()
             .Reader.TryRead(out _).Should().BeFalse();
+
+        // During a restore the settings row may simply not be loaded yet, and GitHub
+        // never resends a 401: the delivery gets a 503, which it does resend (#1599).
+        var maintenance = host.Factory.Services.GetRequiredService<ALDevToolbox.Services.Operations.MaintenanceModeState>();
+        maintenance.Enter("Restoring a backup");
+        try
+        {
+            using var during = await client.SendAsync(Delivery(PullRequestPayload(), Secret));
+
+            during.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            during.Headers.RetryAfter.Should().NotBeNull();
+        }
+        finally
+        {
+            maintenance.Exit();
+        }
+        host.Factory.Services.GetRequiredService<GitHubWebhookQueue>()
+            .Reader.TryRead(out _).Should().BeFalse();
     }
 
     [Fact]

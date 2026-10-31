@@ -425,7 +425,8 @@
                 break;
             case SearchScope.Procedures:
                 <OeProcedureResults Results="_procedureResults"
-                                    ViewReleaseSeed="ViewReleaseSeed" />
+                                    ViewReleaseSeed="ViewReleaseSeed"
+                                    Capped="_proceduresCapped" />
                 break;
             case SearchScope.Content:
                 @* `@_search`, not `_search` - see the note on OeCompareResults
@@ -433,7 +434,8 @@
                    "type something to search" state never showed and a
                    no-results message quoted the field name back at the user. *@
                 <OeContentResults Results="_contentResults"
-                                  Search="@_search" />
+                                  Search="@_search"
+                                  CappedAtFiles="_contentCappedAtFiles" />
                 break;
             case SearchScope.Compare:
                 @* `@_compareRight`, not `_compareRight`: both parameters are
@@ -503,7 +505,11 @@
     private bool _objectsLoadingMore;
     private const int ObjectsPageSize = 100;
     private List<ReleaseProcedureMatch>? _procedureResults;
+    private bool _proceduresCapped;
     private List<ReleaseContentMatch>? _contentResults;
+    private int? _contentCappedAtFiles;
+    private const int ProcedureCap = 500;
+    private const int ContentFileCap = 200;
     private List<ReleaseCompareFileRow>? _compareResults;
     /// <summary>True when the file diff hit its cap and more files changed than are listed.</summary>
     private bool _compareTruncated;
@@ -1067,13 +1073,17 @@
     private async Task ReloadProceduresAsync()
     {
         var trimmedSearch = string.IsNullOrWhiteSpace(_search) ? null : _search;
-        _procedureResults = await Search.SearchProceduresInReleaseAsync(
-            ReleaseId, trimmedSearch, CurrentModuleId, take: 500, includeInherited: _includeInherited);
+        // One past the cap, so the tab can say when it was cut (OEX2-6).
+        var procedures = await Search.SearchProceduresInReleaseAsync(
+            ReleaseId, trimmedSearch, CurrentModuleId, take: ProcedureCap + 1, includeInherited: _includeInherited);
+        _proceduresCapped = procedures.Count > ProcedureCap;
+        _procedureResults = _proceduresCapped ? procedures.Take(ProcedureCap).ToList() : procedures;
     }
 
     private async Task ReloadContentAsync()
     {
         var trimmedSearch = string.IsNullOrWhiteSpace(_search) ? null : _search;
+        _contentCappedAtFiles = null;
         if (string.IsNullOrEmpty(trimmedSearch))
         {
             _contentResults = new();
@@ -1086,8 +1096,19 @@
             // "No lines match..." message up until the query returns.
             _contentResults = null;
             StateHasChanged();
-            _contentResults = await Search.SearchContentInReleaseAsync(
-                ReleaseId, trimmedSearch, CurrentModuleId, take: 200);
+            // The search caps files, not lines: ask for one file past the cap,
+            // and when it comes back, drop its lines and say the list was cut
+            // by files (OEX2-5).
+            var lines = await Search.SearchContentInReleaseAsync(
+                ReleaseId, trimmedSearch, CurrentModuleId, take: ContentFileCap + 1);
+            var files = lines.Select(l => l.FileId).Distinct().Take(ContentFileCap + 1).ToList();
+            if (files.Count > ContentFileCap)
+            {
+                var kept = files.Take(ContentFileCap).ToHashSet();
+                lines = lines.Where(l => kept.Contains(l.FileId)).ToList();
+                _contentCappedAtFiles = ContentFileCap;
+            }
+            _contentResults = lines;
         }
     }
 
