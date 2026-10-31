@@ -83,7 +83,7 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_deployments", ReadOnly = true)]
-    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit, and fewer when the deployments carry many apps, so the answer stays readable; Truncated and Note say when more were left out, and passing the oldest returned id as beforeDeploymentId reads further back (a number above 1 on the oldest row also means there are older ones). In the list, the failure message and each app's message are cut at 300 characters; pass deploymentId to read that one deployment with every message whole.")]
+    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit, and fewer when the deployments carry many apps, so the answer stays readable; Truncated and Note say when more were left out, and passing the oldest returned id as beforeDeploymentId reads further back (a number above 1 on the oldest row also means there are older ones). In the list, the failure message and each app's message are cut at 300 characters; pass deploymentId to read that one deployment with its failure message whole (each app's message too, unless together they are too long for one answer).")]
     public async Task<CappedRows<DeliveryHistoryRow>> ListDeliveriesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
@@ -99,7 +99,7 @@ public sealed class DeliveryTools
             var one = await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, 1, ct, onlyDeliveryId: id);
             if (one.Count == 0)
                 throw new McpException($"Deployment {id} is not one of deployment pipeline {deploymentPipelineId}'s deployments.");
-            return new CappedRows<DeliveryHistoryRow>(one, false, null);
+            return FitOneDeployment(one[0]);
         }
 
         // Business Central's install errors run to thousands of characters and twenty of
@@ -118,6 +118,39 @@ public sealed class DeliveryTools
         return CappedRows<DeliveryHistoryRow>.From(shortened, cap, "deployments", "newest first",
             "Pass the oldest deployment's id as beforeDeploymentId to read the rest.",
             cap < McpListLimit.Max ? CappedRows<DeliveryHistoryRow>.RaiseLimitHint : null);
+    }
+
+    /// <summary>
+    /// One deployment read whole, unless it is too long for one answer: a 20-app
+    /// solution that failed carries a Business Central install error per app, each
+    /// of which can run to thousands of characters (#1601, GBC-3). The deployment's
+    /// own failure message stays whole; the per-app messages share what is left of
+    /// the answer budget, and the note says so.
+    /// </summary>
+    private static CappedRows<DeliveryHistoryRow> FitOneDeployment(DeliveryHistoryRow row)
+    {
+        if (Serialized(row) <= McpAnswerBudget.Characters || row.Apps.Count == 0)
+            return new CappedRows<DeliveryHistoryRow>([row], false, null);
+
+        var withoutAppMessages = row with { Apps = row.Apps.Select(a => a with { Message = null }).ToList() };
+        var left = McpAnswerBudget.Characters - Serialized(withoutAppMessages);
+        var perApp = Math.Max(McpListLimit.MaxListFailureMessage, left / row.Apps.Count);
+        const string where = "the deployment's page in the workbench";
+        var fitted = row with
+        {
+            Apps = row.Apps.Select(a => a with
+            {
+                Message = a.Message is { } m && m.Length > perApp
+                    ? m[..perApp] + $"... (cut; {where} has the whole message)"
+                    : a.Message,
+            }).ToList(),
+        };
+        return new CappedRows<DeliveryHistoryRow>([fitted], true,
+            "Each app's message was cut so the deployment fits in one answer; the deployment's own failure message is whole. "
+            + "The deployment's page in the workbench has every message in full.");
+
+        static int Serialized(DeliveryHistoryRow r) =>
+            System.Text.Json.JsonSerializer.Serialize(r, ModelContextProtocol.McpJsonUtilities.DefaultOptions).Length;
     }
 
     [McpServerTool(Name = "deploy_build", ReadOnly = false, Idempotent = false)]

@@ -348,6 +348,41 @@ public sealed class DeliveryToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task One_deployment_with_many_long_app_messages_still_fits_one_answer()
+    {
+        // #1601, GBC-3: a 20-app deployment whose installs all failed with long
+        // Business Central errors. The deployment's own message stays whole.
+        Seed seed;
+        int id;
+        var apps = Enumerable.Range(1, 20).Select(i => $"CRONUS App {i:00}").ToArray();
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, apps);
+            id = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        var deploymentMessage = "The deployment failed. " + new string('d', 3_000);
+        await using (var ctx = _db.NewContext())
+        {
+            var delivery = await ctx.OeProjectDeliveries.SingleAsync(d => d.Id == id);
+            delivery.FailureMessage = deploymentMessage;
+            foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id).ToListAsync())
+                result.Message = "The extension could not be installed. " + new string('x', 3_000);
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var answer = await NewTools(read).ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: id);
+
+        var row = answer.Rows.Should().ContainSingle().Subject;
+        row.FailureMessage.Should().Be(deploymentMessage);
+        row.Apps.Should().HaveCount(20).And.OnlyContain(a => a.Message!.Contains("whole message"));
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("cut");
+        System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions)
+            .Length.Should().BeLessThan(25_000);
+    }
+
+    [Fact]
     public async Task List_deliveries_reads_further_back_from_the_oldest_deployment_returned()
     {
         Seed seed;
