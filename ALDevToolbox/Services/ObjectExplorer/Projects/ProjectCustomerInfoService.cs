@@ -1,4 +1,5 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -427,6 +428,10 @@ public sealed class ProjectCustomerInfoService
         // The query filter keeps this to the caller's own organisation.
         if (input.UserId is not { } userId || !await _db.Users.AnyAsync(u => u.Id == userId, ct))
             errors["UserId"] = "Choose one of your colleagues.";
+        // The picker offers active accounts only; held here too, as the team service does,
+        // so the list never names someone who can no longer sign in (#1603).
+        else if (!await _db.Users.AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct))
+            errors["UserId"] = "That account is disabled. Choose someone who can still sign in.";
         else if (await _db.OeProjectPeople.AnyAsync(p => p.ProjectId == projectId && p.UserId == userId && p.Id != personId, ct))
             errors["UserId"] = "They are already on the list. Change their roles or areas there.";
 
