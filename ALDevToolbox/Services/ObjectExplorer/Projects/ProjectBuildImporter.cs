@@ -312,7 +312,8 @@ public sealed class ProjectBuildImporter
                 ["Pipeline"] = "This pipeline no longer exists.",
             });
 
-        // Only the owner or an org Admin may trigger a build. See .design/artifacts.md.
+        // Only someone who may manage the solution (its owner, an Admin, everyone on a
+        // Public one, or its teams) may trigger a build. See .design/artifacts.md.
         await _access.EnsureCanManageAsync(pipeline.ProjectId, pipeline.OwnerId, ct).ConfigureAwait(false);
 
         // A disabled pipeline builds nothing, whoever or whatever asks (#1131).

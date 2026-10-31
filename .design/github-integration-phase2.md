@@ -958,7 +958,9 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   solution, of either provider, or changing one's address, likewise makes whoever saves it
   the person building on push and the nightly preview check run as, on every pipeline of
   the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
-  waiting as the previous person is then refused when its turn comes. When the new person
+  waiting as the previous person is then refused when its turn comes; such a refused build
+  does not count as having built its commit, so a redelivery of that push builds it as the
+  new person, though nothing re-queues it on its own (#1551). When the new person
   has nothing to clone one of the solution's providers with, the pipeline shows it as
   paused straight away. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
