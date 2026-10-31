@@ -840,6 +840,23 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     }
 
     /// <summary>
+    /// A fresh token for <paramref name="projectId"/>, for a poll that Business Central
+    /// answers with 401. A cached token is handed out while it has a few minutes left and
+    /// a booked install can be polled for longer, so it can run out mid-wait; the delivery
+    /// path refreshes the same way (#1113). The credentials are read again, so a change
+    /// since the send is honoured.
+    /// </summary>
+    private Func<CancellationToken, Task<string>> ForcedTokenRefresh(int projectId) => async ct =>
+    {
+        var project = await _db.OeProjects.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw new BcApiException(null, "This solution no longer exists.");
+        var creds = await ResolveCredentialsAsync(project, ct)
+            ?? throw new BcApiException(null, "The Business Central connection isn't set up any more.");
+        return await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh: true, ct);
+    };
+
+    /// <summary>
     /// Runs one of the four access checks. The "either" case tries the project-manage
     /// axis first and falls back to the update-ops flag, so a refusal names both ways in.
     /// </summary>
@@ -1982,7 +1999,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // Business Central may answer without the app id; it is the one we asked about.
         var polled = operation.AppId is null ? operation with { AppId = appId } : operation;
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, polled, UploadPollDelay, UploadPollTimeout, ct, progress);
+            _apps, env.Token, ForcedTokenRefresh(projectId), env.Family, env.Name, polled, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         if (result.Raw is { } raw)
         {
@@ -2275,7 +2292,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct, progress);
+            _apps, env.Token, ForcedTokenRefresh(projectId), env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         if (result.Raw is { } raw)
         {
@@ -2303,7 +2320,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var started = new BcAppOperation(operationId, appId, string.Empty, BcAppOperationStatus.Unknown, string.Empty,
             string.Empty, string.Empty, null, string.Empty, string.Empty, string.Empty, false, string.Empty, null, null, null);
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, started, UploadPollDelay, UploadPollTimeout, ct, progress);
+            _apps, env.Token, ForcedTokenRefresh(projectId), env.Family, env.Name, started, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         _logger.LogInformation(
             "Checked operation {OperationId} of app {AppId} on {Environment} (project {ProjectId}) again: completed {Completed}, unconfirmed {Unconfirmed}.",

@@ -423,21 +423,35 @@ public sealed class UpgradeActionService
     /// <see cref="UpgradeActionWorker"/>, so a slot fired tonight does exactly what
     /// pressing the button would have done.
     /// </summary>
-    internal Task RunAsync(
-        int projectId, int environmentId, UpgradeActionKind kind, string? targetVersion, CancellationToken ct) =>
-        kind switch
+    internal async Task RunAsync(
+        int projectId, int environmentId, UpgradeActionKind kind, string? targetVersion, CancellationToken ct)
+    {
+        switch (kind)
         {
-            UpgradeActionKind.PushDateToLatest => _connections.PushUpdateDateToLatestAsync(projectId, environmentId, ct),
-            // A booked start carries the version it was booked for, and refuses another (#1234).
-            UpgradeActionKind.RunNow => _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion),
-            // SelectTargetVersionAsync re-reads the offer list live and refuses a version
-            // no longer offered, so a mirror a sweep old can't send a stale pick.
-            UpgradeActionKind.SelectVersion => _connections.SelectTargetVersionAsync(
-                projectId, environmentId,
-                targetVersion ?? throw new InvalidOperationException("A version change was run without a target version."),
-                ct),
-            _ => throw new InvalidOperationException($"{kind} is recorded, never run."),
-        };
+            case UpgradeActionKind.PushDateToLatest:
+                await _connections.PushUpdateDateToLatestAsync(projectId, environmentId, ct).ConfigureAwait(false);
+                break;
+            case UpgradeActionKind.RunNow:
+                // A booked start carries the version it was booked for, and refuses another (#1234).
+                await _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion).ConfigureAwait(false);
+                break;
+            case UpgradeActionKind.SelectVersion:
+                // The write itself also lets a solution manager through, which suits the
+                // environment page, but every action here was booked on the
+                // environment-updates grant. Held to the same grant now, so a person taken
+                // off the update team since booking doesn't get the slot fired anyway.
+                await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct).ConfigureAwait(false);
+                // SelectTargetVersionAsync re-reads the offer list live and refuses a version
+                // no longer offered, so a mirror a sweep old can't send a stale pick.
+                await _connections.SelectTargetVersionAsync(
+                    projectId, environmentId,
+                    targetVersion ?? throw new InvalidOperationException("A version change was run without a target version."),
+                    ct).ConfigureAwait(false);
+                break;
+            default:
+                throw new InvalidOperationException($"{kind} is recorded, never run.");
+        }
+    }
 
     /// <summary>
     /// Sends a booked upload (<see cref="UpgradeActionKind.UploadApp"/> with a package on
