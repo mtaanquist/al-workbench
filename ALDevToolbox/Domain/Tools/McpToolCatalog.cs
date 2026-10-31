@@ -142,7 +142,8 @@ public static class McpToolCatalog
         new McpToolDescriptor("vote_translation", Translator,
             "Votes a suggested translation up or down.", true, ToolKey.Translator),
         new McpToolDescriptor("remove_translation", Translator,
-            "Withdraws a translation the assistant suggested.", true, ToolKey.Translator),
+            "Removes a translation from your organisation's memory so it is no longer suggested. Needs the "
+            + "Editor role. It can be restored from the Translation memory page.", true, ToolKey.Translator),
 
         // ---- Solutions and pipelines ----
         new McpToolDescriptor("list_solutions", Projects,

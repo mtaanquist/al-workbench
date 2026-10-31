@@ -44,13 +44,16 @@ public sealed class PatAuthenticationHandler : AuthenticationHandler<Authenticat
     /// so Claude (and any other spec-compliant OAuth client) can discover the
     /// authorisation server. The MCP authorization spec requires the header
     /// on a real <c>401</c> — clients ignore the same header when it's on a
-    /// <c>200</c>. The URL is built from the live request so reverse-proxied
-    /// deployments emit the public origin Claude can reach.
+    /// <c>200</c>. The URL is built from <c>PUBLIC_BASE_URL</c> when it is set,
+    /// the same origin the metadata document itself names (#670), and from the
+    /// live request otherwise: behind a proxy that does not forward the public
+    /// scheme or host, the request names an address the client cannot reach (#1617).
     /// </summary>
     protected override Task HandleChallengeAsync(AuthenticationProperties properties)
     {
         Response.StatusCode = StatusCodes.Status401Unauthorized;
-        var url = $"{Request.Scheme}://{Request.Host}/.well-known/oauth-protected-resource";
+        var origin = Context.RequestServices.GetRequiredService<ALDevToolbox.Endpoints.PublicOrigin>().For(Context);
+        var url = $"{origin}/.well-known/oauth-protected-resource";
         Response.Headers.Append("WWW-Authenticate", $"Bearer resource_metadata=\"{url}\"");
         return Task.CompletedTask;
     }

@@ -1,0 +1,42 @@
+@* Sent to the account's own address whenever an authenticator app is turned on or off for it. *@
+<EmailLayout Preheader="@Preheader" Reason="You received this because two-step sign-in changed on the AL Workbench account for this address.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    @if (TurnedOn)
+    {
+        <EmailParagraph>An authenticator app was set up for your AL Workbench account on @ChangedAt. From now on, signing in with your password also asks for a code from that app.</EmailParagraph>
+        <EmailParagraph>If this was you, there is nothing else to do.</EmailParagraph>
+        <EmailParagraph>If it wasn't you, someone else may be able to use your account: change your password, then open Sign-in &amp; security on your Account page and turn the authenticator app off. If you can't sign in, ask your administrator for help.</EmailParagraph>
+    }
+    else
+    {
+        <EmailParagraph>The authenticator app for your AL Workbench account was turned off on @ChangedAt. Signing in no longer asks for a code from it.</EmailParagraph>
+        <EmailParagraph>If this was you, there is nothing else to do.</EmailParagraph>
+        <EmailParagraph>If it wasn't you, change your password, then open Sign-in &amp; security on your Account page and set up two-step sign-in again.</EmailParagraph>
+    }
+    <EmailButton Href="@SecurityUrl">Open Sign-in &amp; security</EmailButton>
+</EmailLayout>
+
+@code {
+    public const string TurnedOnSubject = "An authenticator app was set up for your AL Workbench account";
+    public const string TurnedOffSubject = "The authenticator app for your AL Workbench account was turned off";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public bool TurnedOn { get; set; }
+    [Parameter, EditorRequired] public string ChangedAt { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SecurityUrl { get; set; } = string.Empty;
+
+    private string Preheader => TurnedOn
+        ? "If this wasn't you, change your password and turn the app off."
+        : "If this wasn't you, change your password and set up two-step sign-in again.";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string displayName, bool turnedOn, string changedAt, string securityUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<AuthenticatorAppChangedEmail>(turnedOn ? TurnedOnSubject : TurnedOffSubject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(TurnedOn)] = turnedOn,
+            [nameof(ChangedAt)] = changedAt,
+            [nameof(SecurityUrl)] = securityUrl,
+        }, ct);
+}

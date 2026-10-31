@@ -512,8 +512,8 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "list_customer_modules", ReadOnly = true)]
-    [Description("Answers 'which customers have module X?' and 'which modules does this customer have?' from your organisation's catalogue of third-party modules. With no arguments: the catalogue (name, publisher, app id). With module: every solution you can see that has it, and at which version. With solution: that solution's modules and versions. Give at most one of module or solution. For an online solution the version is what its production environment last reported installed (source 'business_central', read at readAt by the nightly sweep or a Refresh - not a live read); for an on-premises one it is what somebody typed (source 'typed').")]
-    public async Task<IReadOnlyList<CustomerModuleRow>> ListCustomerModulesAsync(
+    [Description("Answers 'which customers have module X?' and 'which modules does this customer have?' from your organisation's catalogue of third-party modules. With no arguments: the catalogue (name, publisher, app id). With module: every solution you can see that has it, and at which version - at most 50; Truncated and Note say when more were left out. With solution: that solution's modules and versions. Give at most one of module or solution. For an online solution the version is what its production environment last reported installed (source 'business_central', read at readAt by the nightly sweep or a Refresh - not a live read); for an on-premises one it is what somebody typed (source 'typed').")]
+    public async Task<CappedRows<CustomerModuleRow>> ListCustomerModulesAsync(
         [Description("Optional module name or numeric id from the catalogue - to list which solutions have it.")] string? module = null,
         [Description("Optional solution name or numeric id - to list its modules.")] string? solution = null,
         CancellationToken ct = default)
@@ -530,16 +530,20 @@ public sealed class DeliverTools
         {
             var (id, project) = await ResolveAsync(solution!, ct);
             var held = await Guard(solution!, () => _modules.GetSolutionModulesAsync(id, ct));
-            return held.Modules.Select(m => ToModuleRow(m, id, project.Name, held)).ToList();
+            return CappedRows<CustomerModuleRow>.From(
+                held.Modules.Select(m => ToModuleRow(m, id, project.Name, held)).ToList(), int.MaxValue,
+                "modules", "as the solution lists them", "Pass module to ask about one module instead.");
         }
 
         if (!byModule)
         {
             // The count the admin page shows is left out on purpose: it counts every
             // solution, including Private ones this caller cannot see.
-            return catalog
-                .Select(m => new CustomerModuleRow(m.Id, m.Name, m.Publisher, m.AppId, null, null, null, null, null, null, null))
-                .ToList();
+            return CappedRows<CustomerModuleRow>.From(
+                catalog
+                    .Select(m => new CustomerModuleRow(m.Id, m.Name, m.Publisher, m.AppId, null, null, null, null, null, null, null))
+                    .ToList(), int.MaxValue,
+                "modules", "as the catalogue lists them", "Pass module or solution to ask about one.");
         }
 
         var wanted = module!.Trim();
@@ -569,8 +573,15 @@ public sealed class DeliverTools
                 : new CustomerModuleRow(entry.Id, entry.Name, entry.Publisher, entry.AppId, option.Id, option.Name,
                     null, source, held.EnvironmentName, held.FetchedAt, null));
         }
-        return rows;
+        // A common ISV module across a few hundred online solutions ran to ~70,000
+        // characters, past what an assistant client accepts (#1601).
+        return CappedRows<CustomerModuleRow>.From(
+            rows, ModuleHolderCap, "solutions", "as your solutions list them",
+            "Pass solution to ask about one customer.");
     }
+
+    /// <summary>The most solutions <c>list_customer_modules</c> by module returns in one answer.</summary>
+    internal const int ModuleHolderCap = 50;
 
     // ── Shaping ─────────────────────────────────────────────────────────
 

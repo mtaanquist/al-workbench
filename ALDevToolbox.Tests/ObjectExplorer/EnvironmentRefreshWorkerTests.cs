@@ -5,6 +5,7 @@ using ALDevToolbox.Services.Workers;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -65,7 +66,24 @@ public sealed class EnvironmentRefreshWorkerTests
         _queue.TryEnqueue(Job()).Should().BeTrue("the next night's refresh is not refused");
     }
 
-    private async Task RunOneJobAsync()
+    /// <summary>
+    /// A job that throws (here: every job) still closes the run when the queue empties:
+    /// the summary is logged and the counts reset, so they don't carry into the next
+    /// night's run with its throttle breaths.
+    /// </summary>
+    [Fact]
+    public async Task A_refresh_that_throws_still_ends_the_run()
+    {
+        using var logs = new CapturingLoggerProvider();
+        using var factory = new LoggerFactory([logs]);
+
+        await RunOneJobAsync(factory.CreateLogger<EnvironmentRefreshWorker>());
+
+        _ranUnder.Should().ContainSingle("the job ran");
+        logs.Messages.Should().ContainSingle(m => m.Contains("Environment refresh run finished: 1 solution(s)"));
+    }
+
+    private async Task RunOneJobAsync(ILogger<EnvironmentRefreshWorker>? logger = null)
     {
         var services = new ServiceCollection()
             .AddScoped<ProjectConnectionService>(_ =>
@@ -76,7 +94,7 @@ public sealed class EnvironmentRefreshWorkerTests
             .BuildServiceProvider();
         await using var _ = services;
         var worker = new EnvironmentRefreshWorker(
-            _queue, services, NullLogger<EnvironmentRefreshWorker>.Instance, new WorkerHeartbeatRegistry(), _maintenance);
+            _queue, services, logger ?? NullLogger<EnvironmentRefreshWorker>.Instance, new WorkerHeartbeatRegistry(), _maintenance);
 
         (await _queue.EnqueueAsync(Job(), TestContext.Current.CancellationToken)).Should().BeTrue();
         await worker.StartAsync(CancellationToken.None);

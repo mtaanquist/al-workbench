@@ -249,7 +249,111 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
         location.Should().NotContain("Password is incorrect");
     }
 
-    private async Task SeedPasswordOnlyMicrosoftUserAsync(string email)
+    [Fact]
+    public async Task Turning_the_authenticator_app_on_and_off_emails_the_owner()
+    {
+        // A second step added with a borrowed session locks the owner out of
+        // password sign-in, so it must not happen silently (#1614).
+        const string email = "app-notice@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        using (var loginPage = await client.GetAsync("/login"))
+        using (var login = await PostAsync(client, "/auth/login",
+                   AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password)))
+        {
+            login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        }
+        string secret;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            secret = (await scope.ServiceProvider.GetRequiredService<TotpService>().BeginEnrollmentAsync(userId)).SecretBase32;
+        }
+
+        using var security = await client.GetAsync("/account/security");
+        var token = AntiforgeryToken(await security.Content.ReadAsStringAsync());
+        using (var on = await PostAsync(client, "/auth/account/2fa/totp/confirm", token, ("Code", CurrentCode(secret))))
+        {
+            on.Headers.Location!.OriginalString.Should().StartWith("/account/2fa/recovery-codes");
+        }
+        using (var off = await PostAsync(client, "/auth/account/2fa/totp/disable", token, ("Password", Password)))
+        {
+            off.Headers.Location!.OriginalString.Should().Contain("ok=totp-disabled");
+        }
+
+        await using var read = _db.NewContext();
+        var notices = await read.EmailOutboxMessages.IgnoreQueryFilters().AsNoTracking()
+            .Where(m => m.ToEmail == email && m.Purpose == EmailPurpose.AuthenticatorAppChanged)
+            .OrderBy(m => m.Id)
+            .Select(m => m.Subject)
+            .ToListAsync();
+        notices.Should().Equal(
+            ALDevToolbox.Components.Email.AuthenticatorAppChangedEmail.TurnedOnSubject,
+            ALDevToolbox.Components.Email.AuthenticatorAppChangedEmail.TurnedOffSubject);
+    }
+
+    [Fact]
+    public async Task A_day_long_step_up_window_still_asks_for_the_password_after_fifteen_minutes()
+    {
+        // Turning two-step off or minting recovery codes is as lasting as adding
+        // a passkey, so it gets the passkey cap, whatever the organisation chose
+        // for its tools (#1614).
+        var userId = await SeedPasswordOnlyMicrosoftUserAsync("long-window@cronus.example");
+        int previousWindow;
+        await using (var ctx = _db.NewContext())
+        {
+            var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+            previousWindow = org.StepUpWindowMinutes;
+            org.StepUpWindowMinutes = 24 * 60;
+            await ctx.SaveChangesAsync();
+        }
+        try
+        {
+            var now = _factory.Services.GetRequiredService<TimeProvider>().GetUtcNow().UtcDateTime;
+            (await MayConfirmWithoutPasswordAsync(userId, now.AddMinutes(-5))).Should().BeTrue();
+            (await MayConfirmWithoutPasswordAsync(userId, now.AddMinutes(-20)))
+                .Should().BeFalse("past the fifteen-minute cap the password is asked for again");
+        }
+        finally
+        {
+            await using var ctx = _db.NewContext();
+            (await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId)).StepUpWindowMinutes = previousWindow;
+            await ctx.SaveChangesAsync();
+        }
+    }
+
+    private async Task<bool> MayConfirmWithoutPasswordAsync(int userId, DateTime strongAuthAt)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var http = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+            User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+            [
+                new(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim, userId.ToString()),
+                new(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString()),
+                new(StepUpAuth.StrongAuthAtClaim, strongAuthAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)),
+            ], "test")),
+        };
+        var accessor = scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>();
+        var previous = accessor.HttpContext;
+        accessor.HttpContext = http;
+        try
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Data.AppDbContext>();
+            return await ALDevToolbox.Endpoints.AccountEndpoints.MayConfirmWithoutPasswordAsync(http, db, userId, CancellationToken.None);
+        }
+        finally
+        {
+            accessor.HttpContext = previous;
+        }
+    }
+
+    private async Task<int> SeedPasswordOnlyMicrosoftUserAsync(string email)
     {
         await using var seed = _db.NewContext();
         var user = new User
@@ -274,6 +378,7 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
             CreatedAt = DateTime.UtcNow,
         });
         await seed.SaveChangesAsync();
+        return user.Id;
     }
 
     private async Task<(int UserId, string Secret, IReadOnlyList<string> RecoveryCodes)> SeedTotpUserAsync(

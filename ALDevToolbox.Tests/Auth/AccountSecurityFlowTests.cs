@@ -74,14 +74,44 @@ public sealed class AccountSecurityFlowTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             var auth = NewAuth(ctx);
-            var user = await auth.CompleteMfaAsync(5010, "127.0.0.1");
-            user.LastLoginAt.Should().NotBeNull();
+            var (user, refused) = await auth.CompleteMfaAsync(5010, _clock.GetUtcNow().UtcDateTime, "127.0.0.1");
+            refused.Should().BeNull();
+            user!.LastLoginAt.Should().NotBeNull();
         }
         await using var read = _db.NewContext();
         var attempt = await read.LoginAttempts.IgnoreQueryFilters()
             .Where(a => a.Email == "mfa2@example.com")
             .OrderByDescending(a => a.Timestamp).FirstAsync();
         attempt.Succeeded.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("reset", "invalid")]
+    [InlineData("disabled", "disabled")]
+    public async Task A_half_finished_sign_in_from_before_a_change_cannot_finish_after_it(string change, string refusal)
+    {
+        // The password leg ran, then the owner reset the password (or an admin
+        // disabled the account); the second factor arriving afterwards must not
+        // mint a session newer than the reset's cut-off (#1614).
+        await SeedMfaUserAsync(5340 + refusal.Length, $"mfa-{change}@example.com");
+        var userId = 5340 + refusal.Length;
+        var pendingIssuedAt = _clock.GetUtcNow().UtcDateTime;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId);
+            row.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime;
+            if (change == "disabled") row.Status = UserStatus.Disabled;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var act = _db.NewContext();
+        var (user, refused) = await NewAuth(act).CompleteMfaAsync(userId, pendingIssuedAt, "127.0.0.1");
+
+        user.Should().BeNull();
+        refused.Should().Be(refusal);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).LastLoginAt.Should().BeNull();
     }
 
     [Fact]
@@ -128,7 +158,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
         // A success (e.g. finally entering the right code) breaks the failure
         // streak, so the account isn't stuck locked.
         _clock.Advance(TimeSpan.FromSeconds(1));
-        await auth.CompleteMfaAsync(5320, "127.0.0.1", default);
+        await auth.CompleteMfaAsync(5320, _clock.GetUtcNow().UtcDateTime, "127.0.0.1", default);
         (await auth.TryReserveMfaAttemptAsync(5320, "127.0.0.1", default)).Should().NotBeNull();
     }
 

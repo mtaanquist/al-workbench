@@ -1295,7 +1295,8 @@ else
         _canConfirmWithoutPassword = _entraLinks.Count > 0;
         if (_canConfirmWithoutPassword && AuthStateTask is not null)
         {
-            _confirmedRecently = await Tools.IsFreshAsync((await AuthStateTask).User);
+            // Same capped window the endpoints apply (#1614).
+            _confirmedRecently = await StepUp.IsFreshForPasskeyAsync((await AuthStateTask).User, CancellationToken.None);
         }
         if (Passkeys.IsConfigured && AuthStateTask is not null)
         {

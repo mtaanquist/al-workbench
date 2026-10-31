@@ -18,8 +18,12 @@ namespace ALDevToolbox.Endpoints;
 /// The gate runs after authentication and authorization. It re-checks on
 /// every request rather than stamping a sign-in-time claim so that flipping
 /// the toggle on (or having an admin disable a user's last method)
-/// evicts that user from privileged paths on their next click — without
-/// waiting for cookie sliding renewal.
+/// evicts that user from privileged paths on their next page load — without
+/// waiting for cookie sliding renewal. An interactive page that is already
+/// open talks over <c>/_blazor</c>, which is allow-listed, so it keeps
+/// working until the user next loads a page; a token or an assistant grant
+/// still cannot be minted from it, since those are plain HTTP posts and
+/// gated (#1614).
 /// </para>
 /// </summary>
 internal static class StrongAuthGate

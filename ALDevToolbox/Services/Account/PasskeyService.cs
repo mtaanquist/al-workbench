@@ -325,12 +325,14 @@ public sealed class PasskeyService
             // an attacker can't recompute it to tell a synthetic entry from a real
             // credential; an assertion against it simply fails to match, exactly
             // like an empty list did. See #490.
-            if (allowCredentials.Count == 0)
+            //
+            // Padded to a constant length, not just filled when empty: a single
+            // stand-in still let a reply with two or more entries say "this
+            // address has that many passkeys" (#1614). Only an account with
+            // more passkeys than the pad length shows a longer list.
+            for (var i = allowCredentials.Count; i < SignInAllowListLength; i++)
             {
-                allowCredentials = new List<PublicKeyCredentialDescriptor>
-                {
-                    new(SyntheticCredentialId(normalised)),
-                };
+                allowCredentials.Add(new PublicKeyCredentialDescriptor(SyntheticCredentialId(normalised, i)));
             }
         }
 
@@ -355,11 +357,21 @@ public sealed class PasskeyService
     /// itself distinguish synthetic from real) yet unguessable to an attacker
     /// who doesn't know the secret. 32 bytes matches a typical credential id.
     /// </summary>
-    private byte[] SyntheticCredentialId(string normalisedEmail)
+    private byte[] SyntheticCredentialId(string normalisedEmail, int index)
     {
         using var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(_deployment.Id));
-        return hmac.ComputeHash(Encoding.UTF8.GetBytes("passkey-synthetic:" + normalisedEmail));
+        // Index 0 keeps the input of the single stand-in this replaced, so a
+        // probe repeated across the change sees the same first id.
+        var input = index == 0 ? "passkey-synthetic:" + normalisedEmail : $"passkey-synthetic:{index}:{normalisedEmail}";
+        return hmac.ComputeHash(Encoding.UTF8.GetBytes(input));
     }
+
+    /// <summary>
+    /// How many entries the sign-in allow-list for an email hint always has,
+    /// real credentials first and stand-ins after, so its length says nothing
+    /// about the address (#1614).
+    /// </summary>
+    internal const int SignInAllowListLength = 8;
 
     /// <summary>
     /// Validates the assertion response, bumps the credential's counter, and
