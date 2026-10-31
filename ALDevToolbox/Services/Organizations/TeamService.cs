@@ -96,12 +96,12 @@ public sealed class TeamService
         return userId is not null && await IsOrgAdminAsync(userId.Value, ct).ConfigureAwait(false);
     }
 
-    private async Task EnsureCanAdministerTeamsAsync(CancellationToken ct)
+    private async Task EnsureCanAdministerTeamsAsync(CancellationToken ct,
+        string refusal = "Only an organisation admin can create or delete teams.")
     {
         if (!await CanAdministerTeamsAsync(ct).ConfigureAwait(false))
         {
-            throw new ProjectAccessDeniedException(
-                "Only an organisation admin can create or delete teams.");
+            throw new ProjectAccessDeniedException(refusal);
         }
     }
 
@@ -373,10 +373,11 @@ public sealed class TeamService
 
     /// <summary>
     /// Grants or withdraws <see cref="TeamMember.ManagesUpdates"/> for one member of
-    /// <paramref name="teamId"/>. Managers and admins, same gate as the manager
-    /// toggle — but a different capability: it lets the member schedule Business
-    /// Central platform updates on the projects this team is assigned to, and grants
-    /// nothing over the team itself. See <c>.design/teams-and-visibility.md</c>.
+    /// <paramref name="teamId"/>. Org Admin and SiteAdmin only — not the team's
+    /// managers: it lets the member schedule Business Central platform updates on the
+    /// production tenants of the projects this team is assigned to, and a manager who
+    /// could tick it could grant it to themselves (#1547). See
+    /// <c>.design/teams-and-visibility.md</c>.
     /// </summary>
     /// <remarks>
     /// Unlike <see cref="SetManagerAsync"/>, a membership row that isn't there is an
@@ -387,7 +388,8 @@ public sealed class TeamService
     public async Task SetManagesUpdatesAsync(int teamId, int memberId, bool managesUpdates, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        await EnsureCanManageTeamAsync(teamId, ct).ConfigureAwait(false);
+        await EnsureCanAdministerTeamsAsync(ct,
+            "Only an organisation admin can decide who schedules Business Central updates.").ConfigureAwait(false);
 
         var member = await _db.TeamMembers.FirstOrDefaultAsync(m => m.Id == memberId && m.TeamId == teamId, ct);
         if (member is null) throw Validation("MemberId", "That person is no longer on this team.");

@@ -334,6 +334,30 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_long_failure_reason_is_cut_to_one_line_in_the_notification_and_kept_whole_in_the_email()
+    {
+        // #1547: the bell flyout, /notifications and the digest show the detail as one
+        // line, like every other notifier; Business Central's reason can run long.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        var reason = "The extension could not be deployed because it is already deployed on another tenant. "
+            + new string('x', 400) + "\nCorrelation id: CRONUS-TAIL-MARKER";
+        _f.Apps.InstallThrows = new BcApiException(System.Net.HttpStatusCode.BadRequest, reason);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.Subject.Should().StartWith("Failed:");
+        sent.Html.Should().Contain("CRONUS-TAIL-MARKER", "the email keeps the whole outcome");
+        await using var ctx = _f.Db.NewContext();
+        var detail = (await ctx.UserNotifications.AsNoTracking().SingleAsync()).Detail;
+        detail.Should().NotBeNull();
+        detail!.Length.Should().BeLessThanOrEqualTo(NotificationText.MaxLineLength + 3);
+        detail.Should().NotContain("\n").And.NotContain("CRONUS-TAIL-MARKER").And.EndWith("...");
+    }
+
+    [Fact]
     public async Task An_install_still_unconfirmed_after_the_second_look_asks_the_person_to_check()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
