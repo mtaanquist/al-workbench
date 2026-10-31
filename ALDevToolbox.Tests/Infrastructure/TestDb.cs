@@ -817,7 +817,8 @@ public sealed class TestDb : IDisposable
     /// <summary>
     /// Puts every organisation at or over its storage quota (a 0 MB default:
     /// billable bytes are always at least 0), the cheapest way to force a
-    /// service's quota refusal without staging real bytes.
+    /// service's quota refusal without staging real bytes. Clears the guard's
+    /// cached decision for both test organisations.
     /// </summary>
     public async Task SetZeroStorageQuotaAsync()
     {
@@ -830,6 +831,11 @@ public sealed class TestDb : IDisposable
         }
         row.DefaultStorageQuotaMb = 0;
         await ctx.SaveChangesAsync();
+        // The guard caches its decision per organisation, so a write made before
+        // this call would otherwise keep answering "under quota".
+        var guard = NewQuotaGuard(ctx);
+        guard.Invalidate(DefaultOrgId);
+        guard.Invalidate(OtherOrgId);
     }
 
     /// <summary>
