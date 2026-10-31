@@ -45,6 +45,9 @@ public sealed class McpSetupPageTests : IDisposable
             .AddInterceptors(_db.CommandTracker)
             .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
         _ctx.Services.AddScoped<PersonalAccessTokenService>();
+        // The token service emails the owner when a token is made.
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.IEmailService>(new CapturingEmailService());
+        _ctx.Services.AddSingleton(sp => new ALDevToolbox.Services.Email.EmailRenderer(sp, NullLoggerFactory.Instance));
         _ctx.Services.AddScoped<ALDevToolbox.Services.OAuth.OAuthConsentService>();
         _ctx.Services.AddScoped(sp => _db.NewToolEnablement(sp.GetRequiredService<AppDbContext>()));
         _ctx.Services.AddSingleton(TimeProvider.System);
