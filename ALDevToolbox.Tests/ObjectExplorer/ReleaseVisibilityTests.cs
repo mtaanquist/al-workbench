@@ -577,6 +577,55 @@ public sealed class ReleaseVisibilityTests : IDisposable
     }
 
     /// <summary>
+    /// OEX-6: the two built-in calls paths #1531 added - a right-click in the
+    /// code, and the method picker narrowing a list - refuse a Private
+    /// solution's release the same way the paths above do. A click in a hidden
+    /// file, or in a visible file viewed from a hidden release, mints nothing;
+    /// and a list a member made stops answering once they can no longer see it.
+    /// </summary>
+    [Fact]
+    public async Task Built_in_calls_from_a_click_or_the_method_picker_refuse_a_hidden_release()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var visible = await SeedReleaseAsync("BC 26.0 (DK)", kind: "first_party");
+        // The object name in `table 50100 "Loyalty Card"`, line 1.
+        const int line = 1, column = 15;
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var sessions = Sessions(ctx);
+            (await sessions.CreateSystemReferencesAtPositionAsync(hidden.FileId, line, column, "outsider"))
+                .Should().BeNull("the file is in a release the outsider cannot see");
+            (await sessions.CreateSystemReferencesAtPositionAsync(visible.FileId, line, column, "outsider", hidden.ReleaseId))
+                .Should().BeNull("the click is viewed from a release the outsider cannot see");
+            (await sessions.CreateSystemReferencesAtPositionAsync(visible.FileId, line, column, "outsider"))
+                .Should().NotBeNull("the visible release's own file still works");
+        }
+
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            Microsoft.Extensions.Options.Options.Create(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+        string token;
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var session = await Sessions(ctx, cache).CreateSystemReferencesAtPositionAsync(hidden.FileId, line, column, "member");
+            session.Should().NotBeNull("a member may list the calls in their own solution");
+            token = session!.Token;
+            (await Sessions(ctx, cache).NarrowSystemReferencesAsync(token, "member", "Insert")).Should().NotBeNull();
+        }
+
+        // The member loses access: the same browser, the same list, a fresh request.
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Sessions(ctx, cache).NarrowSystemReferencesAsync(token, "member", "Insert")).Should().BeNull();
+        }
+    }
+
+    /// <summary>
     /// What <c>Endpoints/ArtifactEndpoints.cs</c> turns into its existing 404: the
     /// byte getters refuse a non-member with <see cref="ProjectAccessDeniedException"/>
     /// rather than streaming a Private project's compiled <c>.app</c>.
@@ -1245,8 +1294,9 @@ public sealed class ReleaseVisibilityTests : IDisposable
             throw new InvalidOperationException("A retry must not download anything.");
     }
 
-    private ReferenceSessionService Sessions(AppDbContext ctx) =>
-        new(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+    private ReferenceSessionService Sessions(AppDbContext ctx,
+        Microsoft.Extensions.Caching.Memory.IMemoryCache? cache = null) =>
+        new(cache ?? new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 Microsoft.Extensions.Options.Options.Create(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             References(ctx), ctx, new ReferenceResolver(ctx), Access(ctx),

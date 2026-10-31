@@ -278,7 +278,14 @@ public sealed class ReferenceSessionService
             methods = [.. methods, session.Results[0].MemberName ?? method];
             counts = null; // no whole count for a method the list did not hold
         }
-        return CacheSession(session with { MethodNames = methods, MethodCounts = counts, Method = method }, ownerKey, query);
+        // Keep the list under the token it came from, so flicking through the
+        // methods replaces one cached session rather than adding one per pick
+        // for the cache to hold until each expires.
+        _cache.Remove(CacheKey(session.Token));
+        return CacheSession(session with
+        {
+            Token = token, MethodNames = methods, MethodCounts = counts, Method = method,
+        }, ownerKey, query);
     }
 
     // Each method once, in its most used spelling, most used first.
