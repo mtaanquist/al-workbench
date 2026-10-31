@@ -124,6 +124,16 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
             }
 
             await AssertGatedAsync(anonymous, "/signin-microsoft?code=abc&state=xyz");
+
+            // An assistant on an access token gets the 503 and its Retry-After, not a 401.
+            using var mcp = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+            {
+                Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json"),
+            };
+            mcp.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "aldt_pat_notarealtoken");
+            using var mcpResponse = await anonymous.SendAsync(mcp, TestContext.Current.CancellationToken);
+            mcpResponse.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            mcpResponse.Headers.RetryAfter.Should().NotBeNull();
         }
         finally
         {

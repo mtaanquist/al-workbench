@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Operations;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -85,35 +86,98 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
             || CircuitOnSiteAdminConsole?.Invoke() == true);
 
     /// <summary>
-    /// Whether a command only reads: a <c>SELECT</c> (after any leading
-    /// comments, which is where a query tag goes) that takes no row locks.
-    /// Anything else, including a CTE, counts as a write.
+    /// Whether a command only reads. Deliberately conservative, since a wrong
+    /// "yes" lets a write into the database being restored and a wrong "no"
+    /// only refuses a read: comments are stripped (nested block comments
+    /// included; SQL whose comments or dollar quotes cannot be parsed is not a
+    /// read), and what is left must be one <c>SELECT</c> statement (a trailing
+    /// <c>;</c> at most) with no row-lock clause, no <c>INTO</c>, and none of
+    /// the functions that change state from inside a query (sequences,
+    /// advisory locks, settings, notifications, large objects). Anything else,
+    /// including a data-modifying CTE, counts as a write.
     /// </summary>
     internal static bool IsRead(string? sql)
     {
-        var text = (sql ?? string.Empty).AsSpan();
-        while (true)
+        if (string.IsNullOrWhiteSpace(sql) || DollarQuote.IsMatch(sql)) return false;
+        if (StripComments(sql) is not { } code) return false;
+
+        var statement = code.Trim();
+        if (statement.EndsWith(';')) statement = statement[..^1].TrimEnd();
+        return statement.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
+            && !statement.Contains(';')
+            && !LockClause.IsMatch(statement)
+            && !Into.IsMatch(statement)
+            && !StateChangingFunction.IsMatch(statement);
+    }
+
+    private static readonly Regex DollarQuote = new(@"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", RegexOptions.Compiled);
+    private static readonly Regex LockClause = new(
+        @"\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex Into = new(@"\bINTO\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex StateChangingFunction = new(
+        @"\b(nextval|setval|pg_advisory\w*|pg_try_advisory\w*|set_config|pg_notify|pg_terminate_backend|pg_cancel_backend|dblink\w*)\b|\blo_\w+",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The SQL with its comments replaced by spaces, or null when a comment is
+    /// left open. String literals and quoted identifiers are kept as they are
+    /// and skipped over, so a comment marker inside one is not taken for a
+    /// comment; a <c>;</c> or a function name inside one makes the classifier
+    /// say "not a read", which is the safe side. A literal with a backslash in
+    /// it is not parsed at all.
+    /// </summary>
+    private static string? StripComments(string sql)
+    {
+        var result = new System.Text.StringBuilder(sql.Length);
+        var i = 0;
+        while (i < sql.Length)
         {
-            text = text.TrimStart();
-            if (text.StartsWith("--"))
+            var c = sql[i];
+            if (c is '\'' or '"')
             {
-                var end = text.IndexOf('\n');
-                if (end < 0) return false;
-                text = text[(end + 1)..];
+                var close = i + 1;
+                while (true)
+                {
+                    close = sql.IndexOf(c, close);
+                    if (close < 0) return null;
+                    // A doubled quote is an escaped one, not the end.
+                    if (close + 1 < sql.Length && sql[close + 1] == c) { close += 2; continue; }
+                    break;
+                }
+                // A backslash may be an escape (an E'' string), which would move the
+                // end of the literal; rather than parse those, it is not a read.
+                if (sql.AsSpan(i, close - i + 1).Contains('\\')) return null;
+                result.Append(sql, i, close - i + 1);
+                i = close + 1;
             }
-            else if (text.StartsWith("/*"))
+            else if (c == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
             {
-                var end = text.IndexOf("*/");
-                if (end < 0) return false;
-                text = text[(end + 2)..];
+                var newline = sql.IndexOf('\n', i);
+                if (newline < 0) return null;
+                result.Append(' ');
+                i = newline + 1;
             }
-            else break;
+            else if (c == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
+            {
+                // Postgres block comments nest.
+                var depth = 1;
+                i += 2;
+                while (depth > 0)
+                {
+                    if (i + 1 >= sql.Length) return null;
+                    if (sql[i] == '/' && sql[i + 1] == '*') { depth++; i += 2; }
+                    else if (sql[i] == '*' && sql[i + 1] == '/') { depth--; i += 2; }
+                    else i++;
+                }
+                result.Append(' ');
+            }
+            else
+            {
+                result.Append(c);
+                i++;
+            }
         }
-        return text.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
-            && text.IndexOf(" FOR UPDATE", StringComparison.OrdinalIgnoreCase) < 0
-            && text.IndexOf(" FOR SHARE", StringComparison.OrdinalIgnoreCase) < 0
-            && text.IndexOf(" FOR NO KEY UPDATE", StringComparison.OrdinalIgnoreCase) < 0
-            && text.IndexOf(" FOR KEY SHARE", StringComparison.OrdinalIgnoreCase) < 0;
+        return result.ToString();
     }
 
     private void End(DbCommand command)

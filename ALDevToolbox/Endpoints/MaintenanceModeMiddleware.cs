@@ -14,12 +14,16 @@ namespace ALDevToolbox.Endpoints;
 internal static class MaintenanceModeMiddleware
 {
     /// <summary>
-    /// The paths a restore closes before authentication runs, because they
-    /// are handled inside it and would write: the OAuth token, revocation and
-    /// introspection endpoints (a refresh grant writes token rows), and the
-    /// Microsoft sign-in callback (a first sign-in creates the user and the
-    /// link). Nobody can be recognised as a SiteAdmin before authentication,
-    /// and an assistant or a person retries these after the 503 (#1571).
+    /// The paths a restore closes before authentication runs. The OAuth
+    /// token, revocation and introspection endpoints (a refresh grant writes
+    /// token rows) and the Microsoft sign-in callback (a first sign-in creates
+    /// the user and the link) are handled inside authentication and would
+    /// write. <c>/mcp</c> is here because its bearer policy is checked by
+    /// authorization, ahead of the gate, and an access token is left
+    /// unvalidated during maintenance, so the caller would get a 401 rather
+    /// than the 503 that tells it to retry. Nobody can be recognised as a
+    /// SiteAdmin before authentication, and an assistant or a person retries
+    /// these after the 503 (#1571).
     /// </summary>
     internal static readonly string[] ClosedBeforeAuthentication =
     [
@@ -27,6 +31,7 @@ internal static class MaintenanceModeMiddleware
         "/oauth/revoke",
         "/oauth/introspect",
         EntraAuthEndpoints.CallbackPath,
+        "/mcp",
     ];
 
     /// <summary>
