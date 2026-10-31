@@ -59,7 +59,10 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         // Routing only - the build itself is the release-import worker's active
         // duration, not this one's. Five minutes is generous for "ask a few orgs
         // what they connected, then open a check run".
-        : base(queue.Reader, logger, heartbeats, nameof(GitHubPullRequestBuildWorker), TimeSpan.FromMinutes(5))
+        : base(queue.Reader, logger, heartbeats, nameof(GitHubPullRequestBuildWorker), TimeSpan.FromMinutes(5),
+            // Not handed to the base: RunJobAsync puts the delivery back on the queue
+            // itself while maintenance is on; the base's wait would pre-empt that (#1538).
+            maintenance: null)
     {
         _queue = queue;
         _services = services;

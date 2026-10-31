@@ -27,14 +27,20 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<ReleaseImportWorker> _logger;
+    // Set on the import worker only; the build workers count theirs on ProjectBuildQueue.
+    private readonly ReleaseImportQueue? _importQueue;
 
     public ReleaseImportWorker(
         ReleaseImportQueue queue,
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
-        : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker))
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base holds jobs back during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
+        : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker), maintenance)
     {
+        _importQueue = queue;
     }
 
     /// <summary>For a worker that runs the same jobs from another queue.</summary>
@@ -43,17 +49,24 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
         WorkerHeartbeatRegistry heartbeats,
-        string name)
+        string name,
+        Operations.MaintenanceModeState? maintenance)
         // The active-duration ceiling is the longest legitimate single import — a fresh
         // BC base-app ingest can run 30+ minutes; 90 leaves margin while still catching
         // the hung-on-I/O case that prompted this in the first place.
-        : base(reader, logger, heartbeats, name, TimeSpan.FromMinutes(90))
+        : base(reader, logger, heartbeats, name, TimeSpan.FromMinutes(90), maintenance)
     {
         _services = services;
         _logger = logger;
     }
 
     protected override string Describe(ReleaseImportJob job) => $"ReleaseId={job.ReleaseId}";
+
+    // Counted from pick-up, before the base's maintenance gate, so a restore that
+    // checks after turning maintenance on either sees this job or holds it back (#1538).
+    protected override void OnJobStarting(ReleaseImportJob job) => _importQueue?.MarkRunning();
+
+    protected override void OnJobFinished(ReleaseImportJob job) => _importQueue?.MarkFinished();
 
     /// <summary>
     /// Publishes the finished build as a GitHub Release when its pipeline names a

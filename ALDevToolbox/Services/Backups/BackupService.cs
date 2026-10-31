@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 using ALDevToolbox.Services.Configuration;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Services.Backups;
@@ -58,6 +59,8 @@ public sealed class BackupService
     private readonly SystemSettingsService? _systemSettings;
     private readonly RestoreInventoryHold? _restoreInventory;
     private readonly DeploymentIdentity? _deployment;
+    private readonly ReleaseImportQueue? _imports;
+    private readonly ProjectBuildQueue? _builds;
 
     public BackupService(
         AppDbContext db,
@@ -77,9 +80,15 @@ public sealed class BackupService
         RestoreInventoryHold? restoreInventory = null,
         // Optional for the same reason; production DI always supplies it. Only
         // the restore of a recovered dump needs it (#1322).
-        DeploymentIdentity? deployment = null)
+        DeploymentIdentity? deployment = null,
+        // Optional for the same reason; production DI always supplies the
+        // singletons, so a restore refuses while an import or build is going (#1538).
+        ReleaseImportQueue? imports = null,
+        ProjectBuildQueue? builds = null)
     {
         _db = db;
+        _imports = imports;
+        _builds = builds;
         _deployment = deployment;
         _systemSettings = systemSettings;
         _restoreInventory = restoreInventory;
@@ -327,6 +336,10 @@ public sealed class BackupService
             });
         }
 
+        // Checked again below once maintenance mode is on; this early check only
+        // spares the SiteAdmin the read of the whole dump when it would be refused.
+        if (!_maintenance.IsHeldAfterFailedRestore) EnsureNoImportsOrBuilds();
+
         // Read the whole dump before anything is dropped (#1321).
         await EnsureDumpIsReadableAsync(row, path, ct);
 
@@ -341,6 +354,22 @@ public sealed class BackupService
         // if this one fails before the drop, that hold has to come back as it was.
         var before = _maintenance.Capture();
         _maintenance.Enter($"Restoring backup {row.FileName}");
+        // With maintenance mode on, schedulers skip their sweeps and the queue
+        // workers hold whatever they pick up, so nothing new starts; only work
+        // already going can still write. An import or build would keep writing into
+        // the dropped and half-loaded schema, so refuse rather than drop under it
+        // (#1538). Skipped while a failed restore holds the site closed: nothing was
+        // running when that one started, anything picked up since is being held,
+        // and refusing would leave no way to reopen the site.
+        if (!before.HeldAfterFailedRestore)
+        {
+            try { EnsureNoImportsOrBuilds(); }
+            catch
+            {
+                _maintenance.Restore(before);
+                throw;
+            }
+        }
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
         var destructive = CancellationToken.None;
@@ -379,8 +408,12 @@ public sealed class BackupService
             _restoreInventory?.Clear();
 
             sw.Stop();
+            // Imports and builds the dump caught part-way have no job behind them in
+            // this process. The startup reconcile marks them, so the backups page
+            // asks the SiteAdmin to restart (#1538).
             _logger.LogInformation(
-                "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
+                "Restored backup {FileName} in {ElapsedMs} ms. Restart the application so imports and builds the backup caught part-way are marked as interrupted.",
+                row.FileName, sw.ElapsedMilliseconds);
         }
         catch (Exception ex) when (dropped)
         {
@@ -441,6 +474,37 @@ public sealed class BackupService
                 "Restored backup {FileName}, made by another installation; this installation now treats that installation's off-site backups as restorable here.",
                 row.FileName);
         }
+    }
+
+    /// <summary>
+    /// Refuses the restore while an import or build is running or waiting to run in
+    /// this process. Those jobs write to the database for minutes to hours, and a
+    /// restore would drop the schema under them and let them write into the one
+    /// being loaded (#1538). Reads the in-memory queues rather than the job tables:
+    /// they are what is actually running here, they span every organisation without
+    /// crossing the tenant filter, and a row left queued by a crash has no job behind
+    /// it and is no reason to refuse.
+    /// </summary>
+    private void EnsureNoImportsOrBuilds()
+    {
+        var imports = _imports?.PendingCount ?? 0;
+        var builds = (_builds?.WaitingCount ?? 0) + (_builds?.RunningCount ?? 0);
+        if (imports == 0 && builds == 0) return;
+
+        _logger.LogWarning(
+            "Refusing to restore: {Imports} import(s) and {Builds} build(s) are running or waiting to run.",
+            imports, builds);
+        string going;
+        if (imports > 0 && builds > 0) going = $"{Count(imports, "import")} and {Count(builds, "build")} are";
+        else if (imports > 0) going = imports == 1 ? "An import is" : $"{imports} imports are";
+        else going = builds == 1 ? "A build is" : $"{builds} builds are";
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["BackupId"] = $"{going} running or waiting to run, and a restore would replace the database under them. "
+                + "Wait until they have finished, then restore. Nothing was changed.",
+        });
+
+        static string Count(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n} {noun}s";
     }
 
     /// <summary>

@@ -39,7 +39,13 @@ public sealed class MaintenanceModeState
     /// Flips the flag on for work in progress. The caller owns the
     /// <c>try/finally</c> that calls <see cref="Exit"/> (or <see cref="Restore"/>).
     /// </summary>
-    public void Enter(string reason) => _state = new(reason, DateTime.UtcNow, false);
+    /// <remarks>
+    /// A full fence, not a plain volatile write: a restore turns the flag on and then
+    /// counts the running imports and builds, while a worker marks its job running
+    /// and then reads the flag. The fence keeps either side from missing the other
+    /// (#1538).
+    /// </remarks>
+    public void Enter(string reason) => Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
 
     /// <summary>
     /// Keeps the flag on after a restore failed once the database was dropped.

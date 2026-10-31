@@ -46,7 +46,8 @@ public sealed class BackupScheduler : PolledScheduler
             pollInterval: TimeSpan.FromMinutes(1),
             maxActiveDuration: TimeSpan.FromHours(2),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_BACKUP_SCHEDULER")
+            disableEnvVar: "DISABLE_BACKUP_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

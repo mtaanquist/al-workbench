@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Backups;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
 
@@ -29,6 +30,9 @@ public sealed class BackupServiceTests : IDisposable
     private readonly MaintenanceModeState _maintenance = new();
     // Shared by every service the fixture builds, as the DI singleton is (#1321).
     private readonly RestoreInventoryHold _restoreInventory = new();
+    // The in-memory import and build lines, shared like the DI singletons (#1538).
+    private readonly ReleaseImportQueue _imports = new();
+    private readonly ProjectBuildQueue _builds = new();
     // Controllable clock so tests give backups distinct created_at values by
     // advancing it, rather than sleeping on the real clock (flaky at coarse
     // resolution / under CI load). See issue #395.
@@ -699,6 +703,101 @@ public sealed class BackupServiceTests : IDisposable
         return path;
     }
 
+    private static ReleaseImportJob ImportJob(int releaseId) => new(
+        releaseId,
+        AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false),
+        new ReleaseImportSource.Url("https://example.invalid/dvd.zip"));
+
+    /// <summary>
+    /// An import waiting to run would write into the schema the restore drops and
+    /// reloads, so the restore is refused before anything is read or dropped, with a
+    /// message on the backup field saying what to wait for (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_is_refused_while_an_import_is_waiting_to_run()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var called = Path.Combine(_backupsDir, "pg-restore-called");
+        var tool = WriteFakeTool("fake-pg-restore", $"touch '{called}'; exit 0");
+        var backupId = await AddBackupRowWithFileAsync();
+        await _imports.EnqueueAsync(ImportJob(41), TestContext.Current.CancellationToken);
+
+        Func<Task> act = () => NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("An import is running or waiting to run")
+            .And.Contain("Wait until they have finished");
+        _maintenance.IsActive.Should().BeFalse("nothing was changed, so the site stays open");
+        File.Exists(called).Should().BeFalse("the refusal comes before the dump is read or restored");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+            .Should().Equal([backupId], "the database was not dropped");
+    }
+
+    /// <summary>
+    /// The check is made again once maintenance mode is on, so a build that joined the
+    /// line while the dump was being read still stops the restore before the drop (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_is_refused_when_a_build_starts_while_the_dump_is_being_read()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var reading = Path.Combine(_backupsDir, "reading");
+        var go = Path.Combine(_backupsDir, "go");
+        var restored = Path.Combine(_backupsDir, "restored");
+        // The read-through check waits for the test to put a build on the line; the
+        // 30-second cap keeps a failed test from leaving the script running.
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            if [ "$1" = "-f" ]; then
+              touch '{reading}'
+              n=0
+              while [ ! -f '{go}' ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done
+              exit 0
+            fi
+            touch '{restored}'
+            exit 0
+            """);
+        var backupId = await AddBackupRowWithFileAsync();
+
+        var restore = NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+        try
+        {
+            await WaitForFileAsync(reading);
+            _builds.Enqueue(ImportJob(42) with { BuildOrder = ProjectBuildOrder.Unordered });
+            _builds.Reader.TryRead(out _).Should().BeTrue("the build has been handed to a worker");
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(go, "", TestContext.Current.CancellationToken);
+        }
+
+        Func<Task> act = () => restore;
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("A build is running or waiting to run");
+        _maintenance.IsActive.Should().BeFalse("the refusal puts maintenance mode back as it was");
+        File.Exists(restored).Should().BeFalse("nothing was dropped or restored");
+    }
+
+    /// <summary>
+    /// While a failed restore holds the site closed, anything picked up since is held
+    /// by its worker, and refusing would leave no way to reopen the site. So the check
+    /// stands aside and the next restore goes ahead (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_after_a_failed_one_is_not_refused_by_a_held_import()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", "exit 0");
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+        await _imports.EnqueueAsync(ImportJob(43), TestContext.Current.CancellationToken);
+
+        await NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+
+        _maintenance.IsActive.Should().BeFalse("a restore that completes reopens the site");
+    }
+
     private async Task<int> AddBackupRowWithFileAsync()
     {
         const string fileName = "aldevtoolbox-20260514T000000000Z-adhoc" + BackupService.BackupFileSuffix;
@@ -742,6 +841,7 @@ public sealed class BackupServiceTests : IDisposable
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock,
             mcpAvailability: mcp, toolAvailability: tools);
         return new BackupService(ctx, _db.OrgContext, _maintenance, config,
-            NullLogger<BackupService>.Instance, _clock, options ?? _options, systemSettings, _restoreInventory);
+            NullLogger<BackupService>.Instance, _clock, options ?? _options, systemSettings, _restoreInventory,
+            imports: _imports, builds: _builds);
     }
 }

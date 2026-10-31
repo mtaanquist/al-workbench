@@ -29,6 +29,18 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     // against a duplicate run, and a re-import of the same release is a
     // legitimate request rather than a double-click to coalesce.
     public ReleaseImportQueue() : base(capacity: 16) { }
+
+    private int _running;
+
+    /// <summary>
+    /// Imports waiting in the channel plus the one the worker has picked up. A full
+    /// restore refuses to start while this is above zero (#1538).
+    /// </summary>
+    public int PendingCount => Reader.Count + Volatile.Read(ref _running);
+
+    internal void MarkRunning() => Interlocked.Increment(ref _running);
+
+    internal void MarkFinished() => Interlocked.Decrement(ref _running);
 }
 
 /// <summary>

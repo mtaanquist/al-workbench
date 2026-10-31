@@ -40,7 +40,10 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
         Operations.MaintenanceModeState? maintenance = null)
         // A single publish uploads a handful of apps and polls install status; 30
         // minutes is generous headroom while still catching a wedged run.
-        : base(queue.Reader, logger, heartbeats, $"{nameof(DeliveryWorker)} {slot}", TimeSpan.FromMinutes(30))
+        : base(queue.Reader, logger, heartbeats, $"{nameof(DeliveryWorker)} {slot}", TimeSpan.FromMinutes(30),
+            // Not handed to the base: RunJobAsync holds the delivery back itself and the
+            // scheduler offers it again (#1321); the base's wait would pre-empt that (#1538).
+            maintenance: null)
     {
         _queue = queue;
         _services = services;

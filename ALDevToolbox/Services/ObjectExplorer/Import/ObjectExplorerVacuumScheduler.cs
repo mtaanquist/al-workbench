@@ -56,14 +56,18 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
         TimeProvider clock,
         IConfiguration config,
         ILogger<ObjectExplorerVacuumScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // Same shape as BackupScheduler: poll every minute, stale at 5; a
         // single VACUUM sweep is short, an hour ceiling is plenty.
         : base(logger, heartbeats, nameof(ObjectExplorerVacuumScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromHours(1),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_OE_VACUUM_SCHEDULER")
+            disableEnvVar: "DISABLE_OE_VACUUM_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

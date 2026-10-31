@@ -79,7 +79,8 @@ public sealed class EnvironmentRefreshScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(30),
-            disableEnvVar: "DISABLE_ENVIRONMENT_REFRESH_SCHEDULER")
+            disableEnvVar: "DISABLE_ENVIRONMENT_REFRESH_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _queue = queue;

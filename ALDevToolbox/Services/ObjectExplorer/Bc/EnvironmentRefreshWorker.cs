@@ -36,7 +36,9 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         // One project is a token call plus two admin-center calls per environment, so 15
         // minutes is ample even for a customer with many sandboxes while still catching a
         // wedged job.
-        : base(queue.Reader, logger, heartbeats, nameof(EnvironmentRefreshWorker), TimeSpan.FromMinutes(15))
+        // Not handed to the base: RunJobAsync applies this worker's own maintenance
+        // policy (#1321), which the base's hold-and-wait would pre-empt (#1538).
+        : base(queue.Reader, logger, heartbeats, nameof(EnvironmentRefreshWorker), TimeSpan.FromMinutes(15), maintenance: null)
     {
         _queue = queue;
         _services = services;

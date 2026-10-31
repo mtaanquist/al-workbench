@@ -54,12 +54,16 @@ public sealed class BuildResourceMonitor : PolledScheduler
         BuildResourceState state,
         TimeProvider clock,
         ILogger<BuildResourceMonitor> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(BuildResourceMonitor),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(1),
             maxIdleSilence: TimeSpan.FromMinutes(3),
-            disableEnvVar: "DISABLE_BUILD_RESOURCE_MONITOR")
+            disableEnvVar: "DISABLE_BUILD_RESOURCE_MONITOR",
+            maintenance: maintenance)
     {
         _builds = builds;
         _resources = resources;
