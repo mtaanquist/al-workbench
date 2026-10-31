@@ -470,7 +470,7 @@ public sealed class AccountAdministrationTests : IDisposable
         var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using var ctx = _db.NewContext();
-        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "wrong-current", "newpasswordlong12345");
+        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "wrong-current", "newpasswordlong12345", "198.51.100.1");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("CurrentPassword");
     }
@@ -485,14 +485,14 @@ public sealed class AccountAdministrationTests : IDisposable
         for (var i = 0; i < AuthService.LockoutThreshold; i++)
         {
             await using var ctx = _db.NewContext();
-            Func<Task> wrong = () => NewService(ctx).ChangePasswordAsync(userId, $"guess-{i}", "newpasswordlong12345");
+            Func<Task> wrong = () => NewService(ctx).ChangePasswordAsync(userId, $"guess-{i}", "newpasswordlong12345", "198.51.100.1");
             (await wrong.Should().ThrowAsync<PlanValidationException>())
                 .Which.Errors["CurrentPassword"].Should().Be("Current password is incorrect.");
         }
 
         await using (var ctx = _db.NewContext())
         {
-            Func<Task> right = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newpasswordlong12345");
+            Func<Task> right = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newpasswordlong12345", "198.51.100.1");
             (await right.Should().ThrowAsync<PlanValidationException>())
                 .Which.Errors["CurrentPassword"].Should().Be(AuthService.CurrentPasswordLockedOutMessage);
         }
@@ -525,7 +525,7 @@ public sealed class AccountAdministrationTests : IDisposable
         var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using var ctx = _db.NewContext();
-        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "short");
+        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "short", "198.51.100.1");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("NewPassword");
     }
@@ -537,7 +537,7 @@ public sealed class AccountAdministrationTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newcorrectpasswordlong");
+            await NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newcorrectpasswordlong", "198.51.100.1");
         }
 
         await using var read = _db.NewContext();
@@ -581,7 +581,7 @@ public sealed class AccountAdministrationTests : IDisposable
         {
             Func<Task> rename = () => NewService(ctx).ChangeDisplayNameAsync(strangerId, "Renamed");
             await rename.Should().ThrowAsync<InvalidOperationException>();
-            Func<Task> repassword = () => NewService(ctx).ChangePasswordAsync(strangerId, "correctpasswordlong", "newcorrectpasswordlong");
+            Func<Task> repassword = () => NewService(ctx).ChangePasswordAsync(strangerId, "correctpasswordlong", "newcorrectpasswordlong", "198.51.100.1");
             await repassword.Should().ThrowAsync<InvalidOperationException>();
         }
 

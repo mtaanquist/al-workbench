@@ -91,6 +91,25 @@ public sealed class PasskeyEnumerationTests : IDisposable
         lengths.Should().BeEquivalentTo(PasskeyService.SyntheticCredentialIdLengths);
     }
 
+    [Fact]
+    public async Task A_stand_ins_bytes_do_not_give_away_its_length()
+    {
+        // The length must not be read off the id's own bytes: when it was
+        // taken from the last byte, every 64-byte stand-in ended in a byte
+        // with the same remainder, which real ids do a quarter of the time.
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var lastByteRemainders = new HashSet<int>();
+        for (var i = 0; i < 60; i++)
+        {
+            var (options, _) = await svc.BeginLoginAsync($"nobody{i}@nowhere.test");
+            foreach (var c in options.AllowCredentials.Where(c => c.Id.Length == 64))
+                lastByteRemainders.Add(c.Id[^1] % PasskeyService.SyntheticCredentialIdLengths.Length);
+        }
+
+        lastByteRemainders.Should().HaveCountGreaterThan(1);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(3)]

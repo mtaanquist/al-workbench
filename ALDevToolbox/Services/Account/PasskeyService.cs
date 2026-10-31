@@ -355,7 +355,9 @@ public sealed class PasskeyService
     /// per-deployment secret via HMAC so it is deterministic (a repeated probe
     /// of the same email yields the same id — a per-request random id would
     /// itself distinguish synthetic from real) yet unguessable to an attacker
-    /// who doesn't know the secret. 32 bytes matches a typical credential id.
+    /// who doesn't know the secret. Its length is one of
+    /// <see cref="SyntheticCredentialIdLengths"/>; a real id of any other
+    /// length still shows as real.
     /// </summary>
     private byte[] SyntheticCredentialId(string normalisedEmail, int index)
     {
@@ -364,8 +366,12 @@ public sealed class PasskeyService
         // Real credential ids differ in length by authenticator, so stand-ins
         // that were all one length (32 bytes, as before #1649) showed which
         // entries were real. Each stand-in takes a length from the common
-        // ones, picked by a digest byte so a repeated probe sees the same list.
-        var length = SyntheticCredentialIdLengths[digest[^1] % SyntheticCredentialIdLengths.Length];
+        // ones, deterministically so a repeated probe sees the same list. The
+        // length comes from a second HMAC, never from bytes the id carries: a
+        // byte picked from the output would tie its value to the length (every
+        // 64-byte stand-in would end in a byte with the same remainder).
+        var picker = hmac.ComputeHash(Encoding.UTF8.GetBytes($"passkey-synthetic-length:{index}:{normalisedEmail}"));
+        var length = SyntheticCredentialIdLengths[picker[0] % SyntheticCredentialIdLengths.Length];
         return digest[..length];
     }
 

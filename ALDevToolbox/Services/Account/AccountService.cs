@@ -443,7 +443,7 @@ public sealed class AccountService
     /// and refuses members of a Microsoft-only organisation (SiteAdmins excepted).
     /// </summary>
     /// <param name="ip">The caller's address, recorded on a failed current-password attempt.</param>
-    public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, string ip = "", CancellationToken ct = default)
+    public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, string ip, CancellationToken ct = default)
     {
         // Filtered: the signed-in user's own row is in their own organisation.
         var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
