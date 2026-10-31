@@ -775,25 +775,12 @@ else
         var procs = new List<ProcedureRange>(outline.Count);
         foreach (var item in outline)
         {
-            if (!IsProcedureLikeKind(item.Kind)) continue;
+            if (!ProcedureKinds.IsProcedureLike(item.Kind)) continue;
             procs.Add(new ProcedureRange(item.LineNumber, item.EndLine, item.Name, item.Kind));
         }
         if (procs.Count == 0) return "[]";
         return JsonSerializer.Serialize(procs, DeclarationJsonOptions);
     }
-
-    /// <summary>
-    /// Kinds that produce a BC stack-trace frame. Mirrors the procedure-like
-    /// branches in <see cref="SourceFileOutlineGrouper"/>: regular,
-    /// internal, protected and local procedures; triggers; event publishers
-    /// and subscribers.
-    /// </summary>
-    private static bool IsProcedureLikeKind(string kind) => kind switch
-    {
-        "procedure" or "internal_procedure" or "protected_procedure" or "local_procedure"
-            or "trigger" or "event_publisher" or "event_subscriber" => true,
-        _ => false,
-    };
 
     private sealed record ProcedureRange(int StartLine, int? EndLine, string Name, string Kind);
 

@@ -283,7 +283,8 @@ public sealed class ObjectSearchService
     /// <summary>
     /// Procedure-name search across every module in the Release. Matches the
     /// supplied substring (case-insensitive) against <c>oe_module_symbols</c>
-    /// where the symbol is a procedure / internal procedure / trigger; the
+    /// where the symbol is procedure-like (<see cref="ProcedureKinds.All"/>:
+    /// every procedure visibility, triggers, event publishers and subscribers); the
     /// owning object + module names join inline so the row can render
     /// "Module / Object / Procedure" in one query. Capped at <paramref name="take"/>.
     /// </summary>
@@ -304,7 +305,7 @@ public sealed class ObjectSearchService
             : await ResolveReleaseModuleIdsAsync(releaseId, ct);
         var q = _db.OeModuleSymbols.AsNoTracking()
             .Where(s => moduleIds.Contains(s.ModuleId))
-            .Where(s => s.Kind == "procedure" || s.Kind == "internal_procedure" || s.Kind == "trigger");
+            .Where(s => ProcedureKinds.All.Contains(s.Kind));
 
         if (moduleId is { } mid)
         {

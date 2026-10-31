@@ -1012,11 +1012,34 @@ public sealed class ObjectExplorerServiceTests : IDisposable
             releaseId, search: null, moduleId: null, take: 500);
 
         hits.Should().NotBeEmpty();
-        // Every hit's procedure kind is one of the procedure-shaped symbols.
-        hits.Should().OnlyContain(h =>
-            h.ProcedureKind == "procedure"
-            || h.ProcedureKind == "internal_procedure"
-            || h.ProcedureKind == "trigger");
+        // Fields, variables, keys and the like are never procedure hits.
+        hits.Should().OnlyContain(h => ProcedureKinds.IsProcedureLike(h.ProcedureKind));
+    }
+
+    [Theory]
+    [InlineData("local_procedure")]
+    [InlineData("event_publisher")]
+    [InlineData("event_subscriber")]
+    public async Task SearchProceduresInReleaseAsync_finds_every_procedure_kind_the_importer_stores(string kind)
+    {
+        // #1569: the search used to match procedure / internal_procedure /
+        // trigger only, so a local procedure, an event publisher or an event
+        // subscriber typed by name answered "No procedures match". The DK Core
+        // and OIOUBL fixtures carry all three, so pick a real imported row of
+        // the kind and search for it by name.
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+        var target = await read.OeModuleSymbols.AsNoTracking()
+            .Where(s => s.Kind == kind && s.Module!.ReleaseId == releaseId)
+            .OrderBy(s => s.Id)
+            .Select(s => new { s.Id, s.Name })
+            .FirstOrDefaultAsync();
+        target.Should().NotBeNull(because: $"the fixtures carry at least one {kind}");
+
+        var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
+            releaseId, search: target!.Name, moduleId: null, take: 500);
+
+        hits.Should().Contain(h => h.Id == target.Id && h.ProcedureKind == kind);
     }
 
     [Fact]
