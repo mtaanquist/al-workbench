@@ -207,6 +207,12 @@ public sealed class RecipeSuggestionService
         var orgId = RequireOrganizationId();
         var deciderId = RequireUserId();
 
+        // The context is circuit-scoped in Blazor Server, and a tracking query
+        // does not refresh an entity it already holds: a copy left behind by an
+        // earlier refused approval would hide the submitter's later edits and
+        // fail the fingerprint check below. Start from what is stored now.
+        _db.ChangeTracker.Clear();
+
         var suggestion = await _db.RecipeSuggestions
             .Include(s => s.Files)
             .FirstOrDefaultAsync(s => s.Id == suggestionId, ct)
@@ -225,10 +231,6 @@ public sealed class RecipeSuggestionService
 
         if (!string.Equals(ContentFingerprint(suggestion), reviewedFingerprint, StringComparison.Ordinal))
         {
-            // The context is circuit-scoped in Blazor Server and a later
-            // tracking query does not refresh an entity it already holds:
-            // drop it so the next attempt reads the suggestion as it is now.
-            _db.ChangeTracker.Clear();
             _logger.LogInformation(
                 "Refused to approve recipe suggestion {SuggestionId}: it changed after the reviewer opened it.",
                 suggestionId);

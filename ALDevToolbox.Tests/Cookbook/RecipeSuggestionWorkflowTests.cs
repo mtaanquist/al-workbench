@@ -661,6 +661,47 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task Approve_after_a_title_clash_and_a_rename_succeeds_first_time_on_the_same_context()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Recipes.Add(RecipeBuilder.Default("Clashing").WithFile("A.al", "// existing"));
+            await ctx.SaveChangesAsync();
+        }
+
+        var user = await SeedUserAsync(userId: 732);
+        _db.OrgContext.CurrentUserId = user.Id;
+        int suggestionId;
+        await using (var ctx = _db.NewContext())
+        {
+            suggestionId = await NewSuggestionService(ctx).SubmitAsync(new RecipeSuggestionInput(
+                "Clashing", "Body.", "", RecipeType.Snippet, new[] { new RecipeFileInput("B.al", "// b") }));
+        }
+
+        var admin = await SeedUserAsync(userId: 733, display: "Admin", role: UserRole.Admin);
+        _db.OrgContext.CurrentUserId = admin.Id;
+        await using var reviewCtx = _db.NewContext();
+        var reviewer = NewSuggestionService(reviewCtx);
+        var opened = await reviewer.GetAsync(suggestionId);
+        Func<Task> clash = () => reviewer.ApproveAsync(suggestionId, RecipeSuggestionService.ContentFingerprint(opened!));
+        (await clash.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Title");
+
+        _db.OrgContext.CurrentUserId = user.Id;
+        await using (var ctx = _db.NewContext())
+        {
+            await NewSuggestionService(ctx).UpdateAsync(suggestionId, new RecipeSuggestionInput(
+                "Not Clashing", "Body.", "", RecipeType.Snippet, new[] { new RecipeFileInput("B.al", "// b") }));
+        }
+
+        // The page reloads after a refusal; approving that reloaded version must
+        // not trip over the copy the refused attempt left on the context.
+        _db.OrgContext.CurrentUserId = admin.Id;
+        var reloaded = await reviewer.GetAsync(suggestionId);
+        var recipe = await reviewer.ApproveAsync(suggestionId, RecipeSuggestionService.ContentFingerprint(reloaded!));
+        recipe.Title.Should().Be("Not Clashing");
+    }
+
+    [Fact]
     public void Content_fingerprint_changes_with_any_copied_field_but_not_with_review_state()
     {
         RecipeSuggestion Make() => new()
