@@ -300,7 +300,7 @@ public sealed class BackupSchedulerTests : IDisposable
             NullLogger<BackupService>.Instance, _clock, options);
         var perTenant = new PerTenantBackupService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
-            NullLogger<PerTenantBackupService>.Instance, _clock, options);
+            NullLogger<PerTenantBackupService>.Instance, _clock, new MaintenanceModeState(), options);
         var systemSettings = new SystemSettingsService(
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock);
         var providerFactory = new OffsiteStorageProviderFactory(NullLoggerFactory.Instance);

@@ -306,7 +306,7 @@ public sealed class OffsiteDownloadMaintenanceTests : IDisposable
 
     private PerTenantBackupService NewPerTenant(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), Config(),
-            NullLogger<PerTenantBackupService>.Instance, _clock, _options, _us);
+            NullLogger<PerTenantBackupService>.Instance, _clock, _maintenance, _options, _us);
 
     private sealed class Factory(OneObjectProvider store) : IOffsiteStorageProviderFactory
     {

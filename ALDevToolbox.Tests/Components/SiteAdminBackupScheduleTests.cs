@@ -63,7 +63,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             sp.GetRequiredService<AppDbContext>(), _db.OrgContext,
             _db.NewQuotaGuard(sp.GetRequiredService<AppDbContext>()),
             _db.NewOrganizationConfigService(sp.GetRequiredService<AppDbContext>()), config,
-            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System));
+            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System, _maintenance));
         _ctx.Services.AddSingleton<IOffsiteStorageProviderFactory>(new OffsiteStorageProviderFactory(NullLoggerFactory.Instance));
         _ctx.Services.AddSingleton(DeploymentIdentity.LoadOrCreate(_deploymentDir, NullLogger.Instance));
         _ctx.Services.AddScoped<OffsiteBackupService>();
@@ -228,6 +228,9 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
             alert.Should().Contain("may be empty or only partly loaded");
             alert.Should().Contain("Restore another backup below to reopen it.");
+            alert.Should().Contain("New backups are paused until then.");
+            // A backup of the empty database would push real ones out of retention (#1610).
+            cut.Find("form[action='/site-admin/backups/create'] button").HasAttribute("disabled").Should().BeTrue();
         });
     }
 
@@ -258,6 +261,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         {
             cut.Markup.Should().Contain("A complete copy of everything on this site.");
             cut.Markup.Should().NotContain("closed to everyone");
+            cut.Find("form[action='/site-admin/backups/create'] button").HasAttribute("disabled").Should().BeFalse();
         });
     }
 
