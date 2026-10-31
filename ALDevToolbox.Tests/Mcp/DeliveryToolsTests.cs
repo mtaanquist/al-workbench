@@ -347,8 +347,10 @@ public sealed class DeliveryToolsTests : IDisposable
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("999999");
     }
 
-    [Fact]
-    public async Task One_deployment_with_many_long_app_messages_still_fits_one_answer()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task One_deployment_with_many_long_app_messages_still_fits_one_answer(bool escapedText)
     {
         // #1601, GBC-3: a 20-app deployment whose installs all failed with long
         // Business Central errors. The deployment's own message stays whole.
@@ -366,7 +368,11 @@ public sealed class DeliveryToolsTests : IDisposable
             var delivery = await ctx.OeProjectDeliveries.SingleAsync(d => d.Id == id);
             delivery.FailureMessage = deploymentMessage;
             foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id).ToListAsync())
-                result.Message = "The extension could not be installed. " + new string('x', 3_000);
+                result.Message = "The extension could not be installed. " + (escapedText
+                    // Quotes and Danish letters grow when serialised, which a plain
+                    // character count of the cut does not see (#1644 review).
+                    ? string.Concat(Enumerable.Repeat("Feltet 'Beløb' i \"Kundeposter\" kan ikke ændres på grund af åbne poster. ", 50))
+                    : new string('x', 3_000));
             await ctx.SaveChangesAsync();
         }
 
@@ -378,8 +384,34 @@ public sealed class DeliveryToolsTests : IDisposable
         row.Apps.Should().HaveCount(20).And.OnlyContain(a => a.Message!.Contains("whole message"));
         answer.Truncated.Should().BeTrue();
         answer.Note.Should().Contain("cut");
-        System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions)
-            .Length.Should().BeLessThan(25_000);
+        System.Text.Json.JsonSerializer.Serialize(row, ModelContextProtocol.McpJsonUtilities.DefaultOptions)
+            .Length.Should().BeLessThanOrEqualTo(McpAnswerBudget.Characters);
+    }
+
+    [Fact]
+    public async Task One_deployment_that_fits_is_returned_whole_and_not_marked_cut()
+    {
+        Seed seed;
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core", "CRONUS Payroll" });
+            id = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        var message = "Feltet 'Beløb' kan ikke ændres. " + new string('x', 1_000);
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id).ToListAsync())
+                result.Message = message;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var answer = await NewTools(read).ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: id);
+
+        answer.Rows.Single().Apps.Should().OnlyContain(a => a.Message == message);
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
     }
 
     [Fact]

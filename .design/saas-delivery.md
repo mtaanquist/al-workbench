@@ -1330,7 +1330,9 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
   solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
   solution and cuts long failure messages. `list_deployments` cuts them too (#1525), and
-  with a `deploymentId` returns that one deployment with every message whole. Long
+  with a `deploymentId` returns that one deployment with its own failure message whole;
+  its per-app messages are whole too unless together they would exceed the answer budget,
+  when each long one is cut to share what is left and `truncated` / `note` say so (#1601). Long
   histories page back instead of growing the limit: `list_deployments` takes a
   `beforeDeploymentId`, and `list_pipeline_builds` / `list_solution_builds` a
   `beforeBuildId`, each returning the rows older than that one (#1526).

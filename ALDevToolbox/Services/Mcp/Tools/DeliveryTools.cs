@@ -132,22 +132,36 @@ public sealed class DeliveryTools
         if (Serialized(row) <= McpAnswerBudget.Characters || row.Apps.Count == 0)
             return new CappedRows<DeliveryHistoryRow>([row], false, null);
 
+        // The budget counts serialised characters, and the serialiser escapes quotes and
+        // non-ASCII letters ("Beløb" grows), so a raw character cut can still overshoot.
+        // Start from an even share of what is left and shrink until the row fits, or the
+        // share reaches the list's own cut, below which nothing is gained.
         var withoutAppMessages = row with { Apps = row.Apps.Select(a => a with { Message = null }).ToList() };
         var left = McpAnswerBudget.Characters - Serialized(withoutAppMessages);
         var perApp = Math.Max(McpListLimit.MaxListFailureMessage, left / row.Apps.Count);
-        const string where = "the deployment's page in the workbench";
-        var fitted = row with
+        var fitted = Cut(row, perApp);
+        while (Serialized(fitted) > McpAnswerBudget.Characters && perApp > McpListLimit.MaxListFailureMessage)
         {
-            Apps = row.Apps.Select(a => a with
+            perApp = Math.Max(McpListLimit.MaxListFailureMessage, perApp * 3 / 4);
+            fitted = Cut(row, perApp);
+        }
+
+        var anyCut = fitted.Apps.Zip(row.Apps).Any(pair => !string.Equals(pair.First.Message, pair.Second.Message, StringComparison.Ordinal));
+        return anyCut
+            ? new CappedRows<DeliveryHistoryRow>([fitted], true,
+                "Each long app message was cut so the deployment fits in one answer; the deployment's own failure message is whole. "
+                + "The deployment's page in the workbench has every message in full.")
+            : new CappedRows<DeliveryHistoryRow>([row], false, null);
+
+        static DeliveryHistoryRow Cut(DeliveryHistoryRow r, int perApp) => r with
+        {
+            Apps = r.Apps.Select(a => a with
             {
                 Message = a.Message is { } m && m.Length > perApp
-                    ? m[..perApp] + $"... (cut; {where} has the whole message)"
+                    ? m[..perApp] + "... (cut; the deployment's page in the workbench has the whole message)"
                     : a.Message,
             }).ToList(),
         };
-        return new CappedRows<DeliveryHistoryRow>([fitted], true,
-            "Each app's message was cut so the deployment fits in one answer; the deployment's own failure message is whole. "
-            + "The deployment's page in the workbench has every message in full.");
 
         static int Serialized(DeliveryHistoryRow r) =>
             System.Text.Json.JsonSerializer.Serialize(r, ModelContextProtocol.McpJsonUtilities.DefaultOptions).Length;
