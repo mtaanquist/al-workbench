@@ -96,7 +96,7 @@ public class TranslationImportService
         var visible = await IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var module = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.ReleaseId == releaseId)
-            .Select(m => new { m.Id, m.Name })
+            .Select(m => new { m.Id, m.Name, m.Release!.Kind })
             .SingleOrDefaultAsync(ct).ConfigureAwait(false);
         if (module is null || !visible)
         {
@@ -130,7 +130,8 @@ public class TranslationImportService
                 fileName, parsed.OriginalName, module.Name, moduleId);
         }
 
-        var inserted = await ReplaceForModuleAsync(orgId, moduleId, parsed, module.Name, ct).ConfigureAwait(false);
+        var inserted = await ReplaceForModuleAsync(
+            orgId, moduleId, parsed, module.Name, LearnsIntoMemory(module.Kind), ct).ConfigureAwait(false);
         return new TranslationImportSummary(
             LanguageCode: parsed.TargetLanguage,
             ModuleName: module.Name,
@@ -159,7 +160,7 @@ public class TranslationImportService
         var visible = await IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
         var release = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
-            .Select(r => new { r.Id })
+            .Select(r => new { r.Id, r.Kind })
             .SingleOrDefaultAsync(ct).ConfigureAwait(false);
         if (release is null || !visible)
         {
@@ -232,7 +233,8 @@ public class TranslationImportService
                 continue;
             }
 
-            var inserted = await ReplaceForModuleAsync(orgId, moduleId, parsed, parsed.OriginalName, ct).ConfigureAwait(false);
+            var inserted = await ReplaceForModuleAsync(
+                orgId, moduleId, parsed, parsed.OriginalName, LearnsIntoMemory(release.Kind), ct).ConfigureAwait(false);
             matched++;
             totalInserted += inserted;
             matchedSummaries.Add(new TranslationImportSummary(
@@ -264,8 +266,21 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(parsed);
         var orgId = RequireOrganizationId();
-        return ReplaceForModuleAsync(orgId, moduleId, parsed, originName, ct);
+        return ReplaceForModuleAsync(orgId, moduleId, parsed, originName, learnIntoMemory: true, ct);
     }
+
+    /// <summary>
+    /// Whether an upload onto a release of <paramref name="releaseKind"/> may feed
+    /// the org-wide translation memory. A solution's build release may not (#1613):
+    /// the memory keeps no link back to the release, so its pairs would reach
+    /// everyone in the organisation, including people a Private solution hides the
+    /// release from. A solution's own strings reach the memory through its
+    /// repositories instead, attributed so the visibility fence still applies
+    /// (<c>.design/github-integration-phase2.md</c>, #631). The upload's
+    /// per-release rows are written either way.
+    /// </summary>
+    private static bool LearnsIntoMemory(string releaseKind) =>
+        !string.Equals(releaseKind, OeRelease.ProjectBuildKind, StringComparison.Ordinal);
 
     // ── Shared parse → clobber → insert → resolve ──────────────────────
 
@@ -278,7 +293,7 @@ public class TranslationImportService
     /// was already uploaded, it's fine for it to clobber existing".
     /// </summary>
     private async Task<int> ReplaceForModuleAsync(
-        int orgId, long moduleId, XliffDocument parsed, string? originName, CancellationToken ct)
+        int orgId, long moduleId, XliffDocument parsed, string? originName, bool learnIntoMemory, CancellationToken ct)
     {
         // Skip XLIFFs whose source-language matches their target-language.
         // That's the shape the AL compiler emits as <Module>.g.xlf — the
@@ -403,8 +418,10 @@ public class TranslationImportService
         // suggestions in the Translator tool (and later as LLM glossary hints).
         // Only meaningful when the file declares a source language; BC XLIFFs
         // carry source-language="en-US". Best-effort — a memory hiccup must not
-        // fail the import the admin actually asked for.
-        if (!string.IsNullOrEmpty(parsed.SourceLanguage))
+        // fail the import the admin actually asked for. Skipped for a solution's
+        // build release, whose pairs the memory could not keep inside the
+        // solution (see LearnsIntoMemory).
+        if (learnIntoMemory && !string.IsNullOrEmpty(parsed.SourceLanguage))
         {
             try
             {

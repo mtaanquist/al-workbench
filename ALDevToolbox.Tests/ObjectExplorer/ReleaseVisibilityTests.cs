@@ -8,6 +8,7 @@ using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Services.Translation;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -994,6 +995,74 @@ public sealed class ReleaseVisibilityTests : IDisposable
             case ReleaseWrite.TranslationZip: break;
             case ReleaseWrite.Backfill: break;
         }
+    }
+
+    // ── Translation uploads and the org-wide memory (#1613) ─────────────
+
+    /// <summary>A sentence from the OIOUBL fixture XLIFF, which it translates into Danish.</summary>
+    private const string FixtureSource = "The total Line Discount Amount cannot be negative.";
+
+    private TranslationMemoryService Memory(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance);
+
+    /// <summary>
+    /// Names the seeded module after the fixture XLIFF's <c>original</c>, so the
+    /// ZIP upload matches it rather than skipping the file.
+    /// </summary>
+    private async Task NameModuleForFixtureAsync(long moduleId)
+    {
+        await using var ctx = _db.NewContext();
+        var module = await ctx.OeModules.SingleAsync(m => m.Id == moduleId);
+        module.Name = "OIOUBL";
+        await ctx.SaveChangesAsync();
+    }
+
+    public static TheoryData<ReleaseWrite> TranslationUploads =>
+        new() { ReleaseWrite.TranslationFile, ReleaseWrite.TranslationZip };
+
+    [Theory]
+    [MemberData(nameof(TranslationUploads))]
+    public async Task A_translation_upload_onto_a_Private_solution_build_does_not_teach_the_org_memory(ReleaseWrite upload)
+    {
+        var seeded = await SeedPrivateReleaseAsync(upload);
+        await NameModuleForFixtureAsync(seeded.ModuleId);
+
+        ActAs(MemberUserId);
+        (await RunWriteAsync(upload, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.OeModuleTranslations.AsNoTracking().CountAsync(t => t.ModuleId == seeded.ModuleId))
+                .Should().Be(436, "the release still gets the uploaded translations");
+            (await read.TranslationMemory.AsNoTracking().AnyAsync())
+                .Should().BeFalse("the memory has no way to keep the pairs inside the solution");
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Memory(ctx).SuggestAsync(FixtureSource, "en-US", "da-DK"))
+                .Should().BeEmpty("someone outside the solution's team must not get its strings");
+            (await Memory(ctx).SearchAsync(new MemorySearchQuery(TargetLanguage: "da-DK"))).Items
+                .Should().BeEmpty();
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(TranslationUploads))]
+    public async Task A_translation_upload_onto_a_Microsoft_release_still_teaches_the_org_memory(ReleaseWrite upload)
+    {
+        var seeded = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+        await NameModuleForFixtureAsync(seeded.ModuleId);
+
+        ActAs(AdminUserId);
+        (await RunWriteAsync(upload, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
+
+        ActAs(OutsiderUserId);
+        await using var ctx = _db.NewContext();
+        (await Memory(ctx).SuggestAsync(FixtureSource, "en-US", "da-DK"))
+            .Should().Contain(h => h.TargetText.Contains("linjerabat"),
+                "a Microsoft release's translations are for the whole organisation");
     }
 
     [Fact]
