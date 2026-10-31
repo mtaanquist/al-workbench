@@ -55,6 +55,33 @@ internal static class BackupCoordination
         return new Handle(conn);
     }
 
+    /// <summary>
+    /// Takes the same lock as <see cref="AcquireAsync"/>, waiting for it rather
+    /// than refusing: tries again every <paramref name="retryInterval"/> (one
+    /// second by default) until it is free or <paramref name="ct"/> fires. For
+    /// the off-site download's final <c>backups</c> insert: the file has already
+    /// been fetched, so being refused because a backup or restore is running
+    /// would throw that work away. A restore holds the lock from before it reads
+    /// the backup inventory until it has put it back, so an insert made under it
+    /// can never land inside one and be wiped (#1579).
+    /// </summary>
+    public static async Task<IAsyncDisposable> WaitAsync(
+        string connectionString, CancellationToken ct, TimeSpan? retryInterval = null)
+    {
+        while (true)
+        {
+            try
+            {
+                return await AcquireAsync(connectionString, ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException)
+            {
+                // Held by another backup or restore; wait and try again.
+            }
+            await Task.Delay(retryInterval ?? TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
+        }
+    }
+
     private sealed class Handle : IAsyncDisposable
     {
         private readonly NpgsqlConnection _conn;
