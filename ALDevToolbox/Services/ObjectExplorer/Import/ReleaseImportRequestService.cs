@@ -412,9 +412,12 @@ public sealed class ReleaseImportRequestService
         // until its job is queued. Anything that stops the steps below (leaving the
         // page during the long wipe, which cancels the request; the wipe's command
         // timeout; a failed insert) fails it again rather than leave it stuck until a
-        // restart (#1612). A wipe cut off half way rolls back, so the next Retry
-        // clears the same rows.
+        // restart (#1612). The module DELETE is one statement, so cut off it rolls back
+        // and the earlier attempt's modules stay; a failure after it (the blob reclaim,
+        // staging, the job row) leaves them already removed. Either way the next Retry
+        // starts by wiping again.
         string? stagedPath = null;
+        long? jobRowId = null;
         try
         {
             await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
@@ -445,12 +448,31 @@ public sealed class ReleaseImportRequestService
                 source = new ReleaseImportSource.CalTxt(stagedPath, submission.CalEncoding);
             }
 
-            await EnqueueImportAsync(releaseId, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
+            // EnqueueImportAsync's two steps, inline so a row written but never queued
+            // (the request ended while the queue was full) can be failed below.
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, submission.StoreSymbolReference, jobRowId.Value),
+                ct).ConfigureAwait(false);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Retry of release {ReleaseId} stopped before its import was queued; failing it again.", releaseId);
+            // A queued row with no job behind it would be resumed at the next start,
+            // wiping the release first, even after a later Retry has imported it.
+            if (jobRowId is long rowId)
+            {
+                try
+                {
+                    await _persistedJobs.FailUnqueuedAsync(rowId, ReleaseImportService.RetryNotQueuedMessage).ConfigureAwait(false);
+                }
+                catch (Exception rowEx)
+                {
+                    _logger.LogError(rowEx, "Could not fail import job row {JobRowId} of release {ReleaseId}.", rowId, releaseId);
+                }
+            }
             // No job will open the staged upload, so it would sit in the temp folder until the next start.
             if (stagedPath is not null)
             {
@@ -580,9 +602,19 @@ public sealed class ReleaseImportRequestService
         UploadedFile file, string prefix, string extension, CancellationToken ct)
     {
         var tempPath = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N") + extension);
-        await using var fs = File.Create(tempPath);
-        await using var src = file.OpenRead();
-        await src.CopyToAsync(fs, ct).ConfigureAwait(false);
+        try
+        {
+            await using var fs = File.Create(tempPath);
+            await using var src = file.OpenRead();
+            await src.CopyToAsync(fs, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A half-written copy has no job to delete it, so it would sit in the
+            // temp folder until the next start. The file is closed by now.
+            try { File.Delete(tempPath); } catch { /* swallow */ }
+            throw;
+        }
         return tempPath;
     }
 

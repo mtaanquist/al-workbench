@@ -122,17 +122,31 @@ public sealed class ArtifactReleaseImporter
         // take it for abandoned while the wipe runs (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
+        long? jobRowId = null;
         try
         {
             await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
             var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
-            var jobRowId = await _persistedJobs.CreateAsync(
+            jobRowId = await _persistedJobs.CreateAsync(
                 releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
-            await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
+            await EnqueueAsync(releaseId, jobRowId.Value, resolved, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Re-run of failed artifact import {ReleaseId} stopped before its job was queued; failing it again.", releaseId);
+            // Left queued, the row would be resumed at the next start and wipe the
+            // release first, even after a later re-run has imported it.
+            if (jobRowId is long rowId)
+            {
+                try
+                {
+                    await _persistedJobs.FailUnqueuedAsync(rowId, ReleaseImportService.RetryNotQueuedMessage).ConfigureAwait(false);
+                }
+                catch (Exception rowEx)
+                {
+                    _logger.LogError(rowEx, "Could not fail import job row {JobRowId} of release {ReleaseId}.", rowId, releaseId);
+                }
+            }
             await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
             throw;
         }

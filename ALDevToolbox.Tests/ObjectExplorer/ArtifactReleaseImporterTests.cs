@@ -223,6 +223,45 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_fails_the_job_row_of_a_re_run_cut_short_at_a_full_queue()
+    {
+        // #1612: the row is written, then the request ends while the queue is full.
+        // Left queued, a restart would resume it and wipe the release, even after a
+        // later re-run had imported it.
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+        failed.StatusMessage = "The download was cut off.";
+        ctx.OeReleases.Add(failed);
+        await ctx.SaveChangesAsync();
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue,
+            new ALDevToolbox.Services.AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var import = NewImporter(ctx, queue).ImportAsync("dk", version: null, request.Token);
+        while (!import.IsCompleted && !await HasJobRowAsync(failed.Id))
+        {
+            await Task.Delay(20);
+        }
+        await request.CancelAsync();
+
+        await import.Awaiting(t => t.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failed.Id)).Status.Should().Be("failed");
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == failed.Id);
+        row.Status.Should().Be("failed");
+        row.ErrorMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+    }
+
+    private async Task<bool> HasJobRowAsync(int releaseId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeImportJobs.AsNoTracking().AnyAsync(j => j.ReleaseId == releaseId);
+    }
+
+    [Fact]
     public async Task ImportAsync_does_not_re_run_a_failed_import_for_an_org_over_its_storage_quota()
     {
         // #1338: the re-run re-ingests a whole release, so it is a write and the

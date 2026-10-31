@@ -329,6 +329,62 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         await retry.Awaiting(r => r.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
         (await StatusAsync(release.Id)).Should().Be("failed");
         File.Exists(stagedPath).Should().BeFalse("no job will open the staged upload");
+        await using var read = _db.NewContext();
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == release.Id);
+        row.Status.Should().Be("failed", "a queued row with no job behind it would be resumed at the next start");
+        row.ErrorMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+    }
+
+    [Fact]
+    public async Task A_re_upload_that_breaks_off_while_staging_leaves_no_partial_file_behind()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 26.1 (DK)", Kind = "first_party", Status = "failed",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        // The upload yields a marker, then the read fails (the disk filled, the body broke off).
+        var marker = Encoding.ASCII.GetBytes("partial-" + Guid.NewGuid().ToString("N"));
+        var upload = new UploadedFile("applications.zip", 1_000_000, () => new BreaksOffStream(marker));
+
+        var outcome = await NewService(ctx, new ReleaseImportQueue()).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: upload, CalTxtFile: null));
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.StagingFailed>();
+        (await StatusAsync(release.Id)).Should().Be("failed");
+        foreach (var path in Directory.GetFiles(Path.GetTempPath(), ReleaseImportRequestService.FolderZipTempPrefix + "*.zip"))
+        {
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(path); }
+            catch (IOException) { continue; } // another test's file, gone or still being written
+            bytes.AsSpan().IndexOf(marker).Should().BeNegative($"the partial copy {path} should have been deleted");
+        }
+    }
+
+    /// <summary>Returns <c>marker</c> on the first read and fails the next one.</summary>
+    private sealed class BreaksOffStream(byte[] marker) : Stream
+    {
+        private bool _served;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_served) throw new IOException("The upload broke off.");
+            _served = true;
+            marker.CopyTo(buffer, offset);
+            return marker.Length;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private async Task<string?> StagedPathAsync(int releaseId)
