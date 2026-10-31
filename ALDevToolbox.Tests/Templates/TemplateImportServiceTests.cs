@@ -75,6 +75,7 @@ public sealed class TemplateImportServiceTests : IDisposable
         var importedModule = imported.DefaultModules.Single().Module!;
         importedModule.Key.Should().Be("payment");
         importedModule.OrganizationId.Should().Be(TestDb.OtherOrgId);
+        importedModule.SourceIdRangeSize.Should().Be(120, "the fork goes on following the repository's size (#1631)");
         var moduleFolders = await verify.ModuleExtensionFolders
             .IgnoreQueryFilters()
             .Where(f => f.ModuleId == importedModule.Id)
@@ -496,6 +497,7 @@ public sealed class TemplateImportServiceTests : IDisposable
         var module = ModuleBuilder.Default("payment", "Payment", organizationId: TestDb.SystemOrgId)
             .WithDependency("11111111-1111-1111-1111-111111111111", "Base App", "Microsoft", "27.0.0.0")
             .WithExtensionFolder("Setup", ("Payment.Setup.al", "// payment setup"));
+        module.SourceIdRangeSize = 120;
 
         var appVersion = new ApplicationVersion
         {

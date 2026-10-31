@@ -110,6 +110,16 @@ public class ModuleSourceService
     }
 
     /// <summary>
+    /// True when saving a repository module whose repository, branch and folder
+    /// are unchanged still needs a fresh copy: the Editor cleared a size they had
+    /// set, and no repository size is recorded to fall back on - a module saved
+    /// before that was kept (#1631). Keeping the copy then would drop the module
+    /// to the template's size rather than the repository's.
+    /// </summary>
+    public static bool NeedsCopyForIdRangeSize(int? savedSize, int? savedSourceSize, int? newSize) =>
+        newSize is null && savedSize is not null && savedSourceSize is null;
+
+    /// <summary>
     /// Asks the repository for the commit module <paramref name="moduleId"/>'s
     /// branch, tag or commit names now, and replaces the copy when it moved. A
     /// failure keeps the copy, records why on the module, and never throws for a
