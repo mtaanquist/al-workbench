@@ -42,6 +42,18 @@ internal static class CookieSessionRevalidation
             ?? principal.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!int.TryParse(idClaim, out var userId)) return;
 
+        // A cookie issued before the sign-in time was mirrored as a claim
+        // (#1567) gets the claim now, from the stamp it already carries. No
+        // database read, and ahead of the throttle, so an open page does not
+        // have to make a trip through the refresh endpoint to learn it.
+        if (principal.FindFirst(EndpointHelpers.SignedInAtClaim) is null
+            && context.Properties.Items.TryGetValue(EndpointHelpers.SignedInAtKey, out var signedInStamp)
+            && !string.IsNullOrEmpty(signedInStamp))
+        {
+            context.ReplacePrincipal(EndpointHelpers.WithStampsFrom(principal, context.Properties));
+            context.ShouldRenew = true;
+        }
+
         var clock = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
         var now = clock.GetUtcNow().UtcDateTime;
 
