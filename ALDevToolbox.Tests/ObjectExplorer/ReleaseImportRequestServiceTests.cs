@@ -365,8 +365,70 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         }
     }
 
-    /// <summary>Returns <c>marker</c> on the first read and fails the next one.</summary>
-    private sealed class BreaksOffStream(byte[] marker) : Stream
+    // ── A new import cut short before its job is queued fails the release (#1632) ──
+
+    [Fact]
+    public async Task A_folder_zip_import_cut_off_while_staging_fails_the_release()
+    {
+        // The person closes the tab while the buffered upload is copied to disk:
+        // the copy throws OperationCanceledException, not IOException.
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS 27.0 (DK) " + Guid.NewGuid().ToString("N");
+        var marker = Encoding.ASCII.GetBytes("partial-" + Guid.NewGuid().ToString("N"));
+        var upload = new UploadedFile("applications.zip", 1_000_000,
+            () => new BreaksOffStream(marker, new OperationCanceledException("The request was aborted.")));
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).SubmitAsync(Submission(label: label, folderZip: upload));
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Label == label);
+        release.Status.Should().Be("failed", "nothing will import it, so it must not read as importing");
+        release.StatusMessage.Should().Be(ReleaseImportService.ImportNotQueuedMessage);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_folder_zip_import_cut_off_at_the_enqueue_fails_the_release_its_job_row_and_removes_the_staged_file()
+    {
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS 27.1 (DK) " + Guid.NewGuid().ToString("N");
+        // A full queue holds the import at the enqueue, after the upload is staged.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var submit = NewService(ctx, queue).SubmitAsync(Submission(label: label, folderZip: EmptyZip("applications.zip")), request.Token);
+        int? releaseId = null;
+        string? stagedPath = null;
+        while (!submit.IsCompleted)
+        {
+            await using (var probe = _db.NewContext())
+            {
+                releaseId ??= await probe.OeReleases.AsNoTracking()
+                    .Where(r => r.Label == label).Select(r => (int?)r.Id).FirstOrDefaultAsync();
+            }
+            if (releaseId is int id && (stagedPath = await StagedPathAsync(id)) is not null) break;
+            await Task.Delay(20);
+        }
+        stagedPath.Should().NotBeNull("the import stages the upload and writes its job row before the enqueue");
+        Track(stagedPath!);
+        await request.CancelAsync();
+
+        await submit.Awaiting(s => s.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        (await StatusAsync(releaseId!.Value)).Should().Be("failed");
+        File.Exists(stagedPath).Should().BeFalse("no job will open the staged upload");
+        await using var read = _db.NewContext();
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId);
+        row.Status.Should().Be("failed", "a queued row with no job behind it would be resumed at the next start");
+        row.ErrorMessage.Should().Be(ReleaseImportService.ImportNotQueuedMessage);
+    }
+
+    /// <summary>Returns <c>marker</c> on the first read and fails the next one with <c>error</c> (an <see cref="IOException"/> by default).</summary>
+    private sealed class BreaksOffStream(byte[] marker, Exception? error = null) : Stream
     {
         private bool _served;
         public override bool CanRead => true;
@@ -377,7 +439,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         public override void Flush() { }
         public override int Read(byte[] buffer, int offset, int count)
         {
-            if (_served) throw new IOException("The upload broke off.");
+            if (_served) throw error ?? new IOException("The upload broke off.");
             _served = true;
             marker.CopyTo(buffer, offset);
             return marker.Length;
