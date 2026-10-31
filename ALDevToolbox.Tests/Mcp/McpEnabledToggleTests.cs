@@ -166,7 +166,7 @@ public sealed class McpEnabledToggleTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = "mette@cronus.example",
                 DisplayName = "Mette",
-                PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(password),
+                PasswordHash = TestPasswords.Hash(password),
                 Role = Domain.Entities.UserRole.Admin,
                 Status = Domain.Entities.UserStatus.Active,
                 CreatedAt = DateTime.UtcNow,

@@ -100,17 +100,30 @@ public sealed class TestDb : IDisposable
 
     /// <summary>
     /// Waits for component-initiated queries to finish before teardown pulls
-    /// the DbContext out from under them. Bounded; returns whether it settled
-    /// so a caller could assert on it, though none needs to today.
+    /// the DbContext out from under them. Bounded; returns whether it settled.
+    /// A wait that runs out is written to the test's output, since it means a
+    /// query never finished and the test spent ten seconds waiting on it (#1552).
     /// </summary>
-    public bool WaitForQueriesToSettle() =>
-        CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10));
+    public bool WaitForQueriesToSettle()
+    {
+        if (CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10))) return true;
 
-    public TestDb()
+        var message = $"TestDb: {CommandTracker.InFlight} database command(s) still running after 10 s at teardown. "
+            + "A component query never finished; find the page or teardown step that leaves it open.";
+        TestContext.Current.TestOutputHelper?.WriteLine(message);
+        TestContext.Current.SendDiagnosticMessage(message);
+        return false;
+    }
+
+    public TestDb() : this(SharedTemplate.Value)
+    {
+    }
+
+    private TestDb(string template)
     {
         var host = SharedHost.Value;
         _databaseName = "aldt_test_" + Guid.NewGuid().ToString("N");
-        host.CloneDatabase(_databaseName, SharedTemplate.Value);
+        host.CloneDatabase(_databaseName, template);
         _connectionString = host.ConnectionStringFor(_databaseName);
 
         _options = BuildOptions(_connectionString);
@@ -129,6 +142,50 @@ public sealed class TestDb : IDisposable
     }
 
     private readonly Lazy<ServiceProvider> _openIddict;
+
+    /// <summary>
+    /// Seeded templates built so far, by key. Each is built once per process
+    /// on first use, like <see cref="SharedTemplate"/>.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<(string Template, object? Value)>> SeededTemplates = new();
+
+    /// <summary>
+    /// Returns a fixture cloned from a template that already holds the rows
+    /// <paramref name="seed"/> writes. The seed runs once per process for each
+    /// <paramref name="key"/>, on a clone of the shared template, and every
+    /// later call clones its result: a clone costs tens of milliseconds where
+    /// importing the Object Explorer <c>.app</c> fixtures costs over a second
+    /// (#1552). <paramref name="value"/> is what the seed returned, typically
+    /// the ids of the rows it wrote; ids and sequences survive the clone.
+    ///
+    /// <para>The same key must always mean the same seed. The seed runs with
+    /// the default <see cref="OrgContext"/>.</para>
+    /// </summary>
+    public static TestDb FromSeed<T>(string key, Func<TestDb, Task<T>> seed, out T value)
+    {
+        var built = SeededTemplates.GetOrAdd(key, _ => new Lazy<(string, object?)>(
+            () => BuildSeededTemplate(seed), isThreadSafe: true)).Value;
+        value = (T)built.Value!;
+        return new TestDb(built.Template);
+    }
+
+    private static (string Template, object? Value) BuildSeededTemplate<T>(Func<TestDb, Task<T>> seed)
+    {
+        var db = new TestDb(SharedTemplate.Value);
+        // Off the caller's synchronization context: the seed is async and this
+        // blocks inside a test.
+        var value = Task.Run(() => seed(db)).GetAwaiter().GetResult();
+        db.ReleaseConnections();
+
+        var name = db._databaseName;
+        var host = SharedHost.Value;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { host.DropDatabase(name); }
+            catch (Exception) { /* best effort: the run is already over */ }
+        };
+        return (name, value);
+    }
 
     /// <summary>
     /// An OpenIddict token manager over this fixture's database, for services
@@ -263,6 +320,16 @@ public sealed class TestDb : IDisposable
 
     public void Dispose()
     {
+        ReleaseConnections();
+        SharedHost.Value.DropDatabase(_databaseName);
+    }
+
+    /// <summary>
+    /// Disposes what holds a connection to this fixture's database and closes
+    /// its idle pooled connections, so the database can be dropped or cloned.
+    /// </summary>
+    private void ReleaseConnections()
+    {
         _memoryCache.Dispose();
         // Before clearing the pool: this provider owns scoped AppDbContexts, and
         // a live one would hand a connection straight back to the pool after the
@@ -279,7 +346,6 @@ public sealed class TestDb : IDisposable
         {
             NpgsqlConnection.ClearPool(connection);
         }
-        SharedHost.Value.DropDatabase(_databaseName);
     }
 
     private readonly MemoryCache _memoryCache = new(Options.Create(new MemoryCacheOptions()));
