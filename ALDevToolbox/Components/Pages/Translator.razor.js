@@ -253,13 +253,77 @@ function notOwned(rec, openId) {
 }
 
 // Stores a new open's record and deletes the tab's previous one in the same
-// transaction: the tab has moved on from that file.
-function openRecord(rec) {
+// transaction: the tab has moved on from that file. Then drops the older
+// copies of the same file nobody holds (#1624).
+async function openRecord(rec) {
     rec.savedAt = Date.now();
-    return startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
+    const ok = await startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
         store.put(rec, rec.openId);
         if (previousId && previousId !== rec.openId) store.delete(previousId);
     }));
+    if (ok) await dropOlderCopies(rec);
+    return ok;
+}
+
+// ── One session per file (#1624) ─────────────────────────────────────────
+//
+// A stored session carries the base the file had when it was opened. Once the
+// same file has been opened again - picked from disk, uploaded, fetched from
+// its repository, or restored - an older session of it is out of date: its
+// base predates whatever was saved since, so Continue followed by Save would
+// write that old base back over the file and lose the newer work. Before
+// #1609 the single record was simply replaced; with one record per open, the
+// older copies have to be dropped by file. A copy a live tab holds is never
+// touched (whileUnheld), as everywhere else.
+
+// Which file a record is of, by name - and for a repository file also by
+// repository and path. The name is part of it because a translation started
+// from the generated file is named for its language, while the path it was
+// opened under is not updated when the language changes: a da-DK and a de-DE
+// translation of one App.g.xlf are different files.
+function fileKey(r) {
+    const name = "\n" + (r.fileName || "");
+    if (r.repo && r.repo.repository && r.repo.path) return "repo\n" + r.repo.repository + "\n" + r.repo.path + name;
+    return "file" + name;
+}
+
+// True when two records are of the same file. Two files picked from disk can
+// share a name and still be different files (the same app in two folders), so
+// when both have a handle the handle decides; an upload has only its name.
+async function sameFile(a, b) {
+    if (fileKey(a) !== fileKey(b)) return false;
+    if (a.handle && b.handle) {
+        if (typeof a.handle.isSameEntry !== "function") return false;
+        try { return await a.handle.isSameEntry(b.handle); } catch { return false; }
+    }
+    return true;
+}
+
+// True when another record of `r`'s file in `all` was saved after it.
+async function superseded(r, all) {
+    for (const o of all) {
+        if (!o || !o.openId || o.openId === r.openId) continue;
+        if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;
+    }
+    return false;
+}
+
+// Deletes the other sessions of `rec`'s file saved before it that no live tab
+// holds. A newer one is left alone: Continue on an older session must not
+// delete newer work.
+async function dropOlderCopies(rec) {
+    try {
+        const live = await heldIds();
+        const all = await withStore("readonly", (store, done) => {
+            const req = store.getAll();
+            req.onsuccess = () => done(req.result || []);
+        });
+        for (const r of all) {
+            if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;
+            if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;
+            if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));
+        }
+    } catch { /* best effort: the prompt also offers only the newest of each file */ }
 }
 
 // Called once when a file is opened. The original XML arrives as a
@@ -340,8 +404,9 @@ function deleteKey(key) {
 // For the restore prompt: the newest session no live tab holds, as its id,
 // file name and when it was last saved (epoch ms). `maxAgeMs` is how old a
 // session may be and still be offered. Sessions nobody holds that are past
-// it, or beyond the newest MAX_KEPT, are deleted here, so the store does not
-// grow with every file ever opened.
+// it, or beyond the newest MAX_KEPT, or older than another record of the same
+// file, are deleted here, so the store does not grow with every file ever
+// opened and an out-of-date copy is never offered.
 export async function peek(maxAgeMs) {
     try {
         await migrateLegacy();
@@ -352,7 +417,13 @@ export async function peek(maxAgeMs) {
         });
         const now = Date.now();
         const free = all.filter((r) => r && r.openId && !live.has(r.openId));
-        const offerable = free
+        // A session with a newer record of its file, held or not, is out of
+        // date, so it is never offered and goes with the rest (#1624).
+        const current = [];
+        for (const r of free) {
+            if (!(await superseded(r, all))) current.push(r);
+        }
+        const offerable = current
             .filter((r) => r.fileName && r.savedAt > 0 && now - r.savedAt <= maxAgeMs)
             .sort((a, b) => b.savedAt - a.savedAt);
         const keep = new Set(offerable.slice(0, MAX_KEPT).map((r) => r.openId));
@@ -383,6 +454,7 @@ export async function loadMeta(openId) {
                 if (previousId) store.delete(previousId);
             }));
             if (!ok) return null;
+            await dropOlderCopies(moved);
             return {
                 openId: newId,
                 fileName: rec.fileName,

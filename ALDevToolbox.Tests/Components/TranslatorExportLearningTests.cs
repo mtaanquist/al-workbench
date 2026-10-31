@@ -323,6 +323,64 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
             .And.Contain("if (previousId && previousId !== rec.openId) store.delete(previousId);");
     }
 
+    /// <summary>
+    /// #1624: a stored session keeps the base its file had when it was opened.
+    /// After the same file is opened again and saved, an older session of it
+    /// would, on Continue and Save, write that old base back over the file. So
+    /// every open (a pick, a drop, an upload, a repository file, or Continue)
+    /// deletes the older sessions of its file that no live tab holds, and the
+    /// prompt only ever offers the newest session of each file - while a
+    /// session a live tab holds is still never touched (#1609).
+    /// </summary>
+    [Fact]
+    public void The_browser_module_keeps_only_the_newest_session_of_each_file()
+    {
+        var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
+
+        // A file is known by its name - a da-DK and a de-DE translation of one
+        // generated file are different files - and a repository file also by
+        // repository and path. When both copies were picked from disk, the
+        // handle decides, so two same-named files in different folders differ.
+        js.Should().Contain("""const name = "\n" + (r.fileName || "");""")
+            .And.Contain("""return "repo\n" + r.repo.repository + "\n" + r.repo.path + name;""")
+            .And.Contain("""return "file" + name;""");
+        var same = js[js.IndexOf("async function sameFile(a, b) {", StringComparison.Ordinal)..];
+        same = same[..same.IndexOf("\n}\n", StringComparison.Ordinal)];
+        same.Should().StartWith("async function sameFile(a, b) {\n    if (fileKey(a) !== fileKey(b)) return false;")
+            .And.Contain("if (a.handle && b.handle) {")
+            .And.Contain("return await a.handle.isSameEntry(b.handle);");
+
+        // Each new open, and Continue, drops the older copies of its file once
+        // the open is stored and held.
+        var open = js[js.IndexOf("async function openRecord(rec) {", StringComparison.Ordinal)..];
+        open = open[..open.IndexOf("\n}\n", StringComparison.Ordinal)];
+        open.Should().Contain("if (ok) await dropOlderCopies(rec);");
+        open.IndexOf("dropOlderCopies", StringComparison.Ordinal)
+            .Should().BeGreaterThan(open.IndexOf("await startOpen(", StringComparison.Ordinal));
+        var load = js[js.IndexOf("export async function loadMeta(openId) {", StringComparison.Ordinal)..];
+        load = load[..load.IndexOf("\n}\n", StringComparison.Ordinal)];
+        load.Should().Contain("if (!ok) return null;\n            await dropOlderCopies(moved);");
+
+        // Only older copies no live tab holds are deleted, and only under their
+        // lock: Continue on an older session leaves a newer one alone.
+        var drop = js[js.IndexOf("async function dropOlderCopies(rec) {", StringComparison.Ordinal)..];
+        drop = drop[..drop.IndexOf("\n}\n", StringComparison.Ordinal)];
+        drop.Should().Contain("if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;")
+            .And.Contain("if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;")
+            .And.Contain("if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
+            .And.NotContain("store.delete(");
+
+        // The prompt offers a session only when no other record of its file,
+        // held or not, is newer; the older ones fall outside what it keeps.
+        js.Should().Contain("if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;");
+        var peek = js[js.IndexOf("export async function peek(maxAgeMs) {", StringComparison.Ordinal)..];
+        peek = peek[..peek.IndexOf("\n}\n", StringComparison.Ordinal)];
+        peek.Should().Contain("if (!(await superseded(r, all))) current.push(r);")
+            .And.Contain("const offerable = current")
+            .And.Contain("if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
+            .And.NotContain("superseded(r, free)", "a newer copy a live tab holds still makes an older free one out of date");
+    }
+
     // ── The restore prompt (#1609) ────────────────────────────────────────
 
     [Fact]
