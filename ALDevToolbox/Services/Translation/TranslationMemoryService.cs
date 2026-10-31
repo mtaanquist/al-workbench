@@ -80,7 +80,8 @@ public sealed class TranslationMemoryService
     /// tracking that repository (#1252): a pair learned without one is visible
     /// to the whole organisation, so a save to a Private solution's repository
     /// has to pass it (#1324). Null for an export or an upload, which belong
-    /// to no repository.
+    /// to no repository - which is why the Translator sends an export of a
+    /// file it opened from a repository nothing to learn (#1540).
     /// </param>
     /// <param name="sourcePath">The file's path in <paramref name="sourceRepository"/>.</param>
     /// <returns>How many pairs were new.</returns>
