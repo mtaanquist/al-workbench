@@ -1811,10 +1811,9 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     /// <summary>
-    /// An install row from an environment's history: one that reached Business Central
-    /// (<paramref name="reached"/>: its operation was stamped and it is recorded as sent),
-    /// or one only stamped with a sent time and failed without a call, as a dependent
-    /// skipped after a failure or a disabled requester's booking is.
+    /// An install row from an environment's history: one the worker sent
+    /// (<paramref name="reached"/>), or one settled without a send, as a dependent skipped
+    /// after a failure or a disabled requester's booking is - failed, with no sent time.
     /// </summary>
     private async Task AddInstallHistoryAsync(int orgId, int projectId, int environmentId, DateTime sentAt, bool reached)
     {
@@ -1824,7 +1823,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
             OrganizationId = orgId, ProjectId = projectId, EnvironmentId = environmentId,
             Kind = UpgradeActionKind.UploadApp, PackageFileName = "Earlier.app",
             Status = reached ? UpgradeActionStatus.Sent : UpgradeActionStatus.Failed,
-            RequestedAt = sentAt.AddHours(-1), ExecuteAfter = sentAt.AddHours(-1), SentAt = sentAt,
+            RequestedAt = sentAt.AddHours(-1), ExecuteAfter = sentAt.AddHours(-1), SentAt = reached ? sentAt : null,
             BcAppId = reached ? Guid.NewGuid() : null, BcOperationId = reached ? Guid.NewGuid() : null,
             Outcome = reached ? "Installed Earlier.app." : "Earlier.app wasn't installed, because the app before it didn't install.",
         });
@@ -1849,6 +1848,43 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
 
         _f.Apps.InstalledFiles.Should().Equal("Denmark.app");
+    }
+
+    [Fact]
+    public async Task A_send_business_central_refused_still_counts_as_the_environments_turn()
+    {
+        // Review of #1603: a customer whose sends all fail before Business Central accepts
+        // them (broken credentials, say) still had its turn each time, or forty bookings
+        // would take every sweep from everyone else.
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (sProject, sEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await BookUploadAsync(dProject, dEnv, hoursAhead: 1, "D1.app");
+        await BookUploadAsync(dProject, dEnv, hoursAhead: 1, "D2.app");
+        await BookUploadAsync(sProject, sEnv, hoursAhead: 1, "S1.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        _f.Apps.InstallThrows = new BcApiException(System.Net.HttpStatusCode.Unauthorized, "The credentials were rejected.");
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Apps.InstallThrows = null;
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "S1.app" }, "Denmark had the last turn, though Business Central refused it");
+    }
+
+    [Fact]
+    public async Task A_dependent_skipped_after_a_failure_is_settled_without_a_sent_time()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 1, "Core.app", "Reports.app");
+        _f.Apps.OnOperationStatus = name => name == "Core.app" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        await SweepUntilQuietAsync();
+
+        var skipped = await _f.ReadActionAsync(ids[1]);
+        skipped.Status.Should().Be(UpgradeActionStatus.Failed);
+        skipped.SentAt.Should().BeNull("nothing went to Business Central for it, so it is no install for the turns");
     }
 
     [Fact]

@@ -311,7 +311,7 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
         var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
-            .Should().Be("That account is disabled. Choose someone who can still sign in.");
+            .Should().Be("That account can't sign in right now. Choose someone with an active account.");
         await using var read = _db.NewContext();
         (await Svc(read).ListPeopleAsync(id)).Should().BeEmpty();
     }

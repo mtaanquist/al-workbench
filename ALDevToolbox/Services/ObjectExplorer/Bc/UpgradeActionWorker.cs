@@ -251,7 +251,11 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (first is null) return null;
         var lastSent = await installs
-            .Where(ReachedBusinessCentral)
+            // A sent time marks a row the worker tried to send, whatever Business Central
+            // answered. The two settles that never try - a dependent skipped after a
+            // failure, a booking whose requester was disabled - leave it unset, so they do
+            // not count as an install (#1603).
+            .Where(a => a.SentAt != null)
             .MaxAsync(a => a.SentAt, ct).ConfigureAwait(false);
         return new InstallTurn(lastSent, first.ExecuteAfter, first.RequestedAt);
     }
@@ -421,8 +425,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         var sentPerRow = await db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => rowIds.Contains(a.EnvironmentId)
                         && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
-                        && a.SentAt >= since)
-            .Where(ReachedBusinessCentral)
+                        && a.SentAt != null && a.SentAt >= since)
             .GroupBy(a => a.EnvironmentId)
             .Select(g => new { EnvironmentId = g.Key, LastSentAt = g.Max(a => a.SentAt) })
             .ToListAsync(ct).ConfigureAwait(false);
@@ -499,17 +502,6 @@ public sealed class UpgradeActionWorker : BackgroundService
             .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind) ? rank[a.BcEnvironment] : 0)
             .ToList(), started);
     }
-
-    /// <summary>
-    /// An install row that took a turn with Business Central, for both turns' "last
-    /// served": one it accepted (its operation was stamped) or one recorded as sent. A
-    /// dependent skipped because the app before it failed, or a booking whose requester
-    /// was disabled, is stamped with a sent time too but never reached Business Central,
-    /// and counting it put its organisation or environment at the back of the turn for an
-    /// install it never got (#1603).
-    /// </summary>
-    private static readonly System.Linq.Expressions.Expression<Func<OeEnvironmentUpgradeAction, bool>> ReachedBusinessCentral =
-        a => a.SentAt != null && (a.BcOperationId != null || a.Status == UpgradeActionStatus.Sent);
 
     /// <summary>
     /// How far back the install turn looks for an environment's last install. An
@@ -615,6 +607,14 @@ public sealed class UpgradeActionWorker : BackgroundService
         return moved > 0;
     }
 
+    /// <summary>The history line for a booking whose requester may no longer do it: disabled since, or off the solution or the update team.</summary>
+    private static string NoPermissionOutcome(UpgradeActionKind kind) => kind switch
+    {
+        UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
+        UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
+        _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
+    };
+
     /// <summary>What one due row came to: left alone, settled without a send, or sent.</summary>
     private enum RunOutcome { Skipped, Settled, Sent }
 
@@ -687,12 +687,12 @@ public sealed class UpgradeActionWorker : BackgroundService
                     : blocked.BcAppId is { } blockedApp && waitsFor.Contains(blockedApp)
                     ? $"{action.Label} wasn't updated, because {blockedName}, which it waits for, wasn't updated."
                     : $"{action.Label} wasn't updated, because the update of {blockedName} before it failed, and it brings along an app both of them wait for.";
-                var skippedAt = _clock.GetUtcNow().UtcDateTime;
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                    // No sent time: nothing went to Business Central, and the install
+                    // turns read a sent time as an install this environment got (#1603).
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
-                        .SetProperty(a => a.SentAt, skippedAt)
                         .SetProperty(a => a.PackageContent, (byte[]?)null)
                         .SetProperty(a => a.Outcome, skippedOutcome),
                         ct).ConfigureAwait(false);
@@ -710,6 +710,24 @@ public sealed class UpgradeActionWorker : BackgroundService
             && await MovedPastClosedWindowAsync(scope, db, action, window, ct).ConfigureAwait(false))
         {
             return RunOutcome.Skipped;
+        }
+
+        // A disabled account runs nothing, booked before it was disabled or not (#1235).
+        // Settled before the claim and without a sent time, as a skipped dependent is:
+        // nothing goes to Business Central, so it is no install for the turns (#1603). The
+        // compare-and-set still lets a racing cancel win.
+        if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
+        {
+            var refused = await db.OeEnvironmentUpgradeActions
+                .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                    .SetProperty(a => a.PackageContent, (byte[]?)null)
+                    .SetProperty(a => a.Outcome, NoPermissionOutcome(action.Kind)),
+                    ct).ConfigureAwait(false);
+            if (refused == 0) return RunOutcome.Skipped;
+            await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);
+            return RunOutcome.Settled;
         }
 
         // Claim first, and this compare-and-set is what beats a racing cancel: stamping
@@ -740,11 +758,6 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         try
         {
-            // A disabled account runs nothing, booked before it was disabled or not (#1235).
-            if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
-            {
-                throw new ProjectAccessDeniedException();
-            }
             var actions = scope.ServiceProvider.GetRequiredService<UpgradeActionService>();
             if (action.Kind == UpgradeActionKind.UploadApp)
             {
@@ -841,12 +854,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         catch (ProjectAccessDeniedException)
         {
             status = UpgradeActionStatus.Failed;
-            outcome = action.Kind switch
-            {
-                UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
-                UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
-                _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
-            };
+            outcome = NoPermissionOutcome(action.Kind);
         }
         catch (Exception ex)
         {
