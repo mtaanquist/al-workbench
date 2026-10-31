@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Auth;
 /// (#1534). It must apply the row now, not after the five-minute cookie
 /// throttle, or the reloaded page would connect with the old claims again.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SessionRefreshEndpointTests : IDisposable
 {
     private const string Email = "sam.berg@cronus.example";
