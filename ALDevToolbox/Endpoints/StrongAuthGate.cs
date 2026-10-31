@@ -53,6 +53,16 @@ internal static class StrongAuthGate
                 return;
             }
 
+            // While a restore runs the users table may not exist yet, so reading
+            // it would turn the request into a 500. The maintenance gate right
+            // after this one answers everyone but a SiteAdmin, and the rule does
+            // not matter while the site is closed (#1599).
+            if (ctx.RequestServices.GetRequiredService<Services.Operations.MaintenanceModeState>().IsActive)
+            {
+                await next();
+                return;
+            }
+
             // A PAT-authenticated request is a programmatic call with its own
             // strong credential, and the strong-auth enrolment UI (TOTP / passkey)
             // is browser-only — gating PATs would 403 the entire MCP/API surface

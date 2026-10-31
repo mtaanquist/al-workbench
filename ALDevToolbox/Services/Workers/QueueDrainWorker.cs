@@ -134,6 +134,7 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
                         _logger.LogWarning(
                             "{Worker} dropped {Job}: a restore replaced the database it was queued against.",
                             _name, Describe(job));
+                        OnJobDropped(job);
                         return;
                     }
                 }
@@ -197,6 +198,14 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
     /// dedupe gate release it here.
     /// </summary>
     protected virtual void OnJobFinished(TJob job) { }
+
+    /// <summary>
+    /// Called for a job the worker took but dropped without running, because a restore
+    /// replaced the database while it was held. A job that owns something outside the
+    /// database (a staged upload) releases it here; the queue's own drop has
+    /// <c>OnDiscarded</c> for the same (#1599).
+    /// </summary>
+    protected virtual void OnJobDropped(TJob job) { }
 
     /// <summary>How the job is named in the failure log. Defaults to the record's own text.</summary>
     protected virtual string Describe(TJob job) => job?.ToString() ?? "(null)";

@@ -5,6 +5,7 @@ using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -139,6 +140,44 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         {
             maintenance.Exit();
         }
+    }
+
+    /// <summary>
+    /// A request that was already running when a restore began, or one that tries to
+    /// write during it, has its database command refused by the guard. That refusal
+    /// answers with the maintenance page and its Retry-After, not a 500, at both the
+    /// outermost middleware and the gate (#1599).
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_command_the_database_guard_refuses_gets_the_maintenance_page_not_an_error(bool atTheGate)
+    {
+        var maintenance = new MaintenanceModeState();
+        using var services = new ServiceCollection().AddSingleton(maintenance).BuildServiceProvider();
+        var app = new Microsoft.AspNetCore.Builder.ApplicationBuilder(services);
+        if (atTheGate) ALDevToolbox.Endpoints.MaintenanceModeMiddleware.UseMaintenanceMode(app);
+        else ALDevToolbox.Endpoints.MaintenanceModeMiddleware.UseMaintenanceDatabaseAllowance(app);
+        app.Run(ctx =>
+        {
+            // The request started while the site was open; the restore began under it.
+            maintenance.Enter("Restoring from a backup.");
+            ctx.Response.Headers["X-Half-Written"] = "yes";
+            throw new DatabaseClosedForMaintenanceException();
+        });
+        var pipeline = app.Build();
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = services };
+        context.Request.Path = "/admin/templates";
+        context.Response.Body = new MemoryStream();
+
+        await pipeline(context);
+
+        context.Response.StatusCode.Should().Be(503);
+        context.Response.Headers.RetryAfter.ToString().Should().Be("30");
+        context.Response.Headers.ContainsKey("X-Half-Written").Should().BeFalse("the half-built response is cleared");
+        context.Response.Body.Position = 0;
+        (await new StreamReader(context.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken))
+            .Should().Contain(MaintenancePage);
     }
 
     private static async Task AssertGatedAsync(HttpClient client, string path)

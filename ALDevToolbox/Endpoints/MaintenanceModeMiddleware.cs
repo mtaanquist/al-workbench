@@ -52,7 +52,7 @@ internal static class MaintenanceModeMiddleware
             var maintenance = ctx.RequestServices.GetRequiredService<MaintenanceModeState>();
             if (!maintenance.IsActive)
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
             if (ClosedBeforeAuthentication.Any(p => ctx.Request.Path.StartsWithSegments(p)))
@@ -60,7 +60,7 @@ internal static class MaintenanceModeMiddleware
                 await WriteMaintenancePageAsync(ctx, maintenance);
                 return;
             }
-            using (maintenance.AllowDatabaseReads()) await next();
+            using (maintenance.AllowDatabaseReads()) await NextOrMaintenancePageAsync(ctx, next, maintenance);
         });
         return app;
     }
@@ -72,7 +72,7 @@ internal static class MaintenanceModeMiddleware
             var maintenance = ctx.RequestServices.GetRequiredService<MaintenanceModeState>();
             if (!maintenance.IsActive)
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
 
@@ -88,18 +88,39 @@ internal static class MaintenanceModeMiddleware
                 // cannot see.
                 || path.StartsWithSegments(GitHubWebhookEndpoints.WebhookPath))
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
             if (ctx.User?.FindFirst(HttpOrganizationContext.SiteAdminClaim)?.Value == "true")
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
 
             await WriteMaintenancePageAsync(ctx, maintenance);
         });
         return app;
+    }
+
+    /// <summary>
+    /// Runs the rest of the pipeline, and answers with the maintenance page when the
+    /// database guard refused a command on the way (#1599): a request that was already
+    /// running when the restore began, or one that tried to write during it, would
+    /// otherwise end as a 500. Applied here, inside the exception handler, so it sees
+    /// the refusal before that handler turns it into the error page, and again in the
+    /// outermost middleware for what fails ahead of this gate.
+    /// </summary>
+    private static async Task NextOrMaintenancePageAsync(HttpContext ctx, Func<Task> next, MaintenanceModeState maintenance)
+    {
+        try
+        {
+            await next();
+        }
+        catch (DatabaseClosedForMaintenanceException) when (!ctx.Response.HasStarted)
+        {
+            ctx.Response.Clear();
+            await WriteMaintenancePageAsync(ctx, maintenance);
+        }
     }
 
     private static Task WriteMaintenancePageAsync(HttpContext ctx, MaintenanceModeState maintenance)

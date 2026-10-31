@@ -117,11 +117,14 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_delivery_that_arrives_during_a_restore_is_put_back_rather_than_built()
+    public async Task A_delivery_that_arrives_during_a_restore_is_held_until_the_site_reopens()
     {
         // The webhook route stays open through maintenance on purpose - GitHub
         // disables a hook whose deliveries keep failing - so the worker is what
-        // has to keep the build off a database being rewritten under it.
+        // has to keep the build off a database being rewritten under it. It holds
+        // the delivery itself rather than putting it back on a queue the endpoint
+        // may have filled meanwhile, where it was dropped after GitHub had been
+        // told 202 (#1599).
         await ConfigureDeploymentAsync();
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
 
@@ -129,12 +132,18 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         var maintenance = new MaintenanceModeState();
         maintenance.Enter("Restoring a backup");
         var worker = NewWorker(queue, maintenance);
-        var job = NewJob();
+        worker.MaintenanceRetryDelay = TimeSpan.FromMilliseconds(10);
 
-        await worker.RunOneAsync(job, CancellationToken.None);
+        var run = worker.RunOneAsync(NewJob(), TestContext.Current.CancellationToken);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
 
-        queue.Reader.TryRead(out var again).Should().BeTrue("the delivery is offered again, not dropped");
-        again.Should().Be(job, "the same head is built once the restore is over");
+        run.IsCompleted.Should().BeFalse("the delivery waits while the site is closed");
+        maintenance.ActiveJobs.Should().Be(0, "a held delivery does not keep a restore waiting");
+        queue.Reader.TryRead(out _).Should().BeFalse("it is not put back on the queue");
+
+        maintenance.Exit();
+        await run.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        maintenance.ActiveJobs.Should().Be(0, "the count it took to run is released");
     }
 
     // --- Member forks (#627) -----------------------------------------------

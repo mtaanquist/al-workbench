@@ -174,6 +174,58 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
         _navigation.Navigations.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A console page's event can do its database work in a DI scope of its own (a
+    /// cache miss that opens one), whose guard the circuit never configured. During a
+    /// restore that work is still let through for a SiteAdmin on the console, and
+    /// only for them, and only inside the event (#1599).
+    /// </summary>
+    [Theory]
+    [InlineData(true, "site-admin/backups", true)]
+    [InlineData(true, "admin/administration/users", false)]
+    [InlineData(false, "site-admin/backups", false)]
+    public async Task During_maintenance_a_site_admin_console_event_reaches_the_database_from_a_scope_of_its_own(
+        bool siteAdmin, string page, bool allowed)
+    {
+        var userId = await SeedAsync(UserRole.Admin, siteAdmin);
+        var maintenance = new MaintenanceModeState();
+        var navigation = new RecordingNavigationManager("https://workbench.cronus.example/" + page);
+        var handler = new SessionRevalidationCircuitHandler(
+            new FixedAuthState(PrincipalFor(userId, UserRole.Admin, siteAdmin)), new FixtureContextFactory(_db), _db.OrgContext,
+            navigation, _clock, maintenance, NullLogger<SessionRevalidationCircuitHandler>.Instance);
+        // Warm the throttled row check before the restore, as an open page would have.
+        (await DispatchAsync(handler)).Should().BeTrue();
+        maintenance.Enter("Restoring a backup");
+
+        Exception? refused = null;
+        var ran = false;
+        var pipeline = handler.CreateInboundActivityHandler(async _ =>
+        {
+            ran = true;
+            // A guard from a fresh scope: no SiteAdmin context, no request, no circuit hook.
+            await using var ctx = _db.NewContext(new MaintenanceDatabaseGuard(
+                maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null)));
+            try { await ctx.SystemSettings.AsNoTracking().CountAsync(); }
+            catch (DatabaseClosedForMaintenanceException ex) { refused = ex; }
+        });
+        await pipeline(null!);
+
+        if (!siteAdmin)
+        {
+            ran.Should().BeFalse("a non-SiteAdmin's event is dropped during a restore");
+            return;
+        }
+        ran.Should().BeTrue();
+        if (allowed) refused.Should().BeNull("the console's own work gets through in any scope");
+        else refused.Should().NotBeNull("a SiteAdmin away from the console is refused like anyone else");
+
+        // Outside the event the allowance is gone.
+        await using var outside = _db.NewContext(new MaintenanceDatabaseGuard(
+            maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null)));
+        var act = () => outside.SystemSettings.AsNoTracking().CountAsync();
+        await act.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+    }
+
     [Fact]
     public async Task A_failed_send_is_tried_again_on_the_next_event()
     {
@@ -287,8 +339,8 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     {
         public List<(string Uri, bool ForceLoad)> Navigations { get; } = new();
 
-        public RecordingNavigationManager() =>
-            Initialize("https://workbench.cronus.example/", "https://workbench.cronus.example/admin/administration/users");
+        public RecordingNavigationManager(string uri = "https://workbench.cronus.example/admin/administration/users") =>
+            Initialize("https://workbench.cronus.example/", uri);
 
         public bool FailNext { get; set; }
 
