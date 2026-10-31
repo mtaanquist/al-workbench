@@ -31,12 +31,14 @@ namespace ALDevToolbox.Services.Account;
 /// <para>
 /// It is also where a restore reaches interactive pages, which the
 /// maintenance middleware never sees: a click on an open page is a circuit
-/// event, not a request (#1571). An event that starts while the site is open
-/// is counted on <see cref="MaintenanceModeState.ActiveJobs"/>, so a restore
-/// waits for it before dropping the database. Once maintenance mode is on,
-/// events from anyone but a SiteAdmin are dropped and the page is reloaded,
-/// which lands on the maintenance page; a SiteAdmin's pages keep working, and
-/// their events are counted too.
+/// event, not a request (#1571). Once maintenance mode is on, new events from
+/// anyone but a SiteAdmin are dropped and the page is reloaded, which lands on
+/// the maintenance page; a SiteAdmin's pages keep working. This only covers
+/// events that arrive during maintenance. A click handler that started before
+/// it keeps running past its first await, beyond the reach of this hook, so
+/// its database work is guarded by <see cref="Data.MaintenanceDatabaseGuard"/>
+/// instead, which counts each command for the restore to wait on and refuses
+/// new ones once the site is closed.
 /// </para>
 /// </summary>
 public sealed class SessionRevalidationCircuitHandler : CircuitHandler
@@ -90,25 +92,18 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
                 SendToRefresh();
                 return;
             }
-            if (_maintenance.TryBeginJob())
+            if (_maintenance.IsActive)
             {
-                // Counted while it runs, so a restore that starts meanwhile
-                // waits for it rather than dropping the database under it.
-                try { await next(context); }
-                finally { _maintenance.EndJob(); }
-                return;
+                // The users table may be empty or gone, so the claim decides,
+                // as it does in the maintenance middleware.
+                var principal = (await _authState.GetAuthenticationStateAsync()).User;
+                if (principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) != "true")
+                {
+                    SendToMaintenancePage();
+                    return;
+                }
             }
-            // Maintenance mode is on. The users table may be empty or gone,
-            // so the claim decides, as it does in the maintenance middleware.
-            var principal = (await _authState.GetAuthenticationStateAsync()).User;
-            if (principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) != "true")
-            {
-                SendToMaintenancePage();
-                return;
-            }
-            _maintenance.BeginJobRegardless();
-            try { await next(context); }
-            finally { _maintenance.EndJob(); }
+            await next(context);
         };
 
     /// <summary>

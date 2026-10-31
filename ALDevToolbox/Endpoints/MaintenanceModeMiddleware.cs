@@ -13,6 +13,32 @@ namespace ALDevToolbox.Endpoints;
 /// </summary>
 internal static class MaintenanceModeMiddleware
 {
+    /// <summary>
+    /// A request that arrives while maintenance mode is on is
+    /// <see cref="UseMaintenanceMode"/>'s to decide: it answers 503 or lets
+    /// it through, and the stages ahead of it (authentication, the tool and
+    /// strong-auth gates) read the database to get there, as they did before
+    /// the database guard existed. So such a request may use the database.
+    /// Registered first, so the allowance covers the whole request. A request
+    /// already running when the restore began gets no allowance: its later
+    /// commands are refused unless it acts for a SiteAdmin (#1571, see
+    /// <see cref="Data.MaintenanceDatabaseGuard"/>).
+    /// </summary>
+    public static IApplicationBuilder UseMaintenanceDatabaseAllowance(this IApplicationBuilder app)
+    {
+        app.Use(async (ctx, next) =>
+        {
+            var maintenance = ctx.RequestServices.GetRequiredService<MaintenanceModeState>();
+            if (!maintenance.IsActive)
+            {
+                await next();
+                return;
+            }
+            using (maintenance.AllowDatabase()) await next();
+        });
+        return app;
+    }
+
     public static IApplicationBuilder UseMaintenanceMode(this IApplicationBuilder app)
     {
         app.Use(async (ctx, next) =>

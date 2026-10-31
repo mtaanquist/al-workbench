@@ -123,7 +123,6 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
         (await DispatchAsync(handler)).Should().BeFalse("a Build click must not write into the database being restored");
         _navigation.Navigations.Should().ContainSingle().Which.Should().Be(
             ("https://workbench.cronus.example/admin/administration/users", true));
-        maintenance.ActiveJobs.Should().Be(0);
     }
 
     [Fact]
@@ -136,33 +135,6 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
 
         (await DispatchAsync(handler)).Should().BeTrue("the SiteAdmin watches the restore from their own page");
         _navigation.Navigations.Should().BeEmpty();
-        maintenance.ActiveJobs.Should().Be(0, "the event released its slot when it finished");
-    }
-
-    [Fact]
-    public async Task An_event_in_progress_is_counted_so_a_restore_waits_for_it()
-    {
-        var userId = await SeedAsync(UserRole.User);
-        var maintenance = new MaintenanceModeState();
-        var handler = NewHandler(PrincipalFor(userId, UserRole.User), maintenance);
-        var release = new TaskCompletionSource();
-        var started = new TaskCompletionSource();
-        var pipeline = handler.CreateInboundActivityHandler(async _ =>
-        {
-            started.SetResult();
-            await release.Task;
-        });
-
-        var running = pipeline(null!);
-        await started.Task;
-        maintenance.ActiveJobs.Should().Be(1, "a click already running when the restore starts is in-flight work");
-        maintenance.Enter("Restoring a backup");
-        (await maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, CancellationToken.None)).Should().BeFalse();
-
-        release.SetResult();
-        await running;
-        maintenance.ActiveJobs.Should().Be(0);
-        (await maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, CancellationToken.None)).Should().BeTrue();
     }
 
     [Fact]

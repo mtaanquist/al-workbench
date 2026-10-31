@@ -251,6 +251,7 @@ public sealed class WorkerBaseTests
     public async Task PolledScheduler_counts_a_running_tick_as_an_active_job()
     {
         var maintenance = new MaintenanceModeState();
+        var allowedInTick = false;
         var inTick = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var scheduler = new TestScheduler(new WorkerHeartbeatRegistry(), "DISABLE_UNUSED_" + Guid.NewGuid().ToString("N"), maintenance)
@@ -259,14 +260,17 @@ public sealed class WorkerBaseTests
             {
                 inTick.TrySetResult(maintenance.ActiveJobs);
                 await release.Task;
+                allowedInTick = maintenance.DatabaseAllowedHere;
             },
         };
 
         var tick = scheduler.RunTickAsync(TestContext.Current.CancellationToken);
         (await inTick.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Should().Be(1);
+        maintenance.Enter("Restoring backup test.dump");
         release.SetResult();
         (await tick.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Should().BeTrue();
         maintenance.ActiveJobs.Should().Be(0, "the tick released its count when it finished");
+        allowedInTick.Should().BeTrue("the restore waits for a counted tick, so it may finish on the database (#1571)");
     }
 
     /// <summary>
@@ -389,12 +393,15 @@ public sealed class WorkerBaseTests
         var queue = new TestQueue(maintenance);
         var running = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowedAfterRestoreBegan = false;
         var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance, holds)
         {
             Body = async _ =>
             {
                 running.TrySetResult(maintenance.ActiveJobs);
                 await release.Task;
+                // The restore waits for this job, so the database guard must let it finish (#1571).
+                allowedAfterRestoreBegan = maintenance.DatabaseAllowedHere;
             },
         };
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
@@ -412,6 +419,8 @@ public sealed class WorkerBaseTests
             release.SetResult();
             (await worker.Finished.Reader.ReadAsync(cts.Token)).Should().Be(1);
             (await maintenance.WaitForActiveJobsAsync(TimeSpan.FromSeconds(5), cts.Token)).Should().BeTrue();
+            allowedAfterRestoreBegan.Should().BeTrue("a counted job may finish its database work");
+            maintenance.DatabaseAllowedHere.Should().BeFalse("the allowance stays inside the job");
         }
         finally
         {
@@ -435,10 +444,12 @@ public sealed class WorkerBaseTests
         var queue = new TestQueue(maintenance);
         var inBody = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool? allowed = null;
         var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance, holds: false)
         {
             Body = async _ =>
             {
+                allowed = maintenance.DatabaseAllowedHere;
                 inBody.TrySetResult(maintenance.ActiveJobs);
                 await release.Task; // deferring, as the webhook worker waits before requeueing
             },
@@ -453,6 +464,7 @@ public sealed class WorkerBaseTests
             (await inBody.Task.WaitAsync(cts.Token)).Should().Be(0);
             (await maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, cts.Token))
                 .Should().BeTrue("a restore does not wait for a job that only defers");
+            allowed.Should().BeFalse("an uncounted job must not reach the database during the restore (#1571)");
         }
         finally
         {

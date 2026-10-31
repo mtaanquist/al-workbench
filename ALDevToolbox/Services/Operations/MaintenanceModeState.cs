@@ -112,6 +112,36 @@ public sealed class MaintenanceModeState
     /// <summary>Releases what <see cref="TryBeginJob"/> or <see cref="BeginJobRegardless"/> claimed.</summary>
     public void EndJob() => Interlocked.Decrement(ref _activeJobs);
 
+    // ---- Database access during a restore (#1571) ---------------------------------
+
+    private readonly AsyncLocal<bool> _databaseAllowed = new();
+
+    /// <summary>
+    /// True in a flow that <see cref="Data.MaintenanceDatabaseGuard"/> lets reach
+    /// the database while maintenance mode is on.
+    /// </summary>
+    public bool DatabaseAllowedHere => _databaseAllowed.Value;
+
+    /// <summary>
+    /// Lets the current flow, and everything it awaits or starts, use the database
+    /// while maintenance mode is on, until the result is disposed. For the restore's
+    /// own work, a background job already counted on <see cref="ActiveJobs"/> (the
+    /// restore waits for it, so it must be able to finish), and a request that
+    /// arrived during maintenance, which the maintenance middleware decides.
+    /// Nothing else should take it.
+    /// </summary>
+    public IDisposable AllowDatabase()
+    {
+        var previous = _databaseAllowed.Value;
+        _databaseAllowed.Value = true;
+        return new DatabaseAllowance(this, previous);
+    }
+
+    private sealed class DatabaseAllowance(MaintenanceModeState owner, bool previous) : IDisposable
+    {
+        public void Dispose() => owner._databaseAllowed.Value = previous;
+    }
+
     /// <summary>
     /// Waits up to <paramref name="timeout"/> for every running job to finish. Call
     /// with the flag on, so no new job can start meanwhile. True when none is left.

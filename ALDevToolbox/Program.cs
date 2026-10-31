@@ -59,6 +59,11 @@ PublicOrigin.Log(app.Logger, publicOrigin);
 
 app.UseForwardedHeaders();
 
+// A request that arrives during a restore may use the database; the
+// maintenance gate further down decides what it gets (#1571). First, so it
+// covers everything the request runs. See Endpoints/MaintenanceModeMiddleware.cs.
+app.UseMaintenanceDatabaseAllowance();
+
 // Baseline security response headers (nosniff, Referrer-Policy,
 // X-Frame-Options and a CSP). Registered this early so *every* response
 // carries them - static assets, health probes, error pages, and the
