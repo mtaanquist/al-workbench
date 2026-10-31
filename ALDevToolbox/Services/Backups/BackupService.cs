@@ -265,6 +265,11 @@ public sealed class BackupService
     public async Task DeleteAsync(int id, CancellationToken ct = default)
     {
         RequireSiteAdmin();
+        // Under the backup lock, so a delete cannot unlink the file a restore has
+        // already checked and is about to load after dropping the schema (#1628).
+        // The lock refuses at once, so a delete during a backup or restore gets the
+        // usual "try again" message.
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
         var row = await _db.Backups.FirstOrDefaultAsync(b => b.Id == id, ct);
         if (row is null) return;
         if (row.IsPinned)
