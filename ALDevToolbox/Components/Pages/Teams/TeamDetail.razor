@@ -159,7 +159,8 @@
                 <p class="card__sub">
                     Managers can add and remove people on this team. It doesn't change what they
                     can do anywhere else. Members marked "Can schedule updates" may set Business
-                    Central update dates for the customers this team works on.
+                    Central update dates for the customers this team works on. Only an admin
+                    can change who is marked.
                 </p>
             </div>
             @if (_team.Members.Count == 0)
@@ -208,8 +209,11 @@
                             </td>
                             <td>
                                 @* A checkbox rather than a button: it is a state
-                                   somebody scans down the column for, not an action. *@
-                                @if (_canManage)
+                                   somebody scans down the column for, not an action.
+                                   Admins only: a team manager sees it read-only, because
+                                   the grant reaches the customer's production tenant
+                                   and a manager could otherwise give it to themselves. *@
+                                @if (_canAdminister)
                                 {
                                     <label class="u-row">
                                         <input type="checkbox" checked="@member.ManagesUpdates"
@@ -264,6 +268,7 @@
     private TeamRoster? _team;
     private bool _loading = true;
     private bool _canManage;
+    private bool _canAdminister;
     private bool _busy;
     private bool _renaming;
     private bool _adding;
@@ -282,6 +287,7 @@
         _loading = true;
         _team = await Teams.GetTeamAsync(Id);
         _canManage = _team is not null && await Teams.CanManageTeamAsync(Id);
+        _canAdminister = _canManage && await Teams.CanAdministerTeamsAsync();
         _loading = false;
     }
 

@@ -242,6 +242,45 @@ public sealed class TranslatorToolsTests : IDisposable
         hits[0].SourcePath.Should().BeNull();
     }
 
+    // ---- search_translation_memory: removed entries are the Editor's view (#1547)
+
+    private async Task<long> SeedRemovedEntryAsync()
+    {
+        var entryId = await SeedEntryAsync();
+        await using var ctx = _db.NewContext();
+        await ctx.TranslationMemory.Where(e => e.Id == entryId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.DeletedAt, DateTime.UtcNow));
+        return entryId;
+    }
+
+    [Fact]
+    public async Task A_plain_User_asking_for_removed_entries_does_not_get_them()
+    {
+        await SeedUserAsync(9109, UserRole.User);
+        await SeedRemovedEntryAsync();
+
+        await using var ctx = _db.NewContext();
+        var hits = await NewTools(ctx).SearchTranslationMemoryAsync("Posting Date", includeRemoved: true);
+
+        hits.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(UserRole.Editor, false)]
+    [InlineData(UserRole.Admin, false)]
+    [InlineData(UserRole.User, true)] // SiteAdmin overrides the org role
+    public async Task An_editor_asking_for_removed_entries_gets_them(UserRole role, bool isSiteAdmin)
+    {
+        await SeedUserAsync(9110, role, isSiteAdmin);
+        var entryId = await SeedRemovedEntryAsync();
+
+        await using var ctx = _db.NewContext();
+        var hits = await NewTools(ctx).SearchTranslationMemoryAsync("Posting Date", includeRemoved: true);
+
+        hits.Should().ContainSingle().Which.EntryId.Should().Be(entryId);
+        hits[0].Removed.Should().BeTrue();
+    }
+
     [Fact]
     public async Task Vote_on_another_orgs_entry_surfaces_as_not_found()
     {

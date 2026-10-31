@@ -46,10 +46,14 @@ public sealed class TranslatorTools
         [Description("Optional target-language filter (BCP-47, e.g. 'da-DK').")] string? targetLanguage = null,
         [Description("Optional kind filter: caption, tooltip, label, option, instructional, other.")] string? kind = null,
         [Description("Optional substring match on the provenance/origin (e.g. 'Base Application').")] string? origin = null,
-        [Description("Include soft-removed entries (default false).")] bool includeRemoved = false,
+        [Description("Include soft-removed entries (default false). Only honoured for the Editor or Admin role; ignored otherwise.")] bool includeRemoved = false,
         [Description("Max results (1-50, default 25). Raise it only when the entry you need is not in the first 25.")] int maxResults = 25,
         CancellationToken ct = default)
     {
+        // Removed entries are the curation page's view, which is Editor-only on the
+        // web; a plain User's assistant must not see what an Editor took out (#1547).
+        if (includeRemoved && !await IsEditorAsync(ct)) includeRemoved = false;
+
         var res = await _memory.SearchAsync(new MemorySearchQuery(
             query, sourceLanguage, targetLanguage,
             string.IsNullOrWhiteSpace(kind) ? null : kind,
@@ -163,16 +167,25 @@ public sealed class TranslatorTools
     /// </summary>
     private async Task RequireEditorAsync(CancellationToken ct)
     {
-        var userId = _orgContext.CurrentUserId
-            ?? throw new McpException("No user in scope; call this from an authenticated MCP session.");
+        if (_orgContext.CurrentUserId is null)
+            throw new McpException("No user in scope; call this from an authenticated MCP session.");
+        if (!await IsEditorAsync(ct))
+        {
+            throw new McpException("Removing translation memory entries requires the Editor or Admin role.");
+        }
+    }
+
+    /// <summary>True for an Editor / Admin (or a SiteAdmin) — the web curation page's audience.</summary>
+    private async Task<bool> IsEditorAsync(CancellationToken ct)
+    {
+        if (_orgContext.IsSiteAdmin) return true;
+        var userId = _orgContext.CurrentUserId;
+        if (userId is null) return false;
         var role = await _db.Users.AsNoTracking()
             .Where(u => u.Id == userId)
             .Select(u => (UserRole?)u.Role)
             .FirstOrDefaultAsync(ct);
-        if (!_orgContext.IsSiteAdmin && role is not (UserRole.Editor or UserRole.Admin))
-        {
-            throw new McpException("Removing translation memory entries requires the Editor or Admin role.");
-        }
+        return role is UserRole.Editor or UserRole.Admin;
     }
 }
 

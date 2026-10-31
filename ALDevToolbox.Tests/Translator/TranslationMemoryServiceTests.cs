@@ -826,6 +826,52 @@ public sealed class TranslationMemoryServiceTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Voting_on_a_pair_from_a_hidden_solution_answers_not_found()
+    {
+        // #1547: the id leaks through the repository, so the vote must not change the
+        // ranking for the team or return the score that confirms the entry exists.
+        await SeedPrivateAndPublicSolutionsAsync();
+        var hiddenId = await EntryIdAsync("Rebate scheme", "Hemmelig");
+        var visibleId = await EntryIdAsync("Bin code", "Delt");
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            var act = () => memory.VoteAsync(hiddenId, 1);
+            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+            (await memory.VoteAsync(visibleId, 1)).Score.Should().Be(1);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.TranslationMemory.AsNoTracking().SingleAsync(e => e.Id == hiddenId)).Score.Should().Be(0);
+        (await read.TranslationMemoryVotes.AnyAsync(v => v.EntryId == hiddenId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Removing_a_pair_from_a_hidden_solution_answers_not_found()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+        var hiddenId = await EntryIdAsync("Rebate scheme", "Hemmelig");
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewMemory(ctx).DeleteAsync(hiddenId);
+            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+        }
+
+        // The owner still can, so the gate is visibility and not a blanket refusal.
+        _db.OrgContext.CurrentUserId = OwnerId;
+        await using (var ctx = _db.NewContext())
+        {
+            await NewMemory(ctx).DeleteAsync(hiddenId);
+        }
+        await using var read = _db.NewContext();
+        (await read.TranslationMemory.AsNoTracking().SingleAsync(e => e.Id == hiddenId)).DeletedAt.Should().NotBeNull();
+    }
+
     private async Task SeedPrivateAndPublicSolutionsAsync()
     {
         await using var ctx = _db.NewContext();

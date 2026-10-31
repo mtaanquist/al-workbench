@@ -396,9 +396,15 @@ public sealed record SuggestRecipeInput(
     IReadOnlyList<RecipeFileInputDto> Files,
     string? Instructions = null,
     int? MinimumApplicationVersionId = null,
-    decimal? EstimatedValueHours = null)
+    decimal? EstimatedValueHours = null,
+    string? MinimumApplication = null)
 {
-    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain() => new(
+    /// <summary>
+    /// Builds the service input. The minimum version id is resolved by the tool
+    /// first, from <c>MinimumApplicationVersionId</c> or the
+    /// <c>MinimumApplication</c> string (#1547), since no tool exposes the id.
+    /// </summary>
+    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain(int? minimumApplicationVersionId) => new(
         Title,
         Description,
         Keywords,
@@ -407,7 +413,7 @@ public sealed record SuggestRecipeInput(
             .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content ?? string.Empty, f.RelativePath))
             .ToList(),
         Instructions,
-        MinimumApplicationVersionId,
+        minimumApplicationVersionId,
         EstimatedValueHours);
 
     internal static ALDevToolbox.Domain.ValueObjects.RecipeType ParseType(string? raw)
@@ -441,9 +447,15 @@ public sealed record UpdateRecipeSuggestionInput(
     IReadOnlyList<RecipeFileInputDto> Files,
     string? Instructions = null,
     int? MinimumApplicationVersionId = null,
-    decimal? EstimatedValueHours = null)
+    decimal? EstimatedValueHours = null,
+    string? MinimumApplication = null)
 {
-    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain() => new(
+    /// <summary>
+    /// Builds the service input. The minimum version id is resolved by the tool
+    /// first, from <c>MinimumApplicationVersionId</c> or the
+    /// <c>MinimumApplication</c> string (#1547), since no tool exposes the id.
+    /// </summary>
+    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain(int? minimumApplicationVersionId) => new(
         Title,
         Description,
         Keywords,
@@ -452,7 +464,7 @@ public sealed record UpdateRecipeSuggestionInput(
             .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content ?? string.Empty, f.RelativePath))
             .ToList(),
         Instructions,
-        MinimumApplicationVersionId,
+        minimumApplicationVersionId,
         EstimatedValueHours);
 }
 

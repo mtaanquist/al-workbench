@@ -450,7 +450,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     }
 
     [Fact]
-    public void A_restore_that_fails_after_continue_lets_go_of_the_session_so_it_can_be_offered_again()
+    public async Task A_restore_that_fails_after_continue_lets_go_of_the_session_so_it_can_be_offered_again()
     {
         _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true).SetResult(new TranslatorPage.SessionMeta
         {
@@ -462,9 +462,14 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         var cut = RenderWithStoredSession();
         var releasesBefore = _module.Invocations["release"].Count;
 
-        var restore = () => cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+        // Awaited rather than the synchronous Click(): that only rethrows when the
+        // handler has already faulted by the time it returns, and on a loaded runner
+        // the renderer can still be finishing the first render, so the dispatch is
+        // queued and Click() returned clean (seen on #1638's CI, shard a).
+        var restore = () => cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue")
+            .ClickAsync(new Microsoft.AspNetCore.Components.Web.MouseEventArgs());
 
-        restore.Should().Throw<JSException>();
+        await restore.Should().ThrowAsync<JSException>();
         _module.Invocations["release"].Should().HaveCount(releasesBefore + 1,
             "the browser moved the session to an id this tab would otherwise go on holding");
     }

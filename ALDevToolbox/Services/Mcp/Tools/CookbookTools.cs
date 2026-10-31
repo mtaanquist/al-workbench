@@ -286,7 +286,9 @@ public sealed class CookbookTools
         "with customer-specific names stripped) that the team's Cookbook is missing. " +
         "Provide a descriptive Title, a 1-3 sentence Description of when to use it, comma-separated Keywords, " +
         "a Type (Snippet / Pattern / Module — see get_cookbook_guidance for definitions), and one or more files. " +
-        "Optionally propose EstimatedValueHours — roughly how many hours of implementer work the recipe saves. " +
+        "Optionally propose EstimatedValueHours — roughly how many hours of implementer work the recipe saves — and " +
+        "MinimumApplication, the oldest Business Central application version the recipe works on (e.g. '24.0.0.0', " +
+        "or a version's name). " +
         "Each file has a flat FileName (no slashes), an optional RelativePath for the folder it lives in (no '..', " +
         "no leading '/', empty = root), and the file body in Content. Returns the new SuggestionId.")]
     public async Task<SuggestRecipeResult> SuggestAsync(
@@ -298,7 +300,9 @@ public sealed class CookbookTools
 
         try
         {
-            var id = await _suggestions.SubmitAsync(input.ToDomain(), ct);
+            var minimumVersionId = await ResolveSuggestedMinimumVersionAsync(
+                input.MinimumApplicationVersionId, input.MinimumApplication, ct);
+            var id = await _suggestions.SubmitAsync(input.ToDomain(minimumVersionId), ct);
             return new SuggestRecipeResult(
                 id,
                 "Submitted for review. An admin will approve or reject it at /admin/cookbook/suggestions.");
@@ -319,7 +323,7 @@ public sealed class CookbookTools
         "file list, so include every file you want the suggestion to end up with, not just the ones " +
         "you're changing. Returns the unchanged SuggestionId on success.")]
     public async Task<UpdateRecipeSuggestionResult> UpdateSuggestionAsync(
-        [Description("The replacement payload, including the id of the suggestion to update and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe: Title, Description and Type required, Files non-empty, FileName flat (no slashes or '..'), RelativePath relative (no leading '/', no '..').")] UpdateRecipeSuggestionInput input,
+        [Description("The replacement payload, including the id of the suggestion to update and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe: Title, Description and Type required, Files non-empty, FileName flat (no slashes or '..'), RelativePath relative (no leading '/', no '..'), optional MinimumApplication (e.g. '24.0.0.0'; omit for none).")] UpdateRecipeSuggestionInput input,
         CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
@@ -327,7 +331,9 @@ public sealed class CookbookTools
 
         try
         {
-            await _suggestions.UpdateAsync(input.SuggestionId, input.ToDomain(), ct);
+            var minimumVersionId = await ResolveSuggestedMinimumVersionAsync(
+                input.MinimumApplicationVersionId, input.MinimumApplication, ct);
+            await _suggestions.UpdateAsync(input.SuggestionId, input.ToDomain(minimumVersionId), ct);
             return new UpdateRecipeSuggestionResult(
                 input.SuggestionId,
                 "Updated. The suggestion is still Pending at /admin/cookbook/suggestions.");
@@ -492,7 +498,31 @@ public sealed class CookbookTools
             return keptId;
         }
 
-        var wanted = input.MinimumApplication.Trim();
+        return await MatchVersionAsync(input.MinimumApplication, currentId, ct);
+    }
+
+    /// <summary>
+    /// The minimum version a suggestion stores: an explicit id wins, otherwise
+    /// <c>MinimumApplication</c> is matched the way <c>update_recipe</c> matches it,
+    /// and leaving both out (or an empty string) means none. A suggestion is a full
+    /// replace, so unlike <c>update_recipe</c> there is no stored value to keep.
+    /// Before #1547 these tools took only the id, which no tool returns.
+    /// </summary>
+    private async Task<int?> ResolveSuggestedMinimumVersionAsync(int? explicitId, string? minimumApplication, CancellationToken ct)
+    {
+        if (explicitId is int id) return id;
+        if (minimumApplication is null) return null;
+        return await MatchVersionAsync(minimumApplication, currentId: null, ct);
+    }
+
+    /// <summary>
+    /// Matches a version string against the organisation's version catalogue by
+    /// application version, name or key; empty means none. <paramref name="currentId"/>
+    /// breaks a tie in favour of the row already stored.
+    /// </summary>
+    private async Task<int?> MatchVersionAsync(string minimumApplication, int? currentId, CancellationToken ct)
+    {
+        var wanted = minimumApplication.Trim();
         if (wanted.Length == 0) return null;
 
         var lowered = wanted.ToLowerInvariant();
@@ -513,7 +543,7 @@ public sealed class CookbookTools
             1 => matches[0].Id,
             0 => throw new McpException(
                 $"No Business Central version '{wanted}' in your organisation's version list. " +
-                "Use the application version get_recipe returns as MinimumApplication (e.g. '24.0.0.0') or the version's name, " +
+                "Use an application version as MinimumApplication (e.g. '24.0.0.0', as get_recipe returns it) or the version's name, " +
                 "or an empty string to remove the minimum version."),
             _ => throw new McpException(
                 $"'{wanted}' matches more than one version: " +
