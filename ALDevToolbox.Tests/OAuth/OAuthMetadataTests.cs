@@ -5,6 +5,7 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
 using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Tests.OAuth;
@@ -79,6 +80,27 @@ public sealed class OAuthMetadataTests : IDisposable
             "the pointer parameter is required for Claude to find the OAuth server.");
         bearer.Parameter.Should().Contain("/.well-known/oauth-protected-resource",
             "the URL must point at the RFC 9728 document Claude knows how to read.");
+    }
+
+    [Fact]
+    public async Task Mcp_401_points_at_the_configured_public_origin_when_there_is_one()
+    {
+        // #1617: behind a proxy that does not forward the public host, the request's
+        // own host is an address the assistant cannot reach.
+        await EnableMcpAsync();
+        using var factory = new EndpointFactory(_db, services =>
+            services.AddSingleton(new ALDevToolbox.Endpoints.PublicOrigin("https://workbench.cronus.example")));
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        response.Headers.WwwAuthenticate.Single(h => h.Parameter?.Contains("resource_metadata") == true).Parameter.Should()
+            .Be("resource_metadata=\"https://workbench.cronus.example/.well-known/oauth-protected-resource\"");
     }
 
     [Fact]
