@@ -149,12 +149,13 @@ public sealed class TranslatorRepositorySaveTests
         var js = File.ReadAllText(ALDevToolbox.Tests.Infrastructure.RepoRoot.Combine(
             "ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
 
-        js.Should().Contain("putBaseStream(fileName, sourceLang, targetLang, streamRef, repo)")
+        js.Should().Contain("putBaseStream(fileName, sourceLang, targetLang, streamRef, repo, replaceOpenId)")
             .And.Contain("repo: repo || null")
             .And.Contain("repo: rec.repo || null")
-            // An overlay is never written onto another file's record (a second tab's).
-            .And.Contain("export async function putEdits(fileName, editsJson, learnedJson)")
-            .And.Contain("rec.fileName !== fileName");
+            // An overlay is never written onto another open's record (a second
+            // tab's), even one with the same file name (#1574).
+            .And.Contain("export async function putEdits(openId, editsJson, learnedJson)")
+            .And.Contain("const rec = await getOwnRec(openId);");
     }
 
     // Blazor's JS interop deserialises with the web defaults.

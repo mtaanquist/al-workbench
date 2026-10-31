@@ -49,6 +49,26 @@ async function getRec() {
     }
 }
 
+// Every open writes a fresh record and stamps it with a random id, which goes
+// back to the tab that opened it. The browser keeps one record for the whole
+// site, so a second tab's open replaces the first tab's; the id is how a tab
+// tells its own record from that one. Everything that reads the base or the
+// handle on a tab's behalf, or writes onto the record, takes the tab's id and
+// refuses when the record carries another (#1595, #1574). Comparing names was
+// not enough: two languages of one app share their trans-unit ids, and two
+// copies of `App.da-DK.xlf` share their name.
+function newOpenId() {
+    return (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+        ? crypto.randomUUID()
+        : Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+// The record when it is still the one `openId` opened, null otherwise.
+async function getOwnRec(openId) {
+    const rec = await getRec();
+    return rec && openId && rec.openId === openId ? rec : null;
+}
+
 async function putRec(rec) {
     try {
         rec.savedAt = Date.now();
@@ -70,22 +90,29 @@ async function putRec(rec) {
 // Resets the edit overlay. `repo` ({ repository, path }) is where a file opened
 // from a repository came from, null otherwise: a restored session has to know,
 // so its export still teaches the translation memory nothing (#1540).
-export async function putBaseStream(fileName, sourceLang, targetLang, streamRef, repo) {
+// Returns the record's open id, which the tab passes back on every later call.
+// `replaceOpenId`, when passed, rebases the tab's own record rather than opening
+// a file: it writes only while the record is still that open's, and returns
+// null (writing nothing) when another tab has replaced it.
+export async function putBaseStream(fileName, sourceLang, targetLang, streamRef, repo, replaceOpenId) {
+    if (arguments.length > 5 && !(await getOwnRec(replaceOpenId))) return null;
     const buf = await streamRef.arrayBuffer();
     const originalXml = new TextDecoder("utf-8").decode(buf);
-    await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null });
+    const openId = newOpenId();
+    await putRec({ openId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null });
+    return openId;
 }
 
 // Debounced incremental edit save (for resume). `editsJson` is the full overlay;
 // `learnedJson` is what each unit last taught the translation memory, kept
 // beside it so a reload does not teach the same units again (#1343).
-// `fileName` is the file this tab has open: when the record holds another file
-// (a second tab opened one since), the overlay does not belong to it, and
-// writing it there would restore one file's edits - and repository origin -
-// onto another.
-export async function putEdits(fileName, editsJson, learnedJson) {
-    const rec = await getRec();
-    if (!rec || rec.fileName !== fileName) return;
+// `openId` is the open this tab holds: when the record is another open's (a
+// second tab opened a file since, even one with the same name), the overlay
+// does not belong to it, and writing it there would restore one file's edits
+// - and repository origin - onto another.
+export async function putEdits(openId, editsJson, learnedJson) {
+    const rec = await getOwnRec(openId);
+    if (!rec) return;
     try {
         rec.edits = JSON.parse(editsJson);
         if (learnedJson) rec.learned = JSON.parse(learnedJson);
@@ -93,8 +120,8 @@ export async function putEdits(fileName, editsJson, learnedJson) {
     await putRec(rec);
 }
 
-export async function putMeta(fileName, targetLang) {
-    const rec = await getRec();
+export async function putMeta(openId, fileName, targetLang) {
+    const rec = await getOwnRec(openId);
     if (!rec) return;
     rec.fileName = fileName;
     rec.targetLang = targetLang;
@@ -110,10 +137,17 @@ export async function peek() {
 }
 
 // Small metadata for an explicit restore (no original XML — that streams).
+// The restoring tab takes over the record's open id; a record saved before ids
+// existed is given one here.
 export async function loadMeta() {
     const rec = await getRec();
     if (!rec) return null;
+    if (!rec.openId) {
+        rec.openId = newOpenId();
+        await putRec(rec);
+    }
     return {
+        openId: rec.openId,
         fileName: rec.fileName,
         sourceLang: rec.sourceLang || null,
         targetLang: rec.targetLang || null,
@@ -125,13 +159,17 @@ export async function loadMeta() {
 
 // The verbatim original, returned as an ArrayBuffer so .NET receives it as an
 // IJSStreamReference and reads it as a stream (bypasses the hub size limit).
-export async function loadOriginalStream() {
-    const rec = await getRec();
+// Empty when another tab has replaced the record since `openId` was handed out.
+export async function loadOriginalStream(openId) {
+    const rec = await getOwnRec(openId);
     const xml = rec && rec.originalXml ? rec.originalXml : "";
     return new TextEncoder().encode(xml).buffer;
 }
 
-export async function clear() {
+// With `openId`, removes the record only while it is still that open's, so
+// closing a file in one tab does not throw away another tab's session.
+export async function clear(openId) {
+    if (openId && !(await getOwnRec(openId))) return;
     try {
         const db = await openDb();
         await new Promise((resolve, reject) => {
@@ -149,11 +187,15 @@ export async function clear() {
 // that returns the file as a download.
 // learnJson lists the unit ids the translation memory should learn from this
 // export: the edits whose text changed since the last save (#1343).
-export async function exportNow(fileName, editsJson, learnJson) {
+// Returns "exported", "empty", or "replaced" when another tab has since opened
+// a file over this tab's record: its base is not this tab's file, so nothing
+// is posted.
+export async function exportNow(openId, fileName, editsJson, learnJson) {
     const rec = await getRec();
-    if (!rec || !rec.originalXml) return false;
+    if (!rec || !rec.originalXml) return "empty";
+    if (rec.openId !== openId) return "replaced";
     const form = document.getElementById("tr-export-form");
-    if (!form) return false;
+    if (!form) return "empty";
     // The form submit below is a navigation, which would otherwise fire the
     // unsaved-changes beforeunload prompt. Detach it first — exporting is a
     // deliberate save, not an accidental exit.
@@ -169,7 +211,7 @@ export async function exportNow(fileName, editsJson, learnJson) {
     const lang = form.querySelector("#tr-export-target-language");
     if (lang) lang.value = rec.targetLang || "";
     form.submit();
-    return true;
+    return "exported";
 }
 
 // ── In-place file editing (File System Access API) ──────────────────────────
@@ -186,12 +228,13 @@ export function supportsFsAccess() {
 }
 
 // Reads a picked/dropped handle into a fresh session record and persists the
-// handle for later in-place saves. Returns { fileName } or null.
+// handle for later in-place saves. Returns { fileName, openId } or null.
 async function adoptHandle(handle) {
     const file = await handle.getFile();
     const originalXml = await file.text();
-    await putRec({ fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });
-    return { fileName: file.name };
+    const openId = newOpenId();
+    await putRec({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });
+    return { fileName: file.name, openId };
 }
 
 // Click-to-open on supported browsers. Wired directly to the button's click in
@@ -217,7 +260,7 @@ export function initPicker(buttonSelector) {
             return;
         }
         const res = await adoptHandle(handle);
-        if (res && dotNetRef) await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName);
+        if (res && dotNetRef) await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName, res.openId);
     };
     btn.addEventListener("click", onClick);
     pickerTeardown = () => btn.removeEventListener("click", onClick);
@@ -229,8 +272,8 @@ export function teardownPicker() {
 
 // True when the current session was opened with a writable handle (so Save can
 // write in place rather than download). Used after a refresh/restore.
-export async function hasHandle() {
-    const rec = await getRec();
+export async function hasHandle(openId) {
+    const rec = await getOwnRec(openId);
     return !!(rec && rec.handle);
 }
 
@@ -247,10 +290,14 @@ async function ensureWritePermission(handle) {
 // still runs server-side (the same /api/translator/export endpoint the download
 // path posts to) so XliffTargetWriter stays the single source of truth — we
 // just fetch the result instead of navigating to it, then write the bytes to
-// the handle. Returns a status: "saved" | "empty" | "no-handle" | "denied" | "error".
-export async function saveInPlace(fileName, editsJson, learnJson) {
+// the handle. Returns a status: "saved" | "empty" | "replaced" | "no-handle" |
+// "denied" | "error". "replaced" means another tab has opened a file over this
+// tab's record: its base and handle are that other file's, so nothing is
+// posted or written - writing through it would overwrite the other file.
+export async function saveInPlace(openId, fileName, editsJson, learnJson) {
     const rec = await getRec();
     if (!rec || !rec.originalXml) return "empty";
+    if (rec.openId !== openId) return "replaced";
     if (!rec.handle) return "no-handle";
     const handle = rec.handle;
     // What the session record held when the save began, to tell afterwards
@@ -294,7 +341,7 @@ export async function saveInPlace(fileName, editsJson, learnJson) {
     // to overwrite edits typed during the save (#1268, L44); a newer overlay
     // already holds everything this one does, so it is left as it is.
     try {
-        const latest = await getRec();
+        const latest = await getOwnRec(openId);
         if (latest && JSON.stringify(latest.edits || {}) === editsAtStart) {
             latest.edits = JSON.parse(editsJson);
             await putRec(latest);
@@ -386,7 +433,7 @@ export function initDropZone(zoneSelector, inputSelector) {
             item.getAsFileSystemHandle().then(async (handle) => {
                 if (handle && handle.kind === "file" && dotNetRef) {
                     const res = await adoptHandle(handle);
-                    if (res) { await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName); return; }
+                    if (res) { await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName, res.openId); return; }
                 }
                 useFileInput(droppedFile);
             }).catch(() => useFileInput(droppedFile));
