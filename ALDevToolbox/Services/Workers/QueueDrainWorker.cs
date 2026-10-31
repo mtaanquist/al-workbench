@@ -117,7 +117,7 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
                 {
                     // Taken just as a restore began: it has not touched the database,
                     // so hold it rather than make the restore wait for it.
-                    if (!_maintenance.TryBeginJob())
+                    if (!_maintenance.TryBeginJob(_name))
                     {
                         _logger.LogInformation(
                             "{Worker} is holding {Job}: maintenance mode is active.", _name, Describe(job));
@@ -126,7 +126,7 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
                         {
                             await WaitUntilOpenAsync(stoppingToken).ConfigureAwait(false);
                         }
-                        while (!_maintenance.TryBeginJob());
+                        while (!_maintenance.TryBeginJob(_name));
                     }
                     counted = true;
                     if (_maintenance.Epoch != epoch)
@@ -138,7 +138,7 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
                         return;
                     }
                 }
-                else if (_maintenance.TryBeginJob())
+                else if (_maintenance.TryBeginJob(_name))
                 {
                     counted = true;
                 }
@@ -170,7 +170,7 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
         }
         finally
         {
-            if (counted) _maintenance!.EndJob();
+            if (counted) _maintenance!.EndJob(_name);
             OnJobFinished(job);
             if (active) Heartbeat.EndActive();
         }

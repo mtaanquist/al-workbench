@@ -25,6 +25,56 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
     public void Dispose() => _f.Dispose();
 
+    /// <summary>
+    /// A sweep is counted like any background job, so a restore waits for a step that
+    /// is polling an install instead of dropping the database under it; and no sweep
+    /// starts while the site is closed (#1579).
+    /// </summary>
+    [Fact]
+    public async Task A_sweep_is_counted_for_the_restore_and_none_starts_during_one()
+    {
+        var maintenance = new ALDevToolbox.Services.Operations.MaintenanceModeState();
+        var worker = _f.Worker(maintenance: maintenance);
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+
+        maintenance.Enter("Restoring a backup");
+        (await worker.RunSweepAsync(new HashSet<int>(), CancellationToken.None)).Should().BeFalse();
+        maintenance.ActiveJobs.Should().Be(0);
+        _f.Admin.Writes.Should().Be(0, "nothing is sent while the site is closed");
+
+        maintenance.Exit();
+        // Hold the sweep inside its Business Central read, as a long install poll would.
+        var inside = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var updates = _f.Admin.OnUpdates;
+        _f.Admin.OnUpdates = () =>
+        {
+            inside.TrySetResult();
+            release.Wait(TimeSpan.FromSeconds(30));
+            return updates();
+        };
+        var sweep = Task.Run(() => worker.RunSweepAsync(new HashSet<int>(), CancellationToken.None));
+        await inside.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        maintenance.ActiveJobs.Should().Be(1, "a running sweep is counted");
+        maintenance.RunningJobs().Named.Should().Equal(nameof(UpgradeActionWorker));
+        // A restore that starts now waits for the sweep rather than dropping the database under it.
+        maintenance.Enter("Restoring a backup");
+        (await maintenance.WaitForActiveJobsAsync(TimeSpan.FromMilliseconds(300), CancellationToken.None))
+            .Should().BeFalse("the sweep is still running");
+
+        release.Set();
+        (await sweep.WaitAsync(TimeSpan.FromSeconds(30))).Should().BeTrue();
+        (await maintenance.WaitForActiveJobsAsync(TimeSpan.FromSeconds(5), CancellationToken.None))
+            .Should().BeTrue("the sweep's count is released when it ends");
+        maintenance.RunningJobs().Named.Should().BeEmpty();
+        maintenance.Exit();
+        (await _f.ReadActionAsync(actionId)).Status.Should().Be(UpgradeActionStatus.Sent,
+            "the sweep started while the site was open finishes its write even after the restore began");
+    }
+
     [Fact]
     public async Task A_due_action_is_sent_and_attributed_to_the_person_who_booked_it()
     {

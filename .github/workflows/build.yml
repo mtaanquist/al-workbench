@@ -292,9 +292,12 @@ jobs:
           load: true
           tags: ${{ steps.image.outputs.name }}
           # Same default cache scope as release.yml, so main-branch runs warm
-          # the cache the release build reads and vice versa.
+          # the cache the release build reads and vice versa. Only pushes write
+          # it: a pull request's cache is readable by that pull request alone,
+          # yet counts against the repository's 10 GB and can evict the entries
+          # the release build reads (#1579).
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
 
       - name: Start the stack
         # Postgres is pulled first because `--pull never` applies to every

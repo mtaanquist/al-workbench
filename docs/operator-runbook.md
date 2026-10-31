@@ -122,14 +122,18 @@ Once the site is closed, the restore stops background work from starting and
 waits up to a minute for imports, builds and background sweeps that are
 already running, and for any database command that is still in progress,
 including one started by a click on an open page. If one is still running
-after that, the restore is refused, the site reopens and nothing has changed:
-wait until imports and builds have finished and try again. A download from
+after that, the restore is refused, the site reopens and nothing has changed.
+The message names what was still running (an import, a deployment, the
+nightly Object Explorer clean-up, ...): wait until it has finished and try
+again. A download from
 off-site storage counts too: if one is running, let it finish before you
 restore. One started while a restore runs waits until the restore is over.
 Imports, builds and
 solution scans that were only waiting in line are dropped when the restore
 completes, because they belong to the database it replaced; start them again
-afterwards if they are still needed.
+afterwards if they are still needed. A build or backfill that was already
+waiting when the backup was taken comes back from the dump still marked as
+waiting, so it can only be started again after the restart described above.
 
 While the site is closed, anyone other than a site administrator who clicks
 on a page they already had open is taken to the maintenance page, and

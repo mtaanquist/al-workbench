@@ -878,7 +878,9 @@ public sealed class BackupServiceTests : IDisposable
         Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
         var (tool, restored) = MarkingRestoreTool();
         var backupId = await AddBackupRowWithFileAsync();
-        _maintenance.BeginJobRegardless(); // An import that is mid-ingest.
+        _maintenance.BeginJobRegardless("ReleaseImportWorker"); // An import that is mid-ingest.
+        _maintenance.BeginJobRegardless("ObjectExplorerVacuumScheduler"); // The nightly clean-up.
+        _maintenance.BeginJobRegardless(); // A page query in flight.
         try
         {
             Func<Task> act = () => NewService(_options with
@@ -888,14 +890,18 @@ public sealed class BackupServiceTests : IDisposable
             }).RestoreAsync(backupId);
 
             var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            // It says what is still running, in words rather than worker names (#1579).
             ex.Which.Errors["BackupId"].Should().Contain("still running")
-                .And.Contain("until imports and builds have finished")
-                .And.Contain("a page that is still loading or saving", "a long page query is counted too (#1571)");
+                .And.Contain("Still running: the nightly Object Explorer clean-up, an import, a database operation still finishing.")
+                .And.NotContain("Worker").And.NotContain("Scheduler");
         }
         finally
         {
+            _maintenance.EndJob("ReleaseImportWorker");
+            _maintenance.EndJob("ObjectExplorerVacuumScheduler");
             _maintenance.EndJob();
         }
+        _maintenance.RunningJobs().Named.Should().BeEmpty();
         _maintenance.IsActive.Should().BeFalse("nothing was changed, so the site reopens");
         _maintenance.Epoch.Should().Be(0, "nothing was replaced, so queued jobs stay valid");
         File.Exists(restored).Should().BeFalse("nothing was dropped or restored");
