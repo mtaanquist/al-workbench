@@ -132,7 +132,13 @@ While the site is closed, anyone other than a site administrator who clicks
 on a page they already had open is taken to the maintenance page, and
 anything still trying to read or save on their behalf gets an error instead
 of reaching the database. Pages left open that refresh themselves show errors
-until the site reopens; a reload fixes them.
+until the site reopens; a reload fixes them. Assistants connected over OAuth
+or an access token get the maintenance response and retry later.
+
+Site administrators keep the site administration pages. Elsewhere in the app
+they can look but not save until the restore is over. Saving a setting on a
+site administration page while a restore runs is not held back, and can
+collide with the restore: leave those pages alone until it has finished.
 
 What it cannot catch is a file that reads cleanly but that the database then
 refuses part-way through loading it. That is the case below.

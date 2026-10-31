@@ -69,7 +69,8 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         NavigationManager navigation,
         TimeProvider clock,
         MaintenanceModeState maintenance,
-        ILogger<SessionRevalidationCircuitHandler> logger)
+        ILogger<SessionRevalidationCircuitHandler> logger,
+        MaintenanceDatabaseGuard? databaseGuard = null)
     {
         _authState = authState;
         _dbFactory = dbFactory;
@@ -78,6 +79,25 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         _clock = clock;
         _maintenance = maintenance;
         _logger = logger;
+        // The guard lets a SiteAdmin's circuit use the database during a restore
+        // only while it shows a SiteAdmin console page (#1571).
+        if (databaseGuard is not null) databaseGuard.CircuitOnSiteAdminConsole = OnSiteAdminConsole;
+    }
+
+    private bool OnSiteAdminConsole()
+    {
+        try
+        {
+            var relative = _navigation.ToBaseRelativePath(_navigation.Uri);
+            var cut = relative.IndexOfAny(['?', '#']);
+            var path = new PathString("/" + (cut < 0 ? relative : relative[..cut]));
+            return path.StartsWithSegments(HttpOrganizationContext.SiteAdminPathPrefix);
+        }
+        catch (InvalidOperationException)
+        {
+            // Not initialised yet: no page, so not the console.
+            return false;
+        }
     }
 
     public override Func<CircuitInboundActivityContext, Task> CreateInboundActivityHandler(

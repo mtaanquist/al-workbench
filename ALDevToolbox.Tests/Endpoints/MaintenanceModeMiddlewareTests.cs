@@ -95,6 +95,42 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The OAuth token endpoints and the Microsoft sign-in callback are handled
+    /// inside authentication, ahead of the gate, and would write (a refresh
+    /// grant's token rows, a first sign-in's user). They get the maintenance
+    /// page before authentication runs (#1571). The personal access token
+    /// side is pinned in <c>PatAuthenticationHandlerTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task During_a_restore_the_token_endpoints_and_sign_in_callbacks_are_closed_before_they_can_write()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var anonymous = factory.CreateClient();
+        var maintenance = factory.Services.GetRequiredService<MaintenanceModeState>();
+        maintenance.Enter("Restoring from a backup.");
+        try
+        {
+            foreach (var path in new[] { "/oauth/token", "/oauth/revoke", "/oauth/introspect" })
+            {
+                using var response = await anonymous.PostAsync(path, new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "refresh_token",
+                    ["refresh_token"] = "a-refresh-token",
+                    ["client_id"] = "cronus-assistant",
+                }), TestContext.Current.CancellationToken);
+                response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable, path);
+                (await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken)).Should().Contain(MaintenancePage);
+            }
+
+            await AssertGatedAsync(anonymous, "/signin-microsoft?code=abc&state=xyz");
+        }
+        finally
+        {
+            maintenance.Exit();
+        }
+    }
+
     private static async Task AssertGatedAsync(HttpClient client, string path)
     {
         using var response = await client.GetAsync(path);

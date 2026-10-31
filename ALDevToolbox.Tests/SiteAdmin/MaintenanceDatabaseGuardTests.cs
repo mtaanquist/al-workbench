@@ -4,6 +4,7 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
@@ -23,12 +24,13 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
 
     public void Dispose() => _db.Dispose();
 
-    private AppDbContext NewGuardedContext(bool siteAdmin = false) =>
-        _db.NewContext(new MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext
-        {
-            CurrentOrganizationId = TestDb.DefaultOrgId,
-            IsSiteAdmin = siteAdmin,
-        }));
+    private AppDbContext NewGuardedContext(bool siteAdmin = false, string? requestPath = null) =>
+        _db.NewContext(NewGuard(siteAdmin, requestPath));
+
+    private MaintenanceDatabaseGuard NewGuard(bool siteAdmin = false, string? requestPath = null) =>
+        new(_maintenance,
+            new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId, IsSiteAdmin = siteAdmin },
+            new TestDb.FixedHttpContextAccessor(requestPath is null ? null : new DefaultHttpContext { Request = { Path = requestPath } }));
 
     [Fact]
     public async Task While_the_site_is_open_commands_run_and_release_their_count()
@@ -107,7 +109,7 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     }
 
     [Fact]
-    public async Task The_restores_own_work_and_a_site_admin_still_reach_the_database()
+    public async Task The_restores_own_work_reaches_the_database_uncounted_and_the_allowance_ends_with_its_scope()
     {
         _maintenance.Enter("Restoring backup test.dump");
 
@@ -115,11 +117,8 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
         using (_maintenance.AllowDatabase())
         {
             await ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
-        }
-
-        await using (var siteAdmin = NewGuardedContext(siteAdmin: true))
-        {
-            await siteAdmin.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+            ctx.Users.Add(NewUser());
+            await ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         _maintenance.ActiveJobs.Should().Be(0, "allowed work during maintenance is not what the restore waits for");
@@ -127,6 +126,102 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
         var read = () => ordinary.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
         await read.Should().ThrowAsync<DatabaseClosedForMaintenanceException>("the allowance ended with its scope");
     }
+
+    [Fact]
+    public async Task A_request_that_arrived_during_the_restore_may_read_but_not_write()
+    {
+        _maintenance.Enter("Restoring backup test.dump");
+        await using var ctx = NewGuardedContext();
+        using var reads = _maintenance.AllowDatabaseReads();
+
+        await ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+        var user = NewUser();
+        ctx.Users.Add(user);
+        var save = () => ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        (await save.Should().ThrowAsync<DbUpdateException>())
+            .WithInnerException<DatabaseClosedForMaintenanceException>("a token refresh or first sign-in must not write");
+        var update = () => ctx.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
+        await update.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+    }
+
+    [Fact]
+    public async Task A_site_admin_reaches_the_database_only_on_the_site_admin_console()
+    {
+        _maintenance.Enter("Restoring backup test.dump");
+
+        await using (var console = NewGuardedContext(siteAdmin: true, requestPath: "/site-admin/backups"))
+        {
+            console.Users.Add(NewUser());
+            await console.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+
+        var circuitGuard = NewGuard(siteAdmin: true, requestPath: "/_blazor");
+        var onConsole = true;
+        circuitGuard.CircuitOnSiteAdminConsole = () => onConsole;
+        await using (var circuit = _db.NewContext(circuitGuard))
+        {
+            await circuit.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+            onConsole = false;
+            var elsewhere = () => circuit.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+            await elsewhere.Should().ThrowAsync<DatabaseClosedForMaintenanceException>("the circuit has moved off the console");
+        }
+
+        await using var otherPage = NewGuardedContext(siteAdmin: true, requestPath: "/solutions/3");
+        var write = () => otherPage.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
+        await write.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+        _maintenance.ActiveJobs.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_canceled_command_releases_its_count()
+    {
+        await using var ctx = NewGuardedContext();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var running = ctx.Database.ExecuteSqlRawAsync("SELECT pg_sleep(10)", cts.Token);
+        await WaitUntilAsync(() => _maintenance.ActiveJobs == 1);
+
+        await cts.CancelAsync();
+        var wait = () => running;
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        _maintenance.ActiveJobs.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_count_left_behind_is_released_when_the_scope_ends()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(NewUser());
+            await seed.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+        var guard = NewGuard();
+        await using var ctx = _db.NewContext(guard);
+        // A reader that is never disposed stands in for one whose close threw
+        // before the guard heard about it.
+        var rows = ctx.Users.AsNoTracking().AsAsyncEnumerable().GetAsyncEnumerator(TestContext.Current.CancellationToken);
+        (await rows.MoveNextAsync()).Should().BeTrue();
+        _maintenance.ActiveJobs.Should().Be(1);
+
+        guard.Dispose();
+
+        _maintenance.ActiveJobs.Should().Be(0, "otherwise every later restore would wait for it and refuse");
+        await rows.DisposeAsync();
+        _maintenance.ActiveJobs.Should().Be(0, "a late dispose does not release the count twice");
+    }
+
+    [Theory]
+    [InlineData("SELECT u.id FROM users AS u", true)]
+    [InlineData("  -- from the Users page\nSELECT 1", true)]
+    [InlineData("/* tag */ select 1", true)]
+    [InlineData("SELECT id FROM users FOR UPDATE", false)]
+    [InlineData("INSERT INTO users (email) VALUES ('x') RETURNING id", false)]
+    [InlineData("UPDATE users SET display_name = 'x'", false)]
+    [InlineData("WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d", false)]
+    [InlineData("-- unterminated comment", false)]
+    [InlineData("", false)]
+    public void Only_a_plain_select_counts_as_a_read(string sql, bool isRead) =>
+        MaintenanceDatabaseGuard.IsRead(sql).Should().Be(isRead);
 
     private static User NewUser() => new()
     {

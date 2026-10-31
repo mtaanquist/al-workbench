@@ -366,12 +366,13 @@ public sealed class BackupService
             var running = _maintenance.ActiveJobs;
             _maintenance.Restore(before);
             _logger.LogWarning(
-                "Refusing to restore {FileName}: {Running} background job(s) were still running after {Wait}.",
+                "Refusing to restore {FileName}: {Running} job(s) or database command(s) were still running after {Wait}.",
                 row.FileName, running, _activeJobsWait);
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["BackupId"] = "An import, a build or another background task is still running, and a restore would "
-                    + "replace the database under it. Wait until imports and builds have finished, then restore. "
+                ["BackupId"] = "Something is still running against the database - an import, a build, a background "
+                    + "task, or a page that is still loading or saving - and a restore would replace the database "
+                    + "under it. Wait a few minutes, or until imports and builds have finished, then restore. "
                     + "Nothing was changed.",
             });
         }
