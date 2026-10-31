@@ -14,7 +14,10 @@ namespace ALDevToolbox.Services.OAuth;
 /// <see cref="SocketsHttpHandler.AllowAutoRedirect"/> disabled so an HTTPS URL
 /// can't 302 us onto an internal <c>http://</c> target. Connections to
 /// loopback, link-local (incl. the cloud metadata service at 169.254.169.254),
-/// private, CGNAT, and unique-local addresses are refused.
+/// private, CGNAT, multicast, reserved and unique-local addresses are refused,
+/// including IPv6 forms that embed one of them (NAT64, 6to4, IPv4-compatible).
+/// The handlers that use it set <see cref="SocketsHttpHandler.UseProxy"/> to
+/// false: through a proxy, the callback would only ever see the proxy's address.
 /// </summary>
 public static class SsrfGuard
 {
@@ -81,7 +84,7 @@ public static class SsrfGuard
                 192 when b[1] == 168 => false,            // 192.168.0.0/16 private
                 192 when b[1] == 0 && b[2] == 0 => false, // 192.0.0.0/24 IETF protocol assignments
                 198 when b[1] is 18 or 19 => false,       // 198.18.0.0/15 benchmarking
-                255 => false,                             // 255.x broadcast / reserved
+                >= 224 => false,                          // 224.0.0.0/4 multicast, 240.0.0.0/4 reserved, broadcast
                 _ => true,
             };
         }
@@ -96,6 +99,27 @@ public static class SsrfGuard
                 || address.Equals(IPAddress.IPv6Loopback))
             {
                 return false;
+            }
+
+            // Forms that carry an IPv4 address inside them reach that address on a host
+            // with NAT64 or 6to4 routing, so judge them by it (#1576): NAT64's
+            // 64:ff9b::/96 (and refuse the local-use 64:ff9b:1::/48 outright), 6to4's
+            // 2002::/16, and the deprecated IPv4-compatible ::a.b.c.d.
+            var v6 = address.GetAddressBytes();
+            if (v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b)
+            {
+                if (v6[4] == 0x00 && v6[5] == 0x01) return false;
+                if (v6.AsSpan(4, 8).IndexOfAnyExcept((byte)0) < 0)
+                    return IsPubliclyRoutable(new IPAddress(v6.AsSpan(12, 4)));
+                return false;
+            }
+            if (v6[0] == 0x20 && v6[1] == 0x02)
+            {
+                return IsPubliclyRoutable(new IPAddress(v6.AsSpan(2, 4)));
+            }
+            if (v6.AsSpan(0, 12).IndexOfAnyExcept((byte)0) < 0)
+            {
+                return IsPubliclyRoutable(new IPAddress(v6.AsSpan(12, 4)));
             }
             return true;
         }
