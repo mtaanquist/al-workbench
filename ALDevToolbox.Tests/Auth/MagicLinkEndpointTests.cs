@@ -12,23 +12,22 @@ namespace ALDevToolbox.Tests.Auth;
 /// The emailed sign-in link through the real pipeline (#1500). Mail scanners
 /// and chat link previews fetch a link before the person clicks it, so no GET
 /// may spend the token or sign anyone in; only the confirmation page's POST does.
+///
+/// <para>The cases share one host (#1536), each with a user of its own. Issuing
+/// a link counts against its source address, so a class that grows past a couple
+/// of dozen links would have to vary the address it passes.</para>
 /// </summary>
-public sealed class MagicLinkEndpointTests : IDisposable
+public sealed class MagicLinkEndpointTests : IClassFixture<SharedEndpointHost>
 {
     private const string AuthCookie = "alwb_auth";
 
-    private readonly TestDb _db = new();
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public MagicLinkEndpointTests()
+    public MagicLinkEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Fact]

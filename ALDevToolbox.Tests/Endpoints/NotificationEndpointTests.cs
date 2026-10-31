@@ -1,11 +1,9 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -14,24 +12,34 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// real auth and antiforgery stack. The service rules have their own tests in
 /// <c>InAppNotificationServiceTests</c>; these pin what the endpoints add on
 /// top: who may call them, the antiforgery check, and where they redirect.
+///
+/// <para>The cases share one host (#1536). Alex and Sam are new users in every
+/// test, so each test sees only the notifications it added.</para>
 /// </summary>
-public sealed class NotificationEndpointTests : IDisposable
+public sealed class NotificationEndpointTests : IClassFixture<SharedEndpointHost>
 {
-    private const string AlexEmail = "alex@cronus.example";
     private const string Password = "correct horse battery staple";
     private static readonly DateTime Monday = new(2026, 10, 5, 9, 0, 0, DateTimeKind.Utc);
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _alexEmail = SharedEndpointHost.UniqueEmail("alex");
+    private readonly string _samEmail = SharedEndpointHost.UniqueEmail("sam");
 
-    public void Dispose() => _db.Dispose();
+    public NotificationEndpointTests(SharedEndpointHost host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+    }
 
     [Fact]
     public async Task Anonymous_open_redirects_to_login_and_leaves_the_notification_unread()
     {
-        var alex = await SeedUserAsync(AlexEmail);
+        var alex = await SeedUserAsync(_alexEmail);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.GetAsync($"/notifications/{id}/open");
 
@@ -43,10 +51,9 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Anonymous_read_all_is_refused_and_marks_nothing()
     {
-        var alex = await SeedUserAsync(AlexEmail);
+        var alex = await SeedUserAsync(_alexEmail);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.PostAsync("/notifications/read-all", Form(("upToId", id.ToString())));
 
@@ -62,10 +69,9 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Opening_your_own_marks_it_read_and_goes_to_its_page()
     {
-        var alex = await SeedUserAsync(AlexEmail, Password);
+        var alex = await SeedUserAsync(_alexEmail, Password);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        using var client = await SignInAsync(_alexEmail);
 
         using var response = await client.GetAsync($"/notifications/{id}/open");
 
@@ -77,11 +83,10 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Opening_someone_elses_goes_back_to_the_list_and_leaves_theirs_unread()
     {
-        await SeedUserAsync(AlexEmail, Password);
-        var sam = await SeedUserAsync("sam@cronus.example");
+        await SeedUserAsync(_alexEmail, Password);
+        var sam = await SeedUserAsync(_samEmail);
         var samsId = await AddAsync(sam, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        using var client = await SignInAsync(_alexEmail);
 
         using var response = await client.GetAsync($"/notifications/{samsId}/open");
 
@@ -93,9 +98,8 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Opening_one_that_does_not_exist_goes_back_to_the_list()
     {
-        await SeedUserAsync(AlexEmail, Password);
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        await SeedUserAsync(_alexEmail, Password);
+        using var client = await SignInAsync(_alexEmail);
 
         using var response = await client.GetAsync("/notifications/987654/open");
 
@@ -106,10 +110,9 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Read_all_without_the_antiforgery_token_is_refused()
     {
-        var alex = await SeedUserAsync(AlexEmail, Password);
+        var alex = await SeedUserAsync(_alexEmail, Password);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        using var client = await SignInAsync(_alexEmail);
 
         using var response = await client.PostAsync("/notifications/read-all", Form(("upToId", id.ToString())));
 
@@ -120,13 +123,12 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Read_all_marks_your_own_up_to_the_newest_shown_and_returns_to_the_list()
     {
-        var alex = await SeedUserAsync(AlexEmail, Password);
-        var sam = await SeedUserAsync("sam@cronus.example");
+        var alex = await SeedUserAsync(_alexEmail, Password);
+        var sam = await SeedUserAsync(_samEmail);
         var first = await AddAsync(alex, "/pipelines/1?build=7");
         var shown = await AddAsync(alex, "/pipelines/1?build=8");
         var samsId = await AddAsync(sam, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        using var client = await SignInAsync(_alexEmail);
         var token = await TokenFromAsync(client, "/notifications");
         var later = await AddAsync(alex, "/pipelines/1?build=9");
 
@@ -151,10 +153,9 @@ public sealed class NotificationEndpointTests : IDisposable
     public async Task Read_all_from_the_flyout_goes_back_to_the_page_it_was_on_and_nowhere_else(
         string returnUrl, string expected)
     {
-        var alex = await SeedUserAsync(AlexEmail, Password);
+        var alex = await SeedUserAsync(_alexEmail, Password);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        using var client = await SignInAsync(_alexEmail);
         var token = await TokenFromAsync(client, "/notifications");
 
         using var response = await client.PostAsync("/notifications/read-all", Form(
@@ -168,10 +169,9 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Read_all_in_the_background_answers_no_content_and_marks_them_read()
     {
-        var alex = await SeedUserAsync(AlexEmail, Password);
+        var alex = await SeedUserAsync(_alexEmail, Password);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, AlexEmail);
+        using var client = await SignInAsync(_alexEmail);
         var token = await TokenFromAsync(client, "/notifications");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/notifications/read-all")
         {
@@ -188,10 +188,9 @@ public sealed class NotificationEndpointTests : IDisposable
     [Fact]
     public async Task Read_all_in_the_background_when_signed_out_is_not_a_success()
     {
-        var alex = await SeedUserAsync(AlexEmail);
+        var alex = await SeedUserAsync(_alexEmail);
         var id = await AddAsync(alex, "/pipelines/1?build=7");
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Post, "/notifications/read-all")
         {
             Content = Form(("upToId", id.ToString())),
@@ -239,7 +238,7 @@ public sealed class NotificationEndpointTests : IDisposable
             DisplayName = "Alex Hansen",
             PasswordHash = password is null
                 ? "x"
-                : new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(password),
+                : _host.HashPassword(password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -249,9 +248,9 @@ public sealed class NotificationEndpointTests : IDisposable
         return user.Id;
     }
 
-    private static async Task<HttpClient> SignInAsync(EndpointFactory factory, string email)
+    private async Task<HttpClient> SignInAsync(string email)
     {
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         var token = await TokenFromAsync(client, "/login");
         using var login = await client.PostAsync("/auth/login", Form(
             ("Email", email), ("Password", Password), ("__RequestVerificationToken", token)));

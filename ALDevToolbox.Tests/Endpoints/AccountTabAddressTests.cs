@@ -2,10 +2,8 @@ using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -14,15 +12,23 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// bare /account. The ?section= links in sent emails and bookmarks, and the redirects
 /// that only carry a result code, settle on that address with the rest of the query
 /// kept. Through the real routing and prerender, which is where the redirect happens.
+/// The cases share one host (#1536), each signed in as a consultant of its own.
 /// </summary>
-public sealed class AccountTabAddressTests : IDisposable
+public sealed class AccountTabAddressTests : IClassFixture<SharedEndpointHost>
 {
-    private const string Email = "consultant@cronus.example";
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _email = SharedEndpointHost.UniqueEmail("consultant");
 
-    public void Dispose() => _db.Dispose();
+    public AccountTabAddressTests(SharedEndpointHost host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+    }
 
     [Theory]
     [InlineData("/account?section=security", "/account/security")]
@@ -42,8 +48,7 @@ public sealed class AccountTabAddressTests : IDisposable
     [InlineData("/account?ok=passkey-added", "/account/security?ok=passkey-added")]
     public async Task An_address_settles_on_the_tab_s_own(string asked, string settled)
     {
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignedInAsync(factory);
+        using var client = await SignedInAsync();
 
         using var response = await client.GetAsync(asked);
 
@@ -59,8 +64,7 @@ public sealed class AccountTabAddressTests : IDisposable
     [InlineData("/account/repos", "Repository access")]
     public async Task A_tab_s_address_opens_on_it(string address, string tab)
     {
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignedInAsync(factory);
+        using var client = await SignedInAsync();
 
         using var page = await client.GetAsync(address);
 
@@ -74,17 +78,16 @@ public sealed class AccountTabAddressTests : IDisposable
     private static string PathAndQuery(Uri location) =>
         location.IsAbsoluteUri ? location.PathAndQuery : location.OriginalString;
 
-    private async Task<HttpClient> SignedInAsync(EndpointFactory factory)
+    private async Task<HttpClient> SignedInAsync()
     {
         await using (var seed = _db.NewContext())
         {
             seed.Users.Add(new User
             {
                 OrganizationId = TestDb.DefaultOrgId,
-                Email = Email,
+                Email = _email,
                 DisplayName = "Nils Consultant",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                    .HashPassword(Password),
+                PasswordHash = _host.HashPassword(Password),
                 Role = UserRole.User,
                 Status = UserStatus.Active,
                 CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -92,13 +95,13 @@ public sealed class AccountTabAddressTests : IDisposable
             await seed.SaveChangesAsync();
         }
 
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         using var loginPage = await client.GetAsync("/login");
         var token = Regex.Match(await loginPage.Content.ReadAsStringAsync(),
             """name="__RequestVerificationToken"[^>]*value="([^"]+)""").Groups[1].Value;
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new[]
         {
-            new KeyValuePair<string, string>("Email", Email),
+            new KeyValuePair<string, string>("Email", _email),
             new KeyValuePair<string, string>("Password", Password),
             new KeyValuePair<string, string>("__RequestVerificationToken", token),
         }));

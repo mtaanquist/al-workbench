@@ -8,7 +8,6 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Auth;
 
@@ -18,29 +17,37 @@ namespace ALDevToolbox.Tests.Auth;
 /// step up with, the current password). And what a password reset does and
 /// does not do to passkeys: they stay, and the person is asked to look them
 /// over. See ".design/auth-and-audit.md", "Passkeys (WebAuthn)".
+///
+/// <para>The cases share one host (#1536), each with a user of its own.</para>
 /// </summary>
-public sealed class PasskeyRegistrationEndpointTests : IDisposable
+public sealed class PasskeyRegistrationEndpointTests : IClassFixture<PasskeyRegistrationEndpointTests.Host>
 {
     private const string Password = "correct horse battery staple";
     private const string NewPassword = "another horse battery staple";
     private const string ReviewPrompt = "Look at when each passkey above was added";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public PasskeyRegistrationEndpointTests()
+    public PasskeyRegistrationEndpointTests(Host host)
     {
-        _factory = new EndpointFactory(_db, settings: new Dictionary<string, string?>
-        {
-            ["Auth:WebAuthn:RpId"] = "localhost",
-            ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
-        });
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
-    public void Dispose()
+    /// <summary>The shared host, with WebAuthn pointed at the test client's origin.</summary>
+    public sealed class Host : SharedEndpointHost
     {
-        _factory.Dispose();
-        _db.Dispose();
+        public Host()
+            : base(configureServices: null, settings: new Dictionary<string, string?>
+            {
+                ["Auth:WebAuthn:RpId"] = "localhost",
+                ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
+            })
+        {
+        }
     }
 
     [Fact]
@@ -245,7 +252,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = DateTime.UtcNow,

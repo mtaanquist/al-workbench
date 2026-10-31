@@ -6,7 +6,6 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 using OtpNet;
 
 namespace ALDevToolbox.Tests.Auth;
@@ -16,23 +15,23 @@ namespace ALDevToolbox.Tests.Auth;
 /// throttle as the endpoints wire it (#1271), and confirming a two-step
 /// change on an account that signs in with Microsoft and has no password
 /// it knows (#1259).
+///
+/// <para>The cases share one host (#1536). Every test signs in an address no
+/// other test uses, so the attempts one test counts are only its own.</para>
 /// </summary>
-public sealed class MfaEndpointTests : IDisposable
+public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public MfaEndpointTests()
+    public MfaEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Fact]
@@ -258,7 +257,7 @@ public sealed class MfaEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = DateTime.UtcNow,
@@ -288,7 +287,7 @@ public sealed class MfaEndpointTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = email,
                 DisplayName = "Nils Consultant",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+                PasswordHash = _host.HashPassword(Password),
                 Role = UserRole.User,
                 Status = UserStatus.Active,
                 CreatedAt = DateTime.UtcNow,
@@ -328,7 +327,7 @@ public sealed class MfaEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             EmailMfaEnabled = true,
