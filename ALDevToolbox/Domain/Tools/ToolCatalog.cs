@@ -40,7 +40,8 @@ public enum ToolKey
 /// authoring routes (<c>/admin/*</c>) are deliberately excluded — disabling a
 /// tool hides its end-user surface but leaves content authoring reachable.
 ///
-/// <para><paramref name="SwitchOnlyPrefixes"/> are the tool's <c>/api</c> endpoints:
+/// <para><paramref name="SwitchOnlyPrefixes"/> are the tool's <c>/api</c> endpoints
+/// (and the generator's <c>/generate</c> posts):
 /// switching the tool off closes them like its pages, but they never ask for the
 /// organisation's step-up (#1343). They download a file or save one locally and
 /// spend no stored credential - the step-up stays on the routes that write to
@@ -75,7 +76,11 @@ public static class ToolCatalog
             new[] { "/diff", "/compare" }),
         new ToolDescriptor(ToolKey.Templates, "Templates",
             "Browse templates and generate AL workspaces and extensions.",
-            new[] { "/templates" }),
+            new[] { "/templates" },
+            // The generator's form posts and the download links the MCP tools
+            // hand out are what the Templates pages exist for, so they close with
+            // the tool like the other tools' /api routes (#1615).
+            SwitchOnlyPrefixes: new[] { "/generate" }),
         // A tool's own /api endpoints go with its switch (#1343): the recipe download
         // and the Translator's export are what those pages exist to hand out, and the
         // Object Explorer's are what its code viewer reads. /api/compare is not

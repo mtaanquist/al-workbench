@@ -24,6 +24,9 @@ internal static class AccountPasskeyEndpoints
     /// <summary>Where the passkey card's script fetches the registration options from.</summary>
     public const string RegistrationOptionsPath = "/account/passkeys/registration-options";
 
+    /// <summary>The one body <c>/auth/passkey/login</c> answers every refusal with (#1614).</summary>
+    public const string PasskeyLoginFailedBody = "{\"error\":\"That passkey didn't work. Try again.\"}";
+
     /// <summary>
     /// Where a step-up before creating an access token comes back to: the AI
     /// assistants tab, with the create form open and a line saying the
@@ -214,9 +217,14 @@ internal static class AccountPasskeyEndpoints
             }
             catch (Exception ex)
             {
+                // One body for every failure: the exception text differed
+                // between an unknown or inactive account's credential and an
+                // active account's, which told a direct caller which addresses
+                // are live accounts with passkeys (#1614). The log keeps it.
                 logger.LogWarning(ex, "Passkey login failed.");
                 ctx.Response.StatusCode = 401;
-                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(PasskeyLoginFailedBody);
             }
         });
 

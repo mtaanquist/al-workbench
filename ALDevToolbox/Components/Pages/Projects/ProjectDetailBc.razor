@@ -381,7 +381,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _bcErrors = new() { ["_"] = "Only the solution owner or an admin can change the connection." };
+            _bcErrors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change the connection." };
         }
         catch (Exception ex)
         {
@@ -409,7 +409,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _bcErrors = new() { ["_"] = "Only the solution owner or an admin can test the connection." };
+            _bcErrors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can test the connection." };
         }
         catch (Exception ex)
         {

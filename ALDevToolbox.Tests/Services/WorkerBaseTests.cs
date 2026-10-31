@@ -63,6 +63,14 @@ public sealed class WorkerBaseTests
 
         protected override void OnJobStarting(TestJob job) => Starting?.Invoke(job);
 
+        /// <summary>Jobs taken but dropped without running.</summary>
+        public List<int> Dropped { get; } = new();
+
+        protected override void OnJobDropped(TestJob job)
+        {
+            lock (Dropped) Dropped.Add(job.Id);
+        }
+
         protected override void OnJobFinished(TestJob job)
         {
             _queue.Complete(job.Id);
@@ -337,6 +345,7 @@ public sealed class WorkerBaseTests
 
             (await worker.Finished.Reader.ReadAsync(cts.Token)).Should().Be(1);
             worker.HasRun(1).Should().BeFalse("the job was queued against the database the restore replaced");
+            lock (worker.Dropped) worker.Dropped.Should().Equal([1], "the worker is told, so it can release what the job holds (#1599)");
             queue.IsInFlight(1).Should().BeFalse("a dropped job still releases its key");
             maintenance.ActiveJobs.Should().Be(0);
         }
@@ -517,6 +526,41 @@ public sealed class WorkerBaseTests
         job!.Id.Should().Be(2, "job 1 was queued before the restore and is dropped");
         queue.IsInFlight(1).Should().BeFalse();
         queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// An uploaded ZIP or C/AL export waits in the import queue with its staged temp
+    /// file. When a restore drops the job, the file goes with it rather than staying in
+    /// /tmp until the next start (#1599). A job queued after the restore keeps its file.
+    /// </summary>
+    [Fact]
+    public async Task The_import_queue_deletes_the_staged_upload_of_a_job_a_restore_dropped()
+    {
+        var maintenance = new MaintenanceModeState();
+        var queue = new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue(maintenance);
+        var identity = ALDevToolbox.Services.AmbientOrganizationScope.OrganizationIdentity.ForOrganization(1, isSystem: false);
+        var zip = Path.GetTempFileName();
+        var cal = Path.GetTempFileName();
+        var kept = Path.GetTempFileName();
+        try
+        {
+            await queue.EnqueueAsync(new(1, identity, new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportSource.StagedZip(zip, IsDvd: false)), TestContext.Current.CancellationToken);
+            await queue.EnqueueAsync(new(2, identity, new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportSource.CalTxt(cal, "1252")), TestContext.Current.CancellationToken);
+            maintenance.AdvanceEpoch();
+            await queue.EnqueueAsync(new(3, identity, new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportSource.StagedZip(kept, IsDvd: false)), TestContext.Current.CancellationToken);
+
+            queue.Reader.TryRead(out var job).Should().BeTrue();
+            job!.ReleaseId.Should().Be(3);
+            File.Exists(zip).Should().BeFalse("the dropped ZIP upload is deleted");
+            File.Exists(cal).Should().BeFalse("the dropped C/AL upload is deleted");
+            File.Exists(kept).Should().BeTrue("the job that runs still needs its file");
+        }
+        finally
+        {
+            File.Delete(zip);
+            File.Delete(cal);
+            File.Delete(kept);
+        }
     }
 
     /// <summary>

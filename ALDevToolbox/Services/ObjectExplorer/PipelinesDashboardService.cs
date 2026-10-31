@@ -152,7 +152,11 @@ public sealed class PipelinesDashboardService
         var recentBuilds = pipelineIds.Count == 0
             ? []
             : await builds
-                .OrderByDescending(b => b.FinishedAt ?? b.StartedAt)
+                // A rerun keeps its last attempt's finish until it ends, so only a finished
+                // build sorts by its finish (#1551).
+                .OrderByDescending(b => (b.Status == ProjectBuildStatus.Ready || b.Status == ProjectBuildStatus.Failed) && b.FinishedAt != null
+                    ? b.FinishedAt.Value
+                    : b.StartedAt)
                 .ThenByDescending(b => b.Id)
                 .Take(ActivityRows)
                 .Select(b => new
@@ -218,7 +222,8 @@ public sealed class PipelinesDashboardService
         foreach (var f in pipelineIds.Count == 0 ? [] : await _freshness.ListAsync(ct))
         {
             var summary = PipelineFreshnessSummary.From(f);
-            if (!summary.IsAhead || inFlight.Contains(f.PipelineId) || !pipelineById.TryGetValue(f.PipelineId, out var p)) continue;
+            // A disabled pipeline refuses Build, so it is not asked for (#1551).
+            if (!summary.IsAhead || inFlight.Contains(f.PipelineId) || !pipelineById.TryGetValue(f.PipelineId, out var p) || p.Disabled) continue;
             readyToBuild++;
             attention.Add(new PipelinesAttentionItem(
                 PipelinesAttentionKind.BranchAhead, summary.PushedAt, p.ProjectId, p.ProjectName,

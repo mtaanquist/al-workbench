@@ -58,7 +58,7 @@ internal static class MaintenanceModeMiddleware
             var maintenance = ctx.RequestServices.GetRequiredService<MaintenanceModeState>();
             if (!maintenance.IsActive)
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
             if (ClosedBeforeAuthentication.Any(p => ctx.Request.Path.StartsWithSegments(p)))
@@ -66,7 +66,7 @@ internal static class MaintenanceModeMiddleware
                 await WriteMaintenancePageAsync(ctx, maintenance);
                 return;
             }
-            using (maintenance.AllowDatabaseReads()) await next();
+            using (maintenance.AllowDatabaseReads()) await NextOrMaintenancePageAsync(ctx, next, maintenance);
         });
         return app;
     }
@@ -78,7 +78,7 @@ internal static class MaintenanceModeMiddleware
             var maintenance = ctx.RequestServices.GetRequiredService<MaintenanceModeState>();
             if (!maintenance.IsActive)
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
 
@@ -94,18 +94,55 @@ internal static class MaintenanceModeMiddleware
                 // cannot see.
                 || path.StartsWithSegments(GitHubWebhookEndpoints.WebhookPath))
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
             if (ctx.User?.FindFirst(HttpOrganizationContext.SiteAdminClaim)?.Value == "true")
             {
-                await next();
+                await NextOrMaintenancePageAsync(ctx, next, maintenance);
                 return;
             }
 
             await WriteMaintenancePageAsync(ctx, maintenance);
         });
         return app;
+    }
+
+    /// <summary>
+    /// Runs the rest of the pipeline, and answers with the maintenance page when the
+    /// database guard refused a command on the way (#1599): a request that was already
+    /// running when the restore began, or one that tried to write during it, would
+    /// otherwise end as a 500. Applied here, inside the exception handler, so it sees
+    /// the refusal before that handler turns it into the error page, and again in the
+    /// outermost middleware for what fails ahead of this gate.
+    /// </summary>
+    private static async Task NextOrMaintenancePageAsync(HttpContext ctx, Func<Task> next, MaintenanceModeState maintenance)
+    {
+        try
+        {
+            await next();
+        }
+        catch (Exception ex) when (IsGuardRefusal(ex) && !ctx.Response.HasStarted)
+        {
+            ctx.Response.Clear();
+            // Clearing drops the security headers set further out; put them back.
+            SecurityHeaders.Apply(ctx.Response.Headers);
+            await WriteMaintenancePageAsync(ctx, maintenance);
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="ex"/> is the guard's refusal, bare (a query) or
+    /// wrapped (EF reports a refused write in <c>SaveChanges</c> as a
+    /// <c>DbUpdateException</c> around it).
+    /// </summary>
+    internal static bool IsGuardRefusal(Exception? ex)
+    {
+        for (; ex is not null; ex = ex.InnerException)
+        {
+            if (ex is DatabaseClosedForMaintenanceException) return true;
+        }
+        return false;
     }
 
     private static Task WriteMaintenancePageAsync(HttpContext ctx, MaintenanceModeState maintenance)
@@ -124,14 +161,22 @@ internal static class MaintenanceModeMiddleware
     /// </summary>
     private static string BuildBody(MaintenanceModeState maintenance)
     {
+        // A request refused by the guard can answer after the restore already ended
+        // (a refused restore reopens the site at once): there is no start time then,
+        // and the site is open again.
         var message = maintenance.IsHeldAfterFailedRestore
             ? "AL Workbench is closed while a site administrator restores it from a backup. Please try again later."
-            : "AL Workbench is being restored from a backup. It will be back shortly.";
+            : maintenance.IsActive
+                ? "AL Workbench is being restored from a backup. It will be back shortly."
+                : "AL Workbench was briefly closed for maintenance. Please try again.";
+        var started = maintenance.IsActive
+            ? $"<p>Started: {maintenance.StartedAtUtc:yyyy-MM-dd HH:mm 'UTC'}.</p>"
+            : string.Empty;
         return "<!doctype html><html><head><title>Maintenance · AL Workbench</title></head>"
             + "<body style=\"font-family: system-ui, sans-serif; padding: 2rem;\">"
             + "<h1>Maintenance in progress</h1>"
             + $"<p>{message}</p>"
-            + $"<p>Started: {maintenance.StartedAtUtc:yyyy-MM-dd HH:mm 'UTC'}.</p>"
+            + started
             + "</body></html>";
     }
 }

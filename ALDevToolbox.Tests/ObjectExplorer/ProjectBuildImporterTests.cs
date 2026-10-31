@@ -535,6 +535,37 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await act.Should().NotThrowAsync();
     }
 
+    /// <summary>
+    /// A Retry drops the last attempt's pickup time, so the page does not age or time the
+    /// queued rerun from it, and keeps its finish time, which is how the worker tells a
+    /// rerun from a first run (#1551).
+    /// </summary>
+    [Fact]
+    public async Task Building_again_clears_the_last_attempts_pickup_time_and_keeps_its_finish()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        var finished = DateTime.UtcNow.AddMinutes(-30);
+        await ctx.OeProjectBuilds.Where(b => b.ReleaseId == first)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(b => b.BuildingStartedAt, finished.AddMinutes(-5))
+                .SetProperty(b => b.FinishedAt, finished));
+
+        await using (var tx = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            await tx.CommitAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.ReleaseId == first);
+        build.Status.Should().Be(ProjectBuildStatus.Queued);
+        build.BuildingStartedAt.Should().BeNull();
+        build.FinishedAt.Should().NotBeNull("a set finish time is what marks a rerun");
+    }
+
     [Fact]
     public async Task A_build_of_a_disabled_pipeline_is_not_built_again()
     {

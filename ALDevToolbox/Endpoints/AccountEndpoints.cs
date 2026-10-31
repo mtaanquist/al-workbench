@@ -98,9 +98,11 @@ internal static class AccountEndpoints
             ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString(ConfirmationExpiredMessage)}");
             return null;
         }
-        if (!auth.VerifyPassword(password, user.PasswordHash))
+        var check = await auth.CheckCurrentPasswordAsync(user.Email, user.PasswordHash, password, EndpointHelpers.ResolveIp(ctx), ct);
+        if (check != CurrentPasswordCheck.Correct)
         {
-            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Password is incorrect.")}");
+            var message = check == CurrentPasswordCheck.LockedOut ? AuthService.CurrentPasswordLockedOutMessage : "Password is incorrect.";
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString(message)}");
             return null;
         }
         return user;
@@ -115,12 +117,19 @@ internal static class AccountEndpoints
     /// authenticator app but never turn it off again (#1259). A fresh step-up
     /// is a stronger proof than the password it stands in for. Accounts with
     /// no Microsoft link keep the password check alone.
+    /// <para>
+    /// The window is capped at <see cref="StepUpService.PasskeyWindowCap"/>,
+    /// whatever the organisation chose for its tools: turning two-step off or
+    /// minting recovery codes is as lasting as adding a passkey, and an
+    /// organisation window of a day would otherwise hide the password box
+    /// from anyone at that browser all day (#1614).
+    /// </para>
     /// </summary>
     internal static async Task<bool> MayConfirmWithoutPasswordAsync(
         HttpContext ctx, AppDbContext db, int userId, CancellationToken ct)
     {
-        var tools = ctx.RequestServices.GetRequiredService<Services.Tools.ToolEnablement>();
-        if (!await tools.IsFreshAsync(ctx.User, ct)) return false;
+        var stepUp = ctx.RequestServices.GetRequiredService<StepUpService>();
+        if (!await stepUp.IsFreshForPasskeyAsync(ctx.User, ct)) return false;
         return await HasMicrosoftLinkAsync(db, userId, ct);
     }
 

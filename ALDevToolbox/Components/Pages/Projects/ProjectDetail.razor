@@ -37,7 +37,7 @@
     solution's Pipelines. Doubles as the create form (/solutions/new), which shows
     just General + Repositories until the solution exists.
 
-    Only the owner or an org admin can edit or delete — the management sections are
+    Only the owner, someone on its team, or an org admin can edit or delete — the management sections are
     hidden for everyone else, who still sees the repositories read-only and can
     follow through to download builds. Named user: the BC consultant who owns a
     customer's solution, opening Settings to point it at a repo or wire up delivery.
@@ -197,7 +197,7 @@
         @if (!_canManage)
         {
             <p class="u-muted">
-                You're viewing this solution. Only its owner@(_header?.OwnerName is { } ownerName ? $" ({ownerName})" : "") or an admin can change or build it — you can still
+                You're viewing this solution. Only its owner@(_header?.OwnerName is { } ownerName ? $" ({ownerName})" : ""), someone on its team, or an admin can change or build it — you can still
                 @* The Pipelines list searched for this solution, not /pipelines/{Id}:
                    that route takes a pipeline's id, so it opened whichever pipeline
                    happened to share this solution's number - or nothing. *@
@@ -1037,7 +1037,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+            _errors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change this solution." };
         }
         catch (Exception ex)
         {
@@ -1063,7 +1063,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+            _errors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change this solution." };
         }
         catch (PlanValidationException ex)
         {
@@ -1097,7 +1097,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+            _errors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change this solution." };
         }
         catch (PlanValidationException ex)
         {

@@ -221,7 +221,7 @@ else
         }
         catch (ProjectAccessDeniedException)
         {
-            _error = "Only the solution owner or an admin can change its symbols.";
+            _error = "Only the solution's owner, someone on its team, or an admin can change its symbols.";
         }
         catch (Exception ex)
         {
@@ -302,7 +302,7 @@ else
         }
         catch (ProjectAccessDeniedException)
         {
-            _error = "Only the solution owner or an admin can change its symbols.";
+            _error = "Only the solution's owner, someone on its team, or an admin can change its symbols.";
         }
         catch (Exception ex)
         {

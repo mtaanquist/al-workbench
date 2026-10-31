@@ -413,6 +413,7 @@ public class ModuleService
         module.SourceDependenciesJson = source is { Dependencies.Count: > 0 }
             ? JsonSerializer.Serialize(source.Dependencies, PersistenceJson.Options)
             : null;
+        module.SourceIdRangeSize = source?.IdRangeSize;
     }
 
     /// <summary>

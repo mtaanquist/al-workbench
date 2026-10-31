@@ -34,7 +34,11 @@ internal static class AdminEndpoints
             ctx.Response.Headers.ContentSecurityPolicy = "default-src 'none'; sandbox";
             ctx.Response.Headers.XContentTypeOptions = "nosniff";
             await ctx.Response.Body.WriteAsync(snapshot.Logo.Content, ct);
-        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
+            // Editors reach the Defaults page that shows this logo and can change
+            // it there, so they can see it too (#1615). It is only ever the
+            // acting organisation's own logo.
+        }).RequireAuthorization(policy => policy.RequireRole(
+            HttpOrganizationContext.AdminRole, HttpOrganizationContext.EditorRole));
 
         // /admin/export/import — destructive restore from a TOML snapshot.
         // Lives on the Export page, kept as a server POST so the (large)

@@ -716,8 +716,13 @@ that names the environment and says what the click does there:
   whichever solution made them: there the installs go by due time, then first booked,
   first served (`requested_at`), then batch order, a single booking counting as a batch's
   first app (#1568), because a later upload may need an app an earlier one brings - an
-  add-on solution's upload booked after the base solution's it depends on goes after it.
-  So an Install now on an environment where an earlier booking is still waiting waits
+  add-on solution's upload booked after the base solution's it depends on goes after it,
+  unless a window moves the base: when the base's batch comes up after its window has
+  closed and moves to the next opening, a later booking on the same environment is not
+  held back with it if nothing holds that booking to the same window - its own window is
+  still open (a different window on the other solution's row, or Microsoft's update
+  window rather than the delivery window), or a person picked its time - and Business
+  Central refuses it if it needs the base (#1629). So an Install now on an environment where an earlier booking is still waiting waits
   for that booking too, the whole batch if it is one; it only goes ahead of other
   environments' bookings. Which environment gets the turn is decided by the best of its
   due installs (#1608): first the environments with any due booking whose time a person
@@ -975,7 +980,13 @@ whole. The page reads the log line back through the same parser, so a deployment
   solutions on one tenant share it), and within a solution to one environment in the order they fell
   due: a run that finds its environment busy, or an earlier deployment to it still waiting, leaves the row
   `scheduled` for the next sweep. Nothing waits on a full queue;
-  a due row that doesn't fit is picked up by the next sweep too (#1139).
+  a due row that doesn't fit is picked up by the next sweep too (#1139). A booked install
+  (`UpgradeActionWorker`) takes the same per-environment gate before it sends, so a
+  deployment and a booked install never install into one environment at once either:
+  whichever finds the environment busy waits for a later sweep (#1629), and a started
+  window batch that waits this way keeps its turn, as when a single booking is skipped. The
+  second look at an install nobody saw finish sends nothing, so it takes no gate. They are
+  not otherwise ordered against each other.
 
 ## UI surfaces
 
@@ -1331,7 +1342,9 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
   solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
   solution and cuts long failure messages. `list_deployments` cuts them too (#1525), and
-  with a `deploymentId` returns that one deployment with every message whole. Long
+  with a `deploymentId` returns that one deployment with its own failure message whole;
+  its per-app messages are whole too unless together they would exceed the answer budget,
+  when each long one is cut to share what is left and `truncated` / `note` say so (#1601). Long
   histories page back instead of growing the limit: `list_deployments` takes a
   `beforeDeploymentId`, and `list_pipeline_builds` / `list_solution_builds` a
   `beforeBuildId`, each returning the rows older than that one (#1526).
