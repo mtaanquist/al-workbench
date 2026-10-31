@@ -653,6 +653,12 @@ public class GenerationService
         if (plan.CoreIdRangeTo <= plan.CoreIdRangeFrom) errors[nameof(plan.CoreIdRangeTo)] = "Must be greater than 'from'.";
         if (string.IsNullOrWhiteSpace(plan.ApplicationVersion)) errors[nameof(plan.ApplicationVersion)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.RuntimeVersion)) errors[nameof(plan.RuntimeVersion)] = "Required.";
+        // The same 8-4-4-4-12 form the field's pattern asks for: the value goes
+        // into the launch configurations, where anything else fails only when
+        // the user publishes (#1545).
+        if (!string.IsNullOrWhiteSpace(plan.TenantId) && !Guid.TryParseExact(plan.TenantId.Trim(), "D", out _))
+            errors[nameof(plan.TenantId)] =
+                "Give the tenant ID as a GUID, for example 8a4f1c3e-1b2d-4e6f-9c1a-3d5b7e9f2a4c, or leave it blank.";
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
 

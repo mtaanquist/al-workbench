@@ -252,6 +252,53 @@ public sealed class TemplateImportServiceTests : IDisposable
             .Should().Be(0);
     }
 
+    /// <summary>
+    /// #1545: when the importing org deleted its own application version with
+    /// the template's default key, the imported template gets no default version
+    /// rather than one the end-user picker hides, and the version stays deleted.
+    /// </summary>
+    [Fact]
+    public async Task Import_links_no_default_version_the_importing_org_deleted()
+    {
+        await SeedSystemCatalogueAsync();
+        int localVersionId;
+        await using (var seed = _db.NewContext())
+        {
+            var local = new ApplicationVersion
+            {
+                OrganizationId = TestDb.OtherOrgId,
+                Key = "bc24",
+                Name = "BC 24",
+                Application = "24.0.0.0",
+                Runtime = "15",
+                Ordering = 0,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+                DeletedAt = DateTime.UtcNow,
+            };
+            seed.ApplicationVersions.Add(local);
+            await seed.SaveChangesAsync();
+            localVersionId = local.Id;
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).ImportTemplateAsync(systemTemplateId);
+        }
+
+        await using var verify = _db.NewContext();
+        var imported = await verify.RuntimeTemplates.IgnoreQueryFilters()
+            .SingleAsync(t => t.OrganizationId == TestDb.OtherOrgId && t.Key == "runtime-system");
+        imported.DefaultApplicationVersionId.Should().BeNull();
+        var versions = await verify.ApplicationVersions.IgnoreQueryFilters()
+            .Where(v => v.OrganizationId == TestDb.OtherOrgId)
+            .ToListAsync();
+        versions.Should().ContainSingle().Which.Id.Should().Be(localVersionId);
+        versions.Single().DeletedAt.Should().NotBeNull();
+    }
+
     [Fact]
     public async Task Import_refuses_when_acting_org_is_the_system_org()
     {

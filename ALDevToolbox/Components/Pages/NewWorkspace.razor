@@ -229,6 +229,7 @@
                            placeholder="e.g. 8a4f1c3e-1b2d-4e6f-9c1a-3d5b7e9f2a4c"
                            title="GUID in 8-4-4-4-12 hex form."
                            value="@_tenantId" @oninput="OnTenantIdInput" />
+                    <FieldError Field="TenantId" Errors="_errors" />
                     @if (_tenantIdFromSolution && _solution is { } tenantSource)
                     {
                         <span class="field__hint">
@@ -1030,7 +1031,7 @@
     private static readonly HashSet<string> FieldedKeys = new(StringComparer.Ordinal)
     {
         "TemplateKey", "WorkspaceName", "ShortName", "CoreIdRangeFrom", "CoreIdRangeTo",
-        "ApplicationVersion", "RuntimeVersion", "SelectedModuleKeys",
+        "ApplicationVersion", "RuntimeVersion", "SelectedModuleKeys", "TenantId",
     };
 
     /// <summary>

@@ -38,6 +38,7 @@ public sealed class AdminCookbookSuggestionReviewTests : IDisposable
                 .AddInterceptors(_db.CommandTracker));
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddScoped<RecipeService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<RecipeSuggestionService>();
         _ctx.Services.AddSingleton<MarkdownRenderer>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));

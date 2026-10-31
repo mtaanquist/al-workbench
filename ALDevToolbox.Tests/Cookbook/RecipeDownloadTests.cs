@@ -300,6 +300,95 @@ public sealed class RecipeDownloadTests : IDisposable
         row.CustomerName.Should().Be("cronus a/s", "the name is still stored as typed -- it is the label");
     }
 
+    /// <summary>
+    /// A Private solution's exact name typed by someone outside its team is
+    /// recorded as a plain customer name: the download neither lands on the
+    /// solution nor confirms the name exists (#1545).
+    /// </summary>
+    [Fact]
+    public async Task RecordDownload_does_not_match_a_private_solution_the_downloader_cannot_see()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Private");
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+        }
+        var recipeId = await SeedRecipeAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).RecordDownloadAsync(recipeId, "CRONUS Private", userId: null);
+        }
+
+        await using var verify = _db.NewContext();
+        var row = await verify.RecipeDownloads.SingleAsync(d => d.RecipeId == recipeId);
+        row.ProjectId.Should().BeNull();
+        row.CustomerName.Should().Be("CRONUS Private");
+    }
+
+    /// <summary>
+    /// The other side of #1545: an org Admin sees every solution, so their
+    /// download of a Private one is still attributed to it.
+    /// </summary>
+    [Fact]
+    public async Task RecordDownload_matches_a_private_solution_for_an_admin()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Private");
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+        }
+        var adminId = await SeedUserAsync(701);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == adminId)
+                .ExecuteUpdateAsync(u => u.SetProperty(x => x.Role, UserRole.Admin));
+        }
+        _db.OrgContext.CurrentUserId = adminId;
+        var recipeId = await SeedRecipeAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).RecordDownloadAsync(recipeId, "CRONUS Private", adminId);
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.RecipeDownloads.SingleAsync(d => d.RecipeId == recipeId))
+            .ProjectId.Should().Be(projectId);
+    }
+
+    /// <summary>
+    /// #1545: the download modal's suggestions leave out a Private solution the
+    /// caller cannot see, including a name recorded by someone who could.
+    /// </summary>
+    [Fact]
+    public async Task Customer_suggestions_leave_out_a_private_solution_the_caller_cannot_see()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Private");
+        await SeedProjectAsync("CRONUS A/S");
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+            ctx.RecipeDownloads.Add(new RecipeDownload
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                RecipeId = await SeedRecipeAsync(),
+                CustomerName = "cronus private",
+                ProjectId = projectId,
+                DownloadedAt = new DateTime(2026, 5, 12, 0, 0, 0, DateTimeKind.Utc),
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var userId = await SeedUserAsync(702);
+        _db.OrgContext.CurrentUserId = userId;
+
+        await using var read = _db.NewContext();
+        var names = await NewService(read).GetCustomerSuggestionsAsync();
+
+        names.Should().Equal("CRONUS A/S");
+    }
+
     [Fact]
     public async Task RecordDownload_leaves_the_project_null_when_nothing_matches()
     {
@@ -499,5 +588,5 @@ public sealed class RecipeDownloadTests : IDisposable
     }
 
     private RecipeService NewService(ALDevToolbox.Data.AppDbContext ctx) =>
-        new(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx));
+        new(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 }

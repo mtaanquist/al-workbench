@@ -634,7 +634,7 @@ public sealed class McpToolTests : IDisposable
         var client = _db.NewGitHubAppClient(ctx, new UnreachableGitHub());
         var access = _db.NewGitHubAccessService(ctx, client);
         return new CookbookTools(
-            new RecipeService(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx)),
+            new RecipeService(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             ctx,
             new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext),
             _db.OrgContext,
