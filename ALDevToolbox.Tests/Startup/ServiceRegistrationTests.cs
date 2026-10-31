@@ -84,6 +84,23 @@ public class ServiceRegistrationTests : IClassFixture<TestDb>
     }
 
     /// <summary>
+    /// The handler that re-checks open interactive pages is the only thing
+    /// between a disabled or demoted user and the pages they still have open
+    /// (#1534). Its own tests build it by hand, so this proves the real host
+    /// hands it to Blazor (#1573).
+    /// </summary>
+    [Fact]
+    public void The_session_re_check_is_registered_as_a_circuit_handler()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var _ = factory.CreateClient();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetServices<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler>()
+            .Should().ContainSingle(h => h is ALDevToolbox.Services.Account.SessionRevalidationCircuitHandler);
+    }
+
+    /// <summary>
     /// The restore's guarantees live in the worker bases and the queues. A scheduler
     /// or drain worker that does not get the maintenance flag runs straight through a
     /// restore, and a queue without it runs jobs from before one (#1538). This checks
