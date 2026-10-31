@@ -90,7 +90,7 @@ public sealed class GenerateExtensionEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = AlexEmail,
             DisplayName = "Alex Hansen",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = TestPasswords.Hash(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),

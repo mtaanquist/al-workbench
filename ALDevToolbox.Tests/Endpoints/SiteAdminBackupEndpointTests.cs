@@ -144,8 +144,7 @@ public sealed class SiteAdminBackupEndpointTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = AdminEmail,
                 DisplayName = "Site Admin",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                    .HashPassword(AdminPassword),
+                PasswordHash = TestPasswords.Hash(AdminPassword),
                 Role = UserRole.Admin,
                 IsSiteAdmin = true,
                 Status = UserStatus.Active,

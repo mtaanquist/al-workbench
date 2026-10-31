@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services.Account;
 using Microsoft.Extensions.DependencyInjection;
@@ -32,8 +31,6 @@ namespace ALDevToolbox.Tests.Infrastructure;
 /// </summary>
 public class SharedEndpointHost : IDisposable
 {
-    private readonly ConcurrentDictionary<string, string> _hashes = new();
-
     public SharedEndpointHost()
         : this(configureServices: null)
     {
@@ -80,12 +77,10 @@ public class SharedEndpointHost : IDisposable
     }
 
     /// <summary>
-    /// The production bcrypt hash of <paramref name="password"/>, computed once per
-    /// fixture. At the app's work factor each hash costs about a third of a
-    /// second, and the tests only need a hash the real sign-in accepts.
+    /// A bcrypt hash of <paramref name="password"/> the real sign-in accepts,
+    /// made cheaply by <see cref="TestPasswords"/>.
     /// </summary>
-    public string HashPassword(string password) =>
-        _hashes.GetOrAdd(password, p => BCrypt.Net.BCrypt.HashPassword(p, AuthService.BcryptWorkFactor));
+    public string HashPassword(string password) => TestPasswords.Hash(password);
 
     public virtual void Dispose()
     {

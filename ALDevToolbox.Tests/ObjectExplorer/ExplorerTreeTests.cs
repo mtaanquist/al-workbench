@@ -25,41 +25,22 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class ExplorerTreeTests : IDisposable
 {
-    private readonly TestDb _db = new();
+    // Created on first use, so a test that starts by seeding gets a clone of
+    // the seeded template instead of an empty database (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
 
-    public void Dispose() => _db.Dispose();
-
-    private static readonly string FixtureRoot =
-        Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
-
-    private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext,
-                new ALDevToolbox.Services.Translation.TranslationMemoryService(
-                    ctx, _db.OrgContext,
-                    NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-                _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
-            new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
+    public void Dispose() => _database?.Dispose();
 
     private ExplorerTreeService NewTree(Data.AppDbContext ctx) =>
         new(ctx, new SourceVisibility(ctx, new ProjectAccess(ctx, _db.OrgContext)));
 
     /// <summary>Two modules in one release, so the tree has siblings to close.</summary>
-    private async Task<int> SeedAsync()
+    private Task<int> SeedAsync()
     {
-        await using var ctx = _db.NewContext();
-        await using var s1 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
-        await using var s2 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
-        var summary = await NewImporter(ctx).ImportReleaseAsync(new ReleaseImportRequest(
-            Label: "BC 25.18 DK", Kind: "first_party",
-            ParentReleaseId: null, ApplicationVersionId: null,
-            Uploads: new[]
-            {
-                new AppFileUpload("Microsoft_DK_Core.app", s1, null),
-                new AppFileUpload("Microsoft_OIOUBL.app", s2, null),
-            }));
-        return summary.ReleaseId;
+        if (_database is not null) return DkReleaseSeed.ImportAsync(_database);
+        _database = DkReleaseSeed.NewDatabase(out var releaseId);
+        return Task.FromResult(releaseId);
     }
 
     private static async Task<(long FileId, string Path, long ModuleId)> AFileAsync(Data.AppDbContext ctx) =>
