@@ -335,12 +335,19 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
     public async Task Someone_who_cannot_change_the_solution_is_told_who_can()
     {
         var (projectId, _) = await SeedAsync();
+        // On a Public solution everyone may change it, so the note only shows on a
+        // Read-only (or Private) one to someone outside its team.
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        }
         _db.OrgContext.CurrentUserId = OutsiderUserId;
 
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(
-            "Only its owner (owner@example.com), someone on its team, or an admin can change or build it"));
+        cut.WaitForAssertion(() => cut.FindAll("p.u-muted").Should().Contain(p => p.TextContent.Contains(
+            "Only its owner (owner@example.com), someone on its team, or an admin can change or build it")));
     }
 
     /// <summary>
