@@ -199,11 +199,19 @@ jobs:
         run: dotnet test --configuration Release --no-build --output Detailed --timeout 40m
 
   compose-smoke:
-    # Boots the published image against a real `db` container to lock in the
-    # M16 done-when criterion: `docker compose up` brings up Postgres + app
-    # cleanly against an empty volume. Catches Dockerfile / compose / startup
-    # regressions the dotnet-test job can't see (those run against a service
-    # container, not the published app image).
+    # Builds the image from this checkout and boots it against a real `db`
+    # container, to lock in the M16 done-when criterion: `docker compose up`
+    # brings up Postgres + app cleanly against an empty volume. Catches
+    # Dockerfile / compose / startup regressions the dotnet-test job can't see
+    # (those run against a service container, not the app image).
+    #
+    # compose.yaml has no `build:` for the app (operators pull the published
+    # image), so `up --build` alone used to pull `latest` and boot the previous
+    # release instead of the commit under test (#1537). The image is built here
+    # under the exact name compose resolves, and `up --pull never` refuses to
+    # fall back to the registry if that local image is somehow missing.
+    # release.yml's `require-green-build` waits for this job on the tagged SHA,
+    # so the Dockerfile a release publishes has booted here first.
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -215,14 +223,47 @@ jobs:
       POSTGRES_PASSWORD: ci-${{ github.run_id }}
       BOOTSTRAP_ADMIN_EMAIL: admin@example.com
       BOOTSTRAP_ADMIN_PASSWORD: ci-bootstrap-${{ github.run_id }}
+      # A tag no registry holds, so a pull can never satisfy it by accident.
+      ALWORKBENCH_TAG: ci-${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build and start the stack
+      - name: Resolve the app image name compose expects
+        id: image
+        # Read back from compose itself rather than spelled out here, so the
+        # build below can never drift from the `image:` line in compose.yaml.
+        run: |
+          image=$(docker compose config --format json | jq -r '.services.aldevtoolbox.image')
+          echo "Building ${image}"
+          echo "name=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the image from this checkout
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          # Into the local Docker image store, where compose looks for it.
+          load: true
+          tags: ${{ steps.image.outputs.name }}
+          # Same default cache scope as release.yml, so main-branch runs warm
+          # the cache the release build reads and vice versa.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start the stack
+        # Postgres is pulled first because `--pull never` applies to every
+        # service, and only the app image is built locally.
         # --wait blocks until every container reports healthy or the timeout
         # expires; without it, compose only waits ~30s on depends_on before
-        # giving up. The 180s budget covers postgres init + image build.
-        run: docker compose up -d --build --wait --wait-timeout 180
+        # giving up. The 180s budget covers postgres init + app first boot
+        # (the image is already built by the step above).
+        run: |
+          docker compose pull db
+          docker compose up -d --pull never --wait --wait-timeout 180
+          docker compose images
 
       - name: Dump container logs if start-up failed
         if: failure()
