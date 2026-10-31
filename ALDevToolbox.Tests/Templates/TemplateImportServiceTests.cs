@@ -147,6 +147,39 @@ public sealed class TemplateImportServiceTests : IDisposable
     }
 
     /// <summary>
+    /// GEN2-3: the import list hides system templates that are deleted or
+    /// deprecated, and the import itself refuses them too, so a stale click
+    /// (or a hand-posted id) cannot fork a template the catalogue retired.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Import_refuses_a_system_template_that_was_retired_and_writes_nothing(bool deleted, bool deprecated)
+    {
+        await SeedSystemCatalogueAsync();
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+        await using (var seed = _db.NewContext())
+        {
+            var t = seed.RuntimeTemplates.IgnoreQueryFilters().Single(x => x.Id == systemTemplateId);
+            if (deleted) t.DeletedAt = DateTime.UtcNow;
+            t.Deprecated = deprecated;
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewService(ctx).ImportTemplateAsync(systemTemplateId);
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors["Import"].Should().Contain("no longer exists in the system catalogue");
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.RuntimeTemplates.IgnoreQueryFilters().CountAsync(t => t.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+    }
+
+    /// <summary>
     /// #1327: a module retired in the system org, but still linked as one of
     /// the template's defaults there, is neither cloned into the importing
     /// org nor linked as a default.
