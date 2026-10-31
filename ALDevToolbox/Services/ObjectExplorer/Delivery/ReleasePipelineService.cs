@@ -44,7 +44,8 @@ public sealed class ReleasePipelineService
 
     /// <summary>
     /// True when the current user may manage <paramref name="releasePipelineId"/> — i.e.
-    /// they may manage its parent project (owner or org Admin / SiteAdmin). False when
+    /// they may manage its parent project (owner, org Admin / SiteAdmin, everyone on a
+    /// Public one, or its teams). False when
     /// the deployment pipeline no longer exists.
     /// </summary>
     public async Task<bool> CanManageAsync(int releasePipelineId, CancellationToken ct = default)
