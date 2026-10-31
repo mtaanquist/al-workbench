@@ -102,7 +102,7 @@ public sealed class StepUpService
     /// prove and keeps a first passkey possible.
     /// </summary>
     public async Task<string?> PasskeyRegistrationRefusalAsync(
-        ClaimsPrincipal principal, int userId, string? password, CancellationToken ct)
+        ClaimsPrincipal principal, int userId, string? password, string ip, CancellationToken ct)
     {
         if (await IsFreshForPasskeyAsync(principal, ct)) return null;
         var methods = await AvailableMethodsAsync(userId, StepUpAuth.Method(principal), ct);
@@ -115,7 +115,7 @@ public sealed class StepUpService
             .Select(u => new { u.Email, u.PasswordHash })
             .FirstAsync(ct);
         // Counted towards the sign-in lockout, as every current-password check is (#1614).
-        return await _auth.CheckCurrentPasswordAsync(account.Email, account.PasswordHash, password, ip: string.Empty, ct) switch
+        return await _auth.CheckCurrentPasswordAsync(account.Email, account.PasswordHash, password, ip, ct) switch
         {
             CurrentPasswordCheck.Correct => null,
             CurrentPasswordCheck.LockedOut => AuthService.CurrentPasswordLockedOutMessage,

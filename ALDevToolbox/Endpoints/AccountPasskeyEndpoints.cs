@@ -75,7 +75,7 @@ internal static class AccountPasskeyEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!passkeys.IsConfigured) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsync("Passkeys not configured."); return; }
             var userId = org.CurrentUserId.Value;
-            var refusal = await stepUp.PasskeyRegistrationRefusalAsync(ctx.User, userId, await ReadPasswordAsync(ctx, ct), ct);
+            var refusal = await stepUp.PasskeyRegistrationRefusalAsync(ctx.User, userId, await ReadPasswordAsync(ctx, ct), ResolveIp(ctx), ct);
             if (refusal is not null)
             {
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
