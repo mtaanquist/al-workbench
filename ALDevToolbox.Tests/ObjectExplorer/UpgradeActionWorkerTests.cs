@@ -150,6 +150,37 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_booked_install_waits_while_a_deployment_to_the_same_environment_is_running()
+    {
+        // #1629: a pipeline deployment and a booked install share the environment gate, so
+        // they never install into one Business Central environment at once.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 1, "Core.app");
+        Guid? tenant;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            tenant = await ctx.OeProjects.Where(p => p.Id == projectId).Select(p => p.BcTenantId).SingleAsync();
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        // The deployment names the environment in other letter case; it is the same one.
+        using (var deployment = _f.Deliveries.TryEnterEnvironment(tenant, projectId, "PRODUCTION"))
+        {
+            deployment.Should().NotBeNull();
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0);
+            _f.Apps.InstalledFiles.Should().BeEmpty("a deployment to that environment is running");
+            var waiting = await _f.ReadActionAsync(ids[0]);
+            waiting.Status.Should().Be(UpgradeActionStatus.Pending);
+            waiting.SentAt.Should().BeNull("it stays due for the next sweep");
+        }
+
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.InstalledFiles.Should().Equal("Core.app");
+        using var after = _f.Deliveries.TryEnterEnvironment(tenant, projectId, "Production");
+        after.Should().NotBeNull("the install let go of the environment");
+    }
+
+    [Fact]
     public async Task One_customers_failure_does_not_stop_the_others()
     {
         var (projectA, envA) = await _f.SeedCustomerAsync("CRONUS Denmark");
