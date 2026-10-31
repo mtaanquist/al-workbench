@@ -63,6 +63,36 @@ public sealed class ResumedImportJobsTests
     }
 
     [Fact]
+    public async Task Backfills_resumed_after_a_restart_take_one_slot_at_a_time()
+    {
+        var queue = new ReleaseImportQueue();
+        var lifetime = new FakeLifetime();
+        var backfills = Enumerable.Range(1, 30)
+            .Select(i => new ReleaseImportJob(i, Identity, new ReleaseImportSource.Backfill(), JobRowId: i))
+            .ToList();
+        try
+        {
+            ResumedImportJobs.QueueWhenStarted(lifetime, queue, new ProjectBuildQueue(), backfills, NullLogger.Instance);
+            lifetime.Start();
+
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (queue.Reader.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
+            await Task.Delay(200);
+            queue.Reader.Count.Should().Be(ReleaseImportQueue.PacedJobLimit,
+                "hundreds of backfills cut off by a deploy must not fill the queue other imports use");
+
+            queue.Reader.TryRead(out var first).Should().BeTrue();
+            queue.MarkPickedUp(first!);
+            var next = await queue.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            next.ReleaseId.Should().Be(2);
+        }
+        finally
+        {
+            lifetime.StopApplication();
+        }
+    }
+
+    [Fact]
     public async Task Shutting_down_while_the_queue_is_full_stops_quietly()
     {
         var queue = new ReleaseImportQueue();

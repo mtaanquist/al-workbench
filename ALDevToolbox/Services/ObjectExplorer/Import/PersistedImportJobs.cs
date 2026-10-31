@@ -42,6 +42,55 @@ public sealed class PersistedImportJobs
         bool storeSymbolReference,
         CancellationToken ct = default)
     {
+        var row = NewRow(releaseId, identity, source, storeSymbolReference);
+        _db.OeImportJobs.Add(row);
+        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        return row.Id;
+    }
+
+    /// <summary>
+    /// Advisory-lock class id for <see cref="CreateBackfillsAsync"/>; the second key is
+    /// the organisation id, so two organisations never wait on each other.
+    /// </summary>
+    private const int BackfillLockClass = 1542;
+
+    /// <summary>
+    /// Writes a <c>queued</c> backfill row for each of <paramref name="releaseIds"/> that
+    /// has no backfill queued or running yet, all in one transaction, and returns the
+    /// rows it wrote. All or nothing: a cancelled request or a failed write leaves no
+    /// row behind that nothing will ever feed to the queue, and that would block the
+    /// next attempt at the same release (#1542). An advisory lock per organisation
+    /// makes a second submit wait for the first to finish, so its check sees those
+    /// rows and a double click cannot queue the catalogue twice.
+    /// </summary>
+    public async Task<IReadOnlyList<(int ReleaseId, long JobRowId)>> CreateBackfillsAsync(
+        IReadOnlyList<int> releaseIds,
+        AmbientOrganizationScope.OrganizationIdentity identity,
+        CancellationToken ct = default)
+    {
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
+            : null;
+        await _db.Database.ExecuteSqlAsync(
+            $"SELECT pg_advisory_xact_lock({BackfillLockClass}, {identity.OrganizationId})", ct).ConfigureAwait(false);
+        var active = await ListReleasesWithActiveBackfillAsync(ct).ConfigureAwait(false);
+        var source = new ReleaseImportSource.Backfill();
+        var rows = releaseIds.Distinct()
+            .Where(id => !active.Contains(id))
+            .Select(id => NewRow(id, identity, source, storeSymbolReference: false))
+            .ToList();
+        _db.OeImportJobs.AddRange(rows);
+        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        if (tx is not null) await tx.CommitAsync(ct).ConfigureAwait(false);
+        return rows.Select(r => (r.ReleaseId, r.Id)).ToList();
+    }
+
+    private OeImportJob NewRow(
+        int releaseId,
+        AmbientOrganizationScope.OrganizationIdentity identity,
+        ReleaseImportSource source,
+        bool storeSymbolReference)
+    {
         var row = new OeImportJob
         {
             OrganizationId = identity.OrganizationId,
@@ -93,9 +142,7 @@ public sealed class PersistedImportJobs
             default:
                 throw new InvalidOperationException($"Unknown import source {source.GetType().Name}.");
         }
-        _db.OeImportJobs.Add(row);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-        return row.Id;
+        return row;
     }
 
     public async Task MarkRunningAsync(long jobRowId, CancellationToken ct = default)
@@ -133,7 +180,8 @@ public sealed class PersistedImportJobs
     }
 
     /// <summary>
-    /// Startup reconciliation. Returns the URL-source jobs to re-enqueue; the
+    /// Startup reconciliation. Returns the resumable jobs to re-enqueue (URL,
+    /// artifact and build imports, and backfills that never started); the
     /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>, oldest first.
     /// Staged-zip jobs are flipped to <c>failed</c> in-place (their temp file
     /// is gone) along with their owning <c>oe_releases</c> row so the admin sees
@@ -235,12 +283,26 @@ public sealed class PersistedImportJobs
                             : ProjectBuildOrder.Unordered,
                         Resumed: true));
                     break;
+                case "backfill_system_references" when row.Status == "queued":
+                    // A backfill that never started. A bulk run queues every
+                    // release and works through them for hours, so a deploy in
+                    // the middle must not fail the rest (#1542). It re-reads
+                    // stored source and has changed nothing yet, so it simply
+                    // runs: not Resumed, which would wipe the release's rows.
+                    toResume.Add(new ReleaseImportJob(
+                        ReleaseId: row.ReleaseId,
+                        Identity: new AmbientOrganizationScope.OrganizationIdentity(
+                            row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
+                        Source: new ReleaseImportSource.Backfill(),
+                        StoreSymbolReference: false,
+                        JobRowId: row.Id));
+                    break;
                 case "backfill_system_references":
-                    // A maintenance backfill interrupted by a restart. The
-                    // release stays ready (backfill never flips its status); its
-                    // system refs may be partially repopulated. Nothing to
-                    // resume — mark failed so the admin re-triggers, which is
-                    // cheap and idempotent. No lost upload to report. See #291.
+                    // A maintenance backfill interrupted by a restart while it
+                    // ran. The release stays ready (backfill never flips its
+                    // status); its system refs may be partially repopulated.
+                    // Mark failed so the admin re-triggers, which is cheap and
+                    // idempotent. No lost upload to report. See #291.
                     row.Status = "failed";
                     row.ErrorMessage = "The system-reference backfill was interrupted by a restart. Re-trigger it from the release.";
                     row.CompletedAt = now;

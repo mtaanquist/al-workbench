@@ -245,39 +245,45 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
         var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
             NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
-        using var request = new CancellationTokenSource();
-
-        var queued = await NewService(ctx, queue, lifetime: lifetime)
-            .QueueBackfillAllAsync(releaseIds, request.Token)
-            .WaitAsync(TimeSpan.FromSeconds(30));
-
-        queued.Should().Be(20);
-        await using (var read = _db.NewContext())
+        try
         {
-            var rows = await read.OeImportJobs.AsNoTracking()
-                .Where(j => j.Kind == "backfill_system_references").ToListAsync();
-            rows.Select(j => j.ReleaseId).Should().BeEquivalentTo(releaseIds);
-            rows.Should().OnlyContain(j => j.Status == "queued");
-        }
+            using var request = new CancellationTokenSource();
 
-        // The tab closing does not stop the feed: it runs until shutdown.
-        await request.CancelAsync();
-        var drained = new List<ReleaseImportJob>();
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (drained.Count(j => j.ReleaseId != int.MaxValue) < 20 && DateTime.UtcNow < deadline)
-        {
-            if (queue.Reader.TryRead(out var job))
+            var result = await NewService(ctx, queue, lifetime: lifetime)
+                .QueueBackfillAllAsync(releaseIds, request.Token)
+                .WaitAsync(TimeSpan.FromSeconds(30));
+
+            result.Should().Be(new BackfillQueueResult(Queued: 20, Skipped: 0));
+            await using (var read = _db.NewContext())
             {
-                queue.MarkPickedUp(job); // what the worker does as it starts a job
-                drained.Add(job);
+                var rows = await read.OeImportJobs.AsNoTracking()
+                    .Where(j => j.Kind == "backfill_system_references").ToListAsync();
+                rows.Select(j => j.ReleaseId).Should().BeEquivalentTo(releaseIds);
+                rows.Should().OnlyContain(j => j.Status == "queued");
             }
-            else await Task.Delay(10);
+
+            // The tab closing does not stop the feed: it runs until shutdown.
+            await request.CancelAsync();
+            var drained = new List<ReleaseImportJob>();
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (drained.Count(j => j.ReleaseId != int.MaxValue) < 20 && DateTime.UtcNow < deadline)
+            {
+                if (queue.Reader.TryRead(out var job))
+                {
+                    queue.MarkPickedUp(job); // what the worker does as it starts a job
+                    drained.Add(job);
+                }
+                else await Task.Delay(10);
+            }
+            drained.Where(j => j.ReleaseId != int.MaxValue).Select(j => j.ReleaseId)
+                .Should().Equal(releaseIds, "every backfill reaches the queue once room frees up, in order");
+            drained.Where(j => j.ReleaseId != int.MaxValue)
+                .Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill && j.JobRowId > 0);
         }
-        drained.Where(j => j.ReleaseId != int.MaxValue).Select(j => j.ReleaseId)
-            .Should().Equal(releaseIds, "every backfill reaches the queue once room frees up, in order");
-        drained.Where(j => j.ReleaseId != int.MaxValue)
-            .Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill && j.JobRowId > 0);
-        lifetime.StopApplication();
+        finally
+        {
+            lifetime.StopApplication();
+        }
     }
 
     [Fact]
@@ -343,15 +349,24 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var releaseIds = await SeedReadyReleasesAsync(ctx, 3);
         var queue = new ReleaseImportQueue();
-        var service = NewService(ctx, queue);
-        (await service.QueueBackfillAllAsync(releaseIds.Take(2).ToList())).Should().Be(2);
+        var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+            NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
+        try
+        {
+            var service = NewService(ctx, queue, lifetime: lifetime);
+            (await service.QueueBackfillAllAsync(releaseIds.Take(2).ToList())).Queued.Should().Be(2);
 
-        var queued = await service.QueueBackfillAllAsync(releaseIds);
+            var result = await service.QueueBackfillAllAsync(releaseIds);
 
-        queued.Should().Be(1, "the first two are still queued");
-        await using var read = _db.NewContext();
-        (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
-            .Should().Be(3);
+            result.Should().Be(new BackfillQueueResult(Queued: 1, Skipped: 2), "the first two are still queued");
+            await using var read = _db.NewContext();
+            (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
+                .Should().Be(3);
+        }
+        finally
+        {
+            lifetime.StopApplication();
+        }
     }
 
     private static async Task<List<int>> SeedReadyReleasesAsync(Data.AppDbContext ctx, int count)

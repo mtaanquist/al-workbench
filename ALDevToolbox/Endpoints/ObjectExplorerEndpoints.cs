@@ -458,8 +458,8 @@ internal static class ObjectExplorerEndpoints
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var releaseIds = await management.ListBackfillableReleaseIdsAsync(ct);
-            var queued = await imports.QueueBackfillAllAsync(releaseIds, ct);
-            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={queued}");
+            var result = await imports.QueueBackfillAllAsync(releaseIds, ct);
+            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={result.Queued}&skipped={result.Skipped}");
         }).RequireObjectExplorerAuthoring();
 
         app.MapPost("/admin/object-explorer/{id:int}/restore", async (

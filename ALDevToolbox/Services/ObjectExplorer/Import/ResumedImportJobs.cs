@@ -25,6 +25,7 @@ internal static class ResumedImportJobs
         ILogger logger)
     {
         var imports = new List<ReleaseImportJob>();
+        var backfills = new List<ReleaseImportJob>();
         var resumedBuilds = 0;
         foreach (var job in jobs)
         {
@@ -33,6 +34,12 @@ internal static class ResumedImportJobs
                 builds.Enqueue(job);
                 resumedBuilds++;
             }
+            else if (job.Source is ReleaseImportSource.Backfill)
+            {
+                // A bulk backfill cut off by the restart can be hundreds of
+                // jobs; paced, so it does not crowd out the imports (#1542).
+                backfills.Add(job);
+            }
             else
             {
                 imports.Add(job);
@@ -40,9 +47,16 @@ internal static class ResumedImportJobs
         }
         if (resumedBuilds > 0) logger.LogInformation("Resumed {Count} build(s) after restart.", resumedBuilds);
 
-        if (imports.Count == 0) return;
-        lifetime.ApplicationStarted.Register(() =>
-            _ = EnqueueAllAsync(queue, imports, logger, "resumed after restart", lifetime.ApplicationStopping));
+        if (imports.Count > 0)
+        {
+            lifetime.ApplicationStarted.Register(() =>
+                _ = EnqueueAllAsync(queue, imports, logger, "resumed after restart", lifetime.ApplicationStopping));
+        }
+        if (backfills.Count > 0)
+        {
+            lifetime.ApplicationStarted.Register(() =>
+                _ = EnqueueAllAsync(queue, backfills, logger, "backfills resumed after restart", lifetime.ApplicationStopping, paced: true));
+        }
     }
 
     /// <summary>
@@ -73,7 +87,7 @@ internal static class ResumedImportJobs
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // Shutting down; the rows are still queued and the next start's reconcile
-            // picks them up (resumes an import, marks a backfill failed to re-trigger).
+            // resumes them.
         }
         catch (Exception ex)
         {
