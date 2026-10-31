@@ -55,6 +55,24 @@ public sealed class IdRangeAllocatorTests
             "each module starts where the previous one ended - the cursor is the whole point");
     }
 
+    [Fact]
+    public void A_blank_module_size_follows_the_copied_repository_and_a_typed_one_wins()
+    {
+        var template = TemplateBuilder.Default("runtime-x");
+        var following = ModuleBuilder.Default("following", "Following");
+        following.SourceIdRangeSize = 120;
+        var typed = ModuleBuilder.Default("typed", "Typed", idRangeSize: 30);
+        typed.SourceIdRangeSize = 120;
+
+        var ranges = IdRangeAllocator.Allocate(
+            template, Array.Empty<string>(), new[] { following, typed }, CoreFrom, CoreTo);
+
+        var followingRange = ranges.Single(r => r.Path == following.ExtensionName);
+        var typedRange = ranges.Single(r => r.Path == typed.ExtensionName);
+        (followingRange.To - followingRange.From + 1).Should().Be(120, "a blank size takes the repository's app.json range");
+        (typedRange.To - typedRange.From + 1).Should().Be(30, "a size the Editor typed wins over the repository's");
+    }
+
     /// <summary>
     /// The contract <c>BuildExtensionList</c> now depends on: allocation order
     /// is emit order. It consumes the list by index against the same two loops,
