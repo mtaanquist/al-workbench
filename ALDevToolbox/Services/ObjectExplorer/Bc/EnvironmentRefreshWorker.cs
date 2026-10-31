@@ -80,9 +80,6 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
     private int _runRequests;
     private long _runStarted;
 
-    /// <summary>How many solutions the run being drained has counted so far. For tests.</summary>
-    internal int SolutionsInRun => _runSolutions;
-
     protected override async Task RunJobAsync(EnvironmentRefreshJob job, CancellationToken ct)
     {
         // A queued job is dropped while a restore runs or a failed one holds the
