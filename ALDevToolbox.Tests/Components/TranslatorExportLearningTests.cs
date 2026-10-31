@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ALDevToolbox.Components.Shared;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
@@ -71,13 +72,24 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     private readonly BunitJSModuleInterop _module;
     private readonly FakeGitHubApi _api;
 
+    // The browser stamps each open with an id and hands it back (#1595); these
+    // stand in for the ids it would return.
+    private const string UploadOpenId = "open-upload";
+    private const string RestoredOpenId = "open-restored";
+    private readonly JSRuntimeInvocationHandler<string> _export;
+    private readonly JSRuntimeInvocationHandler<string?> _openIds;
+
     public TranslatorExportLearningTests()
     {
         _ctx.AddAuthorization().SetAuthorized("translator@cronus.example");
         _ctx.JSInterop.Mode = JSRuntimeMode.Loose;
         _module = _ctx.JSInterop.SetupModule("./Components/Pages/Translator.razor.js");
         _module.Mode = JSRuntimeMode.Loose;
-        _module.Setup<bool>("exportNow", _ => true).SetResult(true);
+        _export = _module.Setup<string>("exportNow", _ => true);
+        _export.SetResult("exported");
+        // A new open; a repository save's rebase passes one more argument.
+        _openIds = _module.Setup<string?>("putBaseStream", i => i.Arguments.Count <= 5);
+        _openIds.SetResult(UploadOpenId);
 
         _api = new FakeGitHubApi()
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
@@ -159,8 +171,8 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         cut.FindAll("button").Single(b => b.TextContent.Contains("Export a copy")).Click();
 
         var export = ExportCall(cut);
-        ((string)export.Arguments[1]!).Should().Contain("Beloeb", "the copy still carries the edit");
-        export.Arguments[2].Should().Be("[]", "the endpoint would learn it with no repository attached");
+        ((string)export.Arguments[2]!).Should().Contain("Beloeb", "the copy still carries the edit");
+        export.Arguments[3].Should().Be("[]", "the endpoint would learn it with no repository attached");
     }
 
     [Fact]
@@ -168,7 +180,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     {
         var cut = Restore(new TranslatorPage.RepositoryOriginDto { Repository = Repo, Path = "App/Translations/App.da-DK.xlf" });
 
-        ExportRestored(cut).Arguments[2].Should().Be("[]");
+        ExportRestored(cut).Arguments[3].Should().Be("[]");
     }
 
     [Fact]
@@ -176,7 +188,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     {
         var cut = Restore(repo: null);
 
-        ExportRestored(cut).Arguments[2].Should().Be(JsonSerializer.Serialize(new[] { UnitId }));
+        ExportRestored(cut).Arguments[3].Should().Be(JsonSerializer.Serialize(new[] { UnitId }));
     }
 
     [Fact]
@@ -193,10 +205,155 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
 
         var export = ExportCall(cut);
-        export.Arguments[2].Should().Be(JsonSerializer.Serialize(new[] { UnitId }));
+        export.Arguments[3].Should().Be(JsonSerializer.Serialize(new[] { UnitId }));
     }
 
-    private IRenderedComponent<TranslatorPage> Restore(TranslatorPage.RepositoryOriginDto? repo)
+    // ── The tab's own record (#1595, #1574) ───────────────────────────────
+    // The browser keeps one session record for the whole site, so a second
+    // tab's open replaces the first tab's. Each open is stamped with an id;
+    // the tab passes it back on every export, save and overlay write, and the
+    // browser refuses when the record has become another open's.
+
+    [Fact]
+    public void An_upload_passes_the_id_its_open_was_given_to_export_and_to_the_overlay()
+    {
+        var cut = _ctx.Render<TranslatorPage>();
+        cut.FindComponent<InputFile>().UploadFiles(InputFileContent.CreateFromText(DanishXliff, "App.da-DK.xlf"));
+        cut.WaitForElement("textarea.tr-tgtarea");
+        Type(cut, "Beloeb");
+
+        // The overlay is written on a debounce off the render loop, so this
+        // polls rather than waiting for a render.
+        SpinWait.SpinUntil(() => _module.Invocations["putEdits"].Count > 0, TimeSpan.FromSeconds(5))
+            .Should().BeTrue("typing persists the overlay for a reload");
+        _module.Invocations["putEdits"].Should().OnlyContain(i => (string?)i.Arguments[0] == UploadOpenId);
+
+        cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
+
+        ExportCall(cut).Arguments[0].Should().Be(UploadOpenId);
+    }
+
+    [Fact]
+    public void An_export_refused_because_another_tab_replaced_the_file_says_so_and_keeps_the_edits_unsaved()
+    {
+        _export.SetResult("replaced");
+        var cut = _ctx.Render<TranslatorPage>();
+        cut.FindComponent<InputFile>().UploadFiles(InputFileContent.CreateFromText(DanishXliff, "App.da-DK.xlf"));
+        cut.WaitForElement("textarea.tr-tgtarea");
+        Type(cut, "Beloeb");
+
+        cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
+
+        ExportCall(cut);
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(TranslatorPage.ReplacedInAnotherTab("export")));
+        cut.FindAll("button.btn--primary").Should().Contain(b => b.TextContent.Contains("Export .xlf (1)"),
+            "nothing was exported, so the edit is still unsaved");
+    }
+
+    [Fact]
+    public void A_restored_session_takes_over_the_records_id_and_a_refused_save_says_so()
+    {
+        _module.Setup<bool>("hasHandle", _ => true).SetResult(true);
+        _module.Setup<string>("saveInPlace", _ => true).SetResult("replaced");
+        var cut = Restore(repo: null, primaryLabel: "Save (1)");
+
+        _module.Invocations["loadOriginalStream"].Single().Arguments.Should().Equal(RestoredOpenId);
+        _module.Invocations["hasHandle"].Single().Arguments.Should().Equal(RestoredOpenId);
+
+        cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Save")).Click();
+
+        cut.WaitForAssertion(() => _module.Invocations["saveInPlace"].Should().ContainSingle());
+        _module.Invocations["saveInPlace"].Single().Arguments[0].Should().Be(RestoredOpenId);
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(TranslatorPage.ReplacedInAnotherTab("save")));
+        cut.FindAll("button.btn--primary").Should().Contain(b => b.TextContent.Contains("Save (1)"),
+            "nothing was written, so the edit is still unsaved");
+    }
+
+    /// <summary>
+    /// The browser half: the id is stamped on every open and checked before
+    /// the base or the handle is used, or the overlay is written. The module
+    /// has no JS test runner here, so this pins the checks in its source.
+    /// </summary>
+    [Fact]
+    public void The_browser_module_checks_the_open_id_before_using_or_writing_the_record()
+    {
+        var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
+
+        js.Should().Contain("await putRec({ openId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null });")
+            .And.Contain("await putRec({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });")
+            .And.Contain("export async function exportNow(openId, fileName, editsJson, learnJson)")
+            .And.Contain("export async function saveInPlace(openId, fileName, editsJson, learnJson)")
+            .And.Contain("export async function putEdits(openId, editsJson, learnedJson)")
+            .And.Contain("export async function putMeta(openId, fileName, targetLang)")
+            .And.Contain("rec.openId === openId")
+            // A missing record (another tab opened a file and closed it) is
+            // refused too, not reported as nothing to export.
+            .And.Contain("""return openId || rec ? "replaced" : "empty";""")
+            // A repository save's rebase writes nothing onto another open's record.
+            .And.Contain("if (arguments.length > 5 && !(await getOwnRec(replaceOpenId))) return null;");
+        // Both readers of the base refuse before anything is posted or written.
+        Regex.Matches(js, @"const refused = notOwned\(rec, openId\);\s+if \(refused\) return refused;").Count.Should().Be(2);
+    }
+
+    [Fact]
+    public void An_export_with_nothing_to_send_keeps_the_edits_unsaved()
+    {
+        _export.SetResult("empty");
+        var cut = _ctx.Render<TranslatorPage>();
+        cut.FindComponent<InputFile>().UploadFiles(InputFileContent.CreateFromText(DanishXliff, "App.da-DK.xlf"));
+        cut.WaitForElement("textarea.tr-tgtarea");
+        Type(cut, "Beloeb");
+
+        cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
+
+        ExportCall(cut);
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Nothing to export yet"));
+        cut.FindAll("button.btn--primary").Should().Contain(b => b.TextContent.Contains("Export .xlf (1)"),
+            "nothing was exported, so the edit is still unsaved");
+    }
+
+    [Fact]
+    public async Task A_repository_save_rebases_only_its_own_record_and_drops_the_id_when_refused()
+    {
+        await ReadyAsync();
+        // No translation branch or language file yet, so the save cuts one and opens a pull request.
+        _api.On(HttpMethod.Get, $"/repos/{Repo}/contents/App/Translations/App.da-DK.xlf", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/main", HttpStatusCode.OK,
+                """{"ref":"refs/heads/main","object":{"sha":"base-sha"}}""")
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("base-sha"))
+            .On(HttpMethod.Put, $"/repos/{Repo}/contents/", HttpStatusCode.OK,
+                """{"content":{"sha":"written-blob-sha"},"commit":{"sha":"new-commit-sha"}}""")
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
+            .On(HttpMethod.Post, $"/repos/{Repo}/pulls", HttpStatusCode.Created,
+                $$"""{"number":12,"html_url":"https://github.com/{{Repo}}/pull/12"}""");
+        // The rebase carries the tab's id; the browser answers null because
+        // another tab has opened a file over the record since.
+        _module.Setup<string?>("putBaseStream", i => i.Arguments.Count > 5).SetResult(null);
+
+        var cut = _ctx.Render<TranslatorPage>();
+        var picker = cut.FindComponent<RepositoryPicker>();
+        await cut.InvokeAsync(() => picker.Instance.SelectedChanged.InvokeAsync(new GitHubRepositorySummary(
+            Repo, OrgLogin, "private-app", "main", IsPrivate: true, Description: null,
+            HtmlUrl: $"https://github.com/{Repo}", CloneUrl: $"https://github.com/{Repo}.git")));
+        cut.WaitForElement(".trepo__file").Click();
+        Type(cut, "Beloeb");
+
+        cut.FindAll("button").First(b => b.TextContent.Contains("Save to repository")).Click();
+        cut.WaitForAssertion(() => cut.FindAll("button").Should().Contain(b => b.TextContent.Contains("Save and open a pull request")));
+        cut.FindAll("button").First(b => b.TextContent.Contains("Save and open a pull request")).Click();
+
+        cut.WaitForAssertion(() => _module.Invocations["putBaseStream"].Should().HaveCount(2), TimeSpan.FromSeconds(5));
+        var rebase = _module.Invocations["putBaseStream"][1];
+        rebase.Arguments.Should().HaveCount(6);
+        rebase.Arguments[5].Should().Be(UploadOpenId, "the rebase names the open it may replace");
+
+        // The tab owns no record any more, so its next export is refused by the browser.
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Export a copy")).Click();
+        ExportCall(cut).Arguments[0].Should().BeNull();
+    }
+
+    private IRenderedComponent<TranslatorPage> Restore(TranslatorPage.RepositoryOriginDto? repo, string primaryLabel = "Export .xlf (1)")
     {
         _module.Setup<TranslatorPage.SessionPeek?>("peek").SetResult(new TranslatorPage.SessionPeek
         {
@@ -205,13 +362,14 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         });
         _module.Setup<TranslatorPage.SessionMeta?>("loadMeta").SetResult(new TranslatorPage.SessionMeta
         {
+            OpenId = RestoredOpenId,
             FileName = "App.da-DK.xlf",
             SourceLang = "en-US",
             TargetLang = "da-DK",
             Edits = new() { [UnitId] = new TranslatorPage.EditDto { T = "Beloeb", S = "translated" } },
             Repo = repo,
         });
-        _module.Setup<IJSStreamReference>("loadOriginalStream").SetResult(new TextStreamReference(DanishXliff));
+        _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true).SetResult(new TextStreamReference(DanishXliff));
 
         var cut = _ctx.Render<TranslatorPage>();
         cut.WaitForAssertion(() =>
@@ -219,7 +377,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
         // The restored edit is already in the overlay, so the unsaved count shows on Export.
         cut.WaitForAssertion(() => cut.FindAll("button.btn--primary")
-            .Should().Contain(b => b.TextContent.Contains("Export .xlf (1)")));
+            .Should().Contain(b => b.TextContent.Contains(primaryLabel)));
         return cut;
     }
 
@@ -233,7 +391,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     {
         cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
         var export = ExportCall(cut);
-        ((string)export.Arguments[1]!).Should().Contain("Beloeb", "the restored edit is in the copy");
+        ((string)export.Arguments[2]!).Should().Contain("Beloeb", "the restored edit is in the copy");
         return export;
     }
 
