@@ -72,7 +72,14 @@ public sealed class ValidateOnlyTests : IDisposable
         // which is exactly what makes the page see it too. See
         // .design/customer-naming.md.
         await SeedTemplateAsync();
-        var plan = PlanBuilder.WorkspacePlan(extensionPrefix: new string('P', 205));
+        // A typed prefix is capped on its own (#1615), so only an organisation's
+        // fixed prefix can still make the names this long.
+        await SetOrgSettingsAsync(new OrganizationSettings
+        {
+            ExtensionPrefixMode = ExtensionPrefixMode.Fixed,
+            ExtensionPrefix = new string('P', 205),
+        });
+        var plan = PlanBuilder.WorkspacePlan();
 
         var errors = await NewService().ValidateWorkspaceAsync(plan);
         errors.Should().ContainKey("ShortName");
@@ -310,6 +317,93 @@ public sealed class ValidateOnlyTests : IDisposable
     }
 
     [Fact]
+    public async Task An_over_long_typed_prefix_is_reported_under_its_own_field()
+    {
+        await SeedTemplateAsync();
+        await SetOrgSettingsAsync(new OrganizationSettings { ExtensionPrefixMode = ExtensionPrefixMode.PerWorkspace });
+        var plan = PlanBuilder.WorkspacePlan(extensionPrefix: new string('P', 51));
+
+        var errors = await NewService().ValidateWorkspaceAsync(plan);
+
+        errors.Should().ContainKey("ExtensionPrefix").And.NotContainKey("ShortName");
+        await AssertGenerateRefusesAsync(plan, "ExtensionPrefix");
+    }
+
+    [Fact]
+    public async Task A_typed_prefix_of_fifty_characters_is_accepted()
+    {
+        await SeedTemplateAsync();
+        await SetOrgSettingsAsync(new OrganizationSettings { ExtensionPrefixMode = ExtensionPrefixMode.PerWorkspace });
+
+        (await NewService().ValidateWorkspaceAsync(PlanBuilder.WorkspacePlan(extensionPrefix: new string('P', 50))))
+            .Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("", "Base Application", "Microsoft", "24.0.0.0", "DepId")]
+    [InlineData("Base Application", "Base Application", "Microsoft", "24.0.0.0", "DepId")]
+    [InlineData("437dbf0e-84ff-417a-965d-ed2bb9650972", " ", "Microsoft", "24.0.0.0", "DepName")]
+    [InlineData("437dbf0e-84ff-417a-965d-ed2bb9650972", "Base Application", "", "24.0.0.0", "DepPublisher")]
+    [InlineData("437dbf0e-84ff-417a-965d-ed2bb9650972", "Base Application", "Microsoft", "", "DepVersion")]
+    public async Task A_dependency_missing_a_field_or_a_real_app_id_is_reported_and_refused(
+        string id, string name, string publisher, string version, string field)
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.ExtensionPlan(dependencies: new[] { new DependencyEntry(id, name, publisher, version) });
+
+        (await NewService().ValidateExtensionAsync(plan)).Should().ContainKey($"Dependencies[0].{field}");
+        await AssertGenerateRefusesAsync(plan, $"Dependencies[0].{field}");
+    }
+
+    [Fact]
+    public async Task The_same_app_id_written_two_ways_is_a_duplicate()
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.ExtensionPlan(dependencies: new[]
+        {
+            new DependencyEntry("437dbf0e-84ff-417a-965d-ed2bb9650972", "Base Application", "Microsoft", "24.0.0.0"),
+            new DependencyEntry("{437DBF0E-84FF-417A-965D-ED2BB9650972}", "Base Application", "Microsoft", "24.0.0.0"),
+        });
+
+        (await NewService().ValidateExtensionAsync(plan)).Should().ContainKey("Dependencies[1].DepId");
+    }
+
+    [Fact]
+    public async Task A_dependency_id_is_written_to_app_json_in_its_usual_form()
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.ExtensionPlan(dependencies: new[]
+        {
+            new DependencyEntry("{437DBF0E84FF417A965DED2BB9650972}", "Base Application", "Microsoft", "24.0.0.0"),
+        });
+
+        var archive = await NewService().GenerateExtensionAsync(plan);
+        using var zip = new System.IO.Compression.ZipArchive(archive.Stream);
+        var appJson = zip.Entries.Single(e => e.FullName.EndsWith("app.json", StringComparison.Ordinal));
+        using var reader = new StreamReader(appJson.Open());
+        (await reader.ReadToEndAsync()).Should().Contain("437dbf0e-84ff-417a-965d-ed2bb9650972");
+    }
+
+    /// <summary>
+    /// One publisher per organisation: the page has no publisher field, and an
+    /// assistant passing its own cannot override the organisation's (#1615).
+    /// </summary>
+    [Fact]
+    public async Task The_organisations_publisher_beats_the_one_the_caller_passed()
+    {
+        await SeedTemplateAsync();
+        await SetOrgSettingsAsync(new OrganizationSettings { DefaultPublisher = "CRONUS Partner A/S" });
+        var plan = PlanBuilder.ExtensionPlan(publisher: "Guessed Publisher");
+
+        var archive = await NewService().GenerateExtensionAsync(plan);
+        using var zip = new System.IO.Compression.ZipArchive(archive.Stream);
+        var appJson = zip.Entries.Single(e => e.FullName.EndsWith("app.json", StringComparison.Ordinal));
+        using var reader = new StreamReader(appJson.Open());
+        var text = await reader.ReadToEndAsync();
+        text.Should().Contain("CRONUS Partner A/S").And.NotContain("Guessed Publisher");
+    }
+
+    [Fact]
     public async Task A_duplicate_dependency_is_reported_and_refused()
     {
         await SeedTemplateAsync();
@@ -323,6 +417,15 @@ public sealed class ValidateOnlyTests : IDisposable
     }
 
     // ===== helpers =====
+
+    private async Task SetOrgSettingsAsync(OrganizationSettings settings)
+    {
+        await using var ctx = _db.NewContext();
+        settings.OrganizationId = TemplateBuilder.DefaultOrganizationId;
+        settings.UpdatedAt = DateTime.UtcNow;
+        ctx.OrganizationSettings.Add(settings);
+        await ctx.SaveChangesAsync();
+    }
 
     private async Task AssertGenerateRefusesAsync(ProjectPlan plan, string expectedKeyFragment)
     {

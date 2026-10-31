@@ -324,7 +324,7 @@ record StandaloneExtensionPlan(
     int IdRangeFrom,
     int IdRangeTo,
     bool IncludeExamples,
-    string Publisher,                // editable, defaults to template's publisher
+    string Publisher,                // the organisation's DefaultPublisher; the plan's value only when the org has none
     IReadOnlyList<DependencyEntry> Dependencies
 );
 
@@ -352,7 +352,7 @@ MyExtension/
 └── workspace.aldt.toml           # the saved plan, so the form can be restored
 ```
 
-**Both scopes of `organization_files` land here** (issue #522). The extension folder *is* the root of what the user unzips, so the workspace-root-scoped rows the template opts into (`.gitignore`, `README.md`, the shared ruleset, whatever else an admin curated) are emitted at that folder's root alongside the per-extension-scoped ones (`app.json`, `AppSourceCop.json`). Previously only the per-extension scope was written, so a standalone extension silently shipped without the `.gitignore` its template declares. `{{publisher}}` in those root files resolves to the plan's user-editable `Publisher` — the same value the extension's own `app.json` carries — rather than the org default the workspace flow uses.
+**Both scopes of `organization_files` land here** (issue #522). The extension folder *is* the root of what the user unzips, so the workspace-root-scoped rows the template opts into (`.gitignore`, `README.md`, the shared ruleset, whatever else an admin curated) are emitted at that folder's root alongside the per-extension-scoped ones (`app.json`, `AppSourceCop.json`). Previously only the per-extension scope was written, so a standalone extension silently shipped without the `.gitignore` its template declares. `{{publisher}}` in those root files resolves to the plan's `Publisher` (the organisation's default publisher, which neither the page nor an assistant can override) — the same value the extension's own `app.json` carries — rather than the org default the workspace flow uses.
 
 **The org logo lands here too**, for the same reason: at the default logo path with its leading `../` dropped, which is where the workspace build puts it relative to the workspace root. `app.json`'s `logo` field points at that same path without the `../`, since this folder is the root.
 

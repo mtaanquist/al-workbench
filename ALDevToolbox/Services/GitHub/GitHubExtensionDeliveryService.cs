@@ -190,17 +190,39 @@ public sealed class GitHubExtensionDeliveryService
                 + "Give this one a different name, or add to the existing extension in your editor instead.");
         }
 
-        // The sibling workspace's file is named in the organisation's folder
-        // style, the same one the generator rewrites it under. Its current
-        // content goes along so the new folder is added to it rather than the
-        // file being rebuilt, which would lose whatever was changed in it by hand.
+        // The sibling workspace's file goes along so the new folder is added to
+        // it rather than the file being rebuilt, which would lose whatever was
+        // changed in it by hand. It is looked for under the name the
+        // organisation's folder style gives it, and then as the one
+        // .code-workspace file at the root: the style may have changed since
+        // the workspace was generated, and rewriting under the new name would
+        // leave two workspace files side by side (#1615).
         var folderStyle = await _generation.GetFolderStyleAsync(ct);
         if (sibling is not null)
         {
+            var fileName = sibling.CodeWorkspaceFileNameFor(folderStyle);
             var codeWorkspace = await _github.GetFileAsync(
-                token, repo.Owner, repo.Name,
-                $"{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace", repo.DefaultBranch, ct);
-            sibling = sibling with { CodeWorkspaceJson = codeWorkspace?.Text };
+                token, repo.Owner, repo.Name, fileName, repo.DefaultBranch, ct);
+            if (codeWorkspace is null)
+            {
+                var tree = await _github.ListTreeAsync(token, repo.Owner, repo.Name, repo.DefaultBranch, ct);
+                var atRoot = tree.Entries
+                    .Where(e => e.Type == "blob" && !e.Path.Contains('/')
+                        && e.Path.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase))
+                    .Select(e => e.Path)
+                    .ToList();
+                if (atRoot.Count == 1)
+                {
+                    fileName = atRoot[0];
+                    codeWorkspace = await _github.GetFileAsync(
+                        token, repo.Owner, repo.Name, fileName, repo.DefaultBranch, ct);
+                }
+            }
+            sibling = sibling with
+            {
+                CodeWorkspaceJson = codeWorkspace?.Text,
+                CodeWorkspaceFileName = codeWorkspace is null ? null : fileName,
+            };
         }
 
         var (files, archiveName, archiveBytes) = await BuildFilesAsync(plan, sibling, ct);
@@ -349,8 +371,9 @@ public sealed class GitHubExtensionDeliveryService
             // folders, and the file is then left alone.
             if (sibling.ExistingFolders.Count > 0)
             {
-                lines.Add($"The `{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace` file is "
-                    + "updated so the new folder opens with the rest of the workspace.");
+                lines.Add($"The `{sibling.CodeWorkspaceFileNameFor(folderStyle)}` file is "
+                    + (sibling.CodeWorkspaceJson is null ? "added" : "updated")
+                    + " so the new folder opens with the rest of the workspace.");
             }
             if (sibling.SavedPlan is not null && sibling.SavedExtensions is { Count: > 0 })
             {

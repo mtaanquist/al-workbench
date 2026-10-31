@@ -75,7 +75,8 @@ public sealed record StandaloneExtensionPlanInput(
     string RuntimeVersion,
     int IdRangeFrom,
     int IdRangeTo,
-    string Publisher,
+    [property: Description("Optional. Your organisation's publisher, set by an admin, is always used when it has one; this is used only when it has none.")]
+    string? Publisher = null,
     [property: Description("Whether to include the template's example files. Ignored when adding to a repository: examples are always left out there, so they cannot clash with the ones it already has.")]
     bool IncludeExamples = true,
     IReadOnlyList<DependencyEntryInput>? Dependencies = null)
@@ -90,7 +91,7 @@ public sealed record StandaloneExtensionPlanInput(
         IdRangeFrom,
         IdRangeTo,
         IncludeExamples,
-        Publisher,
+        Publisher ?? string.Empty,
         Dependencies?.Select(d => d.ToDomain()).ToList() ?? new List<DependencyEntry>());
 }
 

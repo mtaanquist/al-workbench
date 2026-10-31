@@ -141,6 +141,7 @@ public class GenerationService
         bool includeWorkspaceRootFiles = true,
         CancellationToken ct = default)
     {
+        plan = await ApplyOrganizationPublisherAsync(plan, ct);
         ValidateExtensionPlan(plan);
         plan = await ResolveLatestVersionAsync(plan, ct);
 
@@ -224,7 +225,18 @@ public class GenerationService
         // decided here rather than trusted from the form or the MCP input -
         // under Hidden and Fixed whatever arrived is ignored. See
         // .design/customer-naming.md.
+        var typedPrefix = plan.ExtensionPrefix?.Trim();
         plan = plan with { ExtensionPrefix = ResolvePrefix(orgConfig, plan) };
+        // A prefix the user typed is checked on its own, so a long one is named
+        // under its own field rather than blamed on the short name (#1615).
+        if (!string.IsNullOrEmpty(typedPrefix) && plan.ExtensionPrefix == typedPrefix
+            && (typedPrefix.Length > CustomerNaming.MaxShortNameLength || typedPrefix.Any(char.IsControl)))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                [nameof(plan.ExtensionPrefix)] = "At most 50 characters.",
+            });
+        }
 
         // {{publisher}} resolves to the org's configuration default, falling
         // back to the template default for a fresh org. Resolved once here and
@@ -273,6 +285,7 @@ public class GenerationService
     {
         try
         {
+            plan = await ApplyOrganizationPublisherAsync(plan, ct);
             ValidateExtensionPlan(plan);
             await ResolveLatestVersionAsync(plan, ct);
             // Only whether the template is still there matters here, so ask
@@ -292,6 +305,20 @@ public class GenerationService
         {
             return ex.Errors;
         }
+    }
+
+    /// <summary>
+    /// <paramref name="plan"/> with the organisation's publisher, when it has one.
+    /// There is one publisher per organisation, set on the Defaults page: the New
+    /// Extension page has no publisher field, and an assistant calling
+    /// <c>generate_extension</c> cannot override it either (#1615). The plan's own
+    /// value is only used by an organisation that has not set one.
+    /// </summary>
+    private async Task<StandaloneExtensionPlan> ApplyOrganizationPublisherAsync(
+        StandaloneExtensionPlan plan, CancellationToken ct)
+    {
+        var publisher = (await GetOrgConfigAsync(ct)).Settings.DefaultPublisher;
+        return string.IsNullOrWhiteSpace(publisher) ? plan : plan with { Publisher = publisher };
     }
 
     private static readonly IReadOnlyDictionary<string, string> NoErrors =
@@ -642,15 +669,28 @@ public class GenerationService
         if (string.IsNullOrWhiteSpace(plan.ApplicationVersion)) errors[nameof(plan.ApplicationVersion)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.RuntimeVersion)) errors[nameof(plan.RuntimeVersion)] = "Required.";
 
-        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Each dependency goes into app.json as it is, so it needs all four
+        // fields and a real app id: the AL compiler refuses anything less, and
+        // only the page's manual-entry box checked this before (#1615).
+        var seenIds = new HashSet<Guid>();
         for (var i = 0; i < plan.Dependencies.Count; i++)
         {
             var dep = plan.Dependencies[i];
-            if (string.IsNullOrWhiteSpace(dep.DepId)) continue;
-            if (!seenIds.Add(dep.DepId.Trim()))
+            if (!Guid.TryParse(dep.DepId?.Trim(), out var depId))
+            {
+                errors[$"Dependencies[{i}].DepId"] =
+                    "Give the dependency's app id as a GUID, for example 63ca2fa4-4f03-4f2b-a480-172fef340d3f.";
+            }
+            else if (!seenIds.Add(depId))
             {
                 errors[$"Dependencies[{i}].DepId"] = $"Duplicate dependency id '{dep.DepId}'.";
             }
+            if (string.IsNullOrWhiteSpace(dep.DepName))
+                errors[$"Dependencies[{i}].DepName"] = "Give the dependency's name.";
+            if (string.IsNullOrWhiteSpace(dep.DepPublisher))
+                errors[$"Dependencies[{i}].DepPublisher"] = "Give the dependency's publisher.";
+            if (string.IsNullOrWhiteSpace(dep.DepVersion))
+                errors[$"Dependencies[{i}].DepVersion"] = "Give the dependency's version, for example 1.0.0.0.";
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
@@ -887,7 +927,15 @@ public record SiblingWorkspaceContext(
     /// organisation's template, so whatever was changed in it by hand since it
     /// was generated survives. Null rebuilds it (the ZIP download).
     /// </summary>
-    string? CodeWorkspaceJson = null)
+    string? CodeWorkspaceJson = null,
+    /// <summary>
+    /// The name of the <c>.code-workspace</c> file the workspace already has,
+    /// when the caller found one - a GitHub repository's own. The file is
+    /// rewritten under that name rather than one derived again from the
+    /// organisation's folder style, which may have changed since the workspace
+    /// was generated (#1615). Null derives it.
+    /// </summary>
+    string? CodeWorkspaceFileName = null)
 {
     /// <summary>
     /// The context for a workspace read back from its saved settings, carrying
@@ -907,6 +955,13 @@ public record SiblingWorkspaceContext(
             workspace.ExtensionPrefix,
             SavedPlan: workspace,
             SavedExtensions: extensions);
+
+    /// <summary>
+    /// The <c>.code-workspace</c> file this workspace is rewritten under: the one
+    /// it already has, else the name the organisation's folder style gives it.
+    /// </summary>
+    public string CodeWorkspaceFileNameFor(NamingStyle folderStyle) =>
+        CodeWorkspaceFileName ?? $"{CustomerNaming.Apply(WorkspaceName, folderStyle)}.code-workspace";
 
     /// <summary>The tenant with its fallback applied: this context's own, else the saved plan's, else blank.</summary>
     public string EffectiveTenantId => TenantId ?? SavedPlan?.TenantId ?? string.Empty;

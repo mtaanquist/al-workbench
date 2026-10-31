@@ -193,6 +193,7 @@
                     <div class="field">
                         <label class="field__label" for="ws-prefix">Extension prefix</label>
                         <input class="input" id="ws-prefix" type="text" name="ExtensionPrefix"
+                               maxlength="@CustomerNaming.MaxShortNameLength"
                                placeholder="e.g. CRONUS"
                                value="@ExtensionPrefix" @oninput="OnExtensionPrefixInput" />
                         <span class="field__hint">
@@ -207,6 +208,7 @@
                                 </text>
                             }
                         </span>
+                        <FieldError Field="ExtensionPrefix" Errors="_errors" />
                     </div>
                 }
                 <div class="field field--full">

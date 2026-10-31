@@ -175,7 +175,9 @@ public sealed class WorkspaceZipBuilder
                 .Select(d => new EmittableDependency(
                     RefExtensionPath: null,
                     RefModuleKey: null,
-                    LitId: d.DepId,
+                    // Written in the usual 8-4-4-4-12 form whatever form was
+                    // posted ({...} or 32 digits both parse) (#1615).
+                    LitId: Guid.TryParse(d.DepId, out var depId) ? depId.ToString("D") : d.DepId,
                     LitName: d.DepName,
                     LitPublisher: d.DepPublisher,
                     LitVersion: d.DepVersion))
@@ -282,7 +284,7 @@ public sealed class WorkspaceZipBuilder
             if (sibling is not null && sibling.ExistingFolders.Count > 0)
             {
                 var siblingFolderStyle = orgConfig.Settings.NamingFolderStyle;
-                var workspaceFile = $"{CustomerNaming.Apply(sibling.WorkspaceName, siblingFolderStyle)}.code-workspace";
+                var workspaceFile = sibling.CodeWorkspaceFileNameFor(siblingFolderStyle);
                 var existing = sibling.ExistingFolders.ToList();
                 existing.Add(folderName);
 
