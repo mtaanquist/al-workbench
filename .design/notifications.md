@@ -196,6 +196,12 @@ on the page. Each app in a batch is its own notification. Failures are not urgen
 deployments. The link goes to the environment's history tab. A booking someone else
 cancels is not announced to the person who made it; considered and left out for now.
 
+One notice comes before anything is settled: when a booked install's window closes before
+its turn and the worker moves it, with the rest of its batch still waiting, to the
+window's next opening, the person who booked it gets one "Moved to the next window: ..."
+notice for that move, naming how many apps moved and when they now run (#1575). It is one
+per move, not one per app, and the apps are announced again as usual once they run.
+
 ## Ready to check (#1047)
 
 On a planned upgrade, the person assigned to check an environment (or whoever planned the

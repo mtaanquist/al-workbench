@@ -1605,7 +1605,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
         var moved = _f.Emails.Sent.Where(e => e.Subject.StartsWith("Moved")).Should().ContainSingle().Subject;
         moved.Subject.Should().Be("Moved to the next window: Install 2 apps on CRONUS Denmark / Production");
-        moved.Html.Should().Contain("installed before the window closed")
+        moved.Html.Should().Contain("get their turn before the window closed")
             .And.Contain("2026-09-12 at 22:00 (Europe/Copenhagen)");
     }
 
@@ -1667,9 +1667,9 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         {
             var row = await _f.ReadActionAsync(id);
             row.ScheduledByWindow.Should().BeNull("the person has picked the time now");
-            // Both in the one write (#1575): a row unmarked but still at its window slot
-            // could install into the working day if the move were lost.
-            row.ExecuteAfter.Should().Be(_f.Clock.GetUtcNow().UtcDateTime, "the batch moves to now in the same write");
+            // The unmark and the move go together (#1575): a row unmarked but still at its
+            // window slot could install into the working day.
+            row.ExecuteAfter.Should().Be(_f.Clock.GetUtcNow().UtcDateTime, "the batch is moved to now as well as unmarked");
         }
         (await SweepUntilQuietAsync()).Should().Be(2);
         _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");

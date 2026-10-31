@@ -595,8 +595,8 @@ public sealed class UpgradeActionWorker : BackgroundService
             var nextLocal = TimeZoneInfo.ConvertTimeFromUtc(next, tz);
             var when = $"{nextLocal:yyyy-MM-dd} at {UpdateWindow.Clock(TimeOnly.FromDateTime(nextLocal))} ({tz.Id})";
             var message = moved == 1
-                ? $"{action.Label} wasn't installed before the window closed. It now runs when the window next opens, {when}."
-                : $"{moved} apps weren't installed before the window closed. They now run when the window next opens, {when}.";
+                ? $"{action.Label} didn't get its turn before the window closed. It now runs when the window next opens, {when}."
+                : $"{moved} apps didn't get their turn before the window closed. They now run when the window next opens, {when}.";
             await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
                 .NotifyMovedAsync(action.Id, moved, message, CancellationToken.None).ConfigureAwait(false);
         }
