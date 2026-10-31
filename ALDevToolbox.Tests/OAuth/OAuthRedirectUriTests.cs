@@ -16,7 +16,6 @@ namespace ALDevToolbox.Tests.OAuth;
 /// authorize request itself for a row stored before the rule existed. Also
 /// pins that the <c>form_post</c> response mode is switched off.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class OAuthRedirectUriTests : IDisposable
 {
     private const string CimdClientId = "https://client.cronus.example/oauth/metadata.json";

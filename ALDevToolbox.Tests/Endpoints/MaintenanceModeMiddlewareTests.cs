@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// watch the restore and the proxy does not flap the container.
 /// <c>MaintenanceModeStateTests</c> covers the flag itself.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class MaintenanceModeMiddlewareTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

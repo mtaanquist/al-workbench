@@ -19,7 +19,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// file compare page refuses to diff files that are too long and says so
 /// when every diff slot is taken.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class ObjectExplorerLowsEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

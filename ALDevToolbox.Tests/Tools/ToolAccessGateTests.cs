@@ -15,7 +15,6 @@ namespace ALDevToolbox.Tests.Tools;
 /// probed by its address. Boots the real <c>Program.cs</c> so middleware order
 /// is exactly production's.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class ToolAccessGateTests : IDisposable
 {
     private readonly TestDb _db = new();

@@ -23,7 +23,6 @@ namespace ALDevToolbox.Tests.OAuth;
 /// Through the real app: a person signs in, approves a registered client, the
 /// client trades the code for an access token and calls <c>/mcp</c> with it.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class OAuthRevocationTests : IDisposable
 {
     private const string Email = "consultant@cronus.example";

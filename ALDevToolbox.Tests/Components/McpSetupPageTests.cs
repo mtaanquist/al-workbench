@@ -25,7 +25,6 @@ namespace ALDevToolbox.Tests.Components;
 /// to the clipboard; and the tool table rendered flat, wire-name first, on a
 /// page whose own caption says you never need to name them.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class McpSetupPageTests : IDisposable
 {
     private readonly TestDb _db = new();

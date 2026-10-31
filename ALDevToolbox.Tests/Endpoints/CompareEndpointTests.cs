@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// report the identical case, and refuse an over-cap paste with a friendly
 /// error rather than a stack trace.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class CompareEndpointTests : IDisposable
 {
     private readonly TestDb _db = new();

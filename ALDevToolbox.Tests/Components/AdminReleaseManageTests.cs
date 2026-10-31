@@ -21,7 +21,6 @@ namespace ALDevToolbox.Tests.Components;
 /// <see cref="SiteAdminTenantBackupsTests"/> is) and the release management service is
 /// the app's own, resolved from its container.
 /// </remarks>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class AdminReleaseManageTests : IDisposable
 {
     private const string AdminEmail = "admin@cronus.example";

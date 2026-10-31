@@ -19,7 +19,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// handler never runs. <c>UseAntiforgery()</c> does not cover a handler that
 /// reads the form itself (#671), so the call is the only guard.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class AntiforgeryRejectionTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

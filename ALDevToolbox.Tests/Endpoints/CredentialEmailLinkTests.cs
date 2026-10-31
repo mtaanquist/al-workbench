@@ -18,7 +18,8 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// the victim would receive a genuine email whose single-use token pointed at
 /// the attacker. With PUBLIC_BASE_URL set the forged host must be ignored.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
+// Sets PUBLIC_BASE_URL, which startup reads off the environment.
+[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class CredentialEmailLinkTests : IDisposable
 {
     private const string PublicBaseUrl = "https://workbench.cronus.example";

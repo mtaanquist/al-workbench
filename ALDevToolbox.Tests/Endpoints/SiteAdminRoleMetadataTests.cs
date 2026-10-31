@@ -14,7 +14,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// behind those routes cross the tenant fence, and a handler mapped without
 /// the role would otherwise ship green (#1272).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SiteAdminRoleMetadataTests : IDisposable
 {
     private readonly TestDb _db = new();

@@ -13,7 +13,6 @@ namespace ALDevToolbox.Tests.Auth;
 /// and chat link previews fetch a link before the person clicks it, so no GET
 /// may spend the token or sign anyone in; only the confirmation page's POST does.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class MagicLinkEndpointTests : IDisposable
 {
     private const string AuthCookie = "alwb_auth";
