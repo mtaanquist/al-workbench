@@ -691,6 +691,36 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     /// <summary>
+    /// A delete while a restore holds the lock would unlink the file the restore
+    /// has checked and is about to load after dropping the schema, and the site
+    /// would stay closed (#1628). So the delete is refused and the file stays.
+    /// </summary>
+    [Fact]
+    public async Task DeleteAsync_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_dump.");
+        var tool = WriteFakeTool("fake-pg-dump", """
+            for a; do last="$a"; done
+            echo dump > "$last"
+            """);
+        var svc = NewService(_options with { PgDumpPath = tool });
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+        var path = Path.Combine(_backupsDir, backup.FileName);
+
+        await using (await HoldBackupLockAsync())
+        {
+            Func<Task> act = () => svc.DeleteAsync(backup.Id);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+            File.Exists(path).Should().BeTrue("a refused delete leaves the file");
+        }
+
+        await svc.DeleteAsync(backup.Id);
+        File.Exists(path).Should().BeFalse("with the lock free the delete goes through");
+    }
+
+    /// <summary>
     /// A restore that finds the lock taken must refuse before it closes the site
     /// or drops anything: the holder may be a backup reading the schema, or
     /// another restore that has already dropped it.

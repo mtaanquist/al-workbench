@@ -194,6 +194,58 @@ public sealed class PerTenantBackupServiceTests : IDisposable
         (await FingerprintAsync(OrgA)).Should().NotBe(before, "with the lock free the restore goes through");
     }
 
+    /// <summary>
+    /// A snapshot reads on a connection of its own, which a full restore's wait
+    /// for running work cannot see; so it takes the backup lock, and a restore that
+    /// is running refuses it before it writes anything (#1628).
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        await SeedOrgAsync(OrgA, "a");
+
+        await using (await BackupLockHolder.AcquireAsync(_db.ConnectionString))
+        {
+            var act = () => CreateAsync(OrgA);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+            Directory.Exists(Path.Combine(_backupsDir, "tenants", TestDb.DefaultOrgSlug)).Should().BeFalse();
+        }
+
+        var row = await CreateAsync(OrgA);
+        File.Exists(PathFor(row)).Should().BeTrue("the lock is free again");
+    }
+
+    /// <summary>
+    /// Deleting a snapshot while a restore holds the lock would unlink the file the
+    /// restore is reading (#1628). The delete is refused and the file and row stay.
+    /// </summary>
+    [Fact]
+    public async Task Delete_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        await SeedOrgAsync(OrgA, "a");
+        var backup = await CreateAsync(OrgA);
+
+        await using (await BackupLockHolder.AcquireAsync(_db.ConnectionString))
+        {
+            await using var ctx = _db.NewContext();
+            var act = () => NewService(ctx).DeleteAsync(backup.Id);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+        }
+        File.Exists(PathFor(backup)).Should().BeTrue("a refused delete leaves the file");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).DeleteAsync(backup.Id);
+        }
+        File.Exists(PathFor(backup)).Should().BeFalse("with the lock free the delete goes through");
+        await using var read = _db.NewContext();
+        (await read.PerTenantBackups.AsNoTracking().AnyAsync(b => b.Id == backup.Id)).Should().BeFalse();
+    }
+
     [Fact]
     public async Task Restore_refuses_a_snapshot_from_an_older_schema_version()
     {
