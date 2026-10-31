@@ -68,8 +68,8 @@ public sealed class RawSqlBaselineTests
             "Advisory lock and unlock for the backup run; reads and writes no rows.",
             new() { ["AcquireAsync"] = 1, ["DisposeAsync"] = 1 }),
         ["ALDevToolbox/Services/Backups/BackupService.cs"] = new(
-            "Whole-database backup and restore, run by the scheduler or a SiteAdmin; cross-org by design. MigrateAsync only sets and resets lock_timeout on its own connection.",
-            new() { ["CaptureInventoryAsync"] = 1, ["ExecuteSqlAsync"] = 1, ["MigrateAsync"] = 2, ["RestoreInventoryAsync"] = 1 }),
+            "Whole-database backup and restore, run by the scheduler or a SiteAdmin; cross-org by design.",
+            new() { ["CaptureInventoryAsync"] = 1, ["ExecuteSqlAsync"] = 1, ["RestoreInventoryAsync"] = 1 }),
         ["ALDevToolbox/Services/Backups/PerTenantBackupService.cs"] = new(
             "Run by a SiteAdmin (RequireSiteAdmin first) or by the scheduler for a pinned org id; the export and delete statements name the organization_id being snapshotted, and a restore re-inserts that snapshot's rows.",
             new() { ["CreateAsync"] = 1, ["RestoreAsync"] = 4, ["WriteFileContentsAsJsonAsync"] = 1, ["WriteTableAsJsonAsync"] = 1 }),

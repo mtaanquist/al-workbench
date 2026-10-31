@@ -552,26 +552,34 @@ public sealed class BackupService
     /// The command timeout is startup's half hour, which a large data migration may
     /// need. Waiting for a lock is another matter: a session left holding one would
     /// otherwise keep the restore, with the site closed, waiting the full half hour
-    /// before it failed. A short <c>lock_timeout</c> on the migrating connection
-    /// makes that fail in a minute instead (#1538).
+    /// before it failed. For the migrate only, the context connects with a one-minute
+    /// <c>lock_timeout</c> in its startup options, so that fails in a minute instead
+    /// (#1538). The connection string goes back as it was afterwards.
     /// </remarks>
     private async Task MigrateAsync(CancellationToken ct)
     {
+        var original = _db.Database.GetConnectionString();
+        var withLockTimeout = new NpgsqlConnectionStringBuilder(original)
+        {
+            Options = "-c lock_timeout=" + (long)RestoreMigrateLockTimeout.TotalMilliseconds,
+        };
+        await _db.Database.CloseConnectionAsync();
+        _db.Database.SetConnectionString(withLockTimeout.ConnectionString);
         _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
-        await _db.Database.OpenConnectionAsync(ct);
         try
         {
-            await _db.Database.ExecuteSqlRawAsync("SET lock_timeout = '1min'", ct);
             await _db.Database.MigrateAsync(ct);
         }
         finally
         {
-            try { await _db.Database.ExecuteSqlRawAsync("RESET lock_timeout", CancellationToken.None); }
-            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException) { /* connection is closing anyway */ }
             await _db.Database.CloseConnectionAsync();
+            _db.Database.SetConnectionString(original);
             _db.Database.SetCommandTimeout((int?)null);
         }
     }
+
+    /// <summary>How long the restore's migrate waits for a lock before it fails.</summary>
+    internal static readonly TimeSpan RestoreMigrateLockTimeout = TimeSpan.FromMinutes(1);
 
     /// <summary>
     /// Best effort after a restore that failed once the database was dropped:
