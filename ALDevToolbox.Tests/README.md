@@ -265,7 +265,13 @@ collection to serialise them.
   host that lives past their startup delay doesn't clone repositories or call
   out to Microsoft and GitHub. Test a scheduler by driving it directly.
   `keepSchedulers: true` keeps them for the one test that checks they are
-  registered.
+  registered. Those are the real schedulers: a host built that way that
+  lives past their 20-second startup delay starts ticking them, network calls
+  included. Keep such a host short-lived.
+- **Key files.** `KeyDirectoryDefaults` points every host at a key folder of
+  the test process's own and creates the OAuth keys there before any host
+  boots, so parallel first boots only read them. Don't set
+  `DATA_PROTECTION_KEY_DIR` or `OAUTH_KEY_DIR` in a test.
 
 ### Builders
 

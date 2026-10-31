@@ -89,6 +89,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    # Without a limit a hung test holds the runner for GitHub's six-hour
+    # default. The job took about 28 minutes before #1535.
+    timeout-minutes: 45
 
     services:
       # Service container for the test suite. TestDb reads
@@ -98,9 +101,10 @@ jobs:
       #
       # The data directory sits on tmpfs: TestDb clones a template database
       # per test class, and on a disk-backed directory each clone took
-      # 340-560 ms against 35-40 ms in memory. That alone cut the suite from
-      # about 29 to 22 minutes (#1535). The data is thrown away anyway, and
-      # dropped clones free their space, so the mount stays small.
+      # 340-560 ms against 35-40 ms in memory. Measured locally on 4 cores,
+      # that alone cut the suite from about 29 to 22 minutes (#1535). The
+      # data is thrown away anyway, and dropped clones free their space, so
+      # the mount stays small.
       postgres:
         image: postgres:18-alpine
         env:
@@ -189,7 +193,10 @@ jobs:
         # section). VSTest options like --logger are not recognised there: the
         # run exits 5 with zero tests, so this has to stay MTP syntax.
         # --output Detailed is the per-test console output --logger used to give.
-        run: dotnet test --configuration Release --no-build --output Detailed
+        # --timeout is the testing platform's built-in whole-run limit (no extra
+        # package), so a hung run ends inside this step, ahead of the job's
+        # timeout-minutes.
+        run: dotnet test --configuration Release --no-build --output Detailed --timeout 40m
 
   compose-smoke:
     # Boots the published image against a real `db` container to lock in the
