@@ -325,9 +325,7 @@ public sealed class ObjectExplorerTools
             : await _references.FindReferencesForSymbolAsync(releaseId, query, take, ct);
         if (filtered)
         {
-            // FindReferences* fetch one row past the cap, so more than the cap
-            // means the set the filter ran over was itself cut short.
-            var checkedAll = matches.Count <= ReferenceQueryService.MaxReferenceMatches;
+            var checkedAll = UsageFilterCheckedAll(matches);
             matches = matches
                 .Where(m => wantedUsage switch
                 {
@@ -352,6 +350,18 @@ public sealed class ObjectExplorerTools
         return ReferenceSearchResult.From(matches, MaxReferenceRows,
             "Pass targetField or targetProcedure to narrow the search.");
     }
+
+    /// <summary>
+    /// Whether a usage-filtered find_references saw every reference. The
+    /// reference query fetches one row past the cap, so more than the cap means
+    /// it was cut. The declarations and interface implementations a member
+    /// search adds before and after it are separate queries with caps of their
+    /// own, so they are left out of the count, or a complete answer reads as
+    /// cut.
+    /// </summary>
+    internal static bool UsageFilterCheckedAll(IEnumerable<ReferenceMatch> matches) =>
+        matches.Count(m => m.Category is not ("declaration" or "implementation"))
+            <= ReferenceQueryService.MaxReferenceMatches;
 
     [McpServerTool(Name = "find_system_references", ReadOnly = true)]
     [Description("Finds the calls to a built-in / system method on a specific object in a BC release — the calls that find_references deliberately omits. On a table: Insert, Modify, ModifyAll, Delete, DeleteAll, Get, Find/FindFirst/FindLast/FindSet, SetRange, Validate and so on; on a page: Run, RunModal, SetRecord; on a report: Run, RunModal, SaveAsPdf, SaveAs; on a codeunit: Run. Both the instance form (CustomerList.RunModal()) and the static form (Page.RunModal(Page::\"Customer List\")) are found. Use this to answer 'where is this table inserted/modified/deleted?' or 'where is this page opened?'. Optionally narrow to some methods. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out.")]

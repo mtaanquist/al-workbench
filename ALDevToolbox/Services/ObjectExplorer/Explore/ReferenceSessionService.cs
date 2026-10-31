@@ -278,7 +278,14 @@ public sealed class ReferenceSessionService
             methods = [.. methods, session.Results[0].MemberName ?? method];
             counts = null; // no whole count for a method the list did not hold
         }
-        return CacheSession(session with { MethodNames = methods, MethodCounts = counts, Method = method }, ownerKey, query);
+        // Keep the list under the token it came from, so flicking through the
+        // methods replaces one cached session rather than adding one per pick
+        // for the cache to hold until each expires.
+        _cache.Remove(CacheKey(session.Token));
+        return CacheSession(session with
+        {
+            Token = token, MethodNames = methods, MethodCounts = counts, Method = method,
+        }, ownerKey, query);
     }
 
     // Each method once, in its most used spelling, most used first.
@@ -489,10 +496,18 @@ public sealed class ReferenceSessionService
     /// <paramref name="word"/> in <paramref name="haystack"/> only
     /// when the surrounding characters aren't AL identifier characters
     /// (letter, digit, underscore). Stops <c>Item</c> from matching
-    /// inside <c>ItemNo</c>.
+    /// inside <c>ItemNo</c>. A name that is not a plain identifier
+    /// (<c>Temp Sales Line</c>) can only be written quoted, so it matches
+    /// only between quotes and not inside <c>"Temp Sales Line Buffer"</c>;
+    /// the position returned is still that of the name itself.
     /// </summary>
     internal static int IndexOfWord(string haystack, string word, int start)
     {
+        if (word.Length > 0 && !word.All(IsIdentChar))
+        {
+            var quoted = haystack.IndexOf("\"" + word + "\"", Math.Max(start - 1, 0), StringComparison.OrdinalIgnoreCase);
+            return quoted < 0 ? -1 : quoted + 1;
+        }
         var i = start;
         while (i <= haystack.Length - word.Length)
         {

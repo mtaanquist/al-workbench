@@ -130,6 +130,35 @@ public sealed class BuiltInCallsTests : IDisposable
         widened.Method.Should().BeNull();
     }
 
+    /// <summary>
+    /// OEX-5: each pick used to cache another full session under a new token
+    /// for half an hour. A pick now replaces the list under the token it came
+    /// from, so flicking through the methods holds one session, not one per pick.
+    /// </summary>
+    [Fact]
+    public async Task Picking_methods_keeps_one_cached_session_under_the_same_token()
+    {
+        var releaseId = await ImportAsync();
+
+        await using var read = _db.NewContext();
+        var (fileId, lines) = await SetterFileAsync(read, releaseId);
+        var line = Array.FindIndex(lines, l => l.Contains("ThingRec.Insert")) + 1;
+        var column = lines[line - 1].IndexOf("ThingRec", StringComparison.Ordinal) + 2;
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            Microsoft.Extensions.Options.Options.Create(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+        var sessions = NewSessions(read, cache);
+        var session = await sessions.CreateSystemReferencesAtPositionAsync(fileId, line, column, "owner");
+        var before = cache.Count;
+
+        var narrowed = await sessions.NarrowSystemReferencesAsync(session!.Token, "owner", "Get");
+        var widened = await sessions.NarrowSystemReferencesAsync(narrowed!.Token, "owner", "");
+
+        narrowed.Token.Should().Be(session.Token);
+        widened!.Token.Should().Be(session.Token);
+        cache.Count.Should().Be(before, "a pick replaces the cached list rather than adding one");
+        (await sessions.GetAsync(session.Token, "owner"))!.Method.Should().BeNull("the last pick is what the token now holds");
+    }
+
     [Fact]
     public async Task A_cut_list_offers_every_method_even_those_called_only_past_the_cut()
     {
@@ -415,8 +444,9 @@ public sealed class BuiltInCallsTests : IDisposable
     private ReferenceQueryService NewReferences(Data.AppDbContext ctx) =>
         new(ctx, new ProjectAccess(ctx, _db.OrgContext), _db.OrgContext, NullLogger<ReferenceQueryService>.Instance);
 
-    private ReferenceSessionService NewSessions(Data.AppDbContext ctx) =>
-        new(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+    private ReferenceSessionService NewSessions(Data.AppDbContext ctx,
+        Microsoft.Extensions.Caching.Memory.MemoryCache? cache = null) =>
+        new(cache ?? new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 Microsoft.Extensions.Options.Options.Create(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             NewReferences(ctx), ctx, new ReferenceResolver(ctx), new ProjectAccess(ctx, _db.OrgContext),
