@@ -163,8 +163,20 @@ public sealed class TestDb : IDisposable
     /// </summary>
     public static TestDb FromSeed<T>(string key, Func<TestDb, Task<T>> seed, out T value)
     {
-        var built = SeededTemplates.GetOrAdd(key, _ => new Lazy<(string, object?)>(
-            () => BuildSeededTemplate(seed), isThreadSafe: true)).Value;
+        var lazy = SeededTemplates.GetOrAdd(key, _ => new Lazy<(string, object?)>(
+            () => BuildSeededTemplate(seed), isThreadSafe: true));
+        (string Template, object? Value) built;
+        try
+        {
+            built = lazy.Value;
+        }
+        catch
+        {
+            // A Lazy caches its exception. Forget the failed build so the next
+            // test tries again instead of failing on this one's error.
+            SeededTemplates.TryRemove(new KeyValuePair<string, Lazy<(string, object?)>>(key, lazy));
+            throw;
+        }
         value = (T)built.Value!;
         return new TestDb(built.Template);
     }
@@ -172,9 +184,18 @@ public sealed class TestDb : IDisposable
     private static (string Template, object? Value) BuildSeededTemplate<T>(Func<TestDb, Task<T>> seed)
     {
         var db = new TestDb(SharedTemplate.Value);
-        // Off the caller's synchronization context: the seed is async and this
-        // blocks inside a test.
-        var value = Task.Run(() => seed(db)).GetAwaiter().GetResult();
+        T value;
+        try
+        {
+            // Off the caller's synchronization context: the seed is async and
+            // this blocks inside a test.
+            value = Task.Run(() => seed(db)).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            db.Dispose();
+            throw;
+        }
         db.ReleaseConnections();
 
         var name = db._databaseName;

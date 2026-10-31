@@ -52,6 +52,51 @@ public sealed class TestDbSeedTests
     }
 
     [Fact]
+    public async Task A_plain_fixture_does_not_see_a_seeded_templates_rows()
+    {
+        using var seeded = TestDb.FromSeed("test-db-seed-tests", SeedOneOrganizationAsync, out _);
+        using var plain = new TestDb();
+
+        await using var ctx = plain.NewContext();
+        (await ctx.Organizations.AsNoTracking().AnyAsync(o => o.Slug == "seeded-template-org")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_seed_that_fails_is_tried_again_by_the_next_caller()
+    {
+        const string key = "test-db-seed-tests-failing";
+        var attempts = 0;
+        Task<int> FailOnce(TestDb db)
+        {
+            if (++attempts == 1) throw new InvalidOperationException("first seed fails");
+            return Task.FromResult(42);
+        }
+
+        var first = () => TestDb.FromSeed(key, FailOnce, out _).Dispose();
+        first.Should().Throw<InvalidOperationException>();
+
+        using var second = TestDb.FromSeed(key, FailOnce, out var value);
+        value.Should().Be(42);
+        attempts.Should().Be(2);
+    }
+
+    /// <summary>
+    /// The app's own hashes stay at the production work factor; only the test
+    /// seeding takes the shortcut.
+    /// </summary>
+    [Fact]
+    public void The_app_hashes_passwords_at_the_production_work_factor()
+    {
+        using var db = new TestDb();
+        using var ctx = db.NewContext();
+        var hash = new ALDevToolbox.Services.Account.AuthService(
+                ctx, Microsoft.Extensions.Logging.Abstractions.NullLogger<ALDevToolbox.Services.Account.AuthService>.Instance, TimeProvider.System)
+            .HashPassword("correct-horse-battery");
+
+        hash.Should().StartWith("$2a$12$");
+    }
+
+    [Fact]
     public void A_test_password_hash_is_cheap_and_verifies_only_its_password()
     {
         var hash = TestPasswords.Hash("correct-horse-battery");
