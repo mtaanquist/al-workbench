@@ -1701,6 +1701,67 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task Install_now_goes_on_the_next_sweep_ahead_of_a_long_batch_already_running_for_another_customer()
+    {
+        // One organisation, as in single-tenant hosting: a batch for one customer came due
+        // first and is running, one app per sweep.
+        var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await BookUploadAsync(xProject, xEnv, hoursAhead: 1, "X1.app", "X2.app", "X3.app", "X4.app");
+        var urgent = (await BookUploadAsync(wProject, wEnv, hoursAhead: 12, "Hotfix.app")).Single();
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        // Twenty minutes in, someone presses Install now on another customer's booking.
+        _f.Clock.Advance(TimeSpan.FromMinutes(20));
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Svc(ctx).RunBookedInstallNowAsync(urgent);
+
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "X1.app", "Hotfix.app" },
+            "Install now waits for at most the one install already going, not for the rest of another customer's batch");
+
+        await SweepUntilQuietAsync();
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "X1.app", "Hotfix.app", "X2.app", "X3.app", "X4.app" },
+            "the batch then carries on in its own order");
+    }
+
+    [Fact]
+    public async Task An_upload_for_now_goes_on_the_next_sweep_ahead_of_a_long_batch_already_running_for_another_customer()
+    {
+        var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await BookUploadAsync(xProject, xEnv, hoursAhead: 1, "X1.app", "X2.app", "X3.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        await AsOwnerAsync(ctx => _f.Connections(ctx).InstallUploadedAppsAsync(
+            wProject, wEnv, new[] { new UploadPackage(new byte[] { 7, 8, 9 }, "Hotfix.app") }, UploadAppTiming.Now));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "X1.app", "Hotfix.app" });
+    }
+
+    [Fact]
+    public async Task Two_batches_for_one_environment_do_not_interleave_when_another_environment_is_due_too()
+    {
+        // The turn rotates between environments, never between bookings on one: a later
+        // upload to the same environment may need an app the earlier one brings.
+        var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await BookUploadAsync(xProject, xEnv, hoursAhead: 1, "A1.app", "A2.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        await BookUploadAsync(xProject, xEnv, hoursAhead: 1, "B1.app");
+        await BookUploadAsync(wProject, wEnv, hoursAhead: 1, "W1.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        await SweepUntilQuietAsync();
+
+        _f.Apps.InstalledFiles.Should().Equal("A1.app", "W1.app", "A2.app", "B1.app");
+    }
+
+    [Fact]
     public async Task The_install_turn_rotates_between_organisations_so_a_long_batch_does_not_starve_another()
     {
         // This organisation booked two ten-app batches for 09:00...

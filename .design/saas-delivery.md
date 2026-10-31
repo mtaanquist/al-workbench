@@ -703,12 +703,20 @@ that names the environment and says what the click does there:
   booked for one organisation's opening alternates with another organisation's install
   in the same window instead of running to the end first. The order is read from the
   rows each sweep, so it survives a restart. It shares the one install out; it does not
-  make the queue shorter. Inside one organisation the installs go by due time, then
-  first booked, first served (`requested_at`), then batch order, a single booking
-  counting as a batch's first app (#1568). A row moved to a window's next opening ties
-  on time with everything booked for that opening, so its booking time is what keeps
-  its place: a single booking moved past a closed window goes ahead of the leftovers of
-  a batch booked after it and of a batch booked for the new night.
+  make the queue shorter. Inside one organisation the turn rotates the same way between
+  environments (#1596): the environment whose most recent install was sent longest ago
+  goes first, one never served first of all. So an Install now, or an upload for now, on
+  one customer's environment waits for at most the install already running, not for the
+  rest of a batch that came due earlier on another customer's environment - which in
+  single-tenant hosting, where every customer is in one organisation, is the case the
+  rotation between organisations never reached. Bookings on one environment do not
+  rotate: there the installs go by due time, then first booked, first served
+  (`requested_at`), then batch order, a single booking counting as a batch's first app
+  (#1568), because a later upload may need an app an earlier one brings. A row moved to
+  a window's next opening ties on time with everything booked for that opening, so its
+  booking time is what keeps its place: a single booking moved past a closed window goes
+  ahead of the leftovers of a batch booked after it and of a batch booked for the new
+  night.
 
   **A time a window chose stays inside the window** - the deployments rule (#1124),
   extended to booked installs (#1539). The row records which window applied
