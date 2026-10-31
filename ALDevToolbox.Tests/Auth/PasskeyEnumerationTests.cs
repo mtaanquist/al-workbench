@@ -41,25 +41,26 @@ public sealed class PasskeyEnumerationTests : IDisposable
     }
 
     [Fact]
-    public async Task Unknown_email_still_returns_a_non_empty_allow_list()
+    public async Task Unknown_email_returns_an_allow_list_of_the_constant_length()
     {
         await using var ctx = _db.NewContext();
         var (options, _) = await NewService(ctx).BeginLoginAsync("nobody@nowhere.test");
-        // A real user with one passkey returns one descriptor; an unknown email
-        // must be indistinguishable, so it returns a single synthetic one.
-        options.AllowCredentials.Should().ContainSingle();
+        // The length is the same for every address, so it can't say whether
+        // the address has an account or how many passkeys it has (#490, #1614).
+        options.AllowCredentials.Should().HaveCount(PasskeyService.SignInAllowListLength);
+        options.AllowCredentials.Select(c => Convert.ToBase64String(c.Id)).Should().OnlyHaveUniqueItems();
     }
 
     [Fact]
-    public async Task Synthetic_credential_is_deterministic_per_email()
+    public async Task Synthetic_credentials_are_deterministic_per_email()
     {
         await using var ctx = _db.NewContext();
         var svc = NewService(ctx);
         var (a, _) = await svc.BeginLoginAsync("nobody@nowhere.test");
         var (b, _) = await svc.BeginLoginAsync("nobody@nowhere.test");
         // A per-request random id would itself distinguish synthetic from real
-        // across two probes; the same email must always yield the same id.
-        a.AllowCredentials.Single().Id.Should().Equal(b.AllowCredentials.Single().Id);
+        // across two probes; the same email must always yield the same ids.
+        a.AllowCredentials.Select(c => c.Id).Should().BeEquivalentTo(b.AllowCredentials.Select(c => c.Id), o => o.WithStrictOrdering());
     }
 
     [Fact]
@@ -69,13 +70,15 @@ public sealed class PasskeyEnumerationTests : IDisposable
         var svc = NewService(ctx);
         var (a, _) = await svc.BeginLoginAsync("one@nowhere.test");
         var (b, _) = await svc.BeginLoginAsync("two@nowhere.test");
-        a.AllowCredentials.Single().Id.Should().NotEqual(b.AllowCredentials.Single().Id);
+        a.AllowCredentials.First().Id.Should().NotEqual(b.AllowCredentials.First().Id);
     }
 
-    [Fact]
-    public async Task Known_user_with_a_passkey_returns_the_real_credential()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task Known_user_with_passkeys_returns_them_padded_to_the_same_length(int passkeyCount)
     {
-        var credId = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        var credIds = Enumerable.Range(1, passkeyCount).Select(n => new byte[] { (byte)n, 2, 3, 4, 5, 6, 7, 8 }).ToList();
         await using (var seed = _db.NewContext())
         {
             var user = new User
@@ -90,19 +93,22 @@ public sealed class PasskeyEnumerationTests : IDisposable
             };
             seed.Users.Add(user);
             await seed.SaveChangesAsync();
-            seed.UserPasskeys.Add(new UserPasskey
+            foreach (var credId in credIds)
             {
-                UserId = user.Id,
-                CredentialId = credId,
-                PublicKey = new byte[] { 0xAB },
-                CreatedAt = DateTime.UtcNow,
-            });
+                seed.UserPasskeys.Add(new UserPasskey
+                {
+                    UserId = user.Id,
+                    CredentialId = credId,
+                    PublicKey = new byte[] { 0xAB },
+                    CreatedAt = DateTime.UtcNow,
+                });
+            }
             await seed.SaveChangesAsync();
         }
 
         await using var ctx = _db.NewContext();
         var (options, _) = await NewService(ctx).BeginLoginAsync("real@cronus.example");
-        options.AllowCredentials.Should().ContainSingle();
-        options.AllowCredentials.Single().Id.Should().Equal(credId);
+        options.AllowCredentials.Should().HaveCount(PasskeyService.SignInAllowListLength);
+        options.AllowCredentials.Take(passkeyCount).Select(c => c.Id).Should().BeEquivalentTo(credIds);
     }
 }
