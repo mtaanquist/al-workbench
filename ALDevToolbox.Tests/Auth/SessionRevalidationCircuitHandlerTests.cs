@@ -136,7 +136,7 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task Maintenance_mode_leaves_the_page_alone()
+    public async Task Maintenance_mode_does_not_mistake_the_emptied_users_table_for_a_deleted_account()
     {
         var adminId = await SeedAsync(UserRole.Admin);
         var maintenance = new MaintenanceModeState();
@@ -144,7 +144,34 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
         var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin), maintenance);
         await UpdateAsync(adminId, u => u.Status = UserStatus.Disabled);
 
-        (await DispatchAsync(handler)).Should().BeTrue("a restore empties the users table; that is not a deleted account");
+        (await DispatchAsync(handler)).Should().BeFalse("the page goes to the maintenance page instead of running the event");
+        _navigation.Navigations.Should().ContainSingle().Which.Uri.Should().NotContain(
+            "auth/session/refresh", "a restore empties the users table; that is not a deleted account");
+    }
+
+    [Fact]
+    public async Task During_maintenance_a_non_site_admin_event_is_dropped_and_the_page_reloads()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin), maintenance);
+        maintenance.Enter("Restoring a backup");
+
+        (await DispatchAsync(handler)).Should().BeFalse("a Build click must not write into the database being restored");
+        _navigation.Navigations.Should().ContainSingle().Which.Should().Be(
+            ("https://workbench.cronus.example/admin/administration/users", true));
+    }
+
+    [Fact]
+    public async Task During_maintenance_a_site_admin_page_keeps_working()
+    {
+        var operatorId = await SeedAsync(UserRole.Admin, siteAdmin: true);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(operatorId, UserRole.Admin, siteAdmin: true), maintenance);
+        maintenance.Enter("Restoring a backup");
+
+        (await DispatchAsync(handler)).Should().BeTrue("the SiteAdmin watches the restore from their own page");
+        _navigation.Navigations.Should().BeEmpty();
     }
 
     [Fact]

@@ -28,6 +28,18 @@ namespace ALDevToolbox.Services.Account;
 /// authorisation decides what they may still see. One check covers every
 /// interactive page, so no page or service has to re-read its actor itself.
 /// </para>
+/// <para>
+/// It is also where a restore reaches interactive pages, which the
+/// maintenance middleware never sees: a click on an open page is a circuit
+/// event, not a request (#1571). Once maintenance mode is on, new events from
+/// anyone but a SiteAdmin are dropped and the page is reloaded, which lands on
+/// the maintenance page; a SiteAdmin's pages keep working. This only covers
+/// events that arrive during maintenance. A click handler that started before
+/// it keeps running past its first await, beyond the reach of this hook, so
+/// its database work is guarded by <see cref="Data.MaintenanceDatabaseGuard"/>
+/// instead, which counts each command for the restore to wait on and refuses
+/// new ones once the site is closed.
+/// </para>
 /// </summary>
 public sealed class SessionRevalidationCircuitHandler : CircuitHandler
 {
@@ -57,7 +69,8 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         NavigationManager navigation,
         TimeProvider clock,
         MaintenanceModeState maintenance,
-        ILogger<SessionRevalidationCircuitHandler> logger)
+        ILogger<SessionRevalidationCircuitHandler> logger,
+        MaintenanceDatabaseGuard? databaseGuard = null)
     {
         _authState = authState;
         _dbFactory = dbFactory;
@@ -66,6 +79,25 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         _clock = clock;
         _maintenance = maintenance;
         _logger = logger;
+        // The guard lets a SiteAdmin's circuit use the database during a restore
+        // only while it shows a SiteAdmin console page (#1571).
+        if (databaseGuard is not null) databaseGuard.CircuitOnSiteAdminConsole = OnSiteAdminConsole;
+    }
+
+    private bool OnSiteAdminConsole()
+    {
+        try
+        {
+            var relative = _navigation.ToBaseRelativePath(_navigation.Uri);
+            var cut = relative.IndexOfAny(['?', '#']);
+            var path = new PathString("/" + (cut < 0 ? relative : relative[..cut]));
+            return path.StartsWithSegments(HttpOrganizationContext.SiteAdminPathPrefix);
+        }
+        catch (InvalidOperationException)
+        {
+            // Not initialised yet: no page, so not the console.
+            return false;
+        }
     }
 
     public override Func<CircuitInboundActivityContext, Task> CreateInboundActivityHandler(
@@ -76,6 +108,17 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
             {
                 SendToRefresh();
                 return;
+            }
+            if (_maintenance.IsActive)
+            {
+                // The users table may be empty or gone, so the claim decides,
+                // as it does in the maintenance middleware.
+                var principal = (await _authState.GetAuthenticationStateAsync()).User;
+                if (principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) != "true")
+                {
+                    SendToMaintenancePage();
+                    return;
+                }
             }
             await next(context);
         };
@@ -161,20 +204,32 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
 
     private void SendToRefresh()
     {
+        var back = "/" + _navigation.ToBaseRelativePath(_navigation.Uri);
+        ForceLoad($"{CookieSessionRevalidation.RefreshPath.TrimStart('/')}?return={Uri.EscapeDataString(back)}",
+            "Could not send a stale session to the refresh page.");
+    }
+
+    /// <summary>
+    /// Reloads the page the user is on. While maintenance mode is on the
+    /// middleware answers that load with the maintenance page, and once the
+    /// restore is over the same reload brings the page back.
+    /// </summary>
+    private void SendToMaintenancePage() =>
+        ForceLoad(_navigation.Uri, "Could not reload a page into the maintenance page.");
+
+    private void ForceLoad(string uri, string failureMessage)
+    {
         if (Interlocked.Exchange(ref _redirected, 1) == 1) return;
         try
         {
-            var back = "/" + _navigation.ToBaseRelativePath(_navigation.Uri);
-            _navigation.NavigateTo(
-                $"{CookieSessionRevalidation.RefreshPath.TrimStart('/')}?return={Uri.EscapeDataString(back)}",
-                forceLoad: true);
+            _navigation.NavigateTo(uri, forceLoad: true);
         }
         catch (Exception ex)
         {
             // The event is still dropped. Let a later event try again, so a
             // failed send does not leave the page dead.
             Interlocked.Exchange(ref _redirected, 0);
-            _logger.LogWarning(ex, "Could not send a stale session to the refresh page.");
+            _logger.LogWarning(ex, failureMessage);
         }
     }
 

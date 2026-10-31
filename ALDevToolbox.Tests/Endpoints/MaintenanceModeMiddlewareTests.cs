@@ -95,6 +95,52 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The OAuth token endpoints and the Microsoft sign-in callback are handled
+    /// inside authentication, ahead of the gate, and would write (a refresh
+    /// grant's token rows, a first sign-in's user). They get the maintenance
+    /// page before authentication runs (#1571). The personal access token
+    /// side is pinned in <c>PatAuthenticationHandlerTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task During_a_restore_the_token_endpoints_and_sign_in_callbacks_are_closed_before_they_can_write()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var anonymous = factory.CreateClient();
+        var maintenance = factory.Services.GetRequiredService<MaintenanceModeState>();
+        maintenance.Enter("Restoring from a backup.");
+        try
+        {
+            foreach (var path in new[] { "/oauth/token", "/oauth/revoke", "/oauth/introspect" })
+            {
+                using var response = await anonymous.PostAsync(path, new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "refresh_token",
+                    ["refresh_token"] = "a-refresh-token",
+                    ["client_id"] = "cronus-assistant",
+                }), TestContext.Current.CancellationToken);
+                response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable, path);
+                (await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken)).Should().Contain(MaintenancePage);
+            }
+
+            await AssertGatedAsync(anonymous, "/signin-microsoft?code=abc&state=xyz");
+
+            // An assistant on an access token gets the 503 and its Retry-After, not a 401.
+            using var mcp = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+            {
+                Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json"),
+            };
+            mcp.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "aldt_pat_notarealtoken");
+            using var mcpResponse = await anonymous.SendAsync(mcp, TestContext.Current.CancellationToken);
+            mcpResponse.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            mcpResponse.Headers.RetryAfter.Should().NotBeNull();
+        }
+        finally
+        {
+            maintenance.Exit();
+        }
+    }
+
     private static async Task AssertGatedAsync(HttpClient client, string path)
     {
         using var response = await client.GetAsync(path);

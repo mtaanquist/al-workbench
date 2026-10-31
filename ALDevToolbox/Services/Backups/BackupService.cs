@@ -342,6 +342,9 @@ public sealed class BackupService
         // A restore can start while an earlier failed one holds the site closed;
         // if this one fails before the drop, that hold has to come back as it was.
         var before = _maintenance.Capture();
+        // The restore's own reads and writes (migrate, the inventory, retention)
+        // must get past the database guard it is about to close (#1571).
+        using var allowDatabase = _maintenance.AllowDatabase();
         _maintenance.Enter($"Restoring backup {row.FileName}");
         // With maintenance mode on, no scheduler tick or queued job starts. Wait,
         // for a limited time, for those already running to finish: an import or
@@ -363,12 +366,13 @@ public sealed class BackupService
             var running = _maintenance.ActiveJobs;
             _maintenance.Restore(before);
             _logger.LogWarning(
-                "Refusing to restore {FileName}: {Running} background job(s) were still running after {Wait}.",
+                "Refusing to restore {FileName}: {Running} job(s) or database command(s) were still running after {Wait}.",
                 row.FileName, running, _activeJobsWait);
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["BackupId"] = "An import, a build or another background task is still running, and a restore would "
-                    + "replace the database under it. Wait until imports and builds have finished, then restore. "
+                ["BackupId"] = "Something is still running against the database - an import, a build, a background "
+                    + "task, or a page that is still loading or saving - and a restore would replace the database "
+                    + "under it. Wait a few minutes, or until imports and builds have finished, then restore. "
                     + "Nothing was changed.",
             });
         }

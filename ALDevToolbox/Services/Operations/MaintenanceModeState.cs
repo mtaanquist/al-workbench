@@ -112,6 +112,56 @@ public sealed class MaintenanceModeState
     /// <summary>Releases what <see cref="TryBeginJob"/> or <see cref="BeginJobRegardless"/> claimed.</summary>
     public void EndJob() => Interlocked.Decrement(ref _activeJobs);
 
+    // ---- Database access during a restore (#1571) ---------------------------------
+
+    private const int ReadsOnly = 1;
+    private const int ReadsAndWrites = 2;
+
+    private readonly AsyncLocal<int> _databaseAllowance = new();
+
+    /// <summary>
+    /// True in a flow that <see cref="Data.MaintenanceDatabaseGuard"/> lets read and
+    /// write the database while maintenance mode is on.
+    /// </summary>
+    public bool DatabaseAllowedHere => _databaseAllowance.Value >= ReadsAndWrites;
+
+    /// <summary>True in a flow the guard lets read, but not write, during maintenance.</summary>
+    public bool DatabaseReadsAllowedHere => _databaseAllowance.Value >= ReadsOnly;
+
+    /// <summary>
+    /// Lets the current flow, and everything it awaits, read and write the database
+    /// while maintenance mode is on, until the result is disposed. For the restore's
+    /// own work, and a background job already counted on <see cref="ActiveJobs"/>
+    /// (the restore waits for it, so it must be able to finish). Nothing else should
+    /// take it. The allowance is an <see cref="AsyncLocal{T}"/>, so it travels into
+    /// anything started under it: no detached work (a fire-and-forget task, a timer)
+    /// may be started inside it, or that work would keep the allowance after the
+    /// scope ends.
+    /// </summary>
+    public IDisposable AllowDatabase() => Allow(ReadsAndWrites);
+
+    /// <summary>
+    /// Lets the current flow read, but not write, the database while maintenance mode
+    /// is on. For a request that arrives during maintenance: authentication and the
+    /// gates ahead of the maintenance page read the database to get there, and a write
+    /// on the way (a token refresh, a first Microsoft sign-in) must not land in the
+    /// database being restored. The same rule as <see cref="AllowDatabase"/> applies
+    /// to detached work.
+    /// </summary>
+    public IDisposable AllowDatabaseReads() => Allow(ReadsOnly);
+
+    private IDisposable Allow(int level)
+    {
+        var previous = _databaseAllowance.Value;
+        _databaseAllowance.Value = Math.Max(previous, level);
+        return new DatabaseAllowance(this, previous);
+    }
+
+    private sealed class DatabaseAllowance(MaintenanceModeState owner, int previous) : IDisposable
+    {
+        public void Dispose() => owner._databaseAllowance.Value = previous;
+    }
+
     /// <summary>
     /// Waits up to <paramref name="timeout"/> for every running job to finish. Call
     /// with the flag on, so no new job can start meanwhile. True when none is left.

@@ -13,6 +13,58 @@ namespace ALDevToolbox.Endpoints;
 /// </summary>
 internal static class MaintenanceModeMiddleware
 {
+    /// <summary>
+    /// The paths a restore closes before authentication runs. The OAuth
+    /// token, revocation and introspection endpoints (a refresh grant writes
+    /// token rows) and the Microsoft sign-in callback (a first sign-in creates
+    /// the user and the link) are handled inside authentication and would
+    /// write. <c>/mcp</c> is here because its bearer policy is checked by
+    /// authorization, ahead of the gate, and an access token is left
+    /// unvalidated during maintenance, so the caller would get a 401 rather
+    /// than the 503 that tells it to retry. Nobody can be recognised as a
+    /// SiteAdmin before authentication, and an assistant or a person retries
+    /// these after the 503 (#1571).
+    /// </summary>
+    internal static readonly string[] ClosedBeforeAuthentication =
+    [
+        "/oauth/token",
+        "/oauth/revoke",
+        "/oauth/introspect",
+        EntraAuthEndpoints.CallbackPath,
+        "/mcp",
+    ];
+
+    /// <summary>
+    /// A request that arrives while maintenance mode is on is
+    /// <see cref="UseMaintenanceMode"/>'s to decide, but the stages ahead of
+    /// it (authentication, the tool and strong-auth gates) read the database
+    /// to get there. So such a request may read the database, and not write
+    /// it. The paths in <see cref="ClosedBeforeAuthentication"/> get the 503
+    /// here instead, since they are handled inside authentication. Registered
+    /// first, so the allowance covers the whole request. A request already
+    /// running when the restore began gets no allowance at all (#1571, see
+    /// <see cref="Data.MaintenanceDatabaseGuard"/>).
+    /// </summary>
+    public static IApplicationBuilder UseMaintenanceDatabaseAllowance(this IApplicationBuilder app)
+    {
+        app.Use(async (ctx, next) =>
+        {
+            var maintenance = ctx.RequestServices.GetRequiredService<MaintenanceModeState>();
+            if (!maintenance.IsActive)
+            {
+                await next();
+                return;
+            }
+            if (ClosedBeforeAuthentication.Any(p => ctx.Request.Path.StartsWithSegments(p)))
+            {
+                await WriteMaintenancePageAsync(ctx, maintenance);
+                return;
+            }
+            using (maintenance.AllowDatabaseReads()) await next();
+        });
+        return app;
+    }
+
     public static IApplicationBuilder UseMaintenanceMode(this IApplicationBuilder app)
     {
         app.Use(async (ctx, next) =>
@@ -45,12 +97,17 @@ internal static class MaintenanceModeMiddleware
                 return;
             }
 
-            ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            ctx.Response.Headers.RetryAfter = "30";
-            ctx.Response.ContentType = "text/html; charset=utf-8";
-            await ctx.Response.WriteAsync(BuildBody(maintenance));
+            await WriteMaintenancePageAsync(ctx, maintenance);
         });
         return app;
+    }
+
+    private static Task WriteMaintenancePageAsync(HttpContext ctx, MaintenanceModeState maintenance)
+    {
+        ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        ctx.Response.Headers.RetryAfter = "30";
+        ctx.Response.ContentType = "text/html; charset=utf-8";
+        return ctx.Response.WriteAsync(BuildBody(maintenance));
     }
 
     /// <summary>

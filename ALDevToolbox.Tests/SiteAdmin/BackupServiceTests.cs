@@ -116,6 +116,35 @@ public sealed class BackupServiceTests : IDisposable
         _maintenance.IsActive.Should().BeFalse("maintenance mode is lifted after a successful restore");
     }
 
+    /// <summary>
+    /// The restore closes the database to ordinary work (#1571) and then does
+    /// its own: the inventory, the migration, the retention sweep. With the
+    /// guard installed and nothing else exempting it, it still round-trips.
+    /// </summary>
+    [PgToolFact]
+    public async Task Restore_gets_its_own_work_past_the_maintenance_database_guard()
+    {
+        var svc = NewService(guarded: true);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Organizations.Add(new Organization
+            {
+                Name = "Marker", Slug = "marker-guarded",
+                IsPending = false, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+
+        await svc.RestoreAsync(backup.Id);
+
+        _maintenance.IsActive.Should().BeFalse();
+        _maintenance.ActiveJobs.Should().Be(0);
+        await using var check = _db.NewContext();
+        (await check.Organizations.IgnoreQueryFilters().AnyAsync(o => o.Slug == "marker-guarded")).Should().BeTrue();
+        (await check.Backups.AsNoTracking().AnyAsync(b => b.Id == backup.Id)).Should().BeTrue("the inventory was put back");
+    }
+
     [PgToolFact]
     public async Task Retention_prunes_oldest_unpinned_backups_and_keeps_pinned()
     {
@@ -743,7 +772,8 @@ public sealed class BackupServiceTests : IDisposable
 
             var ex = await act.Should().ThrowAsync<PlanValidationException>();
             ex.Which.Errors["BackupId"].Should().Contain("still running")
-                .And.Contain("Wait until imports and builds have finished");
+                .And.Contain("until imports and builds have finished")
+                .And.Contain("a page that is still loading or saving", "a long page query is counted too (#1571)");
         }
         finally
         {
@@ -938,9 +968,22 @@ public sealed class BackupServiceTests : IDisposable
     private BackupService NewService(
         BackupOptions? options = null,
         ALDevToolbox.Services.Mcp.McpAvailabilityState? mcp = null,
-        ALDevToolbox.Services.Tools.ToolAvailabilityState? tools = null)
+        ALDevToolbox.Services.Tools.ToolAvailabilityState? tools = null,
+        bool guarded = false)
     {
-        var ctx = _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
+        var ctx = guarded
+            ? new ALDevToolbox.Data.AppDbContext(
+                new DbContextOptionsBuilder<ALDevToolbox.Data.AppDbContext>()
+                    .UseNpgsql(_db.ConnectionString)
+                    .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning))
+                    .AddInterceptors(
+                        TestDb.NewAuditInterceptor(),
+                        // Not a SiteAdmin and no request: only the restore's own
+                        // allowance can get its commands past the guard.
+                        new ALDevToolbox.Data.MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext()))
+                    .Options,
+                _db.OrgContext)
+            : _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {

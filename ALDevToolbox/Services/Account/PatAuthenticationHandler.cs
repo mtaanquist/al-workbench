@@ -24,15 +24,18 @@ public sealed class PatAuthenticationHandler : AuthenticationHandler<Authenticat
     public const string AuthenticationScheme = "PAT";
 
     private readonly PersonalAccessTokenService _tokens;
+    private readonly ALDevToolbox.Services.Operations.MaintenanceModeState? _maintenance;
 
     public PatAuthenticationHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
         ILoggerFactory logger,
         UrlEncoder encoder,
-        PersonalAccessTokenService tokens)
+        PersonalAccessTokenService tokens,
+        ALDevToolbox.Services.Operations.MaintenanceModeState? maintenance = null)
         : base(options, logger, encoder)
     {
         _tokens = tokens;
+        _maintenance = maintenance;
     }
 
     /// <summary>
@@ -69,6 +72,12 @@ public sealed class PatAuthenticationHandler : AuthenticationHandler<Authenticat
             // Some other Bearer flavour — leave it for another handler.
             return AuthenticateResult.NoResult();
         }
+
+        // Validating writes the token's last-used time, which must not land in a
+        // database being restored, and the users table may be empty meanwhile. Left
+        // anonymous, the request gets the maintenance page (#1571, as #1269 does for
+        // cookies).
+        if (_maintenance?.IsActive == true) return AuthenticateResult.NoResult();
 
         var principal = await _tokens.ValidateAsync(token, Context.RequestAborted);
         if (principal is null)

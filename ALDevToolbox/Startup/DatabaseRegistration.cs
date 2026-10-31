@@ -5,7 +5,7 @@ using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Startup;
 
-/// <summary>The EF Core context and its audit interceptor.</summary>
+/// <summary>The EF Core context and its audit and maintenance interceptors.</summary>
 public static class DatabaseRegistration
 {
     /// <summary>Registers <see cref="AppDbContext"/> against the configured Postgres.</summary>
@@ -19,6 +19,10 @@ public static class DatabaseRegistration
             ?? throw new InvalidOperationException(
                 "ConnectionStrings:DefaultConnection is not configured. Set ConnectionStrings__DefaultConnection.");
         services.AddScoped<AuditInterceptor>();
+        services.AddScoped(sp => new MaintenanceDatabaseGuard(
+            sp.GetRequiredService<ALDevToolbox.Services.Operations.MaintenanceModeState>(),
+            sp.GetRequiredService<ALDevToolbox.Services.IOrganizationContext>(),
+            sp.GetService<IHttpContextAccessor>()));
         // The model snapshot stays a hand-rolled affair (the InitialCreate designer
         // file's BuildTargetModel is intentionally empty), so EF's pending-model-
         // changes guard would fire on every MigrateAsync. Real schema drift still
@@ -52,7 +56,10 @@ public static class DatabaseRegistration
                 .UseNpgsql(connectionString, npgsql => npgsql
                     .UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery))
                 .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning))
-                .AddInterceptors(sp.GetRequiredService<AuditInterceptor>()),
+                .AddInterceptors(
+                    sp.GetRequiredService<AuditInterceptor>(),
+                    // Keeps ordinary work off the database during a restore (#1571).
+                    sp.GetRequiredService<MaintenanceDatabaseGuard>()),
             ServiceLifetime.Scoped);
         return services;
     }

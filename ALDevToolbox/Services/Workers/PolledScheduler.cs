@@ -123,6 +123,8 @@ public abstract class PolledScheduler : BackgroundService
             return false;
         }
 
+        // The restore waits for a counted tick, so it may finish on the database (#1571).
+        using var allowDatabase = _maintenance?.AllowDatabase();
         try
         {
             Heartbeat.BeginActive();

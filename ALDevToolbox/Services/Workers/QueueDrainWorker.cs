@@ -152,6 +152,9 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
             }
             Heartbeat.BeginActive();
             active = true;
+            // A counted job is one the restore waits for, so it may finish its work
+            // on the database even once maintenance mode is on (#1571).
+            using var allowDatabase = counted ? _maintenance!.AllowDatabase() : null;
             await RunJobAsync(job, stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
