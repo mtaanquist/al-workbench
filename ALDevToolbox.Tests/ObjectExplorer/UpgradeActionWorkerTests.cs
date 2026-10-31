@@ -1852,11 +1852,13 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await SetWindowsAsync(dEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
         await SetWindowsAsync(wEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
         await BookInWindowAsync(dProject, dEnv, UploadAppTiming.DeliveryWindow, "D1.app", "D2.app", "D3.app");
+        _f.Clock.Advance(new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        // Booked once the batch has started, so on their own they would wait for it (#1625).
         await BookInWindowAsync(wProject, wEnv, UploadAppTiming.DeliveryWindow, "WWindow.app");
         var urgent = (await BookUploadAsync(wProject, wEnv, hoursAhead: 24, "Hotfix.app"))
             .Last();
-        _f.Clock.Advance(new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
-        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
 
         _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
         await using (var ctx = _f.Db.NewContext())
@@ -1896,6 +1898,169 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
         _f.Apps.InstalledFiles.Should().Equal(new[] { "D1.app", "DLate.app", "D2.app", "D3.app" },
             "the environment with a started batch keeps the turn, whichever of its rows comes first");
+    }
+
+    // ── A single window booking is not held behind another customer's batch (#1625) ──
+    // One install at a time; the fixture's clock starts on Friday 2026-09-11 at 08:00 UTC.
+    // 22:00 in Copenhagen (summer time) is 20:00 UTC, 23:00 is 21:00 UTC.
+
+    [Fact]
+    public async Task A_single_window_booking_goes_ahead_of_a_batch_booked_after_it_for_a_customer_served_less_recently()
+    {
+        var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(xEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await SetWindowsAsync(wEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        // The single booking's customer had an install this morning; the batch's customer none.
+        await BookUploadAsync(wProject, wEnv, hoursAhead: 1, "W0.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        (await SweepUntilQuietAsync()).Should().Be(1);
+
+        await BookInWindowAsync(wProject, wEnv, UploadAppTiming.DeliveryWindow, "Urgent.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        await BookInWindowAsync(xProject, xEnv, UploadAppTiming.DeliveryWindow, "X1.app", "X2.app", "X3.app");
+
+        _f.Clock.Advance(new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
+        for (var i = 0; i < 2; i++)
+        {
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        }
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "W0.app", "Urgent.app", "X1.app" },
+            "a single window booking ranks with started batches, ahead of a batch not yet started, whatever the rotation says");
+    }
+
+    [Fact]
+    public async Task A_single_window_booking_moved_to_the_next_night_does_not_wait_again_behind_another_customers_started_batch()
+    {
+        var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(xEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await SetWindowsAsync(wEnv, deliveryStart: new TimeOnly(23, 0), deliveryEnd: new TimeOnly(0, 0));
+        // The urgent app is booked first; the other customer's batch five minutes later.
+        var urgent = (await BookInWindowAsync(wProject, wEnv, UploadAppTiming.DeliveryWindow, "Urgent.app")).Single();
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        await BookInWindowAsync(xProject, xEnv, UploadAppTiming.DeliveryWindow, "X1.app", "X2.app", "X3.app", "X4.app");
+        var friday = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+
+        // Friday 22:00: the batch starts, the single booking's window has not opened yet.
+        _f.Clock.Advance(friday - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        // Nothing more runs before both windows close: everything left moves to Saturday.
+        _f.Clock.Advance(friday.AddMinutes(150) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0);
+        (await _f.ReadActionAsync(urgent)).ExecuteAfter.Should().Be(friday.AddDays(1).AddHours(1));
+
+        // Saturday 22:00: the batch carries on. 23:00: the single booking is due and takes
+        // the next turn, though the batch started the night before.
+        _f.Clock.Advance(friday.AddDays(1) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Clock.Advance(TimeSpan.FromHours(1));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "X1.app", "X2.app", "Urgent.app" },
+            "a single booking cannot be left part-installed, so it does not wait for the rest of a batch booked after it");
+
+        await SweepUntilQuietAsync();
+        _f.Apps.InstalledFiles.Should().Equal("X1.app", "X2.app", "Urgent.app", "X3.app", "X4.app");
+    }
+
+    [Fact]
+    public async Task A_single_window_booking_behind_an_unstarted_batch_on_its_environment_does_not_start_that_batch_ahead_of_a_started_one()
+    {
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (sProject, sEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(dEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await SetWindowsAsync(sEnv, deliveryStart: new TimeOnly(23, 0), deliveryEnd: new TimeOnly(0, 0));
+        await BookInWindowAsync(sProject, sEnv, UploadAppTiming.DeliveryWindow, "S1.app", "S2.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        await BookInWindowAsync(sProject, sEnv, UploadAppTiming.DeliveryWindow, "SSingle.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        await BookInWindowAsync(dProject, dEnv, UploadAppTiming.DeliveryWindow, "D1.app", "D2.app", "D3.app");
+        var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+
+        _f.Clock.Advance(opening - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Clock.Advance(TimeSpan.FromHours(1));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "D1.app", "D2.app" },
+            "the single booking's turn would send the first app of the batch ahead of it, leaving a second customer part-installed");
+
+        await SweepUntilQuietAsync();
+        _f.Apps.InstalledFiles.Should().Equal("D1.app", "D2.app", "D3.app", "S1.app", "S2.app", "SSingle.app");
+    }
+
+    [Fact]
+    public async Task An_older_single_queued_behind_a_started_batch_does_not_lend_the_batch_its_booking_time()
+    {
+        var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(xEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await SetWindowsAsync(wEnv, deliveryStart: new TimeOnly(23, 0), deliveryEnd: new TimeOnly(0, 0));
+        await BookInWindowAsync(wProject, wEnv, UploadAppTiming.DeliveryWindow, "Urgent.app");
+        // A single on the batch's environment, booked a day earlier but due later tonight.
+        await BookInWindowAsync(xProject, xEnv, UploadAppTiming.DeliveryWindow, "XOld.app");
+        var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.PackageFileName == "XOld.app")
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.RequestedAt, a => a.RequestedAt.AddDays(-1))
+                    .SetProperty(a => a.ExecuteAfter, opening.AddMinutes(30)));
+        }
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        await BookInWindowAsync(xProject, xEnv, UploadAppTiming.DeliveryWindow, "X1.app", "X2.app", "X3.app", "X4.app");
+
+        _f.Clock.Advance(opening - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Clock.Advance(TimeSpan.FromHours(1));
+        for (var i = 0; i < 3; i++)
+        {
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        }
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "X1.app", "Urgent.app", "X2.app", "X3.app" },
+            "the batch's place is the booking time of the row its turn would send, not of an older row queued behind it");
+        await SweepUntilQuietAsync();
+        _f.Apps.InstalledFiles.Should().Equal("X1.app", "Urgent.app", "X2.app", "X3.app", "X4.app", "XOld.app");
+    }
+
+    [Fact]
+    public async Task A_skipped_single_does_not_hand_its_turn_to_an_unstarted_batch_behind_it_while_another_batch_is_part_installed()
+    {
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (sProject, sEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await SetWindowsAsync(dEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        // Sweden: the delivery window runs to midnight, Microsoft's window closes at 22:30.
+        await SetWindowsAsync(sEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0),
+            bcStart: new TimeOnly(22, 0), bcEnd: new TimeOnly(22, 30), bcZone: "Europe/Copenhagen");
+        await BookInWindowAsync(dProject, dEnv, UploadAppTiming.DeliveryWindow, "D1.app", "D2.app", "D3.app");
+        var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+        _f.Clock.Advance(opening - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        // A single for Microsoft's window, booked before the batch (as one moved from last
+        // night would be), then a batch for the delivery window queued behind it.
+        await BookInWindowAsync(sProject, sEnv, UploadAppTiming.BcUpdateWindow, "SSingle.app");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.PackageFileName == "SSingle.app")
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.RequestedAt, a => a.RequestedAt.AddDays(-1))
+                    .SetProperty(a => a.ExecuteAfter, opening));
+        }
+        await BookInWindowAsync(sProject, sEnv, UploadAppTiming.DeliveryWindow, "S1.app", "S2.app");
+
+        // 22:45: the single's window closed before its turn, so it moves to tomorrow.
+        _f.Clock.Advance(TimeSpan.FromMinutes(45));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "D1.app", "D2.app" },
+            "the batch behind the skipped single would leave a second customer part-installed");
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.PackageFileName == "SSingle.app"))
+            .ExecuteAfter.Should().BeAfter(_f.Clock.GetUtcNow().UtcDateTime, "the single waits for its window's next opening");
     }
 
     [Fact]
