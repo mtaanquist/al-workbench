@@ -699,7 +699,7 @@ that names the environment and says what the click does there:
   therefore means "shortly", not "within a minute", when another install is running. That
   one turn rotates (#1539): among the organisations with an install due (or one owed a
   second look), it goes to the one whose most recent install was sent longest ago - one
-  never served first - then to the longest-waiting due install. So a twenty-app batch
+  never served first - then to the longest-waiting due install, and on a tie to the one booked first (a row moved to a window's next opening ties with everything booked for it). So a twenty-app batch
   booked for one organisation's opening alternates with another organisation's install
   in the same window instead of running to the end first. The order is read from the
   rows each sweep, so it survives a restart. It shares the one install out; it does not
@@ -764,8 +764,9 @@ that names the environment and says what the click does there:
   as it is now on the environment: the delivery window for a `DeliveryWindow` row (or
   Microsoft's, if the delivery window has since been removed), Microsoft's for a
   `BcUpdateWindow` row. Outside it, the worker moves that row and the
-  rest of its batch still waiting to the next opening, with a log line, rather than
-  installing into the customer's working day. A picked time runs when the person said,
+  rest of its batch still waiting to the next opening, with a log line and one
+  notification to the person who booked it saying how many apps were moved and when they
+  now run (#1575), rather than installing into the customer's working day. A picked time runs when the person said,
   late or not, and Install now clears the mark because the person has then chosen the
   time. When no window is configured any more, the row runs. An
   install the workbench could not see finish - a run of failed polls, the wait ran out,

@@ -31,6 +31,7 @@ public sealed class NotificationEmailCopyTests : IDisposable
     [InlineData(UpgradeActionResult.Done)]
     [InlineData(UpgradeActionResult.Failed)]
     [InlineData(UpgradeActionResult.Unconfirmed)]
+    [InlineData(UpgradeActionResult.Moved)]
     public async Task A_scheduled_change_names_what_was_scheduled_in_the_body(UpgradeActionResult result)
     {
         var content = await UpgradeActionAsync(result, null);

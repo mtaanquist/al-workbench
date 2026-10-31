@@ -193,7 +193,7 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// The sweep's one booked app install, across every organisation, taken in turns
     /// (#1539). Among the organisations with an install due (or one still owed a second
     /// look), the turn goes to the one whose most recent install was sent longest ago -
-    /// one never served first - and only then to the longest-waiting due install, then the
+    /// one never served first - and only then to the longest-waiting due install (booked first, on a tie), then the
     /// lowest id. So a twenty-app batch booked for one organisation's opening alternates
     /// with another organisation's install in the same window instead of running to the
     /// end first; it does not speed anything up. The order is read from the rows each
@@ -216,6 +216,7 @@ public sealed class UpgradeActionWorker : BackgroundService
             orgs.Where(o => turns.ContainsKey(o.Id))
                 .OrderBy(o => turns[o.Id].LastSentAt ?? DateTime.MinValue)
                 .ThenBy(o => turns[o.Id].OldestDue)
+                .ThenBy(o => turns[o.Id].OldestBooked)
                 .ThenBy(o => o.Id),
             async (org, sys, token) =>
             {
@@ -225,8 +226,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         return sent;
     }
 
-    /// <summary>Where one organisation stands for the install turn: when its last install went, and when its longest-waiting one came due.</summary>
-    private sealed record InstallTurn(DateTime? LastSentAt, DateTime OldestDue);
+    /// <summary>Where one organisation stands for the install turn: when its last install went, and when its longest-waiting due one came due and was booked.</summary>
+    private sealed record InstallTurn(DateTime? LastSentAt, DateTime OldestDue, DateTime OldestBooked);
 
     /// <summary>This org's place in the install turn, or null when it has nothing to send or ask about again.</summary>
     private async Task<InstallTurn?> InstallTurnAsync(int orgId, bool isSystem, CancellationToken ct)
@@ -238,15 +239,21 @@ public sealed class UpgradeActionWorker : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var installs = db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp);
-        var oldestDue = await installs
+        // The first due row in the order one organisation sends them (#1568): a move to a
+        // window's next opening rewrites ExecuteAfter, so an install that has waited since
+        // last night ties with one booked for tonight, and its booking time breaks the tie
+        // rather than the organisation id (#1575).
+        var first = await installs
             .Where(a => a.ConfirmationDue
                         || (a.Status == UpgradeActionStatus.Pending && a.SentAt == null && a.ExecuteAfter <= now))
-            .MinAsync(a => (DateTime?)a.ExecuteAfter, ct).ConfigureAwait(false);
-        if (oldestDue is not { } due) return null;
+            .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.RequestedAt)
+            .Select(a => new { a.ExecuteAfter, a.RequestedAt })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (first is null) return null;
         var lastSent = await installs
             .Where(a => a.SentAt != null)
             .MaxAsync(a => a.SentAt, ct).ConfigureAwait(false);
-        return new InstallTurn(lastSent, due);
+        return new InstallTurn(lastSent, first.ExecuteAfter, first.RequestedAt);
     }
 
     /// <summary>Which of a sweep's two passes a call makes; <see cref="Both"/> is the one-call form a test drives.</summary>
@@ -535,7 +542,8 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// is a compare-and-set on rows still pending, unsent and window-chosen, so a cancel
     /// or an "Install now" in between wins. True when the row was moved.
     /// </summary>
-    private async Task<bool> MovedPastClosedWindowAsync(AppDbContext db, DueAction action, UploadAppTiming window, CancellationToken ct)
+    private async Task<bool> MovedPastClosedWindowAsync(
+        AsyncServiceScope scope, AppDbContext db, DueAction action, UploadAppTiming window, CancellationToken ct)
     {
         var env = await db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == action.EnvironmentId)
@@ -580,6 +588,17 @@ public sealed class UpgradeActionWorker : BackgroundService
             _logger.LogInformation(
                 "Booked install {ActionId} ({FileName}) on {Environment} came up after its window closed; {Moved} row(s) moved to the next opening, {NextOpening}.",
                 action.Id, action.Label, env.Name, moved, next);
+
+            // The requester hears it once per move (the moved rows are not due again until
+            // the opening), so a batch left part-installed overnight is not news only on
+            // the environment's page (#1575).
+            var nextLocal = TimeZoneInfo.ConvertTimeFromUtc(next, tz);
+            var when = $"{nextLocal:yyyy-MM-dd} at {UpdateWindow.Clock(TimeOnly.FromDateTime(nextLocal))} ({tz.Id})";
+            var message = moved == 1
+                ? $"{action.Label} didn't get its turn before the window closed. It now runs when the window next opens, {when}."
+                : $"{moved} apps didn't get their turn before the window closed. They now run when the window next opens, {when}.";
+            await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
+                .NotifyMovedAsync(action.Id, moved, message, CancellationToken.None).ConfigureAwait(false);
         }
         return moved > 0;
     }
@@ -676,7 +695,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         // window, and an install is not sent into the customer's working day for that.
         if (action.ScheduledByWindow is { } window
             && UpgradeActionService.IsAppInstall(action.Kind)
-            && await MovedPastClosedWindowAsync(db, action, window, ct).ConfigureAwait(false))
+            && await MovedPastClosedWindowAsync(scope, db, action, window, ct).ConfigureAwait(false))
         {
             return RunOutcome.Skipped;
         }

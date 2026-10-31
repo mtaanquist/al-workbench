@@ -320,22 +320,21 @@ public sealed class UpgradeActionService
 
         var now = _clock.GetUtcNow().UtcDateTime;
         // The person has picked the time now, so no window holds these rows back any more:
-        // the worker's window check (#1539) must not move them out again. Unmarked before
-        // they are moved, so no row is ever due while still held to a window.
-        var unmarked = await _db.OeEnvironmentUpgradeActions
-            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
-            .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
-            .Where(a => a.ScheduledByWindow != null)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ScheduledByWindow, (UploadAppTiming?)null), ct).ConfigureAwait(false);
+        // the worker's window check (#1539) must not move them out again. Unmarked and
+        // moved in one statement, so a failure part-way can't leave rows with their future
+        // window slot but no longer held to the window, which could then install into the
+        // working day (#1575); and no row is ever due while still held to a window.
         var moved = await _db.OeEnvironmentUpgradeActions
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
             .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
-            .Where(a => a.ExecuteAfter > now)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
+            .Where(a => a.ScheduledByWindow != null || a.ExecuteAfter > now)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.ScheduledByWindow, (UploadAppTiming?)null)
+                .SetProperty(a => a.ExecuteAfter, a => a.ExecuteAfter > now ? now : a.ExecuteAfter), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep, {Unmarked} no longer held to a window.",
-            _orgContext.CurrentUserId, actionId, booking.PackageFileName ?? booking.AppName, moved, unmarked);
+            "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep and no longer held to a window.",
+            _orgContext.CurrentUserId, actionId, booking.PackageFileName ?? booking.AppName, moved);
     }
 
     // ── Reading ─────────────────────────────────────────────────────────
