@@ -40,11 +40,13 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
     /// <summary>
     /// Command timeout for each <c>VACUUM</c>. Npgsql's 30-second default is far
     /// too short once a hard delete has left a large table full of dead tuples:
-    /// the GIN cleanup reads the whole trigram index. Thirty minutes keeps the
-    /// whole sweep inside the one-hour active ceiling, the way the release
-    /// delete and wipe lift theirs (<see cref="ReleaseManagementService"/>).
+    /// the GIN cleanup reads the whole trigram index. The timeout is per statement,
+    /// and there are four, so fourteen minutes each keeps even a sweep where every
+    /// one runs to its limit (56 minutes) inside the one-hour active ceiling below;
+    /// past that the worker health check would report a stall. The release delete
+    /// and wipe lift theirs the same way (<see cref="ReleaseManagementService"/>).
     /// </summary>
-    internal static readonly TimeSpan VacuumCommandTimeout = TimeSpan.FromMinutes(30);
+    internal static readonly TimeSpan VacuumCommandTimeout = TimeSpan.FromMinutes(14);
 
     // Tables touched by the cascade from a hard-deleted Release. Listed
     // explicitly so VACUUM only rewrites the heaps that actually accrue
@@ -74,8 +76,9 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
         // Optional so the tests that build it by hand keep compiling; production DI
         // always supplies the singleton, so the base skips its ticks during a restore.
         Operations.MaintenanceModeState? maintenance = null)
-        // Same shape as BackupScheduler: poll every minute, stale at 5; a
-        // single VACUUM sweep is short, an hour ceiling is plenty.
+        // Same shape as BackupScheduler: poll every minute, stale at 5. A sweep is
+        // usually short; the hour ceiling covers four VACUUMs at their full
+        // VacuumCommandTimeout, which is sized to fit under it.
         : base(logger, heartbeats, nameof(ObjectExplorerVacuumScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromHours(1),

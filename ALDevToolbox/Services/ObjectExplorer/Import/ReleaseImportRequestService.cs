@@ -507,8 +507,11 @@ public sealed class ReleaseImportRequestService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Import of release {ReleaseId} stopped before it was queued; failing it.", releaseId);
-            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, ReleaseImportService.ImportNotQueuedMessage).ConfigureAwait(false);
-            await _importer.FailUnqueuedImportAsync(releaseId).ConfigureAwait(false);
+            // A written job row keeps the origin, so Retry can re-run it.
+            var retryable = jobRowId is not null;
+            var message = retryable ? ReleaseImportService.ImportNotQueuedRetryMessage : ReleaseImportService.ImportNotQueuedMessage;
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, message).ConfigureAwait(false);
+            await _importer.FailUnqueuedImportAsync(releaseId, retryable).ConfigureAwait(false);
             throw;
         }
     }

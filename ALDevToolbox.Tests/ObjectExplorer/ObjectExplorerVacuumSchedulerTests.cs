@@ -105,6 +105,7 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
     [Fact]
     public async Task Each_vacuum_runs_under_the_long_command_timeout()
     {
+        _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
         await NewScheduler(hour: null).TickOnceAsync(TestContext.Current.CancellationToken);
 
         _watcher.Timeouts.Should().NotBeEmpty()
@@ -120,6 +121,7 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
     {
         var scheduler = NewScheduler(hour: null);
         var ct = TestContext.Current.CancellationToken;
+        _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
         _watcher.Fail = true;
 
         await scheduler.TickOnceAsync(ct); // swallowed and logged, not thrown
@@ -130,9 +132,16 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
         await scheduler.TickOnceAsync(ct);
         _runs.Should().Be(1, "the failed sweep counts as the day's run");
 
-        _clock.Advance(TimeSpan.FromHours(2)); // past 03:00
+        _clock.Advance(TimeSpan.FromDays(1)); // tomorrow's slot
         await scheduler.TickOnceAsync(ct);
         _runs.Should().Be(2, "the next slot runs it again");
+    }
+
+    [Fact]
+    public void Four_vacuums_at_their_full_timeout_fit_under_the_hour_ceiling()
+    {
+        // The worker health check reports a stall past the one-hour active ceiling.
+        (ObjectExplorerVacuumScheduler.VacuumCommandTimeout * 4).Should().BeLessThan(TimeSpan.FromHours(1));
     }
 
     /// <summary>Records each VACUUM's command timeout, and can make it fail.</summary>

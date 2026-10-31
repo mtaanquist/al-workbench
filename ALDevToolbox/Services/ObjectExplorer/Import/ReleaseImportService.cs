@@ -351,19 +351,31 @@ public class ReleaseImportService
     /// </summary>
     public Task FailUnqueuedRetryAsync(int releaseId) => FailUnqueuedAsync(releaseId, RetryNotQueuedMessage);
 
-    /// <summary>The status message a new release gets when its import stopped before the job was queued (#1632).</summary>
+    /// <summary>
+    /// The status message a new release gets when its import stopped before its job
+    /// row was written (#1632). With no row there is no saved origin for Retry to
+    /// re-run, so it says to import again.
+    /// </summary>
     public const string ImportNotQueuedMessage =
         "The import stopped before it was queued, so nothing was imported. Soft delete this release and import it again.";
+
+    /// <summary>
+    /// <see cref="ImportNotQueuedMessage"/> for an import that had written its job row
+    /// (it stopped waiting on a full queue): the row keeps the origin, so Retry works.
+    /// </summary>
+    public const string ImportNotQueuedRetryMessage =
+        "The import stopped before it was queued, so nothing was imported. Retry the import.";
 
     /// <summary>
     /// <see cref="FailUnqueuedRetryAsync"/> for a new import: the submit commits the
     /// release as <c>ingesting</c> before it stages the upload and queues the job, so
     /// a request cut off in between (the tab closed during the copy, a full queue)
     /// would otherwise leave it importing until the next restart (#1632). The message
-    /// says to import again rather than retry, because a release with no job row has
-    /// no saved origin for Retry to re-run.
+    /// says to retry only when <paramref name="retryable"/>: a release whose job row
+    /// was never written has no saved origin for Retry to re-run.
     /// </summary>
-    public Task FailUnqueuedImportAsync(int releaseId) => FailUnqueuedAsync(releaseId, ImportNotQueuedMessage);
+    public Task FailUnqueuedImportAsync(int releaseId, bool retryable) =>
+        FailUnqueuedAsync(releaseId, retryable ? ImportNotQueuedRetryMessage : ImportNotQueuedMessage);
 
     private async Task FailUnqueuedAsync(int releaseId, string message)
     {

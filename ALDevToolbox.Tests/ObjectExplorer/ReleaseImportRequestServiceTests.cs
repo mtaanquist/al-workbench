@@ -419,12 +419,53 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         await request.CancelAsync();
 
         await submit.Awaiting(s => s.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
-        (await StatusAsync(releaseId!.Value)).Should().Be("failed");
         File.Exists(stagedPath).Should().BeFalse("no job will open the staged upload");
         await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.Status.Should().Be("failed");
+        release.StatusMessage.Should().Be(ReleaseImportService.ImportNotQueuedRetryMessage,
+            "the job row was written, so it keeps the origin Retry needs");
         var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId);
         row.Status.Should().Be("failed", "a queued row with no job behind it would be resumed at the next start");
-        row.ErrorMessage.Should().Be(ReleaseImportService.ImportNotQueuedMessage);
+        row.ErrorMessage.Should().Be(ReleaseImportService.ImportNotQueuedRetryMessage);
+    }
+
+    [Fact]
+    public async Task A_url_import_cut_off_at_a_full_queue_fails_the_release_and_its_job_row()
+    {
+        await SetAllowlistAsync("cronus.example");
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS 27.2 (DK) " + Guid.NewGuid().ToString("N");
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var submit = NewService(ctx, queue).SubmitAsync(
+            Submission(label: label, dvdUrl: "https://cronus.example/bc.zip"), request.Token);
+        int? releaseId = null;
+        while (!submit.IsCompleted)
+        {
+            await using (var probe = _db.NewContext())
+            {
+                var id = await probe.OeReleases.AsNoTracking()
+                    .Where(r => r.Label == label).Select(r => (int?)r.Id).FirstOrDefaultAsync();
+                if (id is not null && await probe.OeImportJobs.AsNoTracking().AnyAsync(j => j.ReleaseId == id)) releaseId = id;
+            }
+            if (releaseId is not null) break;
+            await Task.Delay(20);
+        }
+        releaseId.Should().NotBeNull("the import writes its job row before the enqueue");
+        await request.CancelAsync();
+
+        await submit.Awaiting(s => s.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.Status.Should().Be("failed");
+        release.StatusMessage.Should().Be(ReleaseImportService.ImportNotQueuedRetryMessage);
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId))
+            .Status.Should().Be("failed");
     }
 
     /// <summary>Returns <c>marker</c> on the first read and fails the next one with <c>error</c> (an <see cref="IOException"/> by default).</summary>

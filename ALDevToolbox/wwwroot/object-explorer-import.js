@@ -103,7 +103,21 @@
 
         function fail(message) {
             if (label) label.textContent = "Failed";
-            if (hint) hint.textContent = message;
+            if (hint) {
+                hint.textContent = message;
+            } else {
+                // Forms without the progress banner (a bare button) still need to
+                // say what went wrong.
+                let note = form.querySelector("[data-oe-import-error]");
+                if (!note) {
+                    note = document.createElement("p");
+                    note.className = "form-sec__cap";
+                    note.setAttribute("role", "alert");
+                    note.setAttribute("data-oe-import-error", "");
+                    form.appendChild(note);
+                }
+                note.textContent = message;
+            }
             if (bar) bar.value = 0;
             if (submit) {
                 submit.disabled = false;
