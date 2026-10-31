@@ -175,6 +175,25 @@ internal static class EndpointHelpers
     public const string SignedInAtKey = "signed_in_at";
 
     /// <summary>
+    /// Claim type mirroring <see cref="SignedInAtKey"/> onto the principal
+    /// (<see cref="Services.Account.StepUpAuth.ApplyClaims"/>), for the
+    /// interactive-page re-check that only sees claims (#1567).
+    /// </summary>
+    public const string SignedInAtClaim = "signed_in_at";
+
+    /// <summary>
+    /// The session's sign-in moment mirrored on the principal. Returns
+    /// <see cref="DateTime.MinValue"/> when the claim is missing or
+    /// unparsable (a cookie issued before the claim existed), so the session
+    /// counts as older than any credential change and gets re-checked.
+    /// </summary>
+    public static DateTime SignedInAt(ClaimsPrincipal? principal) =>
+        DateTime.TryParse(principal?.FindFirst(SignedInAtClaim)?.Value, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var at)
+            ? at
+            : DateTime.MinValue;
+
+    /// <summary>
     /// Marks the auth cookie persistent so it survives browser restarts for
     /// the full <c>ExpireTimeSpan</c> window (see Program.cs). Without this the
     /// cookie is a session cookie and the browser drops it on close, defeating
