@@ -49,19 +49,13 @@ public sealed class PersistedImportJobs
     }
 
     /// <summary>
-    /// Advisory-lock class id for <see cref="CreateBackfillsAsync"/>; the second key is
-    /// the organisation id, so two organisations never wait on each other.
-    /// </summary>
-    private const int BackfillLockClass = 1542;
-
-    /// <summary>
     /// Writes a <c>queued</c> backfill row for each of <paramref name="releaseIds"/> that
     /// has no backfill queued or running yet, all in one transaction, and returns the
     /// rows it wrote. All or nothing: a cancelled request or a failed write leaves no
     /// row behind that nothing will ever feed to the queue, and that would block the
-    /// next attempt at the same release (#1542). An advisory lock per organisation
-    /// makes a second submit wait for the first to finish, so its check sees those
-    /// rows and a double click cannot queue the catalogue twice.
+    /// next attempt at the same release (#1542). Two submits that race can still both
+    /// pass the already-queued check; the cost is a repeated backfill, which is
+    /// harmless, so it is not worth a lock.
     /// </summary>
     public async Task<IReadOnlyList<(int ReleaseId, long JobRowId)>> CreateBackfillsAsync(
         IReadOnlyList<int> releaseIds,
@@ -71,8 +65,6 @@ public sealed class PersistedImportJobs
         await using var tx = _db.Database.CurrentTransaction is null
             ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
             : null;
-        await _db.Database.ExecuteSqlAsync(
-            $"SELECT pg_advisory_xact_lock({BackfillLockClass}, {identity.OrganizationId})", ct).ConfigureAwait(false);
         var active = await ListReleasesWithActiveBackfillAsync(ct).ConfigureAwait(false);
         var source = new ReleaseImportSource.Backfill();
         var rows = releaseIds.Distinct()

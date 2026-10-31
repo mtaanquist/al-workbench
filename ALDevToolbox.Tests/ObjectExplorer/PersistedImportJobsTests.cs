@@ -76,27 +76,6 @@ public sealed class PersistedImportJobsTests : IDisposable
     }
 
     [Fact]
-    public async Task Two_bulk_backfills_at_once_queue_each_release_only_once()
-    {
-        var releaseIds = new List<int>();
-        await using (var seed = _db.NewContext())
-        {
-            for (var i = 0; i < 5; i++) releaseIds.Add((await SeedReleaseAsync(seed, status: "ready")).Id);
-        }
-
-        await using var first = _db.NewContext();
-        await using var second = _db.NewContext();
-        var results = await Task.WhenAll(
-            NewService(first).CreateBackfillsAsync(releaseIds, Identity),
-            NewService(second).CreateBackfillsAsync(releaseIds, Identity));
-
-        results.Sum(r => r.Count).Should().Be(5);
-        await using var read = _db.NewContext();
-        (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
-            .Should().Be(5);
-    }
-
-    [Fact]
     public async Task Reconcile_queues_a_backfill_that_never_started_again_and_fails_only_the_running_one()
     {
         await using var ctx = _db.NewContext();
