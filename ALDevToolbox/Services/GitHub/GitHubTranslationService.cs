@@ -129,6 +129,17 @@ public sealed class GitHubTranslationService
     /// <exception cref="PlanValidationException">The repository cannot be reached or is not one this user may open.</exception>
     /// <exception cref="GitHubApiException">GitHub refused to list the files.</exception>
     public async Task<IReadOnlyList<RepositoryTranslationFile>> ListFilesAsync(
+        string repoFullName, CancellationToken ct = default) =>
+        (await ListFilesWithTreeStateAsync(repoFullName, ct)).Files;
+
+    /// <summary>
+    /// <see cref="ListFilesAsync"/>, plus whether GitHub cut the repository tree short
+    /// (it does past about 100,000 entries), so a caller can say the list may be
+    /// incomplete rather than presenting it as everything (#1601).
+    /// </summary>
+    /// <exception cref="PlanValidationException">The repository cannot be reached or is not one this user may open.</exception>
+    /// <exception cref="GitHubApiException">GitHub refused to list the files.</exception>
+    public async Task<(IReadOnlyList<RepositoryTranslationFile> Files, bool TreeTruncated)> ListFilesWithTreeStateAsync(
         string repoFullName, CancellationToken ct = default)
     {
         var (repo, token) = await ResolveAsync(repoFullName, ct);
@@ -146,7 +157,7 @@ public sealed class GitHubTranslationService
         _logger.LogInformation(
             "Found {FileCount} translation files in {RepoFullName} on {Branch}.",
             files.Count, repo.FullName, repo.DefaultBranch);
-        return files;
+        return (files, tree.Truncated);
     }
 
     /// <summary>

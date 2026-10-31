@@ -456,9 +456,12 @@ public sealed class AccountService
                 ["Password"] = "Your organisation signs in with Microsoft, so there is no password to change here. Use \"Sign in with Microsoft\" instead.",
             });
         }
-        if (!_auth.VerifyPassword(currentPassword, user.PasswordHash))
+        switch (await _auth.CheckCurrentPasswordAsync(user.Email, user.PasswordHash, currentPassword, ip: string.Empty, ct))
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
+            case CurrentPasswordCheck.LockedOut:
+                throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = AuthService.CurrentPasswordLockedOutMessage });
+            case CurrentPasswordCheck.Wrong:
+                throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
         }
         var errors = new Dictionary<string, string>();
         AuthService.ValidatePassword(newPassword, errors, fieldName: "NewPassword");

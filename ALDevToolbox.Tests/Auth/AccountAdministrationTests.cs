@@ -476,6 +476,35 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Wrong_current_passwords_count_towards_the_sign_in_lockout()
+    {
+        // A session without the password could otherwise guess it here with no
+        // limit (#1614). Each wrong guess is a failed attempt for the email,
+        // and once the email is locked out even the right one is refused.
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "guess@example.com", "correctpasswordlong");
+        for (var i = 0; i < AuthService.LockoutThreshold; i++)
+        {
+            await using var ctx = _db.NewContext();
+            Func<Task> wrong = () => NewService(ctx).ChangePasswordAsync(userId, $"guess-{i}", "newpasswordlong12345");
+            (await wrong.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors["CurrentPassword"].Should().Be("Current password is incorrect.");
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> right = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newpasswordlong12345");
+            (await right.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors["CurrentPassword"].Should().Be(AuthService.CurrentPasswordLockedOutMessage);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.LoginAttempts.CountAsync(a => a.Email == "guess@example.com" && !a.Succeeded))
+            .Should().Be(AuthService.LockoutThreshold);
+        var user = await read.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId);
+        NewAuth(read).VerifyPassword("correctpasswordlong", user.PasswordHash).Should().BeTrue("nothing was changed");
+    }
+
+    [Fact]
     public async Task Change_password_rejects_new_password_that_fails_policy()
     {
         var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");

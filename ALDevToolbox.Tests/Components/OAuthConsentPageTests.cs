@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Components;
@@ -67,6 +68,51 @@ public sealed class OAuthConsentPageTests : IDisposable
                 "the protocol name means nothing to the person approving");
             item.TextContent.Should().MatchRegex(@" - \S", "each permission says what it lets the assistant do");
         }
+    }
+
+    [Fact]
+    public async Task The_page_names_the_client_by_the_name_it_registered_not_its_id()
+    {
+        // #1617: a dynamically registered client's id is 32 random characters.
+        using var factory = new EndpointFactory(_db);
+        const string clientId = "3f9c0e5a7d2b4c1e8f6a9b0c2d4e6b21a";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var applications = scope.ServiceProvider.GetRequiredService<OpenIddict.Abstractions.IOpenIddictApplicationManager>();
+            await applications.CreateAsync(new OpenIddict.Abstractions.OpenIddictApplicationDescriptor
+            {
+                ClientId = clientId,
+                DisplayName = "Claude",
+                ClientType = OpenIddict.Abstractions.OpenIddictConstants.ClientTypes.Public,
+                RedirectUris = { new Uri("http://127.0.0.1:41999/callback") },
+            }, TestContext.Current.CancellationToken);
+        }
+        using var client = await SignedInAsync(factory);
+
+        using var page = await client.GetAsync(
+            $"/oauth/consent?client_id={clientId}&redirect_uri=http%3A%2F%2F127.0.0.1%3A41999%2Fcallback&scope=mcp",
+            TestContext.Current.CancellationToken);
+
+        var document = new HtmlParser().ParseDocument(await page.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        document.QuerySelector("h1")!.TextContent.Trim().Should().Be("Authorise Claude");
+        document.Body!.TextContent.Should().NotContain(clientId);
+        document.Body.TextContent.Should().NotContain("Nothing outside this list",
+            "the list does not name every tool, so it must not claim to be complete");
+        document.QuerySelector(".check-list")!.TextContent.Should().Contain("deploy builds");
+    }
+
+    [Fact]
+    public async Task A_client_the_site_does_not_know_is_named_by_its_id()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignedInAsync(factory);
+
+        using var page = await client.GetAsync(
+            "/oauth/consent?client_id=unregistered-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A41999%2Fcallback&scope=mcp",
+            TestContext.Current.CancellationToken);
+
+        var document = new HtmlParser().ParseDocument(await page.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        document.QuerySelector("h1")!.TextContent.Trim().Should().Be("Authorise unregistered-client");
     }
 
     private static string TokenIn(string html)

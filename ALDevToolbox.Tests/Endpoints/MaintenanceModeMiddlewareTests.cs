@@ -126,6 +126,14 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
 
             await AssertGatedAsync(anonymous, "/signin-microsoft?code=abc&state=xyz");
 
+            // The authorization request's client-metadata lookup writes the client row
+            // inside authentication, and end-session is validated there too (#1598).
+            await AssertGatedAsync(anonymous,
+                "/oauth/authorize?client_id=https%3A%2F%2Fclaude.ai%2Foauth%2Fmcp-oauth-client-metadata"
+                + "&response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback"
+                + "&code_challenge=abc&code_challenge_method=S256&scope=mcp");
+            await AssertGatedAsync(anonymous, "/oauth/logout");
+
             // An assistant on an access token gets the 503 and its Retry-After, not a 401.
             using var mcp = new HttpRequestMessage(HttpMethod.Post, "/mcp")
             {

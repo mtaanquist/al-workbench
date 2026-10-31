@@ -23,10 +23,16 @@ internal static class MaintenanceModeMiddleware
     /// unvalidated during maintenance, so the caller would get a 401 rather
     /// than the 503 that tells it to retry. Nobody can be recognised as a
     /// SiteAdmin before authentication, and an assistant or a person retries
-    /// these after the 503 (#1571).
+    /// these after the 503 (#1571). The authorization and end-session endpoints
+    /// are validated inside authentication too, and the authorization request's
+    /// client-metadata lookup creates or refreshes the client row there; without
+    /// the 503 an assistant connecting during a restore got "invalid client" or an
+    /// error page and no hint that trying again later would work (#1598).
     /// </summary>
     internal static readonly string[] ClosedBeforeAuthentication =
     [
+        "/oauth/authorize",
+        "/oauth/logout",
         "/oauth/token",
         "/oauth/revoke",
         "/oauth/introspect",
