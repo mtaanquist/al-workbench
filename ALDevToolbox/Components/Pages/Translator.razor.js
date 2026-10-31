@@ -253,13 +253,59 @@ function notOwned(rec, openId) {
 }
 
 // Stores a new open's record and deletes the tab's previous one in the same
-// transaction: the tab has moved on from that file.
-function openRecord(rec) {
+// transaction: the tab has moved on from that file. Then drops the older
+// copies of the same file nobody holds (#1624).
+async function openRecord(rec) {
     rec.savedAt = Date.now();
-    return startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
+    const ok = await startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
         store.put(rec, rec.openId);
         if (previousId && previousId !== rec.openId) store.delete(previousId);
     }));
+    if (ok) await dropOlderCopies(rec);
+    return ok;
+}
+
+// ── One session per file (#1624) ─────────────────────────────────────────
+//
+// A stored session carries the base the file had when it was opened. Once the
+// same file has been opened again - picked from disk, uploaded, fetched from
+// its repository, or restored - an older session of it is out of date: its
+// base predates whatever was saved since, so Continue followed by Save would
+// write that old base back over the file and lose the newer work. Before
+// #1609 the single record was simply replaced; with one record per open, the
+// older copies have to be dropped by file. A copy a live tab holds is never
+// touched (whileUnheld), as everywhere else.
+
+// Which file a record is of: a repository file by repository and path, any
+// other by its name.
+function fileKey(r) {
+    if (r.repo && r.repo.repository && r.repo.path) return "repo\n" + r.repo.repository + "\n" + r.repo.path;
+    return "file\n" + (r.fileName || "");
+}
+
+async function sameFile(a, b) {
+    if (fileKey(a) === fileKey(b)) return true;
+    // A file picked from disk may have been renamed in the page since (a
+    // generated file is named as the language file it becomes).
+    if (a.handle && b.handle && typeof a.handle.isSameEntry === "function") {
+        try { return await a.handle.isSameEntry(b.handle); } catch { return false; }
+    }
+    return false;
+}
+
+// Deletes every other session of `rec`'s file that no live tab holds.
+async function dropOlderCopies(rec) {
+    try {
+        const live = await heldIds();
+        const all = await withStore("readonly", (store, done) => {
+            const req = store.getAll();
+            req.onsuccess = () => done(req.result || []);
+        });
+        for (const r of all) {
+            if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;
+            if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));
+        }
+    } catch { /* best effort: the prompt also offers only the newest of each file */ }
 }
 
 // Called once when a file is opened. The original XML arrives as a
@@ -340,8 +386,9 @@ function deleteKey(key) {
 // For the restore prompt: the newest session no live tab holds, as its id,
 // file name and when it was last saved (epoch ms). `maxAgeMs` is how old a
 // session may be and still be offered. Sessions nobody holds that are past
-// it, or beyond the newest MAX_KEPT, are deleted here, so the store does not
-// grow with every file ever opened.
+// it, or beyond the newest MAX_KEPT, or older than another record of the same
+// file, are deleted here, so the store does not grow with every file ever
+// opened and an out-of-date copy is never offered.
 export async function peek(maxAgeMs) {
     try {
         await migrateLegacy();
@@ -351,8 +398,17 @@ export async function peek(maxAgeMs) {
             req.onsuccess = () => done(req.result || []);
         });
         const now = Date.now();
+        // The newest record of each file, held or not. An older one is out of
+        // date, so it is never offered and goes with the rest (#1624).
+        const newest = new Map();
+        for (const r of all) {
+            if (!r || !r.openId) continue;
+            const k = fileKey(r), seen = newest.get(k);
+            if (!seen || (r.savedAt || 0) > (seen.savedAt || 0)) newest.set(k, r);
+        }
         const free = all.filter((r) => r && r.openId && !live.has(r.openId));
         const offerable = free
+            .filter((r) => newest.get(fileKey(r)) === r)
             .filter((r) => r.fileName && r.savedAt > 0 && now - r.savedAt <= maxAgeMs)
             .sort((a, b) => b.savedAt - a.savedAt);
         const keep = new Set(offerable.slice(0, MAX_KEPT).map((r) => r.openId));
@@ -383,6 +439,7 @@ export async function loadMeta(openId) {
                 if (previousId) store.delete(previousId);
             }));
             if (!ok) return null;
+            await dropOlderCopies(moved);
             return {
                 openId: newId,
                 fileName: rec.fileName,
