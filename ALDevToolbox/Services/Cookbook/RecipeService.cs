@@ -541,16 +541,33 @@ public sealed class RecipeService
     /// filtering by typing gains nothing from being grouped. Two queries rather
     /// than a SQL union so the de-dup uses the same comparison as
     /// <see cref="RecordDownloadAsync"/>'s project match. See issue #541.
+    ///
+    /// Only projects the caller can see are offered, and a recorded name that
+    /// spells a Private project the caller cannot see is left out too, so the
+    /// list never confirms a hidden project's name (#1545).
     /// </summary>
     public async Task<List<string>> GetCustomerSuggestionsAsync(CancellationToken ct = default)
     {
         RequireOrganizationId();
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct);
 
         var projectNames = await _db.OeProjects
             .AsNoTracking()
             .Where(p => p.DeletedAt == null)
+            .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
             .Select(p => p.Name)
             .ToListAsync(ct);
+
+        // Every active project's name, less the visible ones: what is left
+        // names a project this caller cannot see.
+        var hiddenNames = new HashSet<string>(
+            await _db.OeProjects
+                .AsNoTracking()
+                .Where(p => p.DeletedAt == null)
+                .Select(p => p.Name)
+                .ToListAsync(ct),
+            StringComparer.OrdinalIgnoreCase);
+        hiddenNames.ExceptWith(projectNames);
 
         var recordedNames = await _db.RecipeDownloads
             .AsNoTracking()
@@ -562,7 +579,7 @@ public sealed class RecipeService
         var suggestions = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // Projects first so theirs is the spelling that survives the de-dup.
-        foreach (var name in projectNames.Concat(recordedNames))
+        foreach (var name in projectNames.Concat(recordedNames.Where(n => !hiddenNames.Contains(n))))
         {
             if (seen.Add(name)) suggestions.Add(name);
         }

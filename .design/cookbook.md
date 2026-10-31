@@ -75,10 +75,13 @@ and the distinct customer names recorded on earlier uses, de-duplicated
 case-insensitively with the project's spelling winning and sorted
 alphabetically (`RecipeService.GetCustomerSuggestionsAsync`). At record
 time the typed name is matched case-insensitively against active project
-names and, on an exact match, `recipe_downloads.project_id` is stamped —
+names the user can see and, on an exact match, `recipe_downloads.project_id`
+is stamped —
 `Project.Name` is unique per org among active rows, so "picked a project"
 and "typed exactly a project's name" are the same event and no UI has to
-tell them apart. The free-text name is still stored as typed: it is the
+tell them apart. A Private solution outside the user's teams is not matched:
+the use is recorded as a plain customer name, and the suggestion list leaves
+out both that solution and any recorded name that spells it (#1545). The free-text name is still stored as typed: it is the
 label, the id is the attribution. `project_id` is nullable with
 `ON DELETE SET NULL`, so hard-deleting a project leaves the history intact.
 The admin recipe page links the customer cell to the project when one

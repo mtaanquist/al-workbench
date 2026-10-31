@@ -463,7 +463,14 @@ public sealed class TemplateImportService
             // OrganizationId == actingOrgId; the clone is written into the acting org only.
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(v => v.OrganizationId == actingOrgId && v.Key == sourceVersion.Key, ct);
-        if (existing is not null) return existing.DeletedAt == null ? existing : null;
+        if (existing is not null)
+        {
+            if (existing.DeletedAt == null) return existing;
+            _logger.LogInformation(
+                "Importing into org {OrgId}: left the default application version '{VersionKey}' out because the organisation deleted its copy.",
+                actingOrgId, sourceVersion.Key);
+            return null;
+        }
 
         var maxOrdering = await _db.ApplicationVersions
             // Same category 4 read, pinned to v.OrganizationId == actingOrgId.

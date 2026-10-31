@@ -435,7 +435,7 @@ public sealed class CookbookTools
     public async Task<RepositoryDeliveryResult> ApplyRecipeAsync(
         [Description("Recipe id from search_recipes.")] int recipeId,
         [Description("The repository as 'owner/name'. It must be in the GitHub organisation your organisation has connected, and one you can open on GitHub yourself.")] string repository,
-        [Description("Optional. The customer this recipe is being applied for; a name that matches one of your organisation's Solutions is recorded against it.")] string? customer = null,
+        [Description("Optional. The customer this recipe is being applied for; a name that matches a Solution you can see is recorded against it.")] string? customer = null,
         CancellationToken ct = default)
     {
         try
