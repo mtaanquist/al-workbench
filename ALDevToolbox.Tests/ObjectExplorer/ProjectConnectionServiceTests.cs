@@ -2761,6 +2761,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
         svc.UploadPollDelay = TimeSpan.Zero;
+        svc.UploadPollTimeout = UpgradeActionTestFixture.TestUploadPollTimeout;
         await svc.GetEnvironmentPanelAsync(projectId, envId);
         BcAppOperation? accepted = null;
         var result = await svc.SendBookedUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", new[] { prerequisite },
@@ -3031,6 +3032,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
         svc.UploadPollDelay = TimeSpan.Zero;
+        svc.UploadPollTimeout = UpgradeActionTestFixture.TestUploadPollTimeout;
         BcAppOperation? accepted = null;
         var result = await svc.SendBookedUploadAsync(projectId, envId, new byte[] { 1 }, "Partner.app",
             (op, _) => { accepted = op; return Task.CompletedTask; }, CancellationToken.None);
