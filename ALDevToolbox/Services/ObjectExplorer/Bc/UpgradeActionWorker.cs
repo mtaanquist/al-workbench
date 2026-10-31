@@ -283,7 +283,16 @@ public sealed class UpgradeActionWorker : BackgroundService
                 // take seconds, and must not queue behind an app install that takes minutes.
                 .OrderBy(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
                 .ThenBy(a => a.ExecuteAfter)
-                .ThenBy(a => a.BatchOrder)
+                // Then first booked, first served (#1568). A row moved to a window's next
+                // opening is given that opening as its time and ties with everything booked
+                // for it, so the booking time is what keeps its place: without it a single
+                // booking moved past a closed window queued behind the leftovers of a batch
+                // booked after it, and behind a batch booked for the new night, and could
+                // slip night after night. A single booking has no batch order; it counts as
+                // a batch's first app, never sorted behind every batch (a plain ascending
+                // order puts NULL last).
+                .ThenBy(a => a.RequestedAt)
+                .ThenBy(a => a.BatchOrder ?? 0)
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
                     a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow))
