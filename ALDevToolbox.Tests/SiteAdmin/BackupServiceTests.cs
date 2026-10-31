@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Backups;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
 
@@ -697,6 +698,214 @@ public sealed class BackupServiceTests : IDisposable
         File.SetUnixFileMode(path,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return path;
+    }
+
+    private static ReleaseImportJob ImportJob(int releaseId) => new(
+        releaseId,
+        AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false),
+        new ReleaseImportSource.Url("https://example.invalid/dvd.zip"));
+
+    /// <summary>
+    /// A stand-in pg_restore. The read-through check always passes, and the restore
+    /// itself leaves a marker file so a test can tell whether the drop and load ran.
+    /// </summary>
+    private (string Tool, string Restored) MarkingRestoreTool()
+    {
+        var restored = Path.Combine(_backupsDir, "restored");
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            [ "$1" = "-f" ] && exit 0
+            touch '{restored}'
+            exit 0
+            """);
+        return (tool, restored);
+    }
+
+    /// <summary>
+    /// An import, build or sweep that keeps running past the wait would write into
+    /// the schema the restore drops and reloads. So the restore is refused before
+    /// the drop, with a message on the backup field that says what to wait for, and
+    /// the site reopens (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_is_refused_when_a_running_job_does_not_finish_in_time()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.BeginJobRegardless(); // An import that is mid-ingest.
+        try
+        {
+            Func<Task> act = () => NewService(_options with
+            {
+                PgRestorePath = tool,
+                ActiveJobsWait = TimeSpan.FromMilliseconds(200),
+            }).RestoreAsync(backupId);
+
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors["BackupId"].Should().Contain("still running")
+                .And.Contain("Wait until imports and builds have finished");
+        }
+        finally
+        {
+            _maintenance.EndJob();
+        }
+        _maintenance.IsActive.Should().BeFalse("nothing was changed, so the site reopens");
+        _maintenance.Epoch.Should().Be(0, "nothing was replaced, so queued jobs stay valid");
+        File.Exists(restored).Should().BeFalse("nothing was dropped or restored");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+            .Should().Equal([backupId], "the database was not dropped");
+    }
+
+    /// <summary>
+    /// A job that finishes within the wait does not stop the restore: with maintenance
+    /// on nothing new starts, so once it is done the restore goes ahead (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_waits_for_a_running_job_to_finish_and_then_restores()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.BeginJobRegardless();
+        // The job finishes as soon as the restore has closed the site.
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _maintenance.Entered += () => closed.TrySetResult();
+        var finisher = Task.Run(async () =>
+        {
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            File.Exists(restored).Should().BeFalse("the restore waits for the job before it drops anything");
+            _maintenance.EndJob();
+        }, TestContext.Current.CancellationToken);
+
+        await NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+        await finisher;
+
+        File.Exists(restored).Should().BeTrue();
+        _maintenance.IsActive.Should().BeFalse("a restore that completes reopens the site");
+    }
+
+    /// <summary>
+    /// A webhook delivery that arrives while a failed restore holds the site closed is
+    /// put back on the queue by its worker again and again until the site reopens.
+    /// That deferral touches no database and must not count as running work, or no
+    /// restore could ever start, including the one that would reopen the site (#1538,
+    /// #1321).
+    /// </summary>
+    [Fact]
+    public async Task A_webhook_deferred_during_maintenance_does_not_stop_the_restore()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+        var queue = new ALDevToolbox.Services.GitHub.GitHubWebhookQueue();
+        using var services = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(new Microsoft.Extensions.DependencyInjection.ServiceCollection());
+        var worker = new ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker(
+            queue, services, _maintenance,
+            NullLogger<ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker>.Instance,
+            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry())
+        {
+            MaintenanceRetryDelay = TimeSpan.FromMilliseconds(20),
+        };
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.Deferring += _ => deferred.TrySetResult();
+        queue.TryEnqueue(new ALDevToolbox.Services.GitHub.GitHubPushJob(
+            1, "cronus/app", "https://github.com/cronus/app.git", "delivery-1", "main", "abc", "000", "main",
+            "sam", Forced: false, Deleted: false, DateTime.UtcNow, 0, [], DocumentationOnly: false)).Should().BeTrue();
+
+        await worker.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await deferred.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            await NewService(_options with { PgRestorePath = tool, ActiveJobsWait = TimeSpan.FromSeconds(5) })
+                .RestoreAsync(backupId);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        File.Exists(restored).Should().BeTrue("the deferring webhook did not hold the restore up");
+        _maintenance.IsActive.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Jobs still queued do not hold the restore up, and they are not run against the
+    /// restored database afterwards: they were queued for releases, builds and
+    /// solutions of the database that was replaced. A job queued after the restore runs
+    /// as normal (#1538).
+    /// </summary>
+    [Fact]
+    public async Task Jobs_queued_before_a_restore_are_dropped_once_it_completes()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, _) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        var imports = new ReleaseImportQueue(_maintenance);
+        var builds = new ProjectBuildQueue(ProjectBuildQueue.MaxConcurrency, _maintenance);
+        var discovery = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(_maintenance);
+        var identity = AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false);
+        await imports.EnqueuePacedAsync(ImportJob(41) with { JobRowId = 41 }, TestContext.Current.CancellationToken);
+        builds.Enqueue(ImportJob(42) with { BuildOrder = ProjectBuildOrder.Unordered });
+        discovery.TryEnqueue(new(43, identity)).Should().BeTrue();
+
+        await NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+
+        imports.Reader.TryRead(out _).Should().BeFalse("the import was queued against the old database");
+        builds.Reader.TryRead(out _).Should().BeFalse("so was the build");
+        builds.WaitingCount.Should().Be(0);
+        discovery.Reader.TryRead(out _).Should().BeFalse("and the discovery");
+        discovery.IsInFlight(43).Should().BeFalse("a dropped discovery frees its solution for the next request");
+
+        // The paced slot the dropped import held is free again, and new work runs.
+        await imports.EnqueuePacedAsync(ImportJob(44) with { JobRowId = 44 }, TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        imports.Reader.TryRead(out var fresh).Should().BeTrue();
+        fresh!.ReleaseId.Should().Be(44);
+        discovery.TryEnqueue(new(43, identity)).Should().BeTrue();
+        discovery.Reader.TryRead(out _).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The lock timeout for the restore's migrate is added to the startup options the
+    /// operator may already have in the connection string, not put in their place.
+    /// </summary>
+    [Fact]
+    public void The_restore_migrate_keeps_the_operators_connection_options()
+    {
+        var plain = new Npgsql.NpgsqlConnectionStringBuilder(
+            BackupService.WithRestoreMigrateLockTimeout("Host=db;Database=app"));
+        plain.Options.Should().Be("-c lock_timeout=60000");
+
+        var withOptions = new Npgsql.NpgsqlConnectionStringBuilder(
+            BackupService.WithRestoreMigrateLockTimeout("Host=db;Database=app;Options=-c statement_timeout=0"));
+        withOptions.Options.Should().Be("-c statement_timeout=0 -c lock_timeout=60000");
+    }
+
+    /// <summary>
+    /// A restore that fails after the drop has replaced the database just as much, so
+    /// the epoch moves on and what was queued before is dropped too (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_restore_that_fails_after_the_drop_still_drops_jobs_queued_before_it()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", """
+            [ "$1" = "-f" ] && exit 0
+            exit 1
+            """);
+        var backupId = await AddBackupRowWithFileAsync();
+        var imports = new ReleaseImportQueue(_maintenance);
+        await imports.EnqueueAsync(ImportJob(45), TestContext.Current.CancellationToken);
+
+        Func<Task> act = () => NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+
+        await act.Should().ThrowAsync<BackupRestoreFailedException>();
+        _maintenance.IsHeldAfterFailedRestore.Should().BeTrue();
+        _maintenance.Epoch.Should().Be(1);
+        imports.Reader.TryRead(out _).Should().BeFalse();
     }
 
     private async Task<int> AddBackupRowWithFileAsync()

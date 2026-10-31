@@ -55,7 +55,8 @@ public sealed class DeliveryScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_DELIVERY_SCHEDULER")
+            disableEnvVar: "DISABLE_DELIVERY_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

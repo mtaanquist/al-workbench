@@ -107,6 +107,53 @@ public sealed class ResumedImportJobsTests
         run.IsCompletedSuccessfully.Should().BeTrue();
     }
 
+    /// <summary>
+    /// The feed holds jobs read from the database before a restore. Each one keeps the
+    /// epoch it was built under, the one waiting on a full queue included, and the feed
+    /// stops once a restore has moved the epoch on, so none of them runs against the
+    /// restored database (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_feed_cut_across_a_restore_stops_and_its_jobs_are_dropped()
+    {
+        var maintenance = new ALDevToolbox.Services.Operations.MaintenanceModeState();
+        var queue = new ReleaseImportQueue(maintenance);
+        var built = queue.Epoch;
+        var run = ResumedImportJobs.EnqueueAllAsync(
+            queue, Jobs(20), NullLogger.Instance, "resumed after restart", TestContext.Current.CancellationToken, epoch: built);
+        run.IsCompleted.Should().BeFalse("sixteen fit and the seventeenth waits for room");
+
+        maintenance.AdvanceEpoch();
+
+        // Reading makes room; every job read was built before the restore, so none is handed out.
+        queue.Reader.TryRead(out _).Should().BeFalse();
+        await run.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        queue.Reader.TryRead(out _).Should().BeFalse("the job that was waiting for room keeps its old epoch");
+        queue.Reader.Count.Should().Be(0, "the feed stopped instead of queuing the rest");
+    }
+
+    /// <summary>
+    /// A paced backfill built before a restore is dropped at read, and the slot it held
+    /// is free for the next one (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_paced_job_built_before_a_restore_is_dropped_and_frees_its_slot()
+    {
+        var maintenance = new ALDevToolbox.Services.Operations.MaintenanceModeState();
+        var queue = new ReleaseImportQueue(maintenance);
+        var built = queue.Epoch;
+        var jobs = Jobs(2);
+        maintenance.AdvanceEpoch();
+
+        await queue.EnqueuePacedAsync(jobs[0], TestContext.Current.CancellationToken, epoch: built);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+
+        await queue.EnqueuePacedAsync(jobs[1], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        queue.Reader.TryRead(out var fresh).Should().BeTrue();
+        fresh!.ReleaseId.Should().Be(2);
+    }
+
     private sealed class FakeLifetime : IHostApplicationLifetime
     {
         private readonly CancellationTokenSource _started = new();

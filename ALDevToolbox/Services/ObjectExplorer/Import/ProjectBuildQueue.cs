@@ -63,6 +63,7 @@ public sealed class ProjectBuildQueue
     private TaskCompletionSource _changed = NewSignal();
     private long _sequence;
     private int _limit;
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     /// <summary>
     /// A queue whose only limit is <see cref="MaxConcurrency"/>, for tests and callers
@@ -75,8 +76,14 @@ public sealed class ProjectBuildQueue
     /// The limit used until a site admin saves one, and again when they clear it:
     /// <see cref="Concurrency"/> of <c>OE_BUILD_CONCURRENCY</c>.
     /// </param>
-    public ProjectBuildQueue(int defaultLimit)
+    /// <param name="maintenance">
+    /// When given (production DI always does), a build queued before a restore
+    /// replaced the database is dropped rather than started against the restored one
+    /// (#1538).
+    /// </param>
+    public ProjectBuildQueue(int defaultLimit, Operations.MaintenanceModeState? maintenance = null)
     {
+        _maintenance = maintenance;
         DefaultLimit = Math.Clamp(defaultLimit, MinConcurrency, MaxConcurrency);
         _limit = DefaultLimit;
         Reader = new BuildReader(this);
@@ -164,12 +171,16 @@ public sealed class ProjectBuildQueue
     }
 
     /// <summary>Adds <paramref name="job"/> to the line. Never waits.</summary>
-    public void Enqueue(ReleaseImportJob job)
+    /// <param name="epoch">
+    /// The restore epoch the job was built under, when earlier than this call; a build
+    /// from before a restore is dropped rather than started (#1538).
+    /// </param>
+    public void Enqueue(ReleaseImportJob job, long? epoch = null)
     {
         ArgumentNullException.ThrowIfNull(job);
         lock (_lock)
         {
-            _waiting.Add(new Waiting(job, job.BuildOrder ?? ProjectBuildOrder.Unordered, _sequence++));
+            _waiting.Add(new Waiting(job, job.BuildOrder ?? ProjectBuildOrder.Unordered, _sequence++, epoch ?? CurrentEpoch));
             Signal();
         }
     }
@@ -326,6 +337,10 @@ public sealed class ProjectBuildQueue
     // release at once.
     private Waiting? NextStartable()
     {
+        // Builds queued before a restore replaced the database go first: they would
+        // build into releases that no longer exist, or that are someone else's now.
+        var epoch = CurrentEpoch;
+        _waiting.RemoveAll(w => w.Epoch != epoch);
         if (Active >= _limit || _rejoining > 0) return null;
         Waiting? best = null;
         HashSet<string>? passed = null;
@@ -366,7 +381,12 @@ public sealed class ProjectBuildQueue
 
     private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private sealed record Waiting(ReleaseImportJob Job, ProjectBuildOrder Order, long Sequence);
+    /// <summary>The restore epoch now; see <see cref="JobQueue{TJob}.Epoch"/>.</summary>
+    public long Epoch => _maintenance?.Epoch ?? 0;
+
+    private long CurrentEpoch => Epoch;
+
+    private sealed record Waiting(ReleaseImportJob Job, ProjectBuildOrder Order, long Sequence, long Epoch);
 
     private sealed class BuildReader(ProjectBuildQueue queue) : ChannelReader<ReleaseImportJob>
     {

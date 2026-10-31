@@ -33,8 +33,11 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         ReleaseImportQueue queue,
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
-        : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker))
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base holds jobs back during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
+        : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker), maintenance)
     {
         _queue = queue;
     }
@@ -45,11 +48,12 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
         WorkerHeartbeatRegistry heartbeats,
-        string name)
+        string name,
+        Operations.MaintenanceModeState? maintenance)
         // The active-duration ceiling is the longest legitimate single import — a fresh
         // BC base-app ingest can run 30+ minutes; 90 leaves margin while still catching
         // the hung-on-I/O case that prompted this in the first place.
-        : base(reader, logger, heartbeats, name, TimeSpan.FromMinutes(90))
+        : base(reader, logger, heartbeats, name, TimeSpan.FromMinutes(90), maintenance)
     {
         _services = services;
         _logger = logger;

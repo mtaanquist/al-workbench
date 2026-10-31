@@ -36,14 +36,18 @@ public sealed class ModuleSourceRefreshScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<ModuleSourceRefreshScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // One commit lookup per module, and a download of a few megabytes for the
         // ones that moved: half an hour is a generous ceiling.
         : base(logger, heartbeats, nameof(ModuleSourceRefreshScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(30),
             maxIdleSilence: TimeSpan.FromMinutes(30),
-            disableEnvVar: "DISABLE_MODULE_SOURCE_REFRESH_SCHEDULER")
+            disableEnvVar: "DISABLE_MODULE_SOURCE_REFRESH_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

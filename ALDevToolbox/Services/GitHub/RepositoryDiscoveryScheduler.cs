@@ -43,7 +43,10 @@ public sealed class RepositoryDiscoveryScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<RepositoryDiscoveryScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A sweep is one tree read and one file read per repository, so it is the
         // slowest of the polled sweeps; the active ceiling is generous enough for
         // an organisation with hundreds of repositories.
@@ -51,7 +54,8 @@ public sealed class RepositoryDiscoveryScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(30),
             maxIdleSilence: TimeSpan.FromMinutes(30),
-            disableEnvVar: "DISABLE_GITHUB_REPOSITORY_DISCOVERY_SCHEDULER")
+            disableEnvVar: "DISABLE_GITHUB_REPOSITORY_DISCOVERY_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

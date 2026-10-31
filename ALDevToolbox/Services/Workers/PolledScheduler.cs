@@ -1,3 +1,5 @@
+using ALDevToolbox.Services.Operations;
+
 namespace ALDevToolbox.Services.Workers;
 
 /// <summary>
@@ -14,6 +16,15 @@ namespace ALDevToolbox.Services.Workers;
 /// directly (in a test, or without the registration guard in <c>Program.cs</c>) honours
 /// it too.
 /// </para>
+///
+/// <para>
+/// It also owns the maintenance gate: while a full restore runs, or a failed one holds
+/// the site closed, no tick starts, and a tick that is running is counted on
+/// <see cref="MaintenanceModeState.ActiveJobs"/>, which the restore waits on before it
+/// drops anything (#1538). The heartbeat still beats, so a long restore never reads as
+/// a stalled worker. A sweep due during the restore runs on the first poll after it.
+/// See <c>.design/deployment.md</c>.
+/// </para>
 /// </summary>
 public abstract class PolledScheduler : BackgroundService
 {
@@ -28,8 +39,12 @@ public abstract class PolledScheduler : BackgroundService
     private readonly string _name;
     private readonly string? _disableEnvVar;
     private readonly TimeSpan _pollInterval;
+    private readonly MaintenanceModeState? _maintenance;
 
     protected WorkerHeartbeat Heartbeat { get; }
+
+    /// <summary>The maintenance flag this scheduler was given. Internal so a test can check DI handed it on.</summary>
+    internal MaintenanceModeState? Maintenance => _maintenance;
 
     /// <param name="pollInterval">How often <see cref="TickAsync"/> is offered a turn.</param>
     /// <param name="maxActiveDuration">The longest legitimate single tick.</param>
@@ -38,6 +53,11 @@ public abstract class PolledScheduler : BackgroundService
     /// stalled — roughly 3x the poll interval.
     /// </param>
     /// <param name="disableEnvVar">Name of the <c>1</c>-valued env var that turns this sweep off.</param>
+    /// <param name="maintenance">
+    /// The process-wide maintenance flag; ticks are skipped while it is on. Required
+    /// so a new scheduler has to pass it on; null only for a scheduler a test builds
+    /// by hand.
+    /// </param>
     protected PolledScheduler(
         ILogger logger,
         WorkerHeartbeatRegistry heartbeats,
@@ -45,8 +65,10 @@ public abstract class PolledScheduler : BackgroundService
         TimeSpan pollInterval,
         TimeSpan maxActiveDuration,
         TimeSpan maxIdleSilence,
-        string disableEnvVar)
+        string disableEnvVar,
+        MaintenanceModeState? maintenance)
     {
+        _maintenance = maintenance;
         _logger = logger;
         _name = name;
         _pollInterval = pollInterval;
@@ -70,9 +92,7 @@ public abstract class PolledScheduler : BackgroundService
             Heartbeat.Tick();
             try
             {
-                Heartbeat.BeginActive();
-                try { await TickAsync(stoppingToken).ConfigureAwait(false); }
-                finally { Heartbeat.EndActive(); }
+                await RunTickAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -86,6 +106,34 @@ public abstract class PolledScheduler : BackgroundService
             try { await Task.Delay(_pollInterval, stoppingToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
         }
+    }
+
+    /// <summary>
+    /// One poll as the loop runs it: skipped while maintenance mode is on, otherwise
+    /// <see cref="TickAsync"/> inside the heartbeat's active bracket. Internal so a
+    /// test can drive the gate without the startup delay and the poll loop.
+    /// </summary>
+    internal async Task<bool> RunTickAsync(CancellationToken ct)
+    {
+        // Counted on the flag while it runs, so a restore that starts mid-sweep waits
+        // for the sweep to finish (or refuses) before it drops anything.
+        if (_maintenance is not null && !_maintenance.TryBeginJob())
+        {
+            _logger.LogDebug("{Scheduler} skipped a poll: maintenance mode is active.", _name);
+            return false;
+        }
+
+        try
+        {
+            Heartbeat.BeginActive();
+            try { await TickAsync(ct).ConfigureAwait(false); }
+            finally { Heartbeat.EndActive(); }
+        }
+        finally
+        {
+            _maintenance?.EndJob();
+        }
+        return true;
     }
 
     /// <summary>

@@ -104,6 +104,12 @@ and `/healthz` / `/readyz` keep going.
 Verify: post-restore, `/readyz` is 200 and `/site-admin/audit` shows the
 *Restore* entry. Non-SiteAdmin sign-in works.
 
+Then restart the container when you can. Any import or build that was still in
+progress when the backup was taken comes back from the dump looking as if it
+is running, with nothing behind it. Startup marks those as interrupted (and
+resumes URL imports), as it does after any restart; until then they keep
+showing as running.
+
 ### Before anything is dropped
 
 The restore first checks the file: it must be the size it was when it was
@@ -111,6 +117,15 @@ taken, and `pg_restore` must be able to read it from start to end. A file that
 is cut short, damaged part-way, not a backup at all, or taken by a newer
 PostgreSQL is refused at this point; the backups page says so, nothing has
 changed and the app stays open. The check costs one extra read of the file.
+
+Once the site is closed, the restore stops background work from starting and
+waits up to a minute for imports, builds and background sweeps that are
+already running. If one is still running after that, the restore is refused,
+the site reopens and nothing has changed: wait until imports and builds have
+finished and try again. Imports, builds and solution scans that were only
+waiting in line are dropped when the restore completes, because they belong
+to the database it replaced; start them again afterwards if they are still
+needed.
 
 What it cannot catch is a file that reads cleanly but that the database then
 refuses part-way through loading it. That is the case below.

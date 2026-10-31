@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Channels;
+using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Services.Workers;
 
@@ -14,35 +16,105 @@ namespace ALDevToolbox.Services.Workers;
 /// <see cref="JobQueue{TJob, TKey}"/> when repeat work for the same subject should
 /// coalesce instead.
 /// </para>
+///
+/// <para>
+/// A queue given the <see cref="MaintenanceModeState"/> stamps each job with the
+/// restore <see cref="MaintenanceModeState.Epoch"/> it was queued under, and the read
+/// half drops a job from an earlier epoch instead of handing it out: it was queued
+/// against a database a restore has since replaced (#1538). See
+/// <c>.design/deployment.md</c>.
+/// </para>
 /// </summary>
 public abstract class JobQueue<TJob>
 {
-    private readonly Channel<TJob> _channel;
+    private readonly Channel<Entry> _channel;
+    private readonly MaintenanceModeState? _maintenance;
+
+    private readonly record struct Entry(TJob Job, long Epoch);
 
     /// <param name="capacity">
     /// Channel bound. Pick it from the cost of one queued job, not from the expected
     /// arrival rate: a full channel simply makes the writer wait.
     /// </param>
     /// <param name="singleReader">False when the worker drains it with several lanes.</param>
-    protected JobQueue(int capacity, bool singleReader = true) =>
-        _channel = Channel.CreateBounded<TJob>(new BoundedChannelOptions(capacity)
+    /// <param name="maintenance">
+    /// When given, jobs queued before a restore replaced the database are dropped at
+    /// read rather than run against the restored one.
+    /// </param>
+    protected JobQueue(int capacity, bool singleReader = true, MaintenanceModeState? maintenance = null)
+    {
+        _maintenance = maintenance;
+        _channel = Channel.CreateBounded<Entry>(new BoundedChannelOptions(capacity)
         {
             SingleReader = singleReader,
             FullMode = BoundedChannelFullMode.Wait,
         });
+        Reader = new EpochReader(this);
+    }
 
-    public ChannelReader<TJob> Reader => _channel.Reader;
+    /// <summary>The read half the worker drains. Jobs from before a restore are skipped.</summary>
+    public ChannelReader<TJob> Reader { get; }
 
     /// <summary>
-    /// The write half, for the rare caller that must not block when the channel
-    /// is full - a request thread answering an external caller that will retry,
-    /// rather than a sweep that can afford to wait.
+    /// The restore epoch now. A caller that builds jobs from the database and queues
+    /// them later (a background feeder) reads this when it builds them and passes it to
+    /// <see cref="EnqueueAsync"/>, so a restore in between still drops them (#1538).
     /// </summary>
-    protected ChannelWriter<TJob> Writer => _channel.Writer;
+    public long Epoch => _maintenance?.Epoch ?? 0;
+
+    private protected long CurrentEpoch => Epoch;
+
+    /// <summary>
+    /// Writes without waiting, for the rare caller that must not block when the
+    /// channel is full - a request thread answering an external caller that will
+    /// retry, rather than a sweep that can afford to wait.
+    /// </summary>
+    protected bool TryWrite(TJob job) => _channel.Writer.TryWrite(new Entry(job, CurrentEpoch));
 
     /// <summary>Queues <paramref name="job"/>, waiting if the channel is full.</summary>
-    public ValueTask EnqueueAsync(TJob job, CancellationToken ct = default) =>
-        _channel.Writer.WriteAsync(job, ct);
+    /// <param name="epoch">
+    /// The <see cref="Epoch"/> the job was built under, when that was earlier than this
+    /// call. Defaults to the epoch at the call, which is also what a writer that waits
+    /// on a full channel keeps: the stamp is taken before the wait.
+    /// </param>
+    public ValueTask EnqueueAsync(TJob job, CancellationToken ct = default, long? epoch = null) =>
+        _channel.Writer.WriteAsync(new Entry(job, epoch ?? CurrentEpoch), ct);
+
+    /// <summary>
+    /// Called for a job dropped because a restore replaced the database after it was
+    /// queued under <paramref name="epoch"/>, so a queue can release whatever it holds
+    /// for the job.
+    /// </summary>
+    protected virtual void OnDiscarded(TJob job, long epoch) { }
+
+    private sealed class EpochReader(JobQueue<TJob> queue) : ChannelReader<TJob>
+    {
+        private ChannelReader<Entry> Inner => queue._channel.Reader;
+
+        public override bool CanCount => true;
+
+        public override int Count => Inner.Count;
+
+        public override Task Completion => Inner.Completion;
+
+        public override bool TryRead([MaybeNullWhen(false)] out TJob item)
+        {
+            while (Inner.TryRead(out var entry))
+            {
+                if (entry.Epoch == queue.CurrentEpoch)
+                {
+                    item = entry.Job;
+                    return true;
+                }
+                queue.OnDiscarded(entry.Job, entry.Epoch);
+            }
+            item = default;
+            return false;
+        }
+
+        public override ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default) =>
+            Inner.WaitToReadAsync(cancellationToken);
+    }
 }
 
 /// <summary>
@@ -76,13 +148,21 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
 
     private sealed class Slot
     {
+        // The restore epoch the slot was claimed under. A queued slot from an earlier
+        // one belongs to a job the read half will drop, so it no longer gates (#1538).
+        public long Epoch;
         public bool Running;
         public bool HasRerun;
         public TJob? Rerun;
     }
 
-    protected JobQueue(int capacity, Func<TJob, TKey> keySelector, bool singleReader = true, bool rerunIfRequestedWhileRunning = false)
-        : base(capacity, singleReader)
+    protected JobQueue(
+        int capacity,
+        Func<TJob, TKey> keySelector,
+        bool singleReader = true,
+        bool rerunIfRequestedWhileRunning = false,
+        MaintenanceModeState? maintenance = null)
+        : base(capacity, singleReader, maintenance)
     {
         _keySelector = keySelector;
         _rerunIfRequestedWhileRunning = rerunIfRequestedWhileRunning;
@@ -96,7 +176,10 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
     {
         lock (_gate)
         {
-            if (_inFlight.TryGetValue(key, out var slot))
+            // A slot left queued from before a restore is free: its job is dropped at
+            // read. A running one (a job held across the restore) still gates; on a
+            // re-running queue the request runs once that job has been let go.
+            if (_inFlight.TryGetValue(key, out var slot) && (slot.Running || slot.Epoch == CurrentEpoch))
             {
                 if (_rerunIfRequestedWhileRunning && slot.Running)
                 {
@@ -105,7 +188,7 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
                 }
                 return false;
             }
-            _inFlight[key] = new Slot();
+            _inFlight[key] = new Slot { Epoch = CurrentEpoch };
             return true;
         }
     }
@@ -113,6 +196,19 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
     private void Release(TKey key)
     {
         lock (_gate) _inFlight.Remove(key);
+    }
+
+    /// <summary>
+    /// A job dropped across a restore gives up its key, unless a newer request has
+    /// already taken the key over.
+    /// </summary>
+    protected override void OnDiscarded(TJob job, long epoch)
+    {
+        var key = _keySelector(job);
+        lock (_gate)
+        {
+            if (_inFlight.TryGetValue(key, out var slot) && slot.Epoch == epoch && !slot.Running) _inFlight.Remove(key);
+        }
     }
 
     /// <summary>
@@ -125,7 +221,7 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
         ArgumentNullException.ThrowIfNull(job);
         var key = _keySelector(job);
         if (!TryClaim(job, key)) return false;
-        if (Writer.TryWrite(job)) return true;
+        if (TryWrite(job)) return true;
         Release(key);
         return false;
     }
@@ -189,10 +285,10 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
                 return;
             }
             rerun = slot.Rerun!;
-            _inFlight[key] = new Slot();
+            _inFlight[key] = new Slot { Epoch = CurrentEpoch };
         }
         // Never waits: a full queue drops the re-run as it would any request that found
         // no room, and the gate reopens for the next one.
-        if (!Writer.TryWrite(rerun)) Release(key);
+        if (!TryWrite(rerun)) Release(key);
     }
 }

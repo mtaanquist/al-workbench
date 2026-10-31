@@ -28,11 +28,14 @@ public sealed class ProjectDiscoveryWorker : QueueDrainWorker<ProjectDiscoveryJo
         ProjectDiscoveryQueue queue,
         IServiceProvider services,
         ILogger<ProjectDiscoveryWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base holds jobs back during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A single discovery clones only trees + app.json blobs and is bounded by
         // DiscoveryCloneTimeout (3 min) per repo; 15 minutes leaves ample margin for a
         // many-repo project while still catching a wedged job.
-        : base(queue.Reader, logger, heartbeats, nameof(ProjectDiscoveryWorker), TimeSpan.FromMinutes(15))
+        : base(queue.Reader, logger, heartbeats, nameof(ProjectDiscoveryWorker), TimeSpan.FromMinutes(15), maintenance)
     {
         _queue = queue;
         _services = services;

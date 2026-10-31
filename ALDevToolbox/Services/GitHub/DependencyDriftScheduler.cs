@@ -40,14 +40,18 @@ public sealed class DependencyDriftScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<DependencyDriftScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A pass reads each tracked repository's manifests once and writes a pull
         // request per behind repository, so half an hour is a generous ceiling.
         : base(logger, heartbeats, nameof(DependencyDriftScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(30),
             maxIdleSilence: TimeSpan.FromMinutes(30),
-            disableEnvVar: "DISABLE_DEPENDENCY_DRIFT_SCHEDULER")
+            disableEnvVar: "DISABLE_DEPENDENCY_DRIFT_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

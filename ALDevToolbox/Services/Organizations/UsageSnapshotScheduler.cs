@@ -48,14 +48,18 @@ public sealed class UsageSnapshotScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<UsageSnapshotScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // Poll every minute, stale at 5 (same as the vacuum scheduler). A
         // single recompute sweep is short; a 10-minute active ceiling is plenty.
         : base(logger, heartbeats, nameof(UsageSnapshotScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_USAGE_SNAPSHOT_SCHEDULER")
+            disableEnvVar: "DISABLE_USAGE_SNAPSHOT_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

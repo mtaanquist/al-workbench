@@ -29,7 +29,15 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     // the sibling queues: the durable oe_import_jobs row is this queue's guard
     // against a duplicate run, and a re-import of the same release is a
     // legitimate request rather than a double-click to coalesce.
-    public ReleaseImportQueue() : base(capacity: 16) { }
+    //
+    // Given the maintenance flag (production DI always does), an import queued
+    // before a restore replaced the database is dropped rather than run against
+    // the restored one (#1538).
+    public ReleaseImportQueue(Operations.MaintenanceModeState? maintenance = null)
+        : base(capacity: 16, maintenance: maintenance) { }
+
+    /// <summary>A paced job dropped across a restore frees its slot like one the worker took.</summary>
+    protected override void OnDiscarded(ReleaseImportJob job, long epoch) => MarkPickedUp(job);
 
     /// <summary>
     /// How many paced jobs may wait in the channel at once. One keeps the worker
@@ -49,13 +57,19 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     /// all sixteen slots full for hours, so a user's import, a Retry or the nightly
     /// auto-import sat behind sixteen backfills.
     /// </summary>
-    public async Task EnqueuePacedAsync(ReleaseImportJob job, CancellationToken ct = default)
+    /// <param name="epoch">
+    /// The restore epoch the job was built under (see <see cref="JobQueue{TJob}.Epoch"/>).
+    /// Defaults to the epoch at the call, taken before the wait for a slot, so a
+    /// restore during that wait still drops the job (#1538).
+    /// </param>
+    public async Task EnqueuePacedAsync(ReleaseImportJob job, CancellationToken ct = default, long? epoch = null)
     {
+        var builtUnder = epoch ?? Epoch;
         await _pacedSlots.WaitAsync(ct).ConfigureAwait(false);
         _pacedRowIds[job.JobRowId] = 0;
         try
         {
-            await EnqueueAsync(job, ct).ConfigureAwait(false);
+            await EnqueueAsync(job, ct, builtUnder).ConfigureAwait(false);
         }
         catch
         {

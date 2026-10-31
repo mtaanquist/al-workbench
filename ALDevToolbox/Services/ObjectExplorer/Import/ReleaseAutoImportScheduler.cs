@@ -54,7 +54,10 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         TimeProvider clock,
         ILogger<ReleaseAutoImportScheduler> logger,
         WorkerHeartbeatRegistry heartbeats,
-        ISingleTenantMode singleTenant)
+        ISingleTenantMode singleTenant,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // Poll every minute; the sweep resolves + enqueues quickly (downloads run
         // on ReleaseImportWorker, not here), so a 30-minute active ceiling is
         // ample even for many opted-in orgs.
@@ -62,7 +65,8 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(30),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER")
+            disableEnvVar: "DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

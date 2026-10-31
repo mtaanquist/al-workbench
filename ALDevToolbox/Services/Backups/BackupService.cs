@@ -55,6 +55,7 @@ public sealed class BackupService
     private readonly string _backupsDirectory;
     private readonly string _pgDumpPath;
     private readonly string _pgRestorePath;
+    private readonly TimeSpan _activeJobsWait;
     private readonly SystemSettingsService? _systemSettings;
     private readonly RestoreInventoryHold? _restoreInventory;
     private readonly DeploymentIdentity? _deployment;
@@ -94,6 +95,7 @@ public sealed class BackupService
         _backupsDirectory = backupOptions.Directory;
         _pgDumpPath = backupOptions.PgDumpPath;
         _pgRestorePath = backupOptions.PgRestorePath;
+        _activeJobsWait = backupOptions.ActiveJobsWait;
     }
 
     /// <summary>Absolute path to the backups directory. Created on demand.</summary>
@@ -341,6 +343,35 @@ public sealed class BackupService
         // if this one fails before the drop, that hold has to come back as it was.
         var before = _maintenance.Capture();
         _maintenance.Enter($"Restoring backup {row.FileName}");
+        // With maintenance mode on, no scheduler tick or queued job starts. Wait,
+        // for a limited time, for those already running to finish: an import or
+        // build would keep writing into the dropped and half-loaded schema. If they
+        // do not finish, refuse rather than drop under them (#1538). Jobs still
+        // queued do not hold the restore up; they are dropped once it completes.
+        bool quiet;
+        try
+        {
+            quiet = await _maintenance.WaitForActiveJobsAsync(_activeJobsWait, ct);
+        }
+        catch
+        {
+            _maintenance.Restore(before);
+            throw;
+        }
+        if (!quiet)
+        {
+            var running = _maintenance.ActiveJobs;
+            _maintenance.Restore(before);
+            _logger.LogWarning(
+                "Refusing to restore {FileName}: {Running} background job(s) were still running after {Wait}.",
+                row.FileName, running, _activeJobsWait);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["BackupId"] = "An import, a build or another background task is still running, and a restore would "
+                    + "replace the database under it. Wait until imports and builds have finished, then restore. "
+                    + "Nothing was changed.",
+            });
+        }
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
         var destructive = CancellationToken.None;
@@ -379,8 +410,12 @@ public sealed class BackupService
             _restoreInventory?.Clear();
 
             sw.Stop();
+            // Imports and builds the dump caught part-way have no job behind them in
+            // this process. The startup reconcile marks them, so the backups page
+            // asks the SiteAdmin to restart (#1538).
             _logger.LogInformation(
-                "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
+                "Restored backup {FileName} in {ElapsedMs} ms. Restart the application so imports and builds the backup caught part-way are marked as interrupted.",
+                row.FileName, sw.ElapsedMilliseconds);
         }
         catch (Exception ex) when (dropped)
         {
@@ -416,6 +451,10 @@ public sealed class BackupService
         }
         finally
         {
+            // Anything queued or held from before belongs to the database just
+            // replaced; moving the epoch on, before the site reopens, makes the
+            // queues and workers drop it (#1538).
+            if (dropped) _maintenance.AdvanceEpoch();
             if (restored) _maintenance.Exit();
             // Nothing was dropped, so put back whatever was there before: open, or
             // still held closed by an earlier failed restore.
@@ -509,8 +548,19 @@ public sealed class BackupService
     /// other place migrations run, so without this every query on a newer
     /// column fails until the next restart (#1255).
     /// </summary>
+    /// <remarks>
+    /// The command timeout is startup's half hour, which a large data migration may
+    /// need. Waiting for a lock is another matter: a session left holding one would
+    /// otherwise keep the restore, with the site closed, waiting the full half hour
+    /// before it failed. For the migrate only, the context connects with a one-minute
+    /// <c>lock_timeout</c> in its startup options, so that fails in a minute instead
+    /// (#1538). The connection string goes back as it was afterwards.
+    /// </remarks>
     private async Task MigrateAsync(CancellationToken ct)
     {
+        var original = _db.Database.GetConnectionString();
+        await _db.Database.CloseConnectionAsync();
+        _db.Database.SetConnectionString(WithRestoreMigrateLockTimeout(original!));
         _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
         try
         {
@@ -518,8 +568,26 @@ public sealed class BackupService
         }
         finally
         {
+            await _db.Database.CloseConnectionAsync();
+            _db.Database.SetConnectionString(original);
             _db.Database.SetCommandTimeout((int?)null);
         }
+    }
+
+    /// <summary>How long the restore's migrate waits for a lock before it fails.</summary>
+    internal static readonly TimeSpan RestoreMigrateLockTimeout = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// <paramref name="connectionString"/> with the restore migrate's lock timeout
+    /// added to its startup options. Appended, so options the operator set stay; a
+    /// later <c>-c</c> for the same setting wins.
+    /// </summary>
+    internal static string WithRestoreMigrateLockTimeout(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        var lockTimeout = "-c lock_timeout=" + (long)RestoreMigrateLockTimeout.TotalMilliseconds;
+        builder.Options = string.IsNullOrWhiteSpace(builder.Options) ? lockTimeout : builder.Options + " " + lockTimeout;
+        return builder.ConnectionString;
     }
 
     /// <summary>
