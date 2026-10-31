@@ -335,19 +335,27 @@ public sealed class UpgradeActionWorker : BackgroundService
                 // A single window booking that took the turn and was skipped (its window
                 // closed, or a cancel won the claim) must not hand the turn to the batch
                 // queued behind it while another customer's batch is part-installed: that
-                // would leave two customers part-installed (#1625). It waits a sweep.
-                var skippedSingle = false;
+                // would leave two customers part-installed (#1625). It waits a sweep. So
+                // does a started batch whose next app found a deployment running on its
+                // environment (#1629): it keeps the turn, and no unstarted batch starts.
+                var holdUnstarted = false;
                 foreach (var action in due.Where(a => UpgradeActionService.IsAppInstall(a.Kind)))
                 {
                     if (ct.IsCancellationRequested) break;
-                    if (skippedSingle && startedBatches.Count > 0 && action.ScheduledByWindow != null
+                    if (holdUnstarted && startedBatches.Count > 0 && action.ScheduledByWindow != null
                         && action.BatchId is { } batch && !startedBatches.Contains(batch))
                     {
                         continue;
                     }
-                    if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false) != RunOutcome.Sent)
+                    var outcome = await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false);
+                    if (outcome != RunOutcome.Sent)
                     {
-                        if (action.ScheduledByWindow != null && action.BatchId == null) skippedSingle = true;
+                        if (action.ScheduledByWindow != null && action.BatchId == null) holdUnstarted = true;
+                        if (outcome == RunOutcome.EnvironmentBusy
+                            && action.BatchId is { } busyBatch && startedBatches.Contains(busyBatch))
+                        {
+                            holdUnstarted = true;
+                        }
                         continue;
                     }
                     sent++;
@@ -603,8 +611,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         return moved > 0;
     }
 
-    /// <summary>What one due row came to: left alone, settled without a send, or sent.</summary>
-    private enum RunOutcome { Skipped, Settled, Sent }
+    /// <summary>What one due row came to: left alone, settled without a send, sent, or left alone because a deployment holds its environment.</summary>
+    private enum RunOutcome { Skipped, Settled, Sent, EnvironmentBusy }
 
     /// <summary>
     /// Claims one row, performs it, and writes down what happened. Skipped when the
@@ -699,6 +707,27 @@ public sealed class UpgradeActionWorker : BackgroundService
         {
             return RunOutcome.Skipped;
         }
+
+        // A deployment and a booked install never go to one Business Central environment
+        // at once (#1139, #1629): they share the delivery queue's gate, keyed the same way
+        // as the install turn. A busy environment leaves the row due for the next sweep,
+        // as a deployment waits for a booked install. Held until the install is settled.
+        // The confirmation re-poll (ConfirmOneAsync) sends nothing, so it takes no gate.
+        IDisposable? environmentGate = null;
+        if (UpgradeActionService.IsAppInstall(action.Kind))
+        {
+            environmentGate = scope.ServiceProvider.GetRequiredService<DeliveryQueue>()
+                .TryEnterEnvironment(action.TenantId, action.ProjectId, action.EnvironmentName);
+            if (environmentGate is null)
+            {
+                _logger.LogInformation(
+                    "Booked install {ActionId} ({FileName}) waits: a deployment to {Environment} is running.",
+                    action.Id, action.Label, action.EnvironmentName);
+                return RunOutcome.EnvironmentBusy;
+            }
+        }
+        // Released as soon as the outcome is written, below; this only covers an exception.
+        using var heldEnvironment = environmentGate;
 
         // Claim first, and this compare-and-set is what beats a racing cancel: stamping
         // sent_at while the row is still pending takes it out of both the due query and
@@ -851,7 +880,11 @@ public sealed class UpgradeActionWorker : BackgroundService
         // An unconfirmed one is asked about again only when its operation was stamped:
         // without both ids there is nothing to ask about.
         var finishedAt = _clock.GetUtcNow().UtcDateTime;
-        if (!await SettleAsync(db, action.Id, status, outcome, confirmationDue, finishedAt).ConfigureAwait(false))
+        var settled = await SettleAsync(db, action.Id, status, outcome, confirmationDue, finishedAt).ConfigureAwait(false);
+        // Business Central is done with this environment as far as this install goes; a
+        // deployment need not wait for the notification emails (releasing twice is harmless).
+        environmentGate?.Dispose();
+        if (!settled)
         {
             // Still claimed and pending: a later sweep's SettleStaleClaimsAsync settles it.
             return RunOutcome.Sent;
