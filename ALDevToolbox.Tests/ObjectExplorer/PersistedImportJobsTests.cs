@@ -75,8 +75,15 @@ public sealed class PersistedImportJobsTests : IDisposable
         (await read.OeImportJobs.AsNoTracking().CountAsync()).Should().Be(0);
     }
 
+    /// <summary>
+    /// A deploy in the middle of a bulk run: the backfills that never started
+    /// run again, and so does the one the restart cut off (OEI2-2). That one
+    /// had deleted its release's system references and emitted only some, so
+    /// failing it would leave the release quietly incomplete; a backfill
+    /// deletes before it emits, so running it again is safe.
+    /// </summary>
     [Fact]
-    public async Task Reconcile_queues_a_backfill_that_never_started_again_and_fails_only_the_running_one()
+    public async Task Reconcile_queues_both_a_backfill_that_never_started_and_one_cut_off_while_running()
     {
         await using var ctx = _db.NewContext();
         var svc = NewService(ctx);
@@ -89,16 +96,14 @@ public sealed class PersistedImportJobsTests : IDisposable
 
         var resumable = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
 
-        var job = resumable.Should().ContainSingle().Subject;
-        job.ReleaseId.Should().Be(waiting.Id);
-        job.JobRowId.Should().Be(waitingRow);
-        job.Source.Should().BeOfType<ReleaseImportSource.Backfill>();
-        job.Resumed.Should().BeFalse("a resumed job wipes the release's ingested rows, and a backfill must never do that");
+        resumable.Select(j => j.JobRowId).Should().BeEquivalentTo([waitingRow, interruptedRow]);
+        resumable.Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill);
+        resumable.Should().OnlyContain(j => !j.Resumed,
+            "a resumed job wipes the release's ingested rows, and a backfill must never do that");
         await using var read = _db.NewContext();
-        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == waitingRow)).Status.Should().Be("queued");
-        var failed = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == interruptedRow);
-        failed.Status.Should().Be("failed");
-        failed.ErrorMessage.Should().Contain("interrupted by a restart");
+        var after = await read.OeImportJobs.AsNoTracking()
+            .Where(j => j.Id == waitingRow || j.Id == interruptedRow).ToListAsync();
+        after.Should().OnlyContain(j => j.Status == "queued" && j.StartedAt == null && j.ErrorMessage == null);
     }
 
     [Fact]

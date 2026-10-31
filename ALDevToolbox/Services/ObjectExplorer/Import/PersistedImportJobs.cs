@@ -296,12 +296,18 @@ public sealed class PersistedImportJobs
                             : ProjectBuildOrder.Unordered,
                         Resumed: true));
                     break;
-                case "backfill_system_references" when row.Status == "queued":
-                    // A backfill that never started. A bulk run queues every
-                    // release and works through them for hours, so a deploy in
-                    // the middle must not fail the rest (#1542). It re-reads
-                    // stored source and has changed nothing yet, so it simply
-                    // runs: not Resumed, which would wipe the release's rows.
+                case "backfill_system_references":
+                    // A bulk run queues every release and works through them for
+                    // hours, so a deploy in the middle must not fail the rest
+                    // (#1542). One that never started has changed nothing; one
+                    // the restart cut off had deleted the release's system
+                    // references and emitted only some of them again, and left
+                    // failed it would leave Find System References quietly
+                    // incomplete for that release (OEI2-2). Both simply run
+                    // again: a backfill deletes before it emits, so a second run
+                    // is safe. Not Resumed, which would wipe the release's rows.
+                    row.Status = "queued";
+                    row.StartedAt = null;
                     toResume.Add(new ReleaseImportJob(
                         ReleaseId: row.ReleaseId,
                         Identity: new AmbientOrganizationScope.OrganizationIdentity(
@@ -309,16 +315,6 @@ public sealed class PersistedImportJobs
                         Source: new ReleaseImportSource.Backfill(),
                         StoreSymbolReference: false,
                         JobRowId: row.Id));
-                    break;
-                case "backfill_system_references":
-                    // A maintenance backfill interrupted by a restart while it
-                    // ran. The release stays ready (backfill never flips its
-                    // status); its system refs may be partially repopulated.
-                    // Mark failed so the admin re-triggers, which is cheap and
-                    // idempotent. No lost upload to report. See #291.
-                    row.Status = "failed";
-                    row.ErrorMessage = "The system-reference backfill was interrupted by a restart. Re-trigger it from the release.";
-                    row.CompletedAt = now;
                     break;
                 default:
                     // Staged-zip / cal-txt can't be resumed — the temp file is
