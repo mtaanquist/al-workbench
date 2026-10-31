@@ -44,6 +44,12 @@ public sealed record ReleaseImportSubmission(
     public bool IsCalImport => CalTxtFile is { Length: > 0 };
 }
 
+/// <summary>
+/// What the bulk system-reference backfill queued, and how many releases it left
+/// alone because a backfill was already queued or running for them.
+/// </summary>
+public sealed record BackfillQueueResult(int Queued, int Skipped);
+
 /// <summary>Everything the "retry a failed import" form carries.</summary>
 public sealed record ReleaseRetrySubmission(
     string DvdUrl,
@@ -107,6 +113,8 @@ public sealed class ReleaseImportRequestService
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectBuildImporter _projectBuilds;
     private readonly ProjectAccess _access;
+    private readonly IHostApplicationLifetime _lifetime;
+    private readonly ILogger<ReleaseImportRequestService> _logger;
 
     public ReleaseImportRequestService(
         ReleaseImportService importer,
@@ -116,7 +124,9 @@ public sealed class ReleaseImportRequestService
         PersistedImportJobs persistedJobs,
         IOrganizationContext orgContext,
         ProjectBuildImporter projectBuilds,
-        ProjectAccess access)
+        ProjectAccess access,
+        IHostApplicationLifetime lifetime,
+        ILogger<ReleaseImportRequestService> logger)
     {
         _importer = importer;
         _management = management;
@@ -126,6 +136,8 @@ public sealed class ReleaseImportRequestService
         _orgContext = orgContext;
         _projectBuilds = projectBuilds;
         _access = access;
+        _lifetime = lifetime;
+        _logger = logger;
     }
 
     /// <summary>
@@ -461,6 +473,46 @@ public sealed class ReleaseImportRequestService
         await _queue.EnqueueAsync(
             new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId),
             ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Queues a system-reference backfill for each of <paramref name="releaseIds"/>
+    /// without waiting for room on the queue, and says how many it queued and how
+    /// many it skipped because a backfill was already queued or running for them.
+    ///
+    /// <para>The import queue holds sixteen jobs and has one worker, and a backfill
+    /// takes minutes on a Business Central release, so writing a whole catalogue to
+    /// it from the request held the request for hours, and every other import waited
+    /// behind it (#1542). Instead the durable <c>queued</c> rows are written here, in
+    /// one transaction (<see cref="PersistedImportJobs.CreateBackfillsAsync"/>), and
+    /// the in-memory jobs are handed to the same background feeder the startup resume
+    /// uses. It feeds them paced (<see cref="ReleaseImportQueue.EnqueuePacedAsync"/>),
+    /// one waiting at a time, so an import submitted during the run is not stuck
+    /// behind a full queue of backfills. The feeder runs until shutdown, not until the
+    /// request ends, so closing the tab loses nothing; rows it has not fed by then are
+    /// queued again on the next start.</para>
+    ///
+    /// <para>A release that already has a backfill queued or running is skipped:
+    /// that run re-extracts the same stored source, so a second click adds nothing
+    /// but another hour on the queue.</para>
+    /// </summary>
+    public async Task<BackfillQueueResult> QueueBackfillAllAsync(IReadOnlyList<int> releaseIds, CancellationToken ct = default)
+    {
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a system-reference backfill");
+        var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, ct).ConfigureAwait(false);
+        var source = new ReleaseImportSource.Backfill();
+        var jobs = rows
+            .Select(r => new ReleaseImportJob(r.ReleaseId, identity, source, StoreSymbolReference: false, r.JobRowId))
+            .ToList();
+        if (jobs.Count > 0)
+        {
+            _ = ResumedImportJobs.EnqueueAllAsync(_queue, jobs, _logger, "system-reference backfill", _lifetime.ApplicationStopping, paced: true);
+        }
+        var skipped = releaseIds.Distinct().Count() - jobs.Count;
+        _logger.LogInformation(
+            "Queued {Count} system-reference backfill(s), skipping {Skipped} already queued.",
+            jobs.Count, skipped);
+        return new BackfillQueueResult(jobs.Count, skipped);
     }
 
     /// <summary>Field-keyed (<c>Retry</c>) validation error for the retry path's inline messages.</summary>

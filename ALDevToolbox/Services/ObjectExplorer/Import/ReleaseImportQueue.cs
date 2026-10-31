@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Workers;
 
@@ -29,6 +30,49 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     // against a duplicate run, and a re-import of the same release is a
     // legitimate request rather than a double-click to coalesce.
     public ReleaseImportQueue() : base(capacity: 16) { }
+
+    /// <summary>
+    /// How many paced jobs may wait in the channel at once. One keeps the worker
+    /// busy (the next backfill is always ready) while an import someone submits
+    /// meanwhile waits behind at most one of them, plus the one running (#1542).
+    /// </summary>
+    public const int PacedJobLimit = 1;
+
+    private readonly SemaphoreSlim _pacedSlots = new(PacedJobLimit, PacedJobLimit);
+    private readonly ConcurrentDictionary<long, byte> _pacedRowIds = new();
+
+    /// <summary>
+    /// Queues a job of a bulk run (the system-reference backfill of every release)
+    /// without letting the run fill the channel: waits until fewer than
+    /// <see cref="PacedJobLimit"/> paced jobs are waiting, then writes it. The worker
+    /// frees the slot through <see cref="MarkPickedUp"/>. Without this the feed kept
+    /// all sixteen slots full for hours, so a user's import, a Retry or the nightly
+    /// auto-import sat behind sixteen backfills.
+    /// </summary>
+    public async Task EnqueuePacedAsync(ReleaseImportJob job, CancellationToken ct = default)
+    {
+        await _pacedSlots.WaitAsync(ct).ConfigureAwait(false);
+        _pacedRowIds[job.JobRowId] = 0;
+        try
+        {
+            await EnqueueAsync(job, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (_pacedRowIds.TryRemove(job.JobRowId, out _)) _pacedSlots.Release();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The worker calls this as it takes a job off the channel. Frees a paced slot
+    /// when the job was queued by <see cref="EnqueuePacedAsync"/>; any other job is
+    /// ignored.
+    /// </summary>
+    public void MarkPickedUp(ReleaseImportJob job)
+    {
+        if (_pacedRowIds.TryRemove(job.JobRowId, out _)) _pacedSlots.Release();
+    }
 }
 
 /// <summary>
