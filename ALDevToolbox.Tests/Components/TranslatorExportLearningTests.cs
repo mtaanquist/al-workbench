@@ -302,6 +302,10 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         // the record is written; the prompt skips held records, and Discard
         // and Continue act only on a session nobody holds.
         js.Should().Contain("navigator.locks.request(LOCK_PREFIX + openId, () => new Promise(")
+            // A lock that cannot be taken falls back to the heartbeat, and the
+            // heartbeat goes when the page does, so a reload sees its session.
+            .And.Contain("heartbeat(h);\n                granted();")
+            .And.Contain("window.addEventListener(\"pagehide\", gone);")
             .And.Contain("navigator.locks.request(LOCK_PREFIX + openId, { ifAvailable: true },")
             .And.Contain("const free = all.filter((r) => r && r.openId && !live.has(r.openId));")
             .And.Contain("return (await whileUnheld(openId, async () => { await deleteKey(openId); return true; })) === true;")
@@ -328,6 +332,21 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
 
         _module.Invocations["peek"].Single().Arguments.Should().Equal((long)TimeSpan.FromDays(7).TotalMilliseconds);
         cut.Markup.Should().Contain("App.da-DK.xlf");
+    }
+
+    /// <summary>
+    /// The browser module outlives the component: after a resumed connection a
+    /// fresh, empty page renders in the same tab while the module still holds
+    /// the open the previous page had. Unless the page lets go of it before it
+    /// looks, its own session is hidden from it as if another tab had it.
+    /// </summary>
+    [Fact]
+    public void A_page_with_no_file_lets_go_of_any_open_the_tab_still_holds_before_looking_for_sessions()
+    {
+        RenderWithStoredSession();
+
+        _module.Invocations.Select(i => i.Identifier).Where(id => id is "release" or "peek")
+            .Should().Equal("release", "peek");
     }
 
     [Fact]
@@ -365,10 +384,31 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
 
         cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Pick up where you left off?"));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("That file is open in another tab now, so its edits were kept."));
+        cut.Markup.Should().NotContain("Pick up where you left off?");
         _module.Invocations["loadMeta"].Single().Arguments.Should().Equal(StoredOpenId);
         _module.Invocations["loadOriginalStream"].Should().BeEmpty("there is no session to read");
         cut.FindAll("textarea.tr-tgtarea").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_restore_that_fails_after_continue_lets_go_of_the_session_so_it_can_be_offered_again()
+    {
+        _module.Setup<TranslatorPage.SessionMeta?>("loadMeta", _ => true).SetResult(new TranslatorPage.SessionMeta
+        {
+            OpenId = RestoredOpenId,
+            FileName = "App.da-DK.xlf",
+        });
+        _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true)
+            .SetException(new JSException("The stored copy could not be read."));
+        var cut = RenderWithStoredSession();
+        var releasesBefore = _module.Invocations["release"].Count;
+
+        var restore = () => cut.FindAll("button").First(b => b.TextContent.Trim() == "Continue").Click();
+
+        restore.Should().Throw<JSException>();
+        _module.Invocations["release"].Should().HaveCount(releasesBefore + 1,
+            "the browser moved the session to an id this tab would otherwise go on holding");
     }
 
     [Fact]
@@ -380,7 +420,8 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
 
         await cut.InvokeAsync(() => cut.Instance.DisposeAsync().AsTask());
 
-        _module.Invocations["release"].Should().ContainSingle();
+        // Once on first render (nothing held yet) and once on leaving.
+        _module.Invocations["release"].Should().HaveCount(2);
         _module.Invocations["clear"].Should().BeEmpty("leaving keeps the stored file for a restore");
     }
 

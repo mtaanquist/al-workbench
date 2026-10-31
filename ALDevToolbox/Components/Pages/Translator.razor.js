@@ -106,39 +106,63 @@ async function hold(openId) {
             navigator.locks.request(LOCK_PREFIX + openId, () => new Promise((done) => {
                 h.release = done;
                 granted();
-            })).catch(() => granted());
+            })).catch(() => {
+                // The lock could not be taken at all: hold it the other way
+                // rather than not at all.
+                heartbeat(h);
+                granted();
+            });
         });
     } else {
-        const key = ALIVE_PREFIX + openId;
-        const beat = () => { try { localStorage.setItem(key, String(Date.now())); } catch { /* ignore */ } };
-        beat();
-        const timer = setInterval(beat, ALIVE_EVERY_MS);
-        h.release = () => {
-            clearInterval(timer);
-            try { localStorage.removeItem(key); } catch { /* ignore */ }
-        };
+        heartbeat(h);
     }
     return h;
 }
 
-// The ids some tab (this one included) holds right now.
-async function heldIds() {
+// The stand-in for a lock: a timestamp in localStorage, refreshed while the
+// tab holds the open and removed when it lets go - or when the page goes
+// away, so a reload does not hide the tab's own session from itself.
+function heartbeat(h) {
+    const key = ALIVE_PREFIX + h.openId;
+    const beat = () => { try { localStorage.setItem(key, String(Date.now())); } catch { /* ignore */ } };
+    const gone = () => { try { localStorage.removeItem(key); } catch { /* ignore */ } };
+    beat();
+    const timer = setInterval(beat, ALIVE_EVERY_MS);
+    // A page restored from the back-forward cache holds the open again.
+    const back = (e) => { if (e.persisted) beat(); };
+    window.addEventListener("pagehide", gone);
+    window.addEventListener("pageshow", back);
+    h.release = () => {
+        clearInterval(timer);
+        window.removeEventListener("pagehide", gone);
+        window.removeEventListener("pageshow", back);
+        gone();
+    };
+}
+
+// The ids with a recent heartbeat; stale ones are removed on the way.
+function heartbeatIds() {
     const ids = new Set();
+    try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+            const key = localStorage.key(i);
+            if (!key || !key.startsWith(ALIVE_PREFIX)) continue;
+            if (Date.now() - Number(localStorage.getItem(key)) < ALIVE_FOR_MS) ids.add(key.slice(ALIVE_PREFIX.length));
+            else localStorage.removeItem(key);
+        }
+    } catch { /* ignore */ }
+    return ids;
+}
+
+// The ids some tab (this one included) holds right now, by lock or heartbeat.
+async function heldIds() {
+    const ids = heartbeatIds();
     if (held) ids.add(held.openId);
     if (hasLocks()) {
         try {
             const state = await navigator.locks.query();
             for (const l of state.held || []) {
                 if (l.name && l.name.startsWith(LOCK_PREFIX)) ids.add(l.name.slice(LOCK_PREFIX.length));
-            }
-        } catch { /* ignore */ }
-    } else {
-        try {
-            for (let i = localStorage.length - 1; i >= 0; i--) {
-                const key = localStorage.key(i);
-                if (!key || !key.startsWith(ALIVE_PREFIX)) continue;
-                if (Date.now() - Number(localStorage.getItem(key)) < ALIVE_FOR_MS) ids.add(key.slice(ALIVE_PREFIX.length));
-                else localStorage.removeItem(key);
             }
         } catch { /* ignore */ }
     }
@@ -151,7 +175,7 @@ async function whileUnheld(openId, fn) {
     if (!openId || (held && held.openId === openId)) return null;
     if (hasLocks()) {
         return await navigator.locks.request(LOCK_PREFIX + openId, { ifAvailable: true },
-            (lock) => (lock ? fn() : null));
+            (lock) => (lock && !heartbeatIds().has(openId) ? fn() : null));
     }
     return (await heldIds()).has(openId) ? null : await fn();
 }
@@ -176,7 +200,10 @@ async function startOpen(openId, write) {
 
 // Lets go of this tab's open without deleting its record. Called when the page
 // goes away inside the app: whatever was left unsaved becomes a session the
-// restore prompt can offer.
+// restore prompt can offer. Also called by a page that starts with no file
+// before it looks for sessions: the module outlives the component (a resumed
+// connection renders a fresh one in the same tab), so it may still hold the
+// open the previous component had, which would hide that session from it.
 export function release() {
     if (held) { held.release(); held = null; }
 }
