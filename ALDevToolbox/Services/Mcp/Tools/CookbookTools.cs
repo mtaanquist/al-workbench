@@ -154,7 +154,7 @@ public sealed class CookbookTools
     }
 
     [McpServerTool(Name = "get_recipe", ReadOnly = true)]
-    [Description("Returns the content of a recipe (each file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). File bodies come back in order while they fit in one answer (about 30,000 characters with the recipe's text); a file past that is listed with its path and a null body, and a single file too large for one answer is cut. Truncated and Note say which, and how to read the rest: pass path (a file's Path, or a folder to get the files under it), and offset to continue a cut file. Use search_recipes to find candidate ids.")]
+    [Description("Returns the content of a recipe (each file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). File bodies come back in order while they fit in one answer (about 30,000 characters with the recipe's text); a file past that is listed with its path and a null body, and a single file too large for one answer is cut. Truncated and Note say which, and how to read the rest: pass path (a file's Path, or a folder to get the files under it), and offset to continue a cut file. When editing with update_recipe, a file listed with a null body can be sent back with Content null to keep it as it is. Use search_recipes to find candidate ids.")]
     public async Task<RecipeDetail> GetAsync(
         [Description("Recipe id from search_recipes.")] int id,
         [Description("Optional file Path, or a folder, to return only those files, e.g. 'Setup/SetupTable.al' or 'Setup'.")] string? path = null,
@@ -343,29 +343,69 @@ public sealed class CookbookTools
         "Edits an already-published recipe. Requires the Editor or Admin role — regular users should use " +
         "suggest_recipe / update_recipe_suggestion and go through the review queue instead. " +
         "MANDATORY two-step protocol: include a fresh GuidanceToken from get_cookbook_guidance (same rules " +
-        "as suggest_recipe). The payload is a full replace: every field and every file you want the recipe " +
-        "to end up with, not just the ones you're changing — call get_recipe first and start from its " +
-        "current content. Deprecated is optional and keeps the recipe's current flag when omitted. " +
+        "as suggest_recipe). The payload is a full replace of the title, description, keywords, type, " +
+        "instructions and file list: list every file you want the recipe to end up with, not just the ones " +
+        "you're changing — call get_recipe first and start from its current content. A file whose body you " +
+        "don't change can be sent with Content null (as get_recipe lists a file it left out) and keeps its " +
+        "stored body; a file get_recipe cut short must be sent with its whole body or with Content null. " +
+        "Files left out of the list are removed. The optional fields keep the recipe's current value when " +
+        "omitted: Deprecated, EstimatedValueHours (set ClearEstimatedValueHours to remove it) and the minimum " +
+        "Business Central version (set MinimumApplication to the application version get_recipe returns, " +
+        "e.g. '24.0.0.0', or the version's name; an empty string removes it). " +
         "Returns the unchanged RecipeId on success.")]
     public async Task<UpdateRecipeResult> UpdateRecipeAsync(
-        [Description("The replacement payload, including the id of the recipe to update (from search_recipes) and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe, plus optional EstimatedValueHours and Deprecated.")] UpdateRecipeInput input,
+        [Description("The replacement payload, including the id of the recipe to update (from search_recipes) and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe, plus the optional Deprecated, EstimatedValueHours, ClearEstimatedValueHours and MinimumApplication, which keep the current value when omitted. A file's Content may be null to keep its stored body.")] UpdateRecipeInput input,
         CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         RequireValidGuidanceToken(input.GuidanceToken, orgId);
         await RequireEditorAsync(ct);
 
-        // Resolve the current Deprecated flag so an omitted field preserves
-        // it instead of resetting; also fronts a clear not-found error.
+        // Resolve the current optional fields and file bodies so an omitted
+        // field or a null file body keeps what is stored instead of resetting
+        // it (#1626); also fronts a clear not-found error.
         var current = await _db.Recipes.AsNoTracking()
             .Where(r => r.Id == input.RecipeId && r.DeletedAt == null)
-            .Select(r => new { r.Deprecated })
+            .Select(r => new
+            {
+                r.Deprecated,
+                r.EstimatedValueHours,
+                r.MinimumApplicationVersionId,
+                Files = r.Files.Select(f => new { f.RelativePath, f.FileName, f.Content }).ToList(),
+            })
             .FirstOrDefaultAsync(ct)
             ?? throw new McpException($"Recipe {input.RecipeId} not found, or not visible to your organisation.");
 
+        var minimumVersionId = await ResolveMinimumVersionAsync(input, current.MinimumApplicationVersionId, ct);
+
+        var storedBodies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in current.Files)
+        {
+            storedBodies[RecipeFileKey(f.RelativePath, f.FileName)] = f.Content;
+        }
+        var files = new List<ALDevToolbox.Services.Cookbook.RecipeFileInput>(input.Files.Count);
+        foreach (var f in input.Files)
+        {
+            var content = f.Content;
+            if (content is null)
+            {
+                var key = RecipeFileKey(f.RelativePath, f.FileName);
+                if (!storedBodies.TryGetValue(key, out content))
+                {
+                    throw new McpException(
+                        $"File '{key}' has no Content and is not in recipe {input.RecipeId} yet. " +
+                        "Send its body, or leave Content out only for files get_recipe listed.");
+                }
+            }
+            files.Add(new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, content, f.RelativePath));
+        }
+
         try
         {
-            await _recipes.UpdateAsync(input.RecipeId, input.ToDomain(current.Deprecated), ct);
+            await _recipes.UpdateAsync(
+                input.RecipeId,
+                input.ToDomain(current.Deprecated, current.EstimatedValueHours, minimumVersionId, files),
+                ct);
             return new UpdateRecipeResult(input.RecipeId, "Updated. The change is live in the Cookbook.");
         }
         catch (PlanValidationException ex)
@@ -418,6 +458,58 @@ public sealed class CookbookTools
         {
             throw new McpException(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Works out which minimum version <c>update_recipe</c> stores. An explicit
+    /// id wins; otherwise <c>MinimumApplication</c> is matched against the
+    /// organisation's version catalogue (tenant-filtered like every other read)
+    /// by application version, name or key, an empty string clears it, and
+    /// leaving both out keeps the stored one. That last rule is the point of
+    /// #1626: <c>get_recipe</c> returns the version string but not the id, so a
+    /// round-trip that could only send the id silently dropped the requirement.
+    /// </summary>
+    private async Task<int?> ResolveMinimumVersionAsync(UpdateRecipeInput input, int? currentId, CancellationToken ct)
+    {
+        if (input.MinimumApplicationVersionId is int explicitId) return explicitId;
+        if (input.MinimumApplication is null) return currentId;
+
+        var wanted = input.MinimumApplication.Trim();
+        if (wanted.Length == 0) return null;
+
+        var lowered = wanted.ToLowerInvariant();
+        var matches = await _db.ApplicationVersions.AsNoTracking()
+            .Where(a => a.DeletedAt == null
+                        && (a.Application.ToLower() == lowered
+                            || a.Name.ToLower() == lowered
+                            || a.Key.ToLower() == lowered))
+            .OrderBy(a => a.Ordering)
+            .Select(a => new { a.Id, a.Name, a.Application })
+            .ToListAsync(ct);
+
+        // The value get_recipe returned for the stored version must round-trip
+        // to that same row, even when another catalogue entry shares it.
+        if (currentId is int stored && matches.Any(m => m.Id == stored)) return stored;
+        return matches.Count switch
+        {
+            1 => matches[0].Id,
+            0 => throw new McpException(
+                $"No Business Central version '{wanted}' in your organisation's version list. " +
+                "Use the application version get_recipe returns as MinimumApplication (e.g. '24.0.0.0') or the version's name, " +
+                "or an empty string to remove the minimum version."),
+            _ => throw new McpException(
+                $"'{wanted}' matches more than one version: " +
+                string.Join(", ", matches.Select(m => $"'{m.Name}' ({m.Application})")) +
+                ". Pass the name of the one you mean."),
+        };
+    }
+
+    /// <summary>The case-insensitive path key a recipe file is matched on: folder + "/" + name, or the name at the root.</summary>
+    private static string RecipeFileKey(string? relativePath, string fileName)
+    {
+        var folder = ALDevToolbox.Services.Cookbook.RecipeService.NormaliseRelativePath(relativePath);
+        var name = fileName?.Trim() ?? string.Empty;
+        return folder.Length == 0 ? name : folder + "/" + name;
     }
 
     /// <summary>
