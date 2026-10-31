@@ -103,7 +103,43 @@ public sealed class PersistedImportJobsTests : IDisposable
         await using var read = _db.NewContext();
         var after = await read.OeImportJobs.AsNoTracking()
             .Where(j => j.Id == waitingRow || j.Id == interruptedRow).ToListAsync();
-        after.Should().OnlyContain(j => j.Status == "queued" && j.StartedAt == null && j.ErrorMessage == null);
+        after.Should().OnlyContain(j => j.Status == "queued" && j.StartedAt == null);
+        after.Single(j => j.Id == waitingRow).ErrorMessage.Should().BeNull();
+        after.Single(j => j.Id == interruptedRow).ErrorMessage.Should().Be(PersistedImportJobs.CutOffBackfillNote);
+    }
+
+    /// <summary>
+    /// The cut-off backfill goes after the ones that never started, so a run
+    /// is not stuck behind it; and if it is cut off again - perhaps because
+    /// it is what takes the process down - it is failed, not queued a third
+    /// time, so the container does not restart in a loop.
+    /// </summary>
+    [Fact]
+    public async Task A_backfill_cut_off_twice_is_failed_and_one_cut_off_once_runs_last()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var interrupted = await SeedReleaseAsync(ctx, status: "ready");
+        var waiting = await SeedReleaseAsync(ctx, status: "ready");
+        var rows = await svc.CreateBackfillsAsync([interrupted.Id, waiting.Id], Identity);
+        var interruptedRow = rows.Single(r => r.ReleaseId == interrupted.Id).JobRowId;
+        var waitingRow = rows.Single(r => r.ReleaseId == waiting.Id).JobRowId;
+        await svc.MarkRunningAsync(interruptedRow);
+
+        var first = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        first.Select(j => j.JobRowId).Should().Equal(waitingRow, interruptedRow);
+
+        // The second start: the re-run was cut off as well.
+        await NewService(_db.NewContext()).MarkRunningAsync(interruptedRow);
+        var second = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        second.Select(j => j.JobRowId).Should().Equal(waitingRow);
+        await using var read = _db.NewContext();
+        var failed = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == interruptedRow);
+        failed.Status.Should().Be("failed");
+        failed.ErrorMessage.Should().Contain("cut off by a restart twice");
+        failed.CompletedAt.Should().NotBeNull();
     }
 
     [Fact]
