@@ -276,24 +276,41 @@ async function openRecord(rec) {
 // older copies have to be dropped by file. A copy a live tab holds is never
 // touched (whileUnheld), as everywhere else.
 
-// Which file a record is of: a repository file by repository and path, any
-// other by its name.
+// Which file a record is of, by name - and for a repository file also by
+// repository and path. The name is part of it because a translation started
+// from the generated file is named for its language, while the path it was
+// opened under is not updated when the language changes: a da-DK and a de-DE
+// translation of one App.g.xlf are different files.
 function fileKey(r) {
-    if (r.repo && r.repo.repository && r.repo.path) return "repo\n" + r.repo.repository + "\n" + r.repo.path;
-    return "file\n" + (r.fileName || "");
+    const name = "\n" + (r.fileName || "");
+    if (r.repo && r.repo.repository && r.repo.path) return "repo\n" + r.repo.repository + "\n" + r.repo.path + name;
+    return "file" + name;
 }
 
+// True when two records are of the same file. Two files picked from disk can
+// share a name and still be different files (the same app in two folders), so
+// when both have a handle the handle decides; an upload has only its name.
 async function sameFile(a, b) {
-    if (fileKey(a) === fileKey(b)) return true;
-    // A file picked from disk may have been renamed in the page since (a
-    // generated file is named as the language file it becomes).
-    if (a.handle && b.handle && typeof a.handle.isSameEntry === "function") {
+    if (fileKey(a) !== fileKey(b)) return false;
+    if (a.handle && b.handle) {
+        if (typeof a.handle.isSameEntry !== "function") return false;
         try { return await a.handle.isSameEntry(b.handle); } catch { return false; }
+    }
+    return true;
+}
+
+// True when another record of `r`'s file in `all` was saved after it.
+async function superseded(r, all) {
+    for (const o of all) {
+        if (!o || !o.openId || o.openId === r.openId) continue;
+        if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;
     }
     return false;
 }
 
-// Deletes every other session of `rec`'s file that no live tab holds.
+// Deletes the other sessions of `rec`'s file saved before it that no live tab
+// holds. A newer one is left alone: Continue on an older session must not
+// delete newer work.
 async function dropOlderCopies(rec) {
     try {
         const live = await heldIds();
@@ -303,6 +320,7 @@ async function dropOlderCopies(rec) {
         });
         for (const r of all) {
             if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;
+            if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;
             if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));
         }
     } catch { /* best effort: the prompt also offers only the newest of each file */ }
@@ -398,17 +416,14 @@ export async function peek(maxAgeMs) {
             req.onsuccess = () => done(req.result || []);
         });
         const now = Date.now();
-        // The newest record of each file, held or not. An older one is out of
-        // date, so it is never offered and goes with the rest (#1624).
-        const newest = new Map();
-        for (const r of all) {
-            if (!r || !r.openId) continue;
-            const k = fileKey(r), seen = newest.get(k);
-            if (!seen || (r.savedAt || 0) > (seen.savedAt || 0)) newest.set(k, r);
-        }
         const free = all.filter((r) => r && r.openId && !live.has(r.openId));
-        const offerable = free
-            .filter((r) => newest.get(fileKey(r)) === r)
+        // A session with a newer record of its file, held or not, is out of
+        // date, so it is never offered and goes with the rest (#1624).
+        const current = [];
+        for (const r of free) {
+            if (!(await superseded(r, all))) current.push(r);
+        }
+        const offerable = current
             .filter((r) => r.fileName && r.savedAt > 0 && now - r.savedAt <= maxAgeMs)
             .sort((a, b) => b.savedAt - a.savedAt);
         const keep = new Set(offerable.slice(0, MAX_KEPT).map((r) => r.openId));

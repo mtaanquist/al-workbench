@@ -337,10 +337,17 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
     {
         var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
 
-        // A repository file is known by repository and path, any other by its
-        // name, and a file picked from disk also by its handle.
-        js.Should().Contain("""if (r.repo && r.repo.repository && r.repo.path) return "repo\n" + r.repo.repository + "\n" + r.repo.path;""")
-            .And.Contain("""return "file\n" + (r.fileName || "");""")
+        // A file is known by its name - a da-DK and a de-DE translation of one
+        // generated file are different files - and a repository file also by
+        // repository and path. When both copies were picked from disk, the
+        // handle decides, so two same-named files in different folders differ.
+        js.Should().Contain("""const name = "\n" + (r.fileName || "");""")
+            .And.Contain("""return "repo\n" + r.repo.repository + "\n" + r.repo.path + name;""")
+            .And.Contain("""return "file" + name;""");
+        var same = js[js.IndexOf("async function sameFile(a, b) {", StringComparison.Ordinal)..];
+        same = same[..same.IndexOf("\n}\n", StringComparison.Ordinal)];
+        same.Should().StartWith("async function sameFile(a, b) {\n    if (fileKey(a) !== fileKey(b)) return false;")
+            .And.Contain("if (a.handle && b.handle) {")
             .And.Contain("return await a.handle.isSameEntry(b.handle);");
 
         // Each new open, and Continue, drops the older copies of its file once
@@ -354,23 +361,24 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         load = load[..load.IndexOf("\n}\n", StringComparison.Ordinal)];
         load.Should().Contain("if (!ok) return null;\n            await dropOlderCopies(moved);");
 
-        // Only copies no live tab holds are deleted, and only under their lock.
+        // Only older copies no live tab holds are deleted, and only under their
+        // lock: Continue on an older session leaves a newer one alone.
         var drop = js[js.IndexOf("async function dropOlderCopies(rec) {", StringComparison.Ordinal)..];
         drop = drop[..drop.IndexOf("\n}\n", StringComparison.Ordinal)];
         drop.Should().Contain("if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;")
+            .And.Contain("if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;")
             .And.Contain("if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
             .And.NotContain("store.delete(");
 
         // The prompt offers a session only when no other record of its file,
         // held or not, is newer; the older ones fall outside what it keeps.
+        js.Should().Contain("if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;");
         var peek = js[js.IndexOf("export async function peek(maxAgeMs) {", StringComparison.Ordinal)..];
         peek = peek[..peek.IndexOf("\n}\n", StringComparison.Ordinal)];
-        peek.Should().Contain("if (!seen || (r.savedAt || 0) > (seen.savedAt || 0)) newest.set(k, r);")
-            .And.Contain(".filter((r) => newest.get(fileKey(r)) === r)")
-            .And.Contain("if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));");
-        peek.IndexOf("newest.set", StringComparison.Ordinal)
-            .Should().BeLessThan(peek.IndexOf("const free =", StringComparison.Ordinal),
-                "a newer copy a live tab holds still makes an older free one out of date");
+        peek.Should().Contain("if (!(await superseded(r, all))) current.push(r);")
+            .And.Contain("const offerable = current")
+            .And.Contain("if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
+            .And.NotContain("superseded(r, free)", "a newer copy a live tab holds still makes an older free one out of date");
     }
 
     // ── The restore prompt (#1609) ────────────────────────────────────────
