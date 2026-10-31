@@ -80,6 +80,9 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
     private int _runRequests;
     private long _runStarted;
 
+    /// <summary>How many solutions the run being drained has counted so far. For tests.</summary>
+    internal int SolutionsInRun => _runSolutions;
+
     protected override async Task RunJobAsync(EnvironmentRefreshJob job, CancellationToken ct)
     {
         // A queued job is dropped while a restore runs or a failed one holds the
@@ -92,12 +95,43 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         }
 
         if (_runSolutions == 0) _runStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        _runSolutions++;
 
+        // The run's summary and reset go in the finally: a job that throws (a solution
+        // deleted since it was queued, a database error mid-mirror) must not carry the
+        // counters into the next run, which would log the wrong totals and start with
+        // fewer throttle breaths.
+        TimeSpan pause;
+        try
+        {
+            pause = await RefreshOneAsync(job, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (_queue.Reader.Count == 0)
+            {
+                _logger.LogInformation(
+                    "Environment refresh run finished: {Solutions} solution(s), about {Requests} Business Central request(s), in {Elapsed}.",
+                    _runSolutions, _runRequests, System.Diagnostics.Stopwatch.GetElapsedTime(_runStarted));
+                _runSolutions = 0;
+                _runRequests = 0;
+                _runThrottleBreaths = 0;
+            }
+        }
+
+        if (_queue.Reader.Count > 0 && pause > TimeSpan.Zero)
+        {
+            await Task.Delay(pause, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Refreshes one solution and returns how long to wait before the next.</summary>
+    private async Task<TimeSpan> RefreshOneAsync(EnvironmentRefreshJob job, CancellationToken ct)
+    {
         using var orgScope = AmbientOrganizationScope.Enter(job.Identity);
         await using var scope = _services.CreateAsyncScope();
         var connections = scope.ServiceProvider.GetRequiredService<ProjectConnectionService>();
         var result = await connections.RefreshEnvironmentsUnattendedAsync(job.ProjectId, ct).ConfigureAwait(false);
-        _runSolutions++;
         _runRequests += 2 + (result.IsSuccess ? 2 + 3 * result.EnvironmentCount : 0);
 
         // Business Central asked us to slow down for this customer. The scheduled sweep
@@ -138,20 +172,7 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
                 "Couldn't refresh Business Central environments for project {ProjectId}: {Message}",
                 job.ProjectId, result.Message);
         }
-
-        if (_queue.Reader.Count == 0)
-        {
-            _logger.LogInformation(
-                "Environment refresh run finished: {Solutions} solution(s), about {Requests} Business Central request(s), in {Elapsed}.",
-                _runSolutions, _runRequests, System.Diagnostics.Stopwatch.GetElapsedTime(_runStarted));
-            _runSolutions = 0;
-            _runRequests = 0;
-            _runThrottleBreaths = 0;
-        }
-        else if (pause > TimeSpan.Zero)
-        {
-            await Task.Delay(pause, ct).ConfigureAwait(false);
-        }
+        return pause;
     }
 
     protected override void OnJobFinished(EnvironmentRefreshJob job) => _queue.Complete(job.ProjectId);

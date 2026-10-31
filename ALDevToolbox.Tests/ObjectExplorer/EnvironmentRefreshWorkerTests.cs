@@ -65,7 +65,20 @@ public sealed class EnvironmentRefreshWorkerTests
         _queue.TryEnqueue(Job()).Should().BeTrue("the next night's refresh is not refused");
     }
 
-    private async Task RunOneJobAsync()
+    /// <summary>
+    /// A job that throws (here: every job) still closes the run when the queue empties,
+    /// so the next night's run starts its counts and throttle breaths from zero.
+    /// </summary>
+    [Fact]
+    public async Task A_refresh_that_throws_still_ends_the_run()
+    {
+        var worker = await RunOneJobAsync();
+
+        _ranUnder.Should().ContainSingle("the job ran");
+        worker.SolutionsInRun.Should().Be(0);
+    }
+
+    private async Task<EnvironmentRefreshWorker> RunOneJobAsync()
     {
         var services = new ServiceCollection()
             .AddScoped<ProjectConnectionService>(_ =>
@@ -91,6 +104,7 @@ public sealed class EnvironmentRefreshWorkerTests
         {
             await worker.StopAsync(CancellationToken.None);
         }
+        return worker;
     }
 
     private static EnvironmentRefreshJob Job() => new(ProjectId,
