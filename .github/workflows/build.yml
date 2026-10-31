@@ -51,7 +51,7 @@ permissions:
 
 jobs:
   # Decides whether the change touches anything that can affect compilation,
-  # tests, or the image. Docs-only diffs (**.md, .design/**, docs/**, LICENSE)
+  # tests, or the image. Docs-only pull requests (**.md, .design/**, docs/**, LICENSE)
   # set code=false and the heavy jobs below skip. Uses a plain `git diff` rather
   # than a third-party filter action to avoid a new dependency (#416).
   changes:
@@ -67,13 +67,12 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
             files=$(git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}")
-          elif [ -n "${{ github.event.before }}" ] \
-               && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
-               && git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
-            files=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
           else
-            # First push to a branch (or manual dispatch): no reliable base, so
-            # treat it as a code change and run the full pipeline.
+            # A push (or manual dispatch) always runs the full pipeline. Diffing
+            # against the previous push would let a docs-only commit on top of a
+            # red one report green, and release.yml releases any SHA whose run
+            # succeeded, untested code included (#1550). Path-skipping only
+            # pays off on pull requests anyway.
             files=""
           fi
           echo "Changed files:"
