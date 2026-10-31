@@ -472,7 +472,25 @@ public sealed class CookbookTools
     private async Task<int?> ResolveMinimumVersionAsync(UpdateRecipeInput input, int? currentId, CancellationToken ct)
     {
         if (input.MinimumApplicationVersionId is int explicitId) return explicitId;
-        if (input.MinimumApplication is null) return currentId;
+        if (input.MinimumApplication is null)
+        {
+            if (currentId is not int keptId) return null;
+            // A stored version since removed from the catalogue would make the
+            // service refuse the whole edit with a message naming a field the
+            // assistant never sent, so name the one it can act on instead.
+            var removed = await _db.ApplicationVersions.AsNoTracking()
+                .Where(a => a.Id == keptId)
+                .Select(a => new { a.Name, a.DeletedAt })
+                .FirstOrDefaultAsync(ct);
+            if (removed is null || removed.DeletedAt is not null)
+            {
+                throw new McpException(
+                    $"This recipe's minimum Business Central version{(removed is null ? "" : $" ('{removed.Name}')")} " +
+                    "has been removed from your organisation's version list. Set MinimumApplication to a current " +
+                    "version (e.g. '24.0.0.0'), or to an empty string to remove the minimum version.");
+            }
+            return keptId;
+        }
 
         var wanted = input.MinimumApplication.Trim();
         if (wanted.Length == 0) return null;
@@ -484,7 +502,7 @@ public sealed class CookbookTools
                             || a.Name.ToLower() == lowered
                             || a.Key.ToLower() == lowered))
             .OrderBy(a => a.Ordering)
-            .Select(a => new { a.Id, a.Name, a.Application })
+            .Select(a => new { a.Id, a.Key, a.Name, a.Application })
             .ToListAsync(ct);
 
         // The value get_recipe returned for the stored version must round-trip
@@ -499,8 +517,8 @@ public sealed class CookbookTools
                 "or an empty string to remove the minimum version."),
             _ => throw new McpException(
                 $"'{wanted}' matches more than one version: " +
-                string.Join(", ", matches.Select(m => $"'{m.Name}' ({m.Application})")) +
-                ". Pass the name of the one you mean."),
+                string.Join(", ", matches.Select(m => $"'{m.Name}' (key '{m.Key}', {m.Application})")) +
+                ". Pass the key of the one you mean."),
         };
     }
 

@@ -139,7 +139,8 @@ Tools live in `Services/Mcp/Tools/CookbookTools.cs`:
   `MinimumApplicationVersionId` or by `MinimumApplication` - the version
   string `get_recipe` returns, or the catalogue name or key, resolved
   through the org's own catalogue - and removed by an empty
-  `MinimumApplication`. A file sent with a null `Content` keeps the
+  `MinimumApplication`; a kept version that has since been removed from
+  the catalogue is refused with a message asking for one of those. A file sent with a null `Content` keeps the
   stored body of the file at that path, because `get_recipe` lists
   files that didn't fit in its answer with a null body; a null body for
   a path the recipe doesn't have is refused.

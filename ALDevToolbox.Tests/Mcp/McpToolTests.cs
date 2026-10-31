@@ -856,6 +856,51 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateRecipe_names_MinimumApplication_when_the_stored_version_was_removed()
+    {
+        var (recipeId, versionId) = await SeedVersionGatedRecipeAsync(userId: 840);
+        await using (var seed = _db.NewContext())
+        {
+            var version = await seed.ApplicationVersions.SingleAsync(a => a.Id == versionId);
+            version.DeletedAt = DateTime.UtcNow;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.UpdateRecipeAsync(GatedEdit(recipeId, token)))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("MinimumApplication").And.Contain("Business Central 24");
+
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "" });
+        await using var verify = _db.NewContext();
+        var row = await verify.Recipes.SingleAsync(r => r.Id == recipeId);
+        row.MinimumApplicationVersionId.Should().BeNull();
+        row.Description.Should().Be("Typo fixed.");
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_offers_the_keys_when_a_minimum_version_is_ambiguous()
+    {
+        var (recipeId, _) = await SeedVersionGatedRecipeAsync(userId: 841);
+        await using (var seed = _db.NewContext())
+        {
+            seed.ApplicationVersions.Add(NewApplicationVersion("bc-25-alt", "Business Central 25 (alt)", "25.0.0.0"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "25.0.0.0" }))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("'bc-25'").And.Contain("'bc-25-alt'").And.Contain("key");
+    }
+
+    [Fact]
     public async Task UpdateRecipe_keeps_the_stored_body_of_a_file_sent_with_null_content()
     {
         var (recipeId, _) = await SeedVersionGatedRecipeAsync(userId: 838);
