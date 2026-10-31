@@ -1589,6 +1589,27 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task The_person_who_booked_a_batch_is_told_once_when_its_rest_moves_to_the_next_opening()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "Core.app", "Reports.app", "Extra.app");
+
+        _f.Clock.Advance(TimeSpan.FromHours(12));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Clock.Advance(TimeSpan.FromMinutes(150));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        // A later sweep the same morning finds nothing due and says nothing more.
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var moved = _f.Emails.Sent.Where(e => e.Subject.StartsWith("Moved")).Should().ContainSingle().Subject;
+        moved.Subject.Should().Be("Moved to the next window: Install 2 apps on CRONUS Denmark / Production");
+        moved.Html.Should().Contain("installed before the window closed")
+            .And.Contain("2026-09-12 at 22:00 (Europe/Copenhagen)");
+    }
+
+    [Fact]
     public async Task An_update_booked_for_microsofts_window_that_comes_up_after_it_closed_waits_for_the_next_opening()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
@@ -1644,7 +1665,11 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
         foreach (var id in ids)
         {
-            (await _f.ReadActionAsync(id)).ScheduledByWindow.Should().BeNull("the person has picked the time now");
+            var row = await _f.ReadActionAsync(id);
+            row.ScheduledByWindow.Should().BeNull("the person has picked the time now");
+            // Both in the one write (#1575): a row unmarked but still at its window slot
+            // could install into the working day if the move were lost.
+            row.ExecuteAfter.Should().Be(_f.Clock.GetUtcNow().UtcDateTime, "the batch moves to now in the same write");
         }
         (await SweepUntilQuietAsync()).Should().Be(2);
         _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");
@@ -2106,6 +2131,29 @@ public sealed class UpgradeActionWorkerTests : IDisposable
             .SingleAsync(a => a.EnvironmentId == otherEnvId);
         other.Status.Should().Be(UpgradeActionStatus.Sent);
         other.RequestedByUserId.Should().Be(UpgradeActionTestFixture.OtherOrgOwnerUserId);
+    }
+
+    [Fact]
+    public async Task Between_organisations_never_served_the_install_booked_first_goes_first_when_both_are_due_at_once()
+    {
+        // Both due at the same moment - as a row moved to a window's next opening ties with
+        // one booked for it - so the booking time breaks the tie, not the organisation id
+        // (#1575). The other organisation's id is the lower one.
+        var slot = _f.Clock.GetUtcNow().AddHours(2);
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await AsOwnerAsync(ctx => _f.Connections(ctx).InstallUploadedAppsAsync(
+            projectId, envId, new[] { new UploadPackage(new byte[] { 1, 2, 3 }, "Denmark.app") },
+            UploadAppTiming.AtTime, slot));
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        var (otherProjectId, otherEnvId) = await _f.SeedOtherOrgCustomerAsync();
+        await _f.InOtherOrgAsync(ctx => _f.Connections(ctx).InstallUploadedAppsAsync(
+            otherProjectId, otherEnvId, new[] { new UploadPackage(new byte[] { 1, 2, 3 }, "Sweden.app") },
+            UploadAppTiming.AtTime, slot));
+
+        _f.Clock.Advance(TimeSpan.FromHours(3));
+        (await _f.Worker().RunOneUploadAsync(CancellationToken.None)).Should().BeTrue();
+
+        _f.Apps.InstalledFiles.Should().Equal("Denmark.app");
     }
 
     /// <summary>Connects a second solution to the first one's tenant, its environment row naming the same environment in other letter case.</summary>
