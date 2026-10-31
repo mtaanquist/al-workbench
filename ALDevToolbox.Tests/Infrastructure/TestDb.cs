@@ -815,18 +815,6 @@ public sealed class TestDb : IDisposable
     }
 
     /// <summary>
-    /// Returns a <see cref="StorageQuotaGuard"/> wired to the per-fixture
-    /// context. With no system-settings row and no per-org quota override
-    /// the guard treats every operation as unlimited, so tests that don't
-    /// care about quotas pass through. Tests that DO care should set the
-    /// system_settings row or the organisation override before exercising
-    /// the guarded path.
-    /// </summary>
-    /// <param name="orgContext">
-    /// Overrides the fixture's own context — used by tests that need the guard to read
-    /// the ambient background-worker identity instead of a request's claims.
-    /// </param>
-    /// <summary>
     /// Puts every organisation at or over its storage quota (a 0 MB default:
     /// billable bytes are always at least 0), the cheapest way to force a
     /// service's quota refusal without staging real bytes.
@@ -844,6 +832,18 @@ public sealed class TestDb : IDisposable
         await ctx.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// Returns a <see cref="StorageQuotaGuard"/> wired to the per-fixture
+    /// context. With no system-settings row and no per-org quota override
+    /// the guard treats every operation as unlimited, so tests that don't
+    /// care about quotas pass through. Tests that DO care should set the
+    /// system_settings row or the organisation override before exercising
+    /// the guarded path.
+    /// </summary>
+    /// <param name="orgContext">
+    /// Overrides the fixture's own context — used by tests that need the guard to read
+    /// the ambient background-worker identity instead of a request's claims.
+    /// </param>
     public StorageQuotaGuard NewQuotaGuard(
         AppDbContext ctx, bool singleTenant = false, IOrganizationContext? orgContext = null)
     {

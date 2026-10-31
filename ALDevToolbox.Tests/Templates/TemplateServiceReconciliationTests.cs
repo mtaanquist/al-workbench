@@ -626,6 +626,26 @@ public sealed class TemplateServiceWriteSideTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
     }
 
+    [Fact]
+    public async Task Updating_a_template_over_the_storage_quota_is_refused()
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            id = (await NewService(ctx).CreateAsync(NewAuthoring("runtime-quota-edit"))).Id;
+        }
+        await _db.SetZeroStorageQuotaAsync();
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewService(ctx).UpdateAsync(id, NewAuthoring("runtime-quota-edit") with { Name = "Renamed" });
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.RuntimeTemplates.SingleAsync(t => t.Id == id)).Name.Should().NotBe("Renamed");
+    }
+
     /// <summary>Builds a minimally-valid TemplateAuthoring with sensible defaults so each test only spells out the field it cares about.</summary>
     private static TemplateAuthoring NewAuthoring(
         string key,

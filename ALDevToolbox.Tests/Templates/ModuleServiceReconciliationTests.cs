@@ -177,6 +177,27 @@ public sealed class ModuleServiceReconciliationTests : IDisposable
             .Which.Errors.Should().ContainKey("storage");
     }
 
+    [Fact]
+    public async Task Updating_a_module_over_the_storage_quota_is_refused()
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            id = (await NewService(ctx).CreateAsync(ModuleInputFor("quota-edit"))).Id;
+        }
+        await _db.SetZeroStorageQuotaAsync();
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewService(ctx).UpdateAsync(id, ModuleInputFor("quota-edit") with { Name = "Renamed" });
+            (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
+                .Which.Errors.Should().ContainKey("storage");
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.Modules.SingleAsync(m => m.Id == id)).Name.Should().Be("Test Module");
+    }
+
     private ModuleService NewService(ALDevToolbox.Data.AppDbContext ctx) =>
         new(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
 

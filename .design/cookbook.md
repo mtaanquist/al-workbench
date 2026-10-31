@@ -55,6 +55,8 @@ ignores it. Type filtering happens client-side over the search result.
 - No leading or trailing `/` (normalised away before validation fires).
 - Max 8 segments, max 260 characters total.
 - `(RelativePath, FileName)` must be unique within a recipe (case-insensitive).
+- At most 100 files per recipe (`RecipeService.MaxFiles`); a suggestion is held
+  to the same cap because it goes through the same check.
 
 `Components/Shared/RecipeFileEditor.razor` exposes Folder + File-name +
 Content inputs per row; the user-facing `RecipeDetail` page renders a

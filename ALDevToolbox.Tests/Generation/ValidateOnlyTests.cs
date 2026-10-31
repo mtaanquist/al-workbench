@@ -279,8 +279,8 @@ public sealed class ValidateOnlyTests : IDisposable
     }
 
     /// <summary>
-    /// The other half of #520: a spaced name must pass inline validation, or the
-    /// generator page would refuse a name the service happily generates.
+    /// #1600: a standalone extension name over the 200-character ceiling
+    /// (AppSourceCop AS0047) is refused up front, like a workspace one.
     /// </summary>
     [Fact]
     public async Task A_standalone_extension_name_over_200_characters_is_reported_and_refused()
@@ -292,6 +292,10 @@ public sealed class ValidateOnlyTests : IDisposable
         await AssertGenerateRefusesAsync(plan, "ExtensionName");
     }
 
+    /// <summary>
+    /// The other half of #520: a spaced name must pass inline validation, or the
+    /// generator page would refuse a name the service happily generates.
+    /// </summary>
     [Fact]
     public async Task An_extension_name_with_a_space_is_accepted()
     {

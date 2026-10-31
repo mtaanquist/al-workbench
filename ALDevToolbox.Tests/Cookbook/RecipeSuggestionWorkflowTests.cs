@@ -103,6 +103,33 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task Approving_over_the_storage_quota_is_refused_and_leaves_the_suggestion_pending()
+    {
+        var user = await SeedUserAsync(userId: 740);
+        _db.OrgContext.CurrentUserId = user.Id;
+        int suggestionId;
+        await using (var ctx = _db.NewContext())
+        {
+            suggestionId = await NewSuggestionService(ctx).SubmitAsync(new RecipeSuggestionInput(
+                "Quota Idea", "Body.", "", RecipeType.Snippet, new[] { new RecipeFileInput("A.al", "// a") }));
+        }
+        var admin = await SeedUserAsync(userId: 741, display: "Admin", role: UserRole.Admin);
+        _db.OrgContext.CurrentUserId = admin.Id;
+        await _db.SetZeroStorageQuotaAsync();
+
+        await using var reviewCtx = _db.NewContext();
+        var reviewer = NewSuggestionService(reviewCtx);
+        var opened = await reviewer.GetAsync(suggestionId);
+        Func<Task> act = () => reviewer.ApproveAsync(suggestionId, RecipeSuggestionService.ContentFingerprint(opened!));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
+        await using var verify = _db.NewContext();
+        (await verify.RecipeSuggestions.SingleAsync(s => s.Id == suggestionId))
+            .Decision.Should().Be(RecipeSuggestionDecision.Pending);
+        (await verify.Recipes.AnyAsync(r => r.Title == "Quota Idea")).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_suggestion_with_more_files_than_a_recipe_may_hold_is_refused()
     {
         var user = await SeedUserAsync(userId: 732);
