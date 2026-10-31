@@ -62,9 +62,10 @@ else if (_state.StepUp && _methods.Count == 0 && !_state.PasskeyAvailable && !_s
        until they set something up; say so, and take them there. *@
     <AuthCard Title="Set up two-factor sign-in first">
         <Sub>
-            Your organisation asks people to confirm it's them before using this tool, and
+            Your organisation asks people to confirm it's them before some actions, such as
+            creating an access token, connecting an assistant or using certain tools, and
             your account has no way to do that yet. Add an authenticator app@(string.IsNullOrEmpty(WebAuthn.RpId) ? " or email codes" : ", email codes or a passkey")
-            under Sign-in &amp; security on your account, then open the tool again.
+            under Sign-in &amp; security on your account, then go back and try again.
         </Sub>
         <ChildContent>
             <a class="btn btn--primary" href="/account/security" style="height: var(--control-h-lg)">
@@ -83,7 +84,7 @@ else
     <Sub>
         @if (_state.StepUp)
         {
-            <text>The tool you opened asks you to confirm it's you first. We'll take you straight back, and you won't be asked again for the next @_windowMinutes minutes.</text>
+            <text>What you're doing asks you to confirm it's you first. We'll take you straight back, and you won't be asked again for the next @_windowMinutes minutes.</text>
         }
         else
         {

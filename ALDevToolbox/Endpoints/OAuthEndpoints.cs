@@ -233,8 +233,21 @@ internal static class OAuthEndpoints
             // writing tool the org marked for step-up runs under this consent.
             var strongAuthAt = await tools.IsFreshAsync(cookieResult.Principal, cancellationToken)
                 ? StepUpAuth.StrongAuthAt(cookieResult.Principal) : null;
-            await UpsertConsentAsync(db, userId, orgId, clientId, canonicalScopes, now, strongAuthAt, cancellationToken);
+            var strengthened = await UpsertConsentAsync(db, userId, orgId, clientId, canonicalScopes, now, strongAuthAt, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
+            if (strengthened)
+            {
+                // The MCP filter reads the stamp per (user, client), not per
+                // token. A client-metadata client (Claude) has one client_id for
+                // every installation, so a strong re-approval would otherwise
+                // vouch for an older installation's tokens that were approved
+                // without a second factor. End them; this approval signs in a
+                // fresh set below (#1627).
+                await RevokeTokensForClientAsync(ctx.RequestServices, userId, clientId, cancellationToken);
+                logger.LogInformation(
+                    "OAuth consent for user {UserId} on client {ClientId} was approved with a second step for the first time; earlier tokens revoked.",
+                    userId, clientId);
+            }
 
             // Stamp the org id and granted scopes onto the principal. The
             // OAuth claims transformer turns sub/org into the ALDevToolbox
@@ -269,7 +282,25 @@ internal static class OAuthEndpoints
     private static bool IsScopeSupported(string scope)
         => Array.Exists(SupportedScopes, s => s.Equals(scope, StringComparison.Ordinal));
 
-    private static async Task UpsertConsentAsync(
+    private static async Task RevokeTokensForClientAsync(
+        IServiceProvider services, int userId, string clientId, CancellationToken cancellationToken)
+    {
+        var applications = services.GetRequiredService<IOpenIddictApplicationManager>();
+        var tokens = services.GetRequiredService<IOpenIddictTokenManager>();
+        var application = await applications.FindByClientIdAsync(clientId, cancellationToken);
+        if (application is null) return;
+        var appId = await applications.GetIdAsync(application, cancellationToken);
+        if (appId is null) return;
+        // The same set-based revoke OAuthClientAdminService.RevokeConsentAsync makes.
+        await tokens.RevokeAsync(userId.ToString(), appId, status: null, type: null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Records the consent. Returns true when an existing consent that was
+    /// approved without a recent second factor is now approved with one, which
+    /// is when the caller must revoke the tokens issued under the weaker one.
+    /// </summary>
+    private static async Task<bool> UpsertConsentAsync(
         AppDbContext db,
         int userId,
         int orgId,
@@ -302,14 +333,14 @@ internal static class OAuthEndpoints
                 GrantedAt = now,
                 StrongAuthAt = strongAuthAt,
             });
+            return false;
         }
-        else
-        {
-            existing.ScopesGranted = canonicalScopes;
-            existing.GrantedAt = now;
-            existing.RevokedAt = null;
-            existing.StrongAuthAt = strongAuthAt;
-        }
+        var strengthened = existing.StrongAuthAt is null && strongAuthAt is not null;
+        existing.ScopesGranted = canonicalScopes;
+        existing.GrantedAt = now;
+        existing.RevokedAt = null;
+        existing.StrongAuthAt = strongAuthAt;
+        return strengthened;
     }
 
     // ────────────────────────────────────────────────────────────────────

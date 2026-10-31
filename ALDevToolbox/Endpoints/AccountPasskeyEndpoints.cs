@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Json;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
@@ -30,6 +31,29 @@ internal static class AccountPasskeyEndpoints
     /// confirmation worked.
     /// </summary>
     public const string CreateTokenAfterStepUpUrl = "/account/ai?" + RouteConstants.OkQuery + "=confirmed-token";
+
+    /// <summary>
+    /// The expiry choices the create-token form offers, in days; 0 is no
+    /// expiry. The endpoint accepts these and nothing else, so a hand-made
+    /// post can't ask for an expiry past what a date can hold (#1627).
+    /// </summary>
+    public static readonly int[] AccessTokenTtlDays = [30, 90, 180, 365, 0];
+
+    /// <summary>The expiry the form starts on.</summary>
+    public const int DefaultAccessTokenTtlDays = 90;
+
+    /// <summary>
+    /// <see cref="CreateTokenAfterStepUpUrl"/> carrying what the person had
+    /// typed, so a form sent after the step-up window closed comes back
+    /// filled in rather than empty (#1627).
+    /// </summary>
+    public static string CreateTokenAfterStepUpUrlWith(string? name, string? ttlDays)
+    {
+        var url = CreateTokenAfterStepUpUrl;
+        if (!string.IsNullOrWhiteSpace(name)) url += "&name=" + Uri.EscapeDataString(name.Trim());
+        if (int.TryParse(ttlDays, out var ttl) && AccessTokenTtlDays.Contains(ttl)) url += "&ttl=" + ttl;
+        return url;
+    }
 
     /// <summary>
     /// The current password from the registration-options body
@@ -233,6 +257,11 @@ internal static class AccountPasskeyEndpoints
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
             ALDevToolbox.Services.Tools.ToolEnablement tools,
+            AppDbContext db,
+            IEmailService email,
+            ALDevToolbox.Services.Email.EmailRenderer emailRenderer,
+            PublicOrigin publicOrigin,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -249,25 +278,28 @@ internal static class AccountPasskeyEndpoints
             // the organisation has marked any tool (#1611). The page sends a
             // stale session to step up before showing the form; this is the
             // backstop for a form left open past the window.
-            if (await tools.AnyStepUpAsync(ct) && !await tools.IsFreshAsync(ctx.User, ct))
-            {
-                ctx.Response.Redirect(StepUpEndpoints.Url(CreateTokenAfterStepUpUrl));
-                return;
-            }
             var form = await ctx.Request.ReadFormAsync(ct);
             var name = form["Name"].ToString();
-            DateTime? expiresAt = null;
             var ttlDaysRaw = form["TtlDays"].ToString();
-            if (int.TryParse(ttlDaysRaw, out var ttlDays) && ttlDays > 0)
+            if (await tools.AnyStepUpAsync(ct) && !await tools.IsFreshAsync(ctx.User, ct))
             {
-                expiresAt = DateTime.UtcNow.AddDays(ttlDays);
+                ctx.Response.Redirect(StepUpEndpoints.Url(CreateTokenAfterStepUpUrlWith(name, ttlDaysRaw)));
+                return;
             }
+            if (!int.TryParse(ttlDaysRaw, out var ttlDays) || !AccessTokenTtlDays.Contains(ttlDays))
+            {
+                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString("Choose one of the expiry options offered.")}");
+                return;
+            }
+            DateTime? expiresAt = ttlDays > 0 ? DateTime.UtcNow.AddDays(ttlDays) : null;
 
             try
             {
                 var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct);
                 SetOneShotPatCookie(ctx, protection, new OneShotPat(
                     issued.Id, issued.Plaintext, name.Trim(), issued.CreatedAt, issued.ExpiresAt));
+                await NotifyAccessTokenCreatedAsync(ctx, db, email, emailRenderer, publicOrigin, userId.Value,
+                    name.Trim(), issued.CreatedAt, issued.ExpiresAt, loggerFactory.CreateLogger("AccessTokens"));
                 ctx.Response.Redirect("/account/access-tokens/created");
             }
             catch (PlanValidationException ex)
@@ -297,5 +329,37 @@ internal static class AccountPasskeyEndpoints
         }).RequireAuthorization();
 
         return app;
+    }
+
+    /// <summary>
+    /// Queues the "an access token was created" notice to the account's own
+    /// address. A token acts as the person until it expires or is revoked, so,
+    /// like a new passkey, one the owner did not make must not go unnoticed.
+    /// Sent after the token is saved; a failure is logged, not shown, since
+    /// the token already exists and the person is about to copy it.
+    /// </summary>
+    private static async Task NotifyAccessTokenCreatedAsync(
+        HttpContext ctx, AppDbContext db, IEmailService email, ALDevToolbox.Services.Email.EmailRenderer emailRenderer,
+        PublicOrigin publicOrigin, int userId, string tokenName, DateTime createdAt, DateTime? expiresAt, ILogger logger)
+    {
+        try
+        {
+            // Filtered: the signed-in user's own row, inside their org.
+            var owner = await db.Users.AsNoTracking()
+                .Where(u => u.Id == userId)
+                .Select(u => new { u.Email, u.DisplayName })
+                .FirstAsync(CancellationToken.None);
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            var content = await ALDevToolbox.Components.Email.AccessTokenCreatedEmail.RenderAsync(emailRenderer,
+                owner.DisplayName, tokenName,
+                createdAt.ToString("d MMM yyyy, HH:mm 'UTC'", culture),
+                expiresAt?.ToString("d MMM yyyy", culture),
+                $"{publicOrigin.For(ctx)}/account/ai", CancellationToken.None);
+            await email.SendAsync(owner.Email, content, EmailPurpose.AccessTokenCreated, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not queue the access-token notice for user {UserId}.", userId);
+        }
     }
 }
