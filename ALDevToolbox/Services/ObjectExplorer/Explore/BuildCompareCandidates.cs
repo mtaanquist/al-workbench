@@ -29,9 +29,17 @@ internal static class BuildCompareCandidates
     /// "{project} on BC {version}", so each row's <see cref="ReleaseListItem.Label"/>
     /// is rewritten to name the build and its pipeline. Empty when the release is
     /// not a tracked build or the caller cannot see it.
+    /// <para>
+    /// <paramref name="withFile"/> keeps only builds holding a file at that
+    /// <c>(AppId, Path)</c>, applied before the cap: a pull-request build has no
+    /// own pipeline to rank first, and pipelines can build different apps, so
+    /// filtering after the cap could fill every slot with builds that lack the
+    /// file (#1570). The release page passes none.
+    /// </para>
     /// </summary>
     internal static async Task<List<ReleaseListItem>> ListAsync(
-        AppDbContext db, ProjectAccess access, int releaseId, CancellationToken ct)
+        AppDbContext db, ProjectAccess access, int releaseId, CancellationToken ct,
+        (Guid AppId, string Path)? withFile = null)
     {
         if (!await access.IsReleaseVisibleAsync(releaseId, ct)) return [];
         var own = await db.OeProjectBuilds.AsNoTracking()
@@ -43,7 +51,7 @@ internal static class BuildCompareCandidates
 
         var snapshot = await access.GetSnapshotAsync(ct);
         var visibleRelease = access.VisibleReleasePredicate(snapshot);
-        var rows = await db.OeProjectBuilds.AsNoTracking()
+        var builds = db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ProjectId == own.ProjectId
                         && b.ReleaseId != null
                         && b.ReleaseId != releaseId
@@ -53,7 +61,14 @@ internal static class BuildCompareCandidates
                         // A deleted pipeline's builds go with it, as on the Pipelines pages.
                         && (b.Pipeline == null || b.Pipeline.DeletedAt == null))
             .Where(OeProjectBuild.HasIndexedObjects)
-            .Where(b => db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId))
+            .Where(b => db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId));
+        if (withFile is { } file)
+        {
+            var (appId, path) = file;
+            builds = builds.Where(b => db.OeModuleFiles.Any(f =>
+                f.Path == path && f.Module!.AppId == appId && f.Module.ReleaseId == b.ReleaseId));
+        }
+        var rows = await builds
             .OrderBy(b => own.PipelineId != null && b.PipelineId == own.PipelineId ? 0 : 1)
             .ThenByDescending(b => b.StartedAt)
             .ThenByDescending(b => b.Id)

@@ -633,7 +633,8 @@ public sealed class ReleaseComparisonService
         List<ReleaseListItem>? builds = null;
         if (anchor.ReleaseKind == OeRelease.ProjectBuildKind)
         {
-            builds = await BuildCompareCandidates.ListAsync(_db, _access, anchor.ReleaseId, ct);
+            builds = await BuildCompareCandidates.ListAsync(_db, _access, anchor.ReleaseId, ct,
+                withFile: (anchor.AppId, anchor.Path));
             if (builds.Count == 0) return new();
             var buildReleaseIds = builds.Select(b => b.Id).ToList();
             files = files.Where(f => buildReleaseIds.Contains(f.Module!.ReleaseId));

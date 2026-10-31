@@ -198,6 +198,45 @@ public sealed class BuildCompareCandidatesTests : IDisposable
     }
 
     [Fact]
+    public async Task File_in_a_build_finds_an_older_build_with_the_file_past_a_cap_of_builds_without_it()
+    {
+        // A pull-request build has no pipeline, so no build ranks first as its
+        // own; if the newest builds all lack the file (another app's pipeline),
+        // filtering after the cap would leave nothing to offer.
+        long anchorFile;
+        int withFile, withFileBuild;
+        var now = DateTime.UtcNow;
+        var appId = Guid.NewGuid();
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var other = await SeedPipelineAsync(seed, projectId, "other-app");
+
+            var self = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, projectId, pipelineId: null, self, ProjectBuildStatus.Ready, now);
+            anchorFile = await SeedAppFileAsync(seed, self, appId, "src/Sales.al");
+
+            withFile = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            withFileBuild = await SeedBuildAsync(seed, projectId, pipelineId: null, withFile, ProjectBuildStatus.Ready, now.AddDays(-30));
+            await SeedAppFileAsync(seed, withFile, appId, "src/Sales.al");
+
+            var otherAppId = Guid.NewGuid();
+            for (var i = 1; i <= ObjectExplorerService.BuildCompareCandidateCap + 5; i++)
+            {
+                var release = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+                await SeedBuildAsync(seed, projectId, other, release, ProjectBuildStatus.Ready, now.AddMinutes(-i));
+                await SeedAppFileAsync(seed, release, otherAppId, "src/Sales.al");
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var targets = await NewComparison(read).GetCompareTargetsAsync(anchorFile);
+
+        targets.Should().ContainSingle().Which.Should().Match<CompareTargetOption>(t =>
+            t.ReleaseId == withFile && t.ReleaseLabel == $"Build #{withFileBuild} on BC 28.2");
+    }
+
+    [Fact]
     public async Task File_in_an_imported_release_is_not_offered_builds()
     {
         // Builds stay out of the global pickers; only the build's own Solution
