@@ -520,6 +520,64 @@ public sealed class WorkerBaseTests
     }
 
     /// <summary>
+    /// A request whose write waits on a full queue claims its key; if a restore frees
+    /// the key meanwhile and a newer request claims it, the first one giving up must
+    /// not release the newer request's claim (#1579).
+    /// </summary>
+    [Fact]
+    public async Task A_cancelled_enqueue_does_not_release_a_newer_claim_on_the_same_key()
+    {
+        var maintenance = new MaintenanceModeState();
+        var queue = new TestQueue(maintenance);
+        for (var i = 1; i <= 8; i++) await queue.EnqueueAsync(new TestJob(i), TestContext.Current.CancellationToken);
+
+        using var first = new CancellationTokenSource();
+        var older = queue.EnqueueAsync(new TestJob(100), first.Token).AsTask();
+        maintenance.AdvanceEpoch();
+        using var second = new CancellationTokenSource();
+        var newer = queue.EnqueueAsync(new TestJob(100), second.Token).AsTask();
+        queue.IsInFlight(100).Should().BeTrue();
+
+        await first.CancelAsync();
+        await FluentActions.Awaiting(() => older).Should().ThrowAsync<OperationCanceledException>();
+
+        queue.IsInFlight(100).Should().BeTrue("the newer request still holds its claim");
+        await second.CancelAsync();
+        await FluentActions.Awaiting(() => newer).Should().ThrowAsync<OperationCanceledException>();
+        queue.IsInFlight(100).Should().BeFalse("its own failed write releases it");
+    }
+
+    /// <summary>
+    /// The bases count a running job under the worker's name, so a refused restore can
+    /// say what it waited for (#1579). A job that ends takes its name with it.
+    /// </summary>
+    [Fact]
+    public void Running_jobs_are_kept_by_name_and_the_rest_counted_as_unnamed()
+    {
+        var maintenance = new MaintenanceModeState();
+        maintenance.TryBeginJob("ProjectBuildWorker 1").Should().BeTrue();
+        maintenance.TryBeginJob("ProjectBuildWorker 1").Should().BeTrue();
+        maintenance.TryBeginJob().Should().BeTrue();
+
+        var (named, unnamed) = maintenance.RunningJobs();
+        named.Should().Equal("ProjectBuildWorker 1", "ProjectBuildWorker 1");
+        unnamed.Should().Be(1);
+
+        maintenance.Enter("Restoring");
+        maintenance.TryBeginJob("ReleaseImportWorker").Should().BeFalse();
+        maintenance.RunningJobs().Named.Should().NotContain("ReleaseImportWorker", "a refused claim is not counted");
+        maintenance.Exit();
+
+        maintenance.EndJob("ProjectBuildWorker 1");
+        maintenance.EndJob("ProjectBuildWorker 1");
+        maintenance.EndJob();
+        maintenance.RunningJobs().Named.Should().BeEmpty();
+        maintenance.ActiveJobs.Should().Be(0);
+        ALDevToolbox.Services.Backups.BackupService.DescribeRunning(["ProjectBuildWorker 1", "DeliveryWorker 2", "SomethingNew"], 0)
+            .Should().Be("a build, a deployment, background upkeep");
+    }
+
+    /// <summary>
     /// The maintenance gate lives in the bases, so it only works if every scheduler
     /// and drain worker takes the flag from DI and hands it on. A new one that forgets
     /// would run straight through a restore (#1538).

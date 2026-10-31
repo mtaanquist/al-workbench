@@ -86,47 +86,14 @@ public sealed class UpgradeActionWorker : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             _heartbeat.Tick();
-            // Not while a restore runs or a failed one holds the site closed over a
-            // database that may be half-loaded: a sweep installs apps and moves
-            // update dates in customers' environments (#1321). Booked rows stay
-            // pending and fire on the first sweep after the site reopens.
-            if (_maintenance?.IsActive == true)
-            {
-                try { await Task.Delay(PollInterval, stoppingToken); }
-                catch (OperationCanceledException) { return; }
-                continue;
-            }
             try
             {
-                _heartbeat.BeginActive();
-                try
+                if (!await RunSweepAsync(recovered, stoppingToken).ConfigureAwait(false))
                 {
-                    await ForEachOrgAsync(async (org, sys, ct) =>
-                    {
-                        if (recovered.Contains(org))
-                        {
-                            await SettleStaleClaimsAsync(org, sys, ct).ConfigureAwait(false);
-                            return;
-                        }
-                        // Nothing of ours is running yet, so anything found mid-send was
-                        // orphaned by a restart. Once per org, until it succeeds.
-                        await FailInterruptedAsync(org, sys, ct).ConfigureAwait(false);
-                        recovered.Add(org);
-                    }, stoppingToken).ConfigureAwait(false);
-                    // Two passes. Every organisation's platform-update moves first - a
-                    // date the customer agreed, seconds each - then one booked app install
-                    // in all (an upload or an AppSource update, or a second look at one
-                    // nobody saw finish), which waits for it to finish. So no organisation's agreed slot waits behind another's
-                    // ten-minute install, a sweep costs at most one install, and two
-                    // installs never run at once: that can deadlock on Business Central's
-                    // own bookkeeping table.
-                    await ForEachOrgAsync((org, sys, ct) => RunDueActionsAsync(org, sys, ct, SweepPass.PlatformUpdates), stoppingToken).ConfigureAwait(false);
-                    // Whoever checks an environment after its update hears when it is on
-                    // the target version (#1047). A read, cheap when nothing is new.
-                    await ForEachOrgAsync(NotifyReadyToCheckAsync, stoppingToken).ConfigureAwait(false);
-                    await RunOneUploadAsync(stoppingToken).ConfigureAwait(false);
+                    try { await Task.Delay(PollInterval, stoppingToken); }
+                    catch (OperationCanceledException) { return; }
+                    continue;
                 }
-                finally { _heartbeat.EndActive(); }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -187,6 +154,58 @@ public sealed class UpgradeActionWorker : BackgroundService
                 _logger.LogError(ex, "UpgradeActionWorker failed for org {OrgId}.", orgId);
             }
         }
+    }
+
+    /// <summary>
+    /// One sweep. Not while a restore runs or a failed one holds the site closed over a
+    /// database that may be half-loaded: a sweep installs apps and moves update dates in
+    /// customers' environments (#1321), so it returns false and booked rows stay pending
+    /// for the first sweep after the site reopens. A sweep that runs is counted, so a
+    /// restore waits for a step polling an install (or refuses) instead of dropping the
+    /// schema under it (#1579). Test seam.
+    /// </summary>
+    internal async Task<bool> RunSweepAsync(HashSet<int> recovered, CancellationToken ct)
+    {
+        if (_maintenance?.TryBeginJob(nameof(UpgradeActionWorker)) == false) return false;
+        try
+        {
+            // The restore waits for a counted sweep, so it may finish on the database (#1571).
+            using var allowDatabase = _maintenance?.AllowDatabase();
+            _heartbeat.BeginActive();
+            try
+            {
+                await ForEachOrgAsync(async (org, sys, token) =>
+                {
+                    if (recovered.Contains(org))
+                    {
+                        await SettleStaleClaimsAsync(org, sys, token).ConfigureAwait(false);
+                        return;
+                    }
+                    // Nothing of ours is running yet, so anything found mid-send was
+                    // orphaned by a restart. Once per org, until it succeeds.
+                    await FailInterruptedAsync(org, sys, token).ConfigureAwait(false);
+                    recovered.Add(org);
+                }, ct).ConfigureAwait(false);
+                // Two passes. Every organisation's platform-update moves first - a
+                // date the customer agreed, seconds each - then one booked app install
+                // in all (an upload or an AppSource update, or a second look at one
+                // nobody saw finish), which waits for it to finish. So no organisation's agreed slot waits behind another's
+                // ten-minute install, a sweep costs at most one install, and two
+                // installs never run at once: that can deadlock on Business Central's
+                // own bookkeeping table.
+                await ForEachOrgAsync((org, sys, token) => RunDueActionsAsync(org, sys, token, SweepPass.PlatformUpdates), ct).ConfigureAwait(false);
+                // Whoever checks an environment after its update hears when it is on
+                // the target version (#1047). A read, cheap when nothing is new.
+                await ForEachOrgAsync(NotifyReadyToCheckAsync, ct).ConfigureAwait(false);
+                await RunOneUploadAsync(ct).ConfigureAwait(false);
+            }
+            finally { _heartbeat.EndActive(); }
+        }
+        finally
+        {
+            _maintenance?.EndJob(nameof(UpgradeActionWorker));
+        }
+        return true;
     }
 
     /// <summary>

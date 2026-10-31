@@ -225,6 +225,45 @@ public sealed class BackupService
     }
 
     /// <summary>
+    /// What is holding a restore up, in the SiteAdmin's words rather than worker
+    /// names (#1579): the background jobs still counted, then the uncounted rest,
+    /// which is mostly pages loading or saving.
+    /// </summary>
+    internal static string DescribeRunning(IEnumerable<string> workerNames, int unnamed)
+    {
+        var parts = new List<string>();
+        foreach (var name in workerNames)
+        {
+            // A worker with several slots is named "ProjectBuildWorker 2".
+            var cut = name.IndexOf(' ');
+            var label = WorkerLabels.GetValueOrDefault(cut < 0 ? name : name[..cut], "background upkeep");
+            if (!parts.Contains(label)) parts.Add(label);
+        }
+        if (unnamed > 0) parts.Add("a page loading or saving");
+        return parts.Count == 0 ? "background work" : string.Join(", ", parts);
+    }
+
+    private static readonly Dictionary<string, string> WorkerLabels = new(StringComparer.Ordinal)
+    {
+        ["ReleaseImportWorker"] = "an import",
+        ["ReleaseAutoImportScheduler"] = "an automatic release import",
+        ["ProjectBuildWorker"] = "a build",
+        ["DeliveryWorker"] = "a deployment",
+        ["DeliveryScheduler"] = "a deployment",
+        ["EnvironmentRefreshWorker"] = "an environment refresh",
+        ["EnvironmentRefreshScheduler"] = "an environment refresh",
+        ["UpgradeActionWorker"] = "an environment update step",
+        ["ObjectExplorerVacuumScheduler"] = "the nightly Object Explorer clean-up",
+        ["TranslationMemoryIngestScheduler"] = "a translation memory update",
+        ["BcQualityRefreshScheduler"] = "a BCQuality refresh",
+        ["OffsiteRestoreWorker"] = "an off-site download",
+        ["GitHubPullRequestBuildWorker"] = "a GitHub delivery",
+        ["GitHubWebhookRecoveryScheduler"] = "a GitHub delivery",
+        ["ProjectDiscoveryWorker"] = "a repository scan",
+        ["RepositoryDiscoveryScheduler"] = "a repository scan",
+    };
+
+    /// <summary>
     /// Refuses a new backup while the site is closed for maintenance - in
     /// practice, while a failed restore holds it closed (#1610). Shared with
     /// <see cref="PerTenantBackupService"/>.
@@ -401,16 +440,16 @@ public sealed class BackupService
         if (!quiet)
         {
             var running = _maintenance.ActiveJobs;
+            var (named, unnamed) = _maintenance.RunningJobs();
             _maintenance.Restore(before);
             _logger.LogWarning(
-                "Refusing to restore {FileName}: {Running} job(s) or database command(s) were still running after {Wait}.",
-                row.FileName, running, _activeJobsWait);
+                "Refusing to restore {FileName}: {Running} job(s) or database command(s) were still running after {Wait} ({Workers}; {Commands} unnamed).",
+                row.FileName, running, _activeJobsWait, string.Join(", ", named), unnamed);
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["BackupId"] = "Something is still running against the database - an import, a build, a background "
-                    + "task, or a page that is still loading or saving - and a restore would replace the database "
-                    + "under it. Wait a few minutes, or until imports and builds have finished, then restore. "
-                    + "Nothing was changed.",
+                ["BackupId"] = "Something is still running against the database, and a restore would replace the "
+                    + "database under it. Still running: " + DescribeRunning(named, unnamed) + ". "
+                    + "Wait a few minutes, or until it has finished, then restore. Nothing was changed.",
             });
         }
         var sw = Stopwatch.StartNew();

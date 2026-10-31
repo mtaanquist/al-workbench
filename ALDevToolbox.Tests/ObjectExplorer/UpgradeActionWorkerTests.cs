@@ -25,6 +25,32 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
     public void Dispose() => _f.Dispose();
 
+    /// <summary>
+    /// A sweep is counted like any background job, so a restore waits for a step that
+    /// is polling an install instead of dropping the database under it; and no sweep
+    /// starts while the site is closed (#1579).
+    /// </summary>
+    [Fact]
+    public async Task A_sweep_is_counted_for_the_restore_and_none_starts_during_one()
+    {
+        var maintenance = new ALDevToolbox.Services.Operations.MaintenanceModeState();
+        var worker = _f.Worker(maintenance: maintenance);
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+
+        maintenance.Enter("Restoring a backup");
+        (await worker.RunSweepAsync(new HashSet<int>(), CancellationToken.None)).Should().BeFalse();
+        maintenance.ActiveJobs.Should().Be(0);
+        _f.Admin.Writes.Should().Be(0, "nothing is sent while the site is closed");
+
+        maintenance.Exit();
+        (await worker.RunSweepAsync(new HashSet<int>(), CancellationToken.None)).Should().BeTrue();
+        maintenance.ActiveJobs.Should().Be(0, "the sweep's count is released when it ends");
+        maintenance.RunningJobs().Named.Should().BeEmpty();
+        (await _f.ReadActionAsync(actionId)).Status.Should().Be(UpgradeActionStatus.Sent, "the next open sweep sends it");
+    }
+
     [Fact]
     public async Task A_due_action_is_sent_and_attributed_to_the_person_who_booked_it()
     {

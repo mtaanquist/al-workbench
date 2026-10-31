@@ -95,10 +95,19 @@ public sealed class MaintenanceModeState
     /// then waits for <see cref="ActiveJobs"/> to reach zero either sees this job or
     /// this job sees the flag.
     /// </summary>
-    public bool TryBeginJob()
+    /// <param name="name">
+    /// The worker's name, kept so a refused restore can say what it waited for
+    /// (#1579). Pass the same name to <see cref="EndJob"/>. Null for the database
+    /// guard's per-command count, which is too frequent to name.
+    /// </param>
+    public bool TryBeginJob(string? name = null)
     {
         Interlocked.Increment(ref _activeJobs);
-        if (!IsActive) return true;
+        if (!IsActive)
+        {
+            Track(name, +1);
+            return true;
+        }
         Interlocked.Decrement(ref _activeJobs);
         return false;
     }
@@ -107,10 +116,42 @@ public sealed class MaintenanceModeState
     /// Counts a job that runs whatever the flag says, for a worker that applies its
     /// own maintenance policy inside the job. The restore still waits for it.
     /// </summary>
-    public void BeginJobRegardless() => Interlocked.Increment(ref _activeJobs);
+    public void BeginJobRegardless(string? name = null)
+    {
+        Interlocked.Increment(ref _activeJobs);
+        Track(name, +1);
+    }
 
-    /// <summary>Releases what <see cref="TryBeginJob"/> or <see cref="BeginJobRegardless"/> claimed.</summary>
-    public void EndJob() => Interlocked.Decrement(ref _activeJobs);
+    /// <summary>Releases what <see cref="TryBeginJob"/> or <see cref="BeginJobRegardless"/> claimed, under the same name.</summary>
+    public void EndJob(string? name = null)
+    {
+        Track(name, -1);
+        Interlocked.Decrement(ref _activeJobs);
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _runningByName = new();
+
+    private void Track(string? name, int delta)
+    {
+        if (name is null) return;
+        var now = _runningByName.AddOrUpdate(name, delta, (_, n) => n + delta);
+        if (now <= 0) _runningByName.TryRemove(new KeyValuePair<string, int>(name, now));
+    }
+
+    /// <summary>
+    /// The named jobs running now, one entry per running job, and how many counted
+    /// jobs carry no name (database commands in flight, mostly), by name. For the message a
+    /// refused restore gives (#1579).
+    /// </summary>
+    public (IReadOnlyList<string> Named, int Unnamed) RunningJobs()
+    {
+        var named = new List<string>();
+        foreach (var (name, count) in _runningByName.OrderBy(p => p.Key, StringComparer.Ordinal))
+        {
+            for (var i = 0; i < count; i++) named.Add(name);
+        }
+        return (named, Math.Max(0, ActiveJobs - named.Count));
+    }
 
     // ---- Database access during a restore (#1571) ---------------------------------
 
