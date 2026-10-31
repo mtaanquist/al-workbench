@@ -7,6 +7,7 @@
 @inject DatabaseUsageService Usage
 @inject ISingleTenantMode SingleTenant
 @inject NavigationManager Nav
+@inject ALDevToolbox.Services.Operations.MaintenanceModeState Maintenance
 
 <PageTitle>Space used · Site administration · AL Workbench</PageTitle>
 
@@ -129,7 +130,9 @@
                             {
                                 <form method="post" action="@($"/site-admin/storage/{r.OrganizationId}/backup")">
                                     <AntiforgeryToken />
-                                    <button type="submit" class="btn btn--sm">Back up now</button>
+                                    <button type="submit" class="btn btn--sm"
+                                            disabled="@Maintenance.IsActive"
+                                            title="@(Maintenance.IsActive ? "Backups are paused while the site is closed for maintenance" : null)">Back up now</button>
                                 </form>
                             }
                         </td>

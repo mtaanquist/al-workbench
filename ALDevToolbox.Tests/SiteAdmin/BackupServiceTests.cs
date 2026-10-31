@@ -718,7 +718,94 @@ public sealed class BackupServiceTests : IDisposable
             .Should().BeTrue("nothing was dropped");
     }
 
-    private Task<BackupLockHolder> HoldBackupLockAsync() => BackupLockHolder.AcquireAsync(_db.ConnectionString);
+    /// <summary>
+    /// While a failed restore holds the site closed, the database is empty or
+    /// half-loaded. A backup of it would be useless, and the retention prune that
+    /// follows would delete real backups to make room for it. So it is refused,
+    /// and nothing is written or pruned (#1610).
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_is_refused_while_a_failed_restore_holds_the_site_closed()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_dump.");
+        var tool = WriteFakeTool("fake-pg-dump", """
+            for a; do last="$a"; done
+            echo dump > "$last"
+            """);
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.SystemSettings.FirstAsync(s => s.Id == 1, TestContext.Current.CancellationToken);
+            settings.BackupRetentionCount = 1;
+            await ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+        var existingId = await AddBackupRowWithFileAsync();
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        var svc = NewService(_options with { PgDumpPath = tool });
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+
+        Func<Task> act = () => svc.CreateAsync(BackupKind.AdHoc);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("paused").And.Contain("Nothing was deleted");
+        Directory.GetFiles(_backupsDir, "*-adhoc" + BackupService.BackupFileSuffix)
+            .Should().ContainSingle("no dump was written and the existing one was not pruned");
+        await using (var read = _db.NewContext())
+        {
+            (await read.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+                .Should().Equal([existingId]);
+        }
+        _maintenance.IsHeldAfterFailedRestore.Should().BeTrue("a refused backup leaves the hold alone");
+
+        // Once the site reopens, backups run again, and retention with them.
+        _maintenance.Exit();
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+        await using var after = _db.NewContext();
+        (await after.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+            .Should().Equal([backup.Id]);
+    }
+
+    /// <summary>
+    /// The readability check reads the whole dump and can take minutes. The restore
+    /// holds the backup lock through it, so a scheduled backup cannot run its
+    /// retention prune meanwhile and delete the file the check has just passed,
+    /// which would leave the restore to drop the schema and then fail (#1610).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_holds_the_backup_lock_while_it_checks_the_file()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var checking = Path.Combine(_backupsDir, "checking");
+        var release = Path.Combine(_backupsDir, "release");
+        // Stand-in pg_restore: the read-through check signals it has started and
+        // waits to be released; the restore itself succeeds.
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            if [ "$1" = "-f" ]; then
+              touch '{checking}'
+              while [ ! -f '{release}' ]; do sleep 0.05; done
+            fi
+            exit 0
+            """);
+        var backupId = await AddBackupRowWithFileAsync();
+
+        var restore = NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+        try
+        {
+            await WaitForFileAsync(checking);
+
+            Func<Task> backup = () => NewService().CreateAsync(BackupKind.Scheduled);
+            await backup.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(release, "", TestContext.Current.CancellationToken);
+        }
+
+        await restore;
+        _maintenance.IsActive.Should().BeFalse();
+    }
+
+    private Task<BackupLockHolder> HoldBackupLockAsync() =>BackupLockHolder.AcquireAsync(_db.ConnectionString);
 
     private string WriteFakeTool(string name, string body)
     {

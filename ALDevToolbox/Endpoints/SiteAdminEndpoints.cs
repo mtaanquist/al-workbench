@@ -429,6 +429,10 @@ internal static class SiteAdminEndpoints
                 await backups.CreateAsync(BackupKind.AdHoc, ct);
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.OkQuery}=created");
             }
+            catch (PlanValidationException ex)
+            {
+                RedirectFirstError(ctx, RouteConstants.SiteAdminBackups, ex);
+            }
             catch (Exception ex) when (ex is InvalidOperationException or IOException)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}=" + Uri.EscapeDataString(ex.Message));

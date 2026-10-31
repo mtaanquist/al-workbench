@@ -168,6 +168,13 @@ public sealed class BackupService
         // mid-restore reads a schema being dropped. See issues #370 and #371.
         await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
 
+        // Checked under the lock, so no restore is running: maintenance mode on
+        // here means a failed restore is holding the site closed. Its database is
+        // empty or half-loaded and its retention setting is the seeded default, so
+        // a dump of it would be useless and the prune after it would delete real
+        // backups to make room (#1610).
+        RefuseWhileInMaintenance(_maintenance);
+
         var timestamp = _clock.GetUtcNow().UtcDateTime;
         var label = kind == BackupKind.Scheduled ? "scheduled" : "adhoc";
         // Millisecond precision so two runs in the same second don't collide on
@@ -215,6 +222,21 @@ public sealed class BackupService
 
         await PruneRetentionAsync(ct);
         return row;
+    }
+
+    /// <summary>
+    /// Refuses a new backup while the site is closed for maintenance - in
+    /// practice, while a failed restore holds it closed (#1610). Shared with
+    /// <see cref="PerTenantBackupService"/>.
+    /// </summary>
+    internal static void RefuseWhileInMaintenance(MaintenanceModeState? maintenance)
+    {
+        if (maintenance?.IsActive != true) return;
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["BackupId"] = "Backups are paused while the site is closed for maintenance. "
+                + "If a restore failed, restore another backup to reopen the site. Nothing was deleted.",
+        });
     }
 
     /// <summary>
@@ -327,6 +349,14 @@ public sealed class BackupService
                 throw new PlanValidationException(new Dictionary<string, string> { ["BackupId"] = blocker });
             }
         }
+        // Same advisory lock the backup path takes, so a scheduled pg_dump (or
+        // off-site prune) can't run against the schema we're about to drop (#370).
+        // Taken before the file checks, not after them: the readability check
+        // reads the whole dump and can take minutes, and a scheduled backup's
+        // retention prune meanwhile could delete the file it has just passed,
+        // leaving the restore to drop the schema and then fail (#1610).
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
+
         var path = ResolveFilePath(row.FileName);
         if (!File.Exists(path))
         {
@@ -338,11 +368,6 @@ public sealed class BackupService
 
         // Read the whole dump before anything is dropped (#1321).
         await EnsureDumpIsReadableAsync(row, path, ct);
-
-        // Same advisory lock the backup path takes, so a scheduled pg_dump (or
-        // off-site prune) can't run against the schema we're about to drop. See
-        // issue #370.
-        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
 
         var inventory = await CaptureInventoryForRestoreAsync(ct);
 

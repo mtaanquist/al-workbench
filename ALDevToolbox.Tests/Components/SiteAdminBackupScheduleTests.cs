@@ -228,6 +228,9 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
             alert.Should().Contain("may be empty or only partly loaded");
             alert.Should().Contain("Restore another backup below to reopen it.");
+            alert.Should().Contain("New backups are paused until then.");
+            // A backup of the empty database would push real ones out of retention (#1610).
+            cut.Find("form[action='/site-admin/backups/create'] button").HasAttribute("disabled").Should().BeTrue();
         });
     }
 
@@ -258,6 +261,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         {
             cut.Markup.Should().Contain("A complete copy of everything on this site.");
             cut.Markup.Should().NotContain("closed to everyone");
+            cut.Find("form[action='/site-admin/backups/create'] button").HasAttribute("disabled").Should().BeFalse();
         });
     }
 

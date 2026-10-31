@@ -86,6 +86,7 @@ public sealed class PerTenantBackupService
     private readonly string _connectionString;
     private readonly string _backupsRoot;
     private readonly DeploymentIdentity? _deployment;
+    private readonly MaintenanceModeState? _maintenance;
 
     public PerTenantBackupService(
         AppDbContext db,
@@ -100,9 +101,13 @@ public sealed class PerTenantBackupService
         BackupOptions? options = null,
         // Optional for the same reason. Stamped into every manifest and checked
         // on restore, so a snapshot another deployment took is refused (#1257).
-        DeploymentIdentity? deployment = null)
+        DeploymentIdentity? deployment = null,
+        // Optional for the same reason; production DI always supplies the
+        // singleton. A snapshot is refused while the site is closed (#1610).
+        MaintenanceModeState? maintenance = null)
     {
         _db = db;
+        _maintenance = maintenance;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
         _orgConfig = orgConfig;
@@ -214,7 +219,11 @@ public sealed class PerTenantBackupService
         // user snapshot any org. (Verified: the only Scheduled call site is
         // BackupScheduler; every endpoint passes AdHoc.)
         if (kind == BackupKind.AdHoc) _orgContext.RequireSiteAdmin();
-        var org = await _db.Organizations.AsNoTracking()
+        // While a failed full restore holds the site closed, the organisation's
+        // rows are gone or half-loaded: a snapshot of them is useless, and the
+        // retention prune after it would delete good snapshots (#1610).
+        BackupService.RefuseWhileInMaintenance(_maintenance);
+        var org =await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == organizationId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {

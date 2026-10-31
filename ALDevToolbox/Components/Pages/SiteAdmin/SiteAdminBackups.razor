@@ -21,8 +21,14 @@
     <Actions>
             <form method="post" action="/site-admin/backups/create">
                 <AntiforgeryToken />
+                @* A backup taken while the site is closed after a failed restore copies an
+                   empty database and pushes real backups out of retention (#1610); the
+                   service refuses it too. *@
                 <button type="submit" class="btn btn--sm btn--primary"
-                        title="Take a copy of everything right now">
+                        disabled="@Maintenance.IsActive"
+                        title="@(Maintenance.IsActive
+                            ? "Backups are paused while the site is closed for maintenance"
+                            : "Take a copy of everything right now")">
                     <Icon Name="database-backup" Width="14" Height="14" />
                     <span>Take a backup now</span>
                 </button>
@@ -43,7 +49,7 @@
             <Alert Tone="AlertTone.Danger" Role="alert">
                 <span>
                     @Maintenance.Reason The site is closed to everyone except site administrators.
-                    Restore another backup below to reopen it.
+                    Restore another backup below to reopen it. New backups are paused until then.
                 </span>
             </Alert>
         }
