@@ -287,7 +287,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         // One record per open, under its id; no single site-wide slot.
         js.Should().Contain("store.put(rec, rec.openId);")
             .And.Contain("return await openRecord({ openId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null })")
-            .And.Contain("await openRecord({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });")
+            .And.Contain("await openRecord({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle }, false);")
             .And.NotContain("store.put(rec, KEY)")
             .And.NotContain("getRec()");
         // Export and save read only the tab's own record.
@@ -352,9 +352,9 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
 
         // Each new open, and Continue, drops the older copies of its file once
         // the open is stored and held.
-        var open = js[js.IndexOf("async function openRecord(rec) {", StringComparison.Ordinal)..];
+        var open = js[js.IndexOf("async function openRecord(rec, dropOlder = true) {", StringComparison.Ordinal)..];
         open = open[..open.IndexOf("\n}\n", StringComparison.Ordinal)];
-        open.Should().Contain("if (ok) await dropOlderCopies(rec);");
+        open.Should().Contain("if (ok && dropOlder) await dropOlderCopies(rec);");
         open.IndexOf("dropOlderCopies", StringComparison.Ordinal)
             .Should().BeGreaterThan(open.IndexOf("await startOpen(", StringComparison.Ordinal));
         var load = js[js.IndexOf("export async function loadMeta(openId) {", StringComparison.Ordinal)..];
@@ -365,10 +365,9 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         // lock: Continue on an older session leaves a newer one alone.
         var drop = js[js.IndexOf("async function dropOlderCopies(rec) {", StringComparison.Ordinal)..];
         drop = drop[..drop.IndexOf("\n}\n", StringComparison.Ordinal)];
-        drop.Should().Contain("if (!r || !r.openId || r.openId === rec.openId) continue;")
+        drop.Should().Contain("if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;")
             .And.Contain("if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;")
-            .And.Contain("if (!(await sameFile(r, rec))) continue;")
-            .And.Contain("const gone = await whileUnheld(r.openId, async () => { await deleteKey(r.openId); return true; });")
+            .And.Contain("if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
             .And.NotContain("store.delete(");
 
         // The prompt offers a session only when no other record of its file,
@@ -376,42 +375,24 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         js.Should().Contain("if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;");
         var peek = js[js.IndexOf("export async function peek(maxAgeMs) {", StringComparison.Ordinal)..];
         peek = peek[..peek.IndexOf("\n}\n", StringComparison.Ordinal)];
-        peek.Should().Contain("if (!r.stale && !(await superseded(r, all))) current.push(r);")
+        peek.Should().Contain("if (!(await superseded(r, all))) current.push(r);")
             .And.Contain("const offerable = current")
             .And.Contain("if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
             .And.NotContain("superseded(r, free)", "a newer copy a live tab holds still makes an older free one out of date");
     }
 
     /// <summary>
-    /// The #1633 two-tab gap: tab A holds an older session of a file while
-    /// tab B opens the same file again. A's copy cannot be deleted while A has
-    /// it, and once B closes its own session nothing newer is left to show
-    /// A's copy is out of date. So B marks it stale, the prompt never offers a
-    /// stale session (and Continue refuses one), and A clears the mark only by
-    /// saving the file, which makes its copy the current one again.
+    /// A file picked or dropped from disk is stored before anything parses it,
+    /// so it drops the older sessions of its file only once the page has
+    /// opened it: one that fails to open leaves every other session alone.
     /// </summary>
     [Fact]
-    public void An_older_session_another_tab_holds_is_marked_stale_and_never_offered_once_let_go()
+    public void A_picked_file_drops_older_copies_of_its_file_only_once_it_opened()
     {
         var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
 
-        var drop = js[js.IndexOf("async function dropOlderCopies(rec) {", StringComparison.Ordinal)..];
-        drop = drop[..drop.IndexOf("\n}\n", StringComparison.Ordinal)];
-        drop.Should().Contain("if (gone !== true) await markStale(r.openId);");
-
-        var mark = js[js.IndexOf("function markStale(openId) {", StringComparison.Ordinal)..];
-        mark = mark[..mark.IndexOf("\n}\n", StringComparison.Ordinal)];
-        mark.Should().Contain("return withStore(\"readwrite\", (store) => {")
-            .And.Contain("r.stale = true;\n            store.put(r, openId);")
-            .And.NotContain("savedAt", "marking a copy stale must not make it look newer");
-
-        var load = js[js.IndexOf("export async function loadMeta(openId) {", StringComparison.Ordinal)..];
-        load = load[..load.IndexOf("\n}\n", StringComparison.Ordinal)];
-        load.Should().Contain("if (!rec || rec.stale) return { refused: \"gone\" };");
-
-        var save = js[js.IndexOf("export async function saveInPlace(", StringComparison.Ordinal)..];
-        save = save[..save.IndexOf("\n}\n", StringComparison.Ordinal)];
-        save.Should().Contain("delete latest.stale;");
+        js.Should().Contain("edits: {}, handle }, false);")
+            .And.Contain("export async function opened(openId) {\n    const rec = await getOwnRec(openId);\n    if (rec) await dropOlderCopies(rec);");
     }
 
     /// <summary>
@@ -479,19 +460,22 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         cut.WaitForAssertion(() => cut.Markup.Should().Contain(error));
         _module.Invocations["clear"].Should().ContainSingle()
             .Which.Arguments.Should().Equal("open-picked");
+        _module.Invocations["opened"].Should().BeEmpty("a file that did not open replaces nothing");
         cut.FindAll("textarea.tr-tgtarea").Should().BeEmpty();
     }
 
     [Fact]
-    public void A_picked_file_that_opens_is_kept()
+    public async Task A_picked_file_that_opens_is_kept_and_replaces_older_copies()
     {
         _module.Setup<IJSStreamReference>("loadOriginalStream", _ => true).SetResult(new TextStreamReference(DanishXliff));
         var cut = _ctx.Render<TranslatorPage>();
 
-        cut.InvokeAsync(() => cut.Instance.OpenFromHandleAsync("App.da-DK.xlf", "open-picked")).GetAwaiter().GetResult();
+        await cut.InvokeAsync(() => cut.Instance.OpenFromHandleAsync("App.da-DK.xlf", "open-picked"));
 
         cut.WaitForElement("textarea.tr-tgtarea");
         _module.Invocations["clear"].Should().BeEmpty();
+        _module.Invocations["opened"].Should().ContainSingle()
+            .Which.Arguments.Should().Equal("open-picked");
     }
 
     [Fact]

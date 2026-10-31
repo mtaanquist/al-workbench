@@ -1291,6 +1291,8 @@ else
 
         LoadParsed(fileName, parsed);
         _openId = openId;
+        // Only now that it opened does this file replace older sessions of it.
+        await _module.InvokeVoidAsync("opened", openId);
         _canSaveInPlace = true; // opened with a writable handle
         await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: fileName);
         await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
