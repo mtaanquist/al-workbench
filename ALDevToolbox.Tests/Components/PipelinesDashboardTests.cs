@@ -281,6 +281,32 @@ public sealed class PipelinesDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task A_disabled_pipeline_ahead_of_its_last_build_is_not_offered_as_ready_to_build()
+    {
+        // Build refuses a disabled pipeline, so the dashboard must not ask for one (#1551).
+        var projectId = await SeedSolutionAsync();
+        var pipeline = await SeedBuildPipelineAsync(projectId);
+        var repo = await FreshnessSeed.AddRepositoryAsync(_db, projectId);
+        await FreshnessSeed.AddBuildAsync(_db, projectId, pipeline, repo);
+        await FreshnessSeed.AddHeadAsync(_db, repo, "main", FreshnessSeed.Newest,
+            commits: [FreshnessSeed.Built, FreshnessSeed.Newer, FreshnessSeed.Newest]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == pipeline)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<PipelinesDashboard>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var tile = cut.FindAll(".cue-grid a.cue").Single(t => t.QuerySelector(".cue__label")!.TextContent.Trim() == "Ready to build");
+            tile.QuerySelector(".cue__value")!.TextContent.Trim().Should().Be("0");
+            cut.Markup.Should().NotContain("ahead of its last build");
+        });
+    }
+
+    [Fact]
     public async Task A_branch_ahead_of_its_last_build_is_a_ready_to_build_tile_and_an_attention_row()
     {
         var projectId = await SeedSolutionAsync();
