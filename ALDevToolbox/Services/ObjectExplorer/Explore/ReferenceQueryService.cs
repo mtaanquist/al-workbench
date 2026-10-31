@@ -902,16 +902,19 @@ public sealed class ReferenceQueryService
                 SELECT f.id AS file_id,
                        -- Both alternatives of the pattern contain the word, so
                        -- the substring test is a safe and cheaper gate.
-                       fc.content ILIKE '%temporary%' AND fc.content ~* {4} AS rec_temporary,
+                       g.has_temporary AND fc.content ~* {4} AS rec_temporary,
                        -- The capture walks the whole file; most files declare
                        -- nothing temporary, and the plain substring test
                        -- skips them for the price of one scan.
-                       CASE WHEN fc.content ILIKE '%temporary%' THEN
+                       CASE WHEN g.has_temporary THEN
                            ARRAY(SELECT coalesce(x.m[1], x.m[2])
                                  FROM regexp_matches(fc.content, {3}, 'gi') AS x(m))
                        END AS names
                 FROM oe_module_files  f
                 JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+                -- The gate is computed once per file, not once per use; OFFSET 0
+                -- keeps the planner from folding it back into both columns.
+                CROSS JOIN LATERAL (SELECT fc.content ILIKE '%temporary%' AS has_temporary OFFSET 0) g
                 WHERE f.id = ANY({5}::bigint[]) AND f.organization_id = {2}::int
             ),
             split AS MATERIALIZED (
@@ -923,7 +926,10 @@ public sealed class ReferenceQueryService
             SELECT m.file_id                             AS "FileId",
                    m.line                                AS "LineNumber",
                    f.path                                AS "Path",
-                   split_part(fc.content, E'\n', m.line) AS "Text",
+                   -- A file already split takes its line from the array, so
+                   -- only the others decompress their content once per line.
+                   CASE WHEN s.file_id IS NOT NULL THEN coalesce(s.lines[m.line], '')
+                        ELSE split_part(fc.content, E'\n', m.line) END AS "Text",
                    t.rec_temporary                       AS "RecTemporary",
                    t.names                               AS "TemporaryNames",
                    greatest(m.line - {7}, 1)             AS "ContextStart",
