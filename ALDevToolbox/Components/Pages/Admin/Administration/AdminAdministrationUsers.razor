@@ -622,6 +622,13 @@
             _selected.Clear();
             await LoadAsync();
         }
+        catch (PlanValidationException ex)
+        {
+            // The whole batch was refused, e.g. this page outlived the
+            // signed-in admin's own rights (#1534).
+            _lastError = ex.Errors.FirstOrDefault().Value ?? "The change was rejected.";
+            await LoadAsync();
+        }
         catch (Exception ex)
         {
             Log.LogError(ex, "Bulk {Action} on users raised an unexpected error.", label);
