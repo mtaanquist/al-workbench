@@ -306,7 +306,8 @@ environment, so one booked for the window's opening can come up after the window
 its turn comes, a deployment the window chose (`scheduled_by_delivery_window`, not
 `scheduled_outside_window`) is judged at that moment against the environment's window as it is
 now; outside it, the deployment moves to the next opening and a log line says so. One a person
-placed outside the window on purpose runs when they said.
+placed outside the window on purpose runs when they said. Booked app installs and AppSource
+updates follow the same rule (#1539, "Uploading apps" below).
 
 **The organisation can set the window a new environment starts with** (#962). Administration →
 Business Central holds one default for Production and one for Sandbox, each start-and-end or "any
@@ -695,7 +696,23 @@ that names the environment and says what the click does there:
   **one** upload across all organisations, so a batch spreads over as many sweeps as it
   has apps, no customer's agreed update slot waits behind another's install, and a sweep
   costs at most one install (the worker's heartbeat is ticked on every poll of it). "Now"
-  therefore means "shortly", not "within a minute", when another install is running. An
+  therefore means "shortly", not "within a minute", when another install is running. That
+  one turn goes to the organisation whose due install has waited longest (the earliest
+  `execute_after` among its due installs and installs owed a second look), not to
+  whichever organisation the list happens to return first, so one organisation's long
+  queue cannot hold back another's slot until it has drained (#1539).
+
+  **A time a window chose stays inside the window** - the deployments rule (#1124),
+  extended to booked installs (#1539). The row records which window applied
+  (`scheduled_by_window`: `DeliveryWindow` or `BcUpdateWindow`, null for a picked time or
+  now). One install at a time means a batch, or a queue of other bookings for the same
+  opening, can outlast a two-hour window. So before sending a window-chosen upload or
+  AppSource update, the worker judges the moment against the environment's window as it
+  is now (the delivery window, else Microsoft's), and outside it moves that row and the
+  rest of its batch still waiting to the next opening, with a log line, rather than
+  installing into the customer's working day. A picked time runs when the person said,
+  late or not, and Install now clears the mark because the person has then chosen the
+  time. When no window is configured any more, the row runs. An
   install the workbench could not see finish - a run of failed polls, the wait ran out,
   or a restart while it was installing - is recorded as **sent, unconfirmed** and marked
   to be asked about again (`package_confirmation_due`, #1002). A later sweep re-polls it

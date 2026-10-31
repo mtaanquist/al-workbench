@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Workers;
@@ -123,12 +124,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                     // Whoever checks an environment after its update hears when it is on
                     // the target version (#1047). A read, cheap when nothing is new.
                     await ForEachOrgAsync(NotifyReadyToCheckAsync, stoppingToken).ConfigureAwait(false);
-                    var uploadSent = false;
-                    await ForEachOrgAsync(async (org, sys, ct) =>
-                    {
-                        if (uploadSent) return;
-                        uploadSent = await RunDueActionsAsync(org, sys, ct, SweepPass.OneUpload).ConfigureAwait(false) > 0;
-                    }, stoppingToken).ConfigureAwait(false);
+                    await RunOneUploadAsync(stoppingToken).ConfigureAwait(false);
                 }
                 finally { _heartbeat.EndActive(); }
             }
@@ -152,23 +148,29 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// it would in a request. The active-org enumeration is the one cross-org read; the
     /// organisations table carries no tenant filter, so it needs no bypass.
     /// </summary>
-    private async Task ForEachOrgAsync(Func<int, bool, CancellationToken, Task> perOrg, CancellationToken ct)
-    {
-        // IsSystem travels with the id so the per-org identity carries the org's real
-        // flag rather than a hard-coded false (issue #694).
-        List<(int Id, bool IsSystem)> orgs;
-        await using (var scope = _services.CreateAsyncScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            // The org enumeration; per-org work then runs inside that org's
-            // AmbientOrganizationScope.
-            var rows = await db.Organizations.AsNoTracking()
-                .Where(o => !o.IsPending)
-                .Select(o => new { o.Id, o.IsSystem })
-                .ToListAsync(ct).ConfigureAwait(false);
-            orgs = rows.Select(o => (o.Id, o.IsSystem)).ToList();
-        }
+    private async Task ForEachOrgAsync(Func<int, bool, CancellationToken, Task> perOrg, CancellationToken ct) =>
+        await RunForOrgsAsync(await ListOrgsAsync(ct).ConfigureAwait(false), perOrg, ct).ConfigureAwait(false);
 
+    /// <summary>
+    /// The active organisations. IsSystem travels with the id so the per-org identity
+    /// carries the org's real flag rather than a hard-coded false (issue #694).
+    /// </summary>
+    private async Task<List<(int Id, bool IsSystem)>> ListOrgsAsync(CancellationToken ct)
+    {
+        await using var scope = _services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        // The org enumeration; per-org work then runs inside that org's
+        // AmbientOrganizationScope.
+        var rows = await db.Organizations.AsNoTracking()
+            .Where(o => !o.IsPending)
+            .Select(o => new { o.Id, o.IsSystem })
+            .ToListAsync(ct).ConfigureAwait(false);
+        return rows.Select(o => (o.Id, o.IsSystem)).ToList();
+    }
+
+    /// <summary>Runs <paramref name="perOrg"/> for each of <paramref name="orgs"/> in the order given; one org's failure is logged and the rest go on.</summary>
+    private async Task RunForOrgsAsync(IEnumerable<(int Id, bool IsSystem)> orgs, Func<int, bool, CancellationToken, Task> perOrg, CancellationToken ct)
+    {
         foreach (var (orgId, isSystem) in orgs)
         {
             try
@@ -185,6 +187,52 @@ public sealed class UpgradeActionWorker : BackgroundService
                 _logger.LogError(ex, "UpgradeActionWorker failed for org {OrgId}.", orgId);
             }
         }
+    }
+
+    /// <summary>
+    /// The sweep's one booked app install, across every organisation. The turn goes to the
+    /// organisation whose oldest due install (or install still owed a second look) has
+    /// waited longest, not to whichever comes first in the list, so one organisation's
+    /// long queue cannot hold back another's slot until it has drained (#1539). Still one
+    /// install in all - see the comment in <see cref="ExecuteAsync"/>. An organisation
+    /// whose due rows all turn out to be waiting (a batch gate, a window that closed)
+    /// passes the turn on. Internal so a test can drive the pass. True when one was sent.
+    /// </summary>
+    internal async Task<bool> RunOneUploadAsync(CancellationToken ct)
+    {
+        var orgs = await ListOrgsAsync(ct).ConfigureAwait(false);
+        var oldest = new Dictionary<int, DateTime>();
+        await RunForOrgsAsync(orgs, async (org, sys, token) =>
+        {
+            if (await OldestDueInstallAsync(org, sys, token).ConfigureAwait(false) is { } at) oldest[org] = at;
+        }, ct).ConfigureAwait(false);
+
+        var sent = false;
+        await RunForOrgsAsync(
+            orgs.Where(o => oldest.ContainsKey(o.Id)).OrderBy(o => oldest[o.Id]).ThenBy(o => o.Id),
+            async (org, sys, token) =>
+            {
+                if (sent) return;
+                sent = await RunDueActionsAsync(org, sys, token, SweepPass.OneUpload).ConfigureAwait(false) > 0;
+            }, ct).ConfigureAwait(false);
+        return sent;
+    }
+
+    /// <summary>When this org's longest-waiting install became due, or null when it has none to send or ask about again.</summary>
+    private async Task<DateTime?> OldestDueInstallAsync(int orgId, bool isSystem, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        using var ambient = AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
+        await using var scope = _services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        return await db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.ConfirmationDue
+                        || (a.Status == UpgradeActionStatus.Pending
+                            && a.SentAt == null
+                            && a.ExecuteAfter <= now
+                            && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)))
+            .MinAsync(a => (DateTime?)a.ExecuteAfter, ct).ConfigureAwait(false);
     }
 
     /// <summary>Which of a sweep's two passes a call makes; <see cref="Both"/> is the one-call form a test drives.</summary>
@@ -224,7 +272,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .ThenBy(a => a.BatchOrder)
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
-                    a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder))
+                    a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow))
                 .ToListAsync(ct).ConfigureAwait(false);
         }
 
@@ -287,6 +335,65 @@ public sealed class UpgradeActionWorker : BackgroundService
         userId is { } id
         && await db.Users.AsNoTracking()
             .AnyAsync(u => u.Id == id && u.Status == UserStatus.Active, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// The deliveries rule (#1124) for a booked install a window chose the time for: judged
+    /// against the environment's window as it is now, the same answer a booking made now
+    /// would get (the delivery window, else Microsoft's update window). When the window
+    /// has closed, the row and the rest of its batch still waiting are moved to its next
+    /// opening rather than sent. A time the person picked is never held back - those rows
+    /// carry no window. Nothing is moved when no window is configured any more. The write
+    /// is a compare-and-set on rows still pending, unsent and window-chosen, so a cancel
+    /// or an "Install now" in between wins. True when the row was moved.
+    /// </summary>
+    private async Task<bool> MovedPastClosedWindowAsync(AppDbContext db, DueAction action, UploadAppTiming window, CancellationToken ct)
+    {
+        var env = await db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == action.EnvironmentId)
+            .Select(e => new
+            {
+                e.Name, e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays, e.Project!.BcTimeZone,
+                e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana,
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (env is null) return false;
+
+        TimeOnly? start, end;
+        DeliveryDays days;
+        TimeZoneInfo tz;
+        if (window == UploadAppTiming.DeliveryWindow && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
+        {
+            (start, end, days, tz) = (env.UpdateWindowStart, env.UpdateWindowEnd, env.UpdateWindowDays,
+                UpdateWindow.ResolveTimeZone(env.BcTimeZone));
+        }
+        else if (UpdateWindow.IsConfigured(env.BcUpdateWindowStart, env.BcUpdateWindowEnd))
+        {
+            // Microsoft's window is expressed in its own zone, as the booking read it.
+            (start, end, days, tz) = (env.BcUpdateWindowStart, env.BcUpdateWindowEnd, DeliveryDays.Every,
+                UpdateWindow.ResolveTimeZone(env.BcUpdateWindowTimeZoneIana ?? env.BcTimeZone));
+        }
+        else
+        {
+            return false;
+        }
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (UpdateWindow.IsWithin(start, end, tz, now, days)) return false;
+
+        var next = UpdateWindow.NextOpeningUtc(start, end, tz, now, days);
+        var moved = await db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null
+                        && a.ScheduledByWindow != null && a.ExecuteAfter < next)
+            .Where(a => action.BatchId != null ? a.BatchId == action.BatchId : a.Id == action.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, next), ct).ConfigureAwait(false);
+        if (moved > 0)
+        {
+            _logger.LogInformation(
+                "Booked install {ActionId} ({FileName}) on {Environment} came up after its window closed; {Moved} row(s) moved to the next opening, {NextOpening}.",
+                action.Id, action.Label, env.Name, moved, next);
+        }
+        return moved > 0;
+    }
 
     /// <summary>What one due row came to: left alone, settled without a send, or sent.</summary>
     private enum RunOutcome { Skipped, Settled, Sent }
@@ -373,6 +480,16 @@ public sealed class UpgradeActionWorker : BackgroundService
                 await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);
                 return RunOutcome.Settled;
             }
+        }
+
+        // A window chose this install's time, so it runs inside that window or waits for
+        // the next opening (#1539): a batch or a queue of other bookings can outlast the
+        // window, and an install is not sent into the customer's working day for that.
+        if (action.ScheduledByWindow is { } window
+            && UpgradeActionService.IsAppInstall(action.Kind)
+            && await MovedPastClosedWindowAsync(db, action, window, ct).ConfigureAwait(false))
+        {
+            return RunOutcome.Skipped;
         }
 
         // Claim first, and this compare-and-set is what beats a racing cancel: stamping
@@ -837,5 +954,5 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// </summary>
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
-        string? Label, Guid? BatchId, int? BatchOrder);
+        string? Label, Guid? BatchId, int? BatchOrder, UploadAppTiming? ScheduledByWindow);
 }

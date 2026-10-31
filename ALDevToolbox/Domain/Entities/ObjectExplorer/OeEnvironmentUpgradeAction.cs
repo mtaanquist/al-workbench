@@ -1,3 +1,4 @@
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 namespace ALDevToolbox.Domain.Entities.ObjectExplorer;
 
@@ -148,6 +149,19 @@ public class OeEnvironmentUpgradeAction
     /// action performed immediately, so the feed can order and read both kinds alike.
     /// </summary>
     public DateTime ExecuteAfter { get; set; }
+
+    /// <summary>
+    /// The window that chose <see cref="ExecuteAfter"/> for a booked install:
+    /// <see cref="UploadAppTiming.DeliveryWindow"/> or <see cref="UploadAppTiming.BcUpdateWindow"/>,
+    /// whichever actually applied. Null for a time the person picked, for "now", and for
+    /// every row that is not a booked install. A window-chosen install runs inside that
+    /// window or not at all: when its turn comes after the window has closed (one install
+    /// at a time, and a batch or a queue of bookings can outlast the window), the worker
+    /// moves it and the rest of its batch to the next opening rather than installing
+    /// while people are working - the rule deliveries follow (#1124, #1539). "Install
+    /// now" clears it, because the person has then picked the time.
+    /// </summary>
+    public UploadAppTiming? ScheduledByWindow { get; set; }
 
     /// <summary>When the change actually reached Business Central (or failed trying). Null while pending or cancelled.</summary>
     public DateTime? SentAt { get; set; }

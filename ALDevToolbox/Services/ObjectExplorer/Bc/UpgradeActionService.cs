@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -321,8 +322,12 @@ public sealed class UpgradeActionService
         var moved = await _db.OeEnvironmentUpgradeActions
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
             .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
-            .Where(a => a.ExecuteAfter > now)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
+            .Where(a => a.ExecuteAfter > now || a.ScheduledByWindow != null)
+            // The person has picked the time now, so no window holds these rows back any
+            // more: the worker's window check (#1539) must not move them out again.
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.ExecuteAfter, a => a.ExecuteAfter > now ? now : a.ExecuteAfter)
+                .SetProperty(a => a.ScheduledByWindow, (UploadAppTiming?)null), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep.",

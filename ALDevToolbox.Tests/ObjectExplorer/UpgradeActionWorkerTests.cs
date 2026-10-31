@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.Workers;
@@ -1543,6 +1544,186 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
             .Which.Errors.Values.Should().ContainMatch("*booked for a later install*");
         (await _f.ReadActionAsync(update)).ExecuteAfter.Should().BeAfter(_f.Clock.GetUtcNow().UtcDateTime);
+    }
+
+    // ── A window chose the time (#1539) ─────────────────────────────────
+    // The deliveries rule (#1124) for booked installs: a time a window chose runs inside
+    // that window or waits for its next opening. The fixture's clock starts on Friday
+    // 2026-09-11 at 08:00 UTC, 10:00 in Copenhagen.
+
+    [Fact]
+    public async Task A_window_booked_batch_that_outlasts_its_window_moves_the_rest_to_the_next_opening()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        // 22:00-00:00 in Copenhagen (summer time) is 20:00-22:00 UTC.
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        var ids = await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "Core.app", "Reports.app");
+        var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+        foreach (var id in ids)
+        {
+            var row = await _f.ReadActionAsync(id);
+            row.ScheduledByWindow.Should().Be(UploadAppTiming.DeliveryWindow, "the row remembers that a window chose its time");
+            row.ExecuteAfter.Should().Be(opening);
+        }
+
+        // Inside the window: the first app goes.
+        _f.Clock.Advance(TimeSpan.FromHours(12));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        // The window has closed before the second app's turn came.
+        _f.Clock.Advance(TimeSpan.FromMinutes(150));
+        var ran = await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        ran.Should().Be(0);
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Core.app" }, "nothing is installed into the customer's working day");
+        var second = await _f.ReadActionAsync(ids[1]);
+        second.Status.Should().Be(UpgradeActionStatus.Pending);
+        second.SentAt.Should().BeNull();
+        second.ExecuteAfter.Should().Be(opening.AddDays(1), "it waits for the window's next opening");
+        second.PackageContent.Should().NotBeNull("the package is still needed for the next opening");
+
+        // And goes at that opening.
+        _f.Clock.Advance(opening.AddDays(1) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");
+    }
+
+    [Fact]
+    public async Task An_update_booked_for_microsofts_window_that_comes_up_after_it_closed_waits_for_the_next_opening()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        // 01:00-05:00 in Copenhagen (summer time) is 23:00-03:00 UTC.
+        await SetWindowsAsync(envId, bcStart: new TimeOnly(1, 0), bcEnd: new TimeOnly(5, 0), bcZone: "Europe/Copenhagen");
+        Waiting();
+        await AsOwnerAsync(ctx => _f.Connections(ctx).BookAppUpdateAsync(projectId, envId, CoreAppId, "28.5.0.1", UploadAppTiming.BcUpdateWindow));
+        await using (var read = _f.Db.NewContext())
+        {
+            var booked = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
+            booked.ScheduledByWindow.Should().Be(UploadAppTiming.BcUpdateWindow);
+            booked.ExecuteAfter.Should().Be(new DateTime(2026, 9, 11, 23, 0, 0, DateTimeKind.Utc));
+        }
+
+        // 06:00 in Copenhagen the next morning: the window closed an hour ago.
+        _f.Clock.Advance(new DateTime(2026, 9, 12, 4, 0, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
+        var ran = await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        ran.Should().Be(0);
+        _f.Apps.Updated.Should().BeEmpty();
+        await using var after = _f.Db.NewContext();
+        var row = await after.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
+        row.Status.Should().Be(UpgradeActionStatus.Pending);
+        row.ExecuteAfter.Should().Be(new DateTime(2026, 9, 12, 23, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task A_picked_time_outside_the_window_still_fires()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        // 11:00 in Copenhagen, well outside the window: the person chose it.
+        var actionId = (await BookUploadAsync(projectId, envId, hoursAhead: 1, "Partner.app"))[0];
+        (await _f.ReadActionAsync(actionId)).ScheduledByWindow.Should().BeNull();
+
+        _f.Clock.Advance(TimeSpan.FromHours(3));
+        var ran = await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        ran.Should().Be(1, "a picked time runs when the person said, even late");
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Partner.app" });
+    }
+
+    [Fact]
+    public async Task Install_now_on_a_window_booking_is_not_held_back_by_the_window()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        var ids = await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "Core.app", "Reports.app");
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Svc(ctx).RunBookedInstallNowAsync(ids[0]);
+
+        foreach (var id in ids)
+        {
+            (await _f.ReadActionAsync(id)).ScheduledByWindow.Should().BeNull("the person has picked the time now");
+        }
+        (await SweepUntilQuietAsync()).Should().Be(2);
+        _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");
+    }
+
+    [Fact]
+    public async Task The_install_turn_goes_to_the_organisation_whose_install_has_waited_longest()
+    {
+        // This organisation's install has been due since 09:00...
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 1, "Waited.app");
+        // ...another's only since 10:00. The organisations list in no particular order,
+        // and the other one usually comes first.
+        int otherActionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var project = new OeProject
+            {
+                OrganizationId = TestDb.OtherOrgId, Name = "CRONUS Sweden", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            var env = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.OtherOrgId, ProjectId = project.Id, Name = "Production", Type = "Production",
+                ApplicationFamily = "BusinessCentral", Status = "Active", FetchedAt = DateTime.UtcNow,
+            };
+            ctx.OeProjectEnvironments.Add(env);
+            await ctx.SaveChangesAsync();
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            var action = new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.OtherOrgId, ProjectId = project.Id, EnvironmentId = env.Id,
+                Kind = UpgradeActionKind.UploadApp, Status = UpgradeActionStatus.Pending,
+                RequestedBy = "someone <someone@example.com>", RequestedAt = now, ExecuteAfter = now.AddHours(2),
+                PackageFileName = "Newer.app", PackageContent = new byte[] { 1, 2, 3 },
+            };
+            ctx.OeEnvironmentUpgradeActions.Add(action);
+            await ctx.SaveChangesAsync();
+            otherActionId = action.Id;
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(3));
+        var sent = await _f.Worker().RunOneUploadAsync(CancellationToken.None);
+
+        sent.Should().BeTrue();
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Waited.app" }, "the install that has waited longest takes the sweep's one turn");
+        await using var read = _f.Db.NewContext();
+        var other = await read.OeEnvironmentUpgradeActions.IgnoreQueryFilters().AsNoTracking().SingleAsync(a => a.Id == otherActionId);
+        other.Status.Should().Be(UpgradeActionStatus.Pending, "it waits for the next sweep");
+        other.SentAt.Should().BeNull();
+    }
+
+    /// <summary>Sets an environment's delivery window and Microsoft's update window, as the environment page and a refresh would.</summary>
+    private async Task SetWindowsAsync(int envId,
+        TimeOnly? deliveryStart = null, TimeOnly? deliveryEnd = null,
+        TimeOnly? bcStart = null, TimeOnly? bcEnd = null, string? bcZone = null)
+    {
+        await using var ctx = _f.Db.NewContext();
+        var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envId);
+        env.UpdateWindowStart = deliveryStart;
+        env.UpdateWindowEnd = deliveryEnd;
+        env.BcUpdateWindowStart = bcStart;
+        env.BcUpdateWindowEnd = bcEnd;
+        env.BcUpdateWindowTimeZoneIana = bcZone;
+        if (bcStart is not null) env.BcUpdateWindowFetchedAt = DateTime.UtcNow;
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>Books uploads for a window as the solution's owner. Returns the row ids in batch order.</summary>
+    private async Task<List<int>> BookInWindowAsync(int projectId, int environmentId, UploadAppTiming timing, params string[] files)
+    {
+        await AsOwnerAsync(ctx => _f.Connections(ctx).InstallUploadedAppsAsync(
+            projectId, environmentId, files.Select(f => new UploadPackage(new byte[] { 7, 8, 9 }, f)).ToList(), timing));
+        await using var read = _f.Db.NewContext();
+        return await read.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == environmentId && a.Kind == UpgradeActionKind.UploadApp)
+            .OrderBy(a => a.BatchOrder).ThenBy(a => a.Id)
+            .Select(a => a.Id).ToListAsync();
     }
 
     /// <summary>The shape a restart mid-install leaves: claimed, still pending, with the operation Business Central answered with.</summary>

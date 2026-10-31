@@ -1921,6 +1921,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 RequestedBy = requestedBy,
                 RequestedAt = now,
                 ExecuteAfter = runsAt,
+                ScheduledByWindow = WindowThatChose(applied),
                 BcAppId = update.AppId,
                 AppName = Truncate(update.Name, 250),
                 TargetVersion = update.Version,
@@ -2115,6 +2116,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 RequestedBy = requestedBy,
                 RequestedAt = now,
                 ExecuteAfter = runsAt,
+                ScheduledByWindow = WindowThatChose(applied),
                 PackageFileName = cleaned[i].Name,
                 PackageContent = cleaned[i].Bytes,
                 BatchId = batchId,
@@ -2208,6 +2210,13 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         return (applied, runsAt);
     }
+
+    /// <summary>
+    /// The window a booking's time came from, stored on the row so the worker holds the
+    /// install to it when its turn comes (#1539); null for a picked time or "now".
+    /// </summary>
+    private static UploadAppTiming? WindowThatChose(UploadAppTiming applied) =>
+        applied is UploadAppTiming.DeliveryWindow or UploadAppTiming.BcUpdateWindow ? applied : null;
 
     /// <summary>The most apps one upload may book together. A vendor's suite, not a whole environment.</summary>
     public const int MaxUploadBatch = 10;
