@@ -251,10 +251,9 @@ public sealed class WorkspaceZipBuilder
             // for the same reason sibling mode suppresses them.
             if (sibling is null && includeWorkspaceRootFiles)
             {
-                // The New Extension form's publisher is user-editable and is
-                // what this extension's app.json carries, so {{publisher}} in
-                // the root files resolves to the same value rather than to the
-                // org default the workspace flow uses.
+                // {{publisher}} in the root files resolves to the publisher this
+                // extension's app.json carries: the organisation's, settled by
+                // GenerationService before the plan gets here.
                 fileCount += WriteOrgFiles(
                     archive, folderName, includedFiles, standaloneAsWorkspacePlan, template, plan.Publisher,
                     orgConfig.Settings.NamingFolderStyle, ct);

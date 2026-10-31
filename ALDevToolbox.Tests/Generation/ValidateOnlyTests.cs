@@ -329,6 +329,22 @@ public sealed class ValidateOnlyTests : IDisposable
         await AssertGenerateRefusesAsync(plan, "ExtensionPrefix");
     }
 
+    /// <summary>
+    /// Left alone, the prefix field posts what an empty field resolves to - with
+    /// no short name, the customer's whole name, which may be up to 100
+    /// characters. That is not a typed prefix and is not capped.
+    /// </summary>
+    [Fact]
+    public async Task An_untouched_prefix_field_carrying_a_long_customer_name_is_accepted()
+    {
+        await SeedTemplateAsync();
+        await SetOrgSettingsAsync(new OrganizationSettings { ExtensionPrefixMode = ExtensionPrefixMode.PerWorkspace });
+        var customer = "CRONUS " + new string('A', 53);
+        var plan = PlanBuilder.WorkspacePlan(workspaceName: customer, shortName: null, extensionPrefix: customer);
+
+        (await NewService().ValidateWorkspaceAsync(plan)).Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_typed_prefix_of_fifty_characters_is_accepted()
     {

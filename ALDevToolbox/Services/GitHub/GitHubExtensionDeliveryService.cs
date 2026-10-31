@@ -205,7 +205,8 @@ public sealed class GitHubExtensionDeliveryService
                 token, repo.Owner, repo.Name, fileName, repo.DefaultBranch, ct);
             if (codeWorkspace is null)
             {
-                var rootTree = await _github.ListTreeAsync(token, repo.Owner, repo.Name, repo.DefaultBranch, ct);
+                var rootTree = await _github.ListTreeAsync(
+                    token, repo.Owner, repo.Name, repo.DefaultBranch, ct, recursive: false);
                 var atRoot = rootTree.Entries
                     .Where(e => e.Type == "blob" && !e.Path.Contains('/')
                         && e.Path.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase))

@@ -1235,6 +1235,9 @@
         _errors = errors;
         _unfieldedErrors = errors
             .Where(e => !FieldedKeys.Contains(e.Key)
+                // The prefix field, and its error slot, only exist when the
+                // organisation leaves the prefix to each workspace.
+                && !(e.Key == "ExtensionPrefix" && ShowExtensionPrefix)
                 // The checkbox list, and the slot under it, only exist when the
                 // template has optional extensions to tick.
                 && !(e.Key == "SelectedExtensionPaths" && _optionalExtensions.Count > 0))

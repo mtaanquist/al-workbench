@@ -226,10 +226,14 @@ public class GenerationService
         // under Hidden and Fixed whatever arrived is ignored. See
         // .design/customer-naming.md.
         var typedPrefix = plan.ExtensionPrefix?.Trim();
+        // What the prefix would be with nothing typed: the page posts it when the
+        // field is left alone, and it can be as long as the customer's name.
+        var untypedPrefix = ExtensionPrefixPolicy.Resolve(orgConfig.Settings, null, plan.ShortName, plan.WorkspaceName);
         plan = plan with { ExtensionPrefix = ResolvePrefix(orgConfig, plan) };
         // A prefix the user typed is checked on its own, so a long one is named
         // under its own field rather than blamed on the short name (#1615).
-        if (!string.IsNullOrEmpty(typedPrefix) && plan.ExtensionPrefix == typedPrefix
+        if (orgConfig.Settings.ExtensionPrefixMode == ExtensionPrefixMode.PerWorkspace
+            && !string.IsNullOrEmpty(typedPrefix) && typedPrefix != untypedPrefix
             && (typedPrefix.Length > CustomerNaming.MaxShortNameLength || typedPrefix.Any(char.IsControl)))
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -676,21 +680,22 @@ public class GenerationService
         for (var i = 0; i < plan.Dependencies.Count; i++)
         {
             var dep = plan.Dependencies[i];
+            var which = string.IsNullOrWhiteSpace(dep.DepName) ? $"Dependency {i + 1}" : $"The dependency {dep.DepName.Trim()}";
             if (!Guid.TryParse(dep.DepId?.Trim(), out var depId))
             {
                 errors[$"Dependencies[{i}].DepId"] =
-                    "Give the dependency's app id as a GUID, for example 63ca2fa4-4f03-4f2b-a480-172fef340d3f.";
+                    $"{which} needs its app id as a GUID, for example 63ca2fa4-4f03-4f2b-a480-172fef340d3f.";
             }
             else if (!seenIds.Add(depId))
             {
                 errors[$"Dependencies[{i}].DepId"] = $"Duplicate dependency id '{dep.DepId}'.";
             }
             if (string.IsNullOrWhiteSpace(dep.DepName))
-                errors[$"Dependencies[{i}].DepName"] = "Give the dependency's name.";
+                errors[$"Dependencies[{i}].DepName"] = $"{which} needs a name.";
             if (string.IsNullOrWhiteSpace(dep.DepPublisher))
-                errors[$"Dependencies[{i}].DepPublisher"] = "Give the dependency's publisher.";
+                errors[$"Dependencies[{i}].DepPublisher"] = $"{which} needs a publisher.";
             if (string.IsNullOrWhiteSpace(dep.DepVersion))
-                errors[$"Dependencies[{i}].DepVersion"] = "Give the dependency's version, for example 1.0.0.0.";
+                errors[$"Dependencies[{i}].DepVersion"] = $"{which} needs a version, for example 1.0.0.0.";
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
