@@ -28,6 +28,16 @@ namespace ALDevToolbox.Services.Account;
 /// authorisation decides what they may still see. One check covers every
 /// interactive page, so no page or service has to re-read its actor itself.
 /// </para>
+/// <para>
+/// It is also where a restore reaches interactive pages, which the
+/// maintenance middleware never sees: a click on an open page is a circuit
+/// event, not a request (#1571). An event that starts while the site is open
+/// is counted on <see cref="MaintenanceModeState.ActiveJobs"/>, so a restore
+/// waits for it before dropping the database. Once maintenance mode is on,
+/// events from anyone but a SiteAdmin are dropped and the page is reloaded,
+/// which lands on the maintenance page; a SiteAdmin's pages keep working, and
+/// their events are counted too.
+/// </para>
 /// </summary>
 public sealed class SessionRevalidationCircuitHandler : CircuitHandler
 {
@@ -80,7 +90,25 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
                 SendToRefresh();
                 return;
             }
-            await next(context);
+            if (_maintenance.TryBeginJob())
+            {
+                // Counted while it runs, so a restore that starts meanwhile
+                // waits for it rather than dropping the database under it.
+                try { await next(context); }
+                finally { _maintenance.EndJob(); }
+                return;
+            }
+            // Maintenance mode is on. The users table may be empty or gone,
+            // so the claim decides, as it does in the maintenance middleware.
+            var principal = (await _authState.GetAuthenticationStateAsync()).User;
+            if (principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) != "true")
+            {
+                SendToMaintenancePage();
+                return;
+            }
+            _maintenance.BeginJobRegardless();
+            try { await next(context); }
+            finally { _maintenance.EndJob(); }
         };
 
     /// <summary>
@@ -159,20 +187,32 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
 
     private void SendToRefresh()
     {
+        var back = "/" + _navigation.ToBaseRelativePath(_navigation.Uri);
+        ForceLoad($"{CookieSessionRevalidation.RefreshPath.TrimStart('/')}?return={Uri.EscapeDataString(back)}",
+            "Could not send a stale session to the refresh page.");
+    }
+
+    /// <summary>
+    /// Reloads the page the user is on. While maintenance mode is on the
+    /// middleware answers that load with the maintenance page, and once the
+    /// restore is over the same reload brings the page back.
+    /// </summary>
+    private void SendToMaintenancePage() =>
+        ForceLoad(_navigation.Uri, "Could not reload a page into the maintenance page.");
+
+    private void ForceLoad(string uri, string failureMessage)
+    {
         if (Interlocked.Exchange(ref _redirected, 1) == 1) return;
         try
         {
-            var back = "/" + _navigation.ToBaseRelativePath(_navigation.Uri);
-            _navigation.NavigateTo(
-                $"{CookieSessionRevalidation.RefreshPath.TrimStart('/')}?return={Uri.EscapeDataString(back)}",
-                forceLoad: true);
+            _navigation.NavigateTo(uri, forceLoad: true);
         }
         catch (Exception ex)
         {
             // The event is still dropped. Let a later event try again, so a
             // failed send does not leave the page dead.
             Interlocked.Exchange(ref _redirected, 0);
-            _logger.LogWarning(ex, "Could not send a stale session to the refresh page.");
+            _logger.LogWarning(ex, failureMessage);
         }
     }
 

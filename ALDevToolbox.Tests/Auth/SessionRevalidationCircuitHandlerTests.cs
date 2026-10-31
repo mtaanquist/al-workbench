@@ -99,7 +99,7 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task Maintenance_mode_leaves_the_page_alone()
+    public async Task Maintenance_mode_does_not_mistake_the_emptied_users_table_for_a_deleted_account()
     {
         var adminId = await SeedAsync(UserRole.Admin);
         var maintenance = new MaintenanceModeState();
@@ -107,7 +107,62 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
         var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin), maintenance);
         await UpdateAsync(adminId, u => u.Status = UserStatus.Disabled);
 
-        (await DispatchAsync(handler)).Should().BeTrue("a restore empties the users table; that is not a deleted account");
+        (await DispatchAsync(handler)).Should().BeFalse("the page goes to the maintenance page instead of running the event");
+        _navigation.Navigations.Should().ContainSingle().Which.Uri.Should().NotContain(
+            "auth/session/refresh", "a restore empties the users table; that is not a deleted account");
+    }
+
+    [Fact]
+    public async Task During_maintenance_a_non_site_admin_event_is_dropped_and_the_page_reloads()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin), maintenance);
+        maintenance.Enter("Restoring a backup");
+
+        (await DispatchAsync(handler)).Should().BeFalse("a Build click must not write into the database being restored");
+        _navigation.Navigations.Should().ContainSingle().Which.Should().Be(
+            ("https://workbench.cronus.example/admin/administration/users", true));
+        maintenance.ActiveJobs.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task During_maintenance_a_site_admin_page_keeps_working()
+    {
+        var operatorId = await SeedAsync(UserRole.Admin, siteAdmin: true);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(operatorId, UserRole.Admin, siteAdmin: true), maintenance);
+        maintenance.Enter("Restoring a backup");
+
+        (await DispatchAsync(handler)).Should().BeTrue("the SiteAdmin watches the restore from their own page");
+        _navigation.Navigations.Should().BeEmpty();
+        maintenance.ActiveJobs.Should().Be(0, "the event released its slot when it finished");
+    }
+
+    [Fact]
+    public async Task An_event_in_progress_is_counted_so_a_restore_waits_for_it()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User), maintenance);
+        var release = new TaskCompletionSource();
+        var started = new TaskCompletionSource();
+        var pipeline = handler.CreateInboundActivityHandler(async _ =>
+        {
+            started.SetResult();
+            await release.Task;
+        });
+
+        var running = pipeline(null!);
+        await started.Task;
+        maintenance.ActiveJobs.Should().Be(1, "a click already running when the restore starts is in-flight work");
+        maintenance.Enter("Restoring a backup");
+        (await maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, CancellationToken.None)).Should().BeFalse();
+
+        release.SetResult();
+        await running;
+        maintenance.ActiveJobs.Should().Be(0);
+        (await maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, CancellationToken.None)).Should().BeTrue();
     }
 
     [Fact]

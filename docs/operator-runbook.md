@@ -120,7 +120,9 @@ changed and the app stays open. The check costs one extra read of the file.
 
 Once the site is closed, the restore stops background work from starting and
 waits up to a minute for imports, builds and background sweeps that are
-already running. If one is still running after that, the restore is refused,
+already running, and for any click on an open page that is still being
+handled. Anyone other than a site administrator who then clicks on a page
+they already had open is taken to the maintenance page. If one is still running after that, the restore is refused,
 the site reopens and nothing has changed: wait until imports and builds have
 finished and try again. Imports, builds and solution scans that were only
 waiting in line are dropped when the restore completes, because they belong
