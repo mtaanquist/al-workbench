@@ -94,7 +94,9 @@ public sealed class UpgradeActionNotifier
             [recipient],
             new NotificationSummary(
                 UpgradeActionEmail.SubjectFor(result, what, action.SolutionName, action.EnvironmentName),
-                action.Outcome,
+                // One line, like every other notifier's detail: a failure outcome carries
+                // Business Central's whole reason. The email below keeps it in full.
+                action.Outcome is null ? null : NotificationText.FirstLine(action.Outcome),
                 path,
                 action.SolutionName),
             (email, token) => UpgradeActionEmail.RenderAsync(

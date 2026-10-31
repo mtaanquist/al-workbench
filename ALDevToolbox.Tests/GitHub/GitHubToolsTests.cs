@@ -478,6 +478,28 @@ public sealed class GitHubToolsTests : IDisposable
         api.Calls.Should().NotContain(c => c.StartsWith("PUT", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("Danish")]
+    [InlineData("da_DK")]
+    [InlineData("../da-DK")]
+    [InlineData("da-DK/../../x")]
+    [InlineData("da DK")]
+    public async Task A_target_language_that_is_not_a_language_tag_is_refused_before_github_is_asked_anything(string language)
+    {
+        // #1576: the language goes into the file name and the XLIFF target-language.
+        await ReadyAsync();
+        var api = WritableApi();
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var act = () => tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, language, [new TranslationUnitEditInput(AmountId, "Beloeb")]);
+
+        (await act.Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("language tag such as da-DK");
+        api.Calls.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task No_edits_at_all_is_refused_before_github_is_asked_anything()
     {

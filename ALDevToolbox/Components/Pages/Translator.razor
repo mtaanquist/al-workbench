@@ -863,6 +863,12 @@ else
         [JsonPropertyName("learned")] public LearnedDto? Learned { get; set; }
         /// <summary>Where a file opened from a repository came from; null for any other file (#1540).</summary>
         [JsonPropertyName("repo")] public RepositoryOriginDto? Repo { get; set; }
+        /// <summary>
+        /// Set instead of the rest when Continue took nothing over: "held" when
+        /// another tab has the session, "gone" when it was deleted or went out
+        /// of date since the prompt appeared, "error" when storage failed.
+        /// </summary>
+        [JsonPropertyName("refused")] public string? Refused { get; set; }
     }
 
     /// <summary>The repository and path a session's file was opened from, as the browser keeps it.</summary>
@@ -961,10 +967,9 @@ else
     // drop on a supported browser), so Save writes in place instead of
     // downloading. Reset whenever a file loads without one.
     private bool _canSaveInPlace;
-    // The id the browser stamped on its session record when this tab opened
-    // the file. The browser keeps one record for the whole site, so another
-    // tab's open replaces it; every call that reads or writes the record passes
-    // this, and the browser refuses when the record is another open's (#1595).
+    // The id of this tab's own stored record (one per open, #1609); every read
+    // or write of the browser copy names it, and the browser answers "missing"
+    // when that record is gone.
     private string? _openId;
     // True when a file opened from disk holds no translation yet - the
     // compiler's generated file. It is never saved in place and exports as a
@@ -1262,7 +1267,14 @@ else
         {
             xml = await reader.ReadToEndAsync();
         }
-        if (string.IsNullOrEmpty(xml)) { _parseError = $"Could not read \"{fileName}\"."; return; }
+        // A file that does not open is not kept: the browser stored it before
+        // anything parsed it, and it would come back on the restore prompt.
+        if (string.IsNullOrEmpty(xml))
+        {
+            _parseError = $"Could not read \"{fileName}\".";
+            await _module.InvokeAsync<bool>("clear", openId);
+            return;
+        }
 
         XliffDocument parsed;
         try
@@ -1273,11 +1285,14 @@ else
         catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
         {
             _parseError = $"Could not read \"{fileName}\" as XLIFF v1.2: {ex.Message}";
+            await _module.InvokeAsync<bool>("clear", openId);
             return;
         }
 
         LoadParsed(fileName, parsed);
         _openId = openId;
+        // Only now that it opened does this file replace older sessions of it.
+        await _module.InvokeVoidAsync("opened", openId);
         _canSaveInPlace = true; // opened with a writable handle
         await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: fileName);
         await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
@@ -1370,12 +1385,18 @@ else
         try
         {
             // The browser moves the session to a fresh id this tab then holds,
-            // and answers null when another tab took it over meanwhile.
+            // and says why when it could not: another tab took it over, or it
+            // is not stored any more.
             var meta = await _module.InvokeAsync<SessionMeta?>("loadMeta", _restoreOpenId);
-            if (meta is null)
+            if (meta is null || meta.Refused is not null)
             {
                 ForgetRestore();
-                Flash(OpenInAnotherTab, ToastKind.Warn);
+                Flash(meta?.Refused switch
+                {
+                    "gone" => SessionGone,
+                    "error" => SessionUnreadable,
+                    _ => OpenInAnotherTab,
+                }, ToastKind.Warn);
                 return;
             }
             try
@@ -1398,6 +1419,8 @@ else
     }
 
     private const string OpenInAnotherTab = "That file is open in another tab now, so its edits were kept.";
+    private const string SessionGone = "That session is no longer stored in this browser, so there is nothing to pick up.";
+    private const string SessionUnreadable = "That session could not be read from this browser's storage. Open the file again to carry on.";
 
     /// <summary>Reads and opens a session Continue has just moved to <paramref name="meta"/>'s fresh id.</summary>
     private async Task LoadRestoredAsync(SessionMeta meta)
@@ -1412,6 +1435,7 @@ else
         }
         if (string.IsNullOrEmpty(xml))
         {
+            _parseError = $"Could not restore the saved session: the stored copy of \"{meta.FileName}\" is empty.";
             await _module.InvokeAsync<bool>("clear", meta.OpenId);
             ForgetRestore();
             return;

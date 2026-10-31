@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.GitHub;
@@ -30,7 +31,7 @@ namespace ALDevToolbox.Services.Mcp.Tools;
 /// <c>.design/github-integration-phase2.md</c>.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class GitHubTools
+public sealed partial class GitHubTools
 {
     private readonly GitHubRepositoryService _repositories;
     private readonly GitHubWorkspaceRepositoryService _workspaces;
@@ -60,6 +61,14 @@ public sealed class GitHubTools
 
     /// <summary>The most files <c>list_translation_files</c> returns in one answer.</summary>
     internal const int TranslationFileCap = 100;
+
+    /// <summary>
+    /// A BCP-47-shaped language tag such as <c>da-DK</c>. It goes into the file name and
+    /// the XLIFF <c>target-language</c>, so "Danish" or "da_DK" would open a pull request
+    /// Business Central never loads, and a '/' or '..' would put the file elsewhere (#1576).
+    /// </summary>
+    [GeneratedRegex("^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")]
+    private static partial Regex LanguageTag();
 
     private const int DefaultRepositoryLimit = 50;
 
@@ -262,6 +271,11 @@ public sealed class GitHubTools
         var language = (targetLanguage ?? string.Empty).Trim();
 
         if (language.Length == 0) throw new McpException("Say which language you are translating into, e.g. da-DK.");
+        if (!LanguageTag().IsMatch(language))
+        {
+            throw new McpException(
+                $"'{language}' is not a language tag. Pass a language tag such as da-DK, the way Business Central names its translation files.");
+        }
         if (edits is null || edits.Count == 0)
         {
             throw new McpException(

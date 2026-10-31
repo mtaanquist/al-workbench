@@ -15,10 +15,15 @@ namespace ALDevToolbox.Domain.Tools;
 /// the same as it 404s the tool's pages. For a writing tool it is also the tool whose step-up
 /// rule governs it; read-only tools are never gated by step-up, because a recent second factor
 /// guards the actions that spend a stored credential, not the lookups around them. Null only
-/// for a tool that serves several tools at once (<c>list_repositories</c>) or none of them
+/// for a tool that serves several tools at once (<c>list_repositories</c>, see <paramref name="AnyOf"/>) or none of them
 /// (the quality guidance), which only the MCP switch itself turns off.
 /// <c>McpToolCatalogTests</c> requires every writing tool to name one.</param>
-public sealed record McpToolDescriptor(string Name, string Group, string Blurb, bool Writes, ToolKey? Tool = null);
+/// <param name="AnyOf">For a tool with no single <paramref name="Tool"/> that only helps
+/// the tools listed here (<c>list_repositories</c>): it is offered while any of them is on,
+/// and dropped once all of them are off, since nothing left could use its answer.</param>
+public sealed record McpToolDescriptor(
+    string Name, string Group, string Blurb, bool Writes, ToolKey? Tool = null,
+    IReadOnlyList<ToolKey>? AnyOf = null);
 
 /// <summary>
 /// The user-facing description of every tool an AI assistant can call, for
@@ -197,7 +202,9 @@ public static class McpToolCatalog
         // ---- GitHub repositories ----
         new McpToolDescriptor("list_repositories", Repositories,
             "Lists the GitHub repositories you can work on, and says what to connect when there "
-            + "are none yet.", false),
+            + "are none yet.", false,
+            // Only the Templates, Cookbook and Translator tools take a repository.
+            AnyOf: [ToolKey.Templates, ToolKey.Cookbook, ToolKey.Translator]),
         new McpToolDescriptor("create_repository", Repositories,
             "Creates a repository in your GitHub organisation with a new workspace in it.", true, ToolKey.Templates),
         new McpToolDescriptor("add_extension_to_repository", Repositories,
