@@ -849,9 +849,51 @@ public sealed class ReleaseVisibilityTests : IDisposable
         var session = await sessions.CreateFromSymbolAsync(seeded.ObjectId, "user-a");
 
         session.Should().NotBeNull();
-        sessions.Get(session!.Token, "user-b").Should().BeNull();
-        sessions.Get(session.Token, "user-a").Should().NotBeNull();
+        (await sessions.GetAsync(session!.Token, "user-b")).Should().BeNull();
+        (await sessions.GetAsync(session.Token, "user-a")).Should().NotBeNull();
     }
+
+    /// <summary>
+    /// OEX2-3: a Find references list holds code lines. Once its owner can no
+    /// longer see the release - removed from a Private solution's team - the
+    /// link in their open tab stops showing it on the next load, rather than
+    /// for as long as they keep reloading inside the sliding expiry.
+    /// </summary>
+    [Fact]
+    public async Task A_reference_session_stops_answering_once_its_owner_loses_access_to_the_release()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            Microsoft.Extensions.Options.Options.Create(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+
+        string token;
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var session = await SessionsSharing(ctx, cache).CreateFromSymbolAsync(hidden.ObjectId, "member");
+            session.Should().NotBeNull();
+            token = session!.Token;
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await SessionsSharing(ctx, cache).GetAsync(token, "member")).Should().NotBeNull("the member can still see it");
+        }
+
+        // The same browser, the same link, after the member left the team.
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await SessionsSharing(ctx, cache).GetAsync(token, "member")).Should().BeNull();
+        }
+    }
+
+    // One request's service over a cache that outlives it, as the app's
+    // singleton memory cache does.
+    private ReferenceSessionService SessionsSharing(AppDbContext ctx, Microsoft.Extensions.Caching.Memory.IMemoryCache cache) =>
+        new(cache, References(ctx), ctx, new ReferenceResolver(ctx), Access(ctx),
+            NullLogger<ReferenceSessionService>.Instance);
 
     // ── The admin writes (#1430) ────────────────────────────────────────
 

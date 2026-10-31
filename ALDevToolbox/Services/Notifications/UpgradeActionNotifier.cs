@@ -13,6 +13,8 @@ public enum UpgradeActionResult
     Failed,
     /// <summary>Sent to Business Central, but nobody saw it finish: the person should check.</summary>
     Unconfirmed,
+    /// <summary>A booked install, or the rest of a batch, came up after its window closed and now waits for the next opening.</summary>
+    Moved,
 }
 
 /// <summary>
@@ -104,6 +106,61 @@ public sealed class UpgradeActionNotifier
                 action.EnvironmentName, action.Outcome, email.ItemUrl, email.SettingsUrl, token),
             ProjectId: action.ProjectId),
             ct);
+    }
+
+    /// <summary>
+    /// Tells the person who booked <paramref name="actionId"/> that it, and the rest of
+    /// its batch still waiting (<paramref name="moved"/> rows in all), came up after its
+    /// window closed and was moved to the next opening (#1575). Without it a part-done
+    /// batch reads as done from the notifications alone. Never throws, as
+    /// <see cref="NotifyAsync"/>.
+    /// </summary>
+    /// <param name="message">The plain-words line: what was moved and when it now runs.</param>
+    public async Task NotifyMovedAsync(int actionId, int moved, string message, CancellationToken ct = default)
+    {
+        try
+        {
+            var action = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.Id == actionId)
+                .Select(a => new
+                {
+                    a.ProjectId,
+                    a.EnvironmentId,
+                    a.Kind,
+                    a.RequestedByUserId,
+                    a.TargetVersion,
+                    a.AppName,
+                    a.PackageFileName,
+                    SolutionName = a.Project!.Name,
+                    EnvironmentName = a.Environment!.Name,
+                })
+                .FirstOrDefaultAsync(ct);
+            if (action?.RequestedByUserId is not { } recipient) return;
+
+            var what = moved > 1
+                ? action.Kind == UpgradeActionKind.UpdateApp ? $"Update {moved} apps" : $"Install {moved} apps"
+                : Describe(action.Kind, action.TargetVersion, action.PackageFileName ?? action.AppName);
+            var path = $"/environments/{action.EnvironmentId}/history";
+            const UpgradeActionResult result = UpgradeActionResult.Moved;
+
+            await _notifications.NotifyAsync(new Notification(
+                NotificationCategory.Upgrades,
+                [recipient],
+                new NotificationSummary(
+                    UpgradeActionEmail.SubjectFor(result, what, action.SolutionName, action.EnvironmentName),
+                    message,
+                    path,
+                    action.SolutionName),
+                (email, token) => UpgradeActionEmail.RenderAsync(
+                    email.Renderer, email.Recipient.DisplayName, email.OrganizationName, result, what, action.SolutionName,
+                    action.EnvironmentName, message, email.ItemUrl, email.SettingsUrl, token),
+                ProjectId: action.ProjectId),
+                ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not send the moved notice for upgrade action {ActionId}.", actionId);
+        }
     }
 
     /// <summary>What was scheduled, as a short imperative: "Install CRONUS Coffee.app".</summary>

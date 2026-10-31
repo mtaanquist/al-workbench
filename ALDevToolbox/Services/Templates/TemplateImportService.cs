@@ -149,7 +149,11 @@ public sealed class TemplateImportService
             // Fence category 5 (system-org fork read): pinned to t.OrganizationId == systemOrgId.
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value)
+            // Live, non-deprecated only, like ListSystemTemplatesAsync: a stale
+            // Import click on a template the catalogue has since retired is
+            // refused rather than forking a live copy of it.
+            .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value
+                && t.DeletedAt == null && !t.Deprecated)
             .Include(t => t.WorkspaceExtensions.OrderBy(e => e.Ordering))
                 .ThenInclude(e => e.Dependencies.OrderBy(d => d.Ordering))
             .Include(t => t.DefaultModules.OrderBy(d => d.Ordering))
@@ -516,6 +520,7 @@ public sealed class TemplateImportService
             SourceCheckedAt = sourceModule.SourceCheckedAt,
             SourceSkippedJson = sourceModule.SourceSkippedJson,
             SourceDependenciesJson = sourceModule.SourceDependenciesJson,
+            SourceIdRangeSize = sourceModule.SourceIdRangeSize,
             Dependencies = sourceModule.Dependencies.Select((d, i) => new ModuleDependency
             {
                 OrganizationId = actingOrgId,

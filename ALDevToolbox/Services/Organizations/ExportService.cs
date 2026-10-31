@@ -128,7 +128,9 @@ public class ExportService
                         Key = module.Key,
                         Name = module.Name,
                         ExtensionName = module.ExtensionName,
-                        IdRangeSize = module.IdRangeSize,
+                        // The size the module generates with: a blank one that
+                        // follows its repository is written as it stands (#1631).
+                        IdRangeSize = module.IdRangeSize ?? module.SourceIdRangeSize,
                         Deprecated = module.Deprecated,
                         Dependencies = module.Dependencies
                             .OrderBy(d => d.Ordering)

@@ -604,13 +604,17 @@ public sealed class ReferenceSessionService
     /// <summary>
     /// Retrieves a previously minted session by token. Returns null when
     /// the token is unknown, expired, or owned by a different user — the
-    /// caller should hide the panel in that case (token in URL stale).
+    /// caller should hide the panel in that case (token in URL stale) — and
+    /// when its release is no longer visible to the caller: the session holds
+    /// code lines, so someone removed from a Private solution's team stops
+    /// seeing them on their next load, as NarrowSystemReferencesAsync does.
     /// </summary>
-    public ReferenceSession? Get(string token, string ownerKey)
+    public async Task<ReferenceSession?> GetAsync(string token, string ownerKey, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(token)) return null;
         if (!_cache.TryGetValue(CacheKey(token), out CachedSession? cached) || cached is null) return null;
         if (!string.Equals(cached.OwnerKey, ownerKey, StringComparison.Ordinal)) return null;
+        if (!await SeedVisibleAsync(cached.Session.ReleaseId, ct)) return null;
         return cached.Session;
     }
 

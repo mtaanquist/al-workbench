@@ -10,6 +10,7 @@
 @inject IOrganizationContext Org
 @inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 @inject NavigationManager Nav
+@inject OpenIddict.Abstractions.IOpenIddictApplicationManager Applications
 
 <PageTitle>Authorise · AL Workbench</PageTitle>
 
@@ -46,7 +47,7 @@ else
             <div class="card__head">
                 <div>
                     <h2 class="card__title">What this assistant will be able to do</h2>
-                    <p class="card__sub">Nothing outside this list, and nothing your own account cannot already do.</p>
+                    <p class="card__sub">Nothing your own account cannot already do.</p>
                 </div>
             </div>
             <div class="card__body">
@@ -139,7 +140,13 @@ else
             foreach (var single in v) _hiddenParams.Add(new(k, single ?? string.Empty));
         }
 
-        _clientName = !string.IsNullOrWhiteSpace(clientId) ? clientId : "Unknown client";
+        // The name the client registered ("Claude", "Cursor"), not its id: a
+        // registered client's id is 32 random characters, and a client-metadata
+        // client's is a long URL (#1617). The redirect host below stays the thing
+        // to check, since a client chooses its own name.
+        var application = await Applications.FindByClientIdAsync(clientId);
+        var displayName = application is null ? null : await Applications.GetDisplayNameAsync(application);
+        _clientName = !string.IsNullOrWhiteSpace(displayName) ? displayName.Trim() : clientId;
         _redirectHost = Uri.TryCreate(redirectUri, UriKind.Absolute, out var u) ? u.Host : "(unknown)";
 
         _currentEmail = http.User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? "you";
@@ -174,7 +181,8 @@ else
     private static (string Name, string Blurb) PermissionFor(string scope) => scope switch
     {
         "mcp" => ("Use AL Workbench tools",
-            "List templates, generate workspaces, search Object Explorer, look up recipes."),
+            "Read your templates, recipes, solutions and Business Central objects, and do what you can do "
+            + "yourself: generate workspaces, open pull requests in your name and deploy builds where you are allowed to."),
         "offline_access" => ("Stay signed in",
             "Keeps working between sessions, so it doesn't ask you to approve this again every hour."),
         _ => throw new System.Diagnostics.UnreachableException(

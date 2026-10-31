@@ -75,6 +75,7 @@ public sealed class TemplateImportServiceTests : IDisposable
         var importedModule = imported.DefaultModules.Single().Module!;
         importedModule.Key.Should().Be("payment");
         importedModule.OrganizationId.Should().Be(TestDb.OtherOrgId);
+        importedModule.SourceIdRangeSize.Should().Be(120, "the fork goes on following the repository's size (#1631)");
         var moduleFolders = await verify.ModuleExtensionFolders
             .IgnoreQueryFilters()
             .Where(f => f.ModuleId == importedModule.Id)
@@ -143,6 +144,39 @@ public sealed class TemplateImportServiceTests : IDisposable
         (await verify.RuntimeTemplates.IgnoreQueryFilters().CountAsync(t => t.OrganizationId == TestDb.OtherOrgId))
             .Should().Be(0);
         (await verify.Modules.IgnoreQueryFilters().CountAsync(m => m.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+    }
+
+    /// <summary>
+    /// GEN2-3: the import list hides system templates that are deleted or
+    /// deprecated, and the import itself refuses them too, so a stale click
+    /// (or a hand-posted id) cannot fork a template the catalogue retired.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Import_refuses_a_system_template_that_was_retired_and_writes_nothing(bool deleted, bool deprecated)
+    {
+        await SeedSystemCatalogueAsync();
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+        await using (var seed = _db.NewContext())
+        {
+            var t = seed.RuntimeTemplates.IgnoreQueryFilters().Single(x => x.Id == systemTemplateId);
+            if (deleted) t.DeletedAt = DateTime.UtcNow;
+            t.Deprecated = deprecated;
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewService(ctx).ImportTemplateAsync(systemTemplateId);
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors["Import"].Should().Contain("no longer exists in the system catalogue");
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.RuntimeTemplates.IgnoreQueryFilters().CountAsync(t => t.OrganizationId == TestDb.OtherOrgId))
             .Should().Be(0);
     }
 
@@ -496,6 +530,7 @@ public sealed class TemplateImportServiceTests : IDisposable
         var module = ModuleBuilder.Default("payment", "Payment", organizationId: TestDb.SystemOrgId)
             .WithDependency("11111111-1111-1111-1111-111111111111", "Base App", "Microsoft", "27.0.0.0")
             .WithExtensionFolder("Setup", ("Payment.Setup.al", "// payment setup"));
+        module.SourceIdRangeSize = 120;
 
         var appVersion = new ApplicationVersion
         {
