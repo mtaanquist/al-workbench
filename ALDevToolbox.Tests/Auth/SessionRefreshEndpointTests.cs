@@ -2,13 +2,11 @@ using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Endpoints;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Operations;
 using Microsoft.Extensions.DependencyInjection;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Auth;
 
@@ -16,24 +14,24 @@ namespace ALDevToolbox.Tests.Auth;
 /// <c>/auth/session/refresh</c> is where a stale interactive page is sent
 /// (#1534). It must apply the row now, not after the five-minute cookie
 /// throttle, or the reloaded page would connect with the old claims again.
+///
+/// <para>The cases share one host (#1536, #1582), each signing in a user of its
+/// own. The one that puts the host into maintenance mode boots a host of its own.</para>
 /// </summary>
-public sealed class SessionRefreshEndpointTests : IDisposable
+public sealed class SessionRefreshEndpointTests : IClassFixture<SharedEndpointHost>
 {
-    private const string Email = "sam.berg@cronus.example";
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _email = SharedEndpointHost.UniqueEmail("sam.berg");
 
-    public SessionRefreshEndpointTests()
+    public SessionRefreshEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Fact]
@@ -93,9 +91,10 @@ public sealed class SessionRefreshEndpointTests : IDisposable
         // A SiteAdmin is the one user the maintenance gate lets through, and a
         // restore empties the users table; checking then would sign them out
         // in the middle of it (#1269).
-        var (client, userId) = await SignedInAdminAsync(siteAdmin: true);
+        using var factory = new EndpointFactory(_db);
+        var (client, userId) = await SignedInAdminAsync(factory, siteAdmin: true);
         using (var first = await client.GetAsync(RouteConstants.AdminUsers)) { }
-        var maintenance = _factory.Services.GetRequiredService<MaintenanceModeState>();
+        var maintenance = factory.Services.GetRequiredService<MaintenanceModeState>();
         maintenance.Enter("Restoring a backup");
         try
         {
@@ -132,7 +131,9 @@ public sealed class SessionRefreshEndpointTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private async Task<(HttpClient Client, int UserId)> SignedInAdminAsync(bool siteAdmin = false)
+    private Task<(HttpClient Client, int UserId)> SignedInAdminAsync() => SignedInAdminAsync(_factory);
+
+    private async Task<(HttpClient Client, int UserId)> SignedInAdminAsync(EndpointFactory factory, bool siteAdmin = false)
     {
         int userId;
         await using (var seed = _db.NewContext())
@@ -140,10 +141,9 @@ public sealed class SessionRefreshEndpointTests : IDisposable
             var user = new User
             {
                 OrganizationId = TestDb.DefaultOrgId,
-                Email = Email,
+                Email = _email,
                 DisplayName = "Sam Berg",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                    .HashPassword(Password),
+                PasswordHash = _host.HashPassword(Password),
                 Role = UserRole.Admin,
                 IsSiteAdmin = siteAdmin,
                 Status = UserStatus.Active,
@@ -154,11 +154,11 @@ public sealed class SessionRefreshEndpointTests : IDisposable
             userId = user.Id;
         }
 
-        var client = _factory.CreateClient();
+        var client = factory.CreateClient();
         using var loginPage = await client.GetAsync("/login");
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new[]
         {
-            new KeyValuePair<string, string>("Email", Email),
+            new KeyValuePair<string, string>("Email", _email),
             new KeyValuePair<string, string>("Password", Password),
             new KeyValuePair<string, string>("__RequestVerificationToken", AntiforgeryToken(await loginPage.Content.ReadAsStringAsync())),
         }));

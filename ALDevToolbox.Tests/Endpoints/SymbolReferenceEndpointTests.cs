@@ -3,10 +3,8 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -16,25 +14,34 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// carries its own Private-solution check and its own release pin; these tests
 /// hold both (#1347). It also writes a file name built from the release label
 /// and the app name, which may hold letters such as the Danish ae (#1339).
+///
+/// <para>The cases share one host (#1536, #1582). Each seeds its own three users,
+/// solution and releases, and asks only for those.</para>
 /// </summary>
-public sealed class SymbolReferenceEndpointTests : IDisposable
+public sealed class SymbolReferenceEndpointTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
-    private const string OwnerEmail = "owner@cronus.example";
-    private const string MemberEmail = "mel@cronus.example";
-    private const string OutsiderEmail = "nils@cronus.example";
     private const string SymbolJson = "{\"RuntimeVersion\":\"14.0\"}";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _ownerEmail = SharedEndpointHost.UniqueEmail("owner");
+    private readonly string _memberEmail = SharedEndpointHost.UniqueEmail("mel");
+    private readonly string _outsiderEmail = SharedEndpointHost.UniqueEmail("nils");
 
-    public void Dispose() => _db.Dispose();
+    public SymbolReferenceEndpointTests(SharedEndpointHost host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+    }
 
     [Fact]
     public async Task A_member_of_a_private_solution_downloads_the_symbols()
     {
         var seed = await SeedAsync(ProjectVisibility.Private);
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, MemberEmail);
+        using var client = await SignInAsync(_memberEmail);
 
         using var response = await client.GetAsync(Url(seed.ReleaseId, seed.ModuleId));
 
@@ -46,8 +53,7 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
     public async Task An_outsider_gets_not_found_for_a_private_solutions_symbols()
     {
         var seed = await SeedAsync(ProjectVisibility.Private);
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, OutsiderEmail);
+        using var client = await SignInAsync(_outsiderEmail);
 
         using var response = await client.GetAsync(Url(seed.ReleaseId, seed.ModuleId));
 
@@ -63,8 +69,7 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
         // only the module's own release pin keeps it out.
         var seed = await SeedAsync(ProjectVisibility.Private);
         var open = await SeedReleaseAsync("Open release", "Open app");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, OutsiderEmail);
+        using var client = await SignInAsync(_outsiderEmail);
 
         using var response = await client.GetAsync(Url(open.ReleaseId, seed.ModuleId));
 
@@ -75,8 +80,7 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
     public async Task A_name_with_a_non_ascii_letter_downloads_with_that_name()
     {
         var seed = await SeedReleaseAsync("BC 25 Lærling", "Løn og ferie");
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory, OutsiderEmail);
+        using var client = await SignInAsync(_outsiderEmail);
 
         using var response = await client.GetAsync(Url(seed.ReleaseId, seed.ModuleId));
 
@@ -99,9 +103,9 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
         int ownerId, memberId;
         await using (var ctx = _db.NewContext())
         {
-            var owner = NewUser(ctx, OwnerEmail, UserRole.Editor);
-            var member = NewUser(ctx, MemberEmail, UserRole.User);
-            NewUser(ctx, OutsiderEmail, UserRole.User);
+            var owner = NewUser(ctx, _ownerEmail, UserRole.Editor);
+            var member = NewUser(ctx, _memberEmail, UserRole.User);
+            NewUser(ctx, _outsiderEmail, UserRole.User);
             await ctx.SaveChangesAsync();
             ownerId = owner.Id;
             memberId = member.Id;
@@ -112,12 +116,14 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             var now = DateTime.UtcNow;
-            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Denmark engagement", CreatedAt = now, UpdatedAt = now };
+            // Solution and team names are unique in an organisation, and the class shares one.
+            var suffix = Guid.NewGuid().ToString("N")[..8];
+            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = $"Denmark engagement {suffix}", CreatedAt = now, UpdatedAt = now };
             ctx.Teams.Add(team);
             var project = new OeProject
             {
                 OrganizationId = TestDb.DefaultOrgId,
-                Name = "CRONUS Denmark",
+                Name = $"CRONUS Denmark {suffix}",
                 CreatedByUserId = ownerId,
                 Visibility = visibility,
                 CreatedAt = now,
@@ -146,9 +152,9 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
     private async Task<Seeded> SeedReleaseAsync(string label, string appName)
     {
         await using var ctx = _db.NewContext();
-        if (!ctx.Users.Any(u => u.Email == OutsiderEmail))
+        if (!ctx.Users.Any(u => u.Email == _outsiderEmail))
         {
-            NewUser(ctx, OutsiderEmail, UserRole.User);
+            NewUser(ctx, _outsiderEmail, UserRole.User);
         }
         var now = DateTime.UtcNow;
         var release = new OeRelease
@@ -189,14 +195,14 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
         return new Seeded(release.Id, module.Id);
     }
 
-    private static User NewUser(Data.AppDbContext ctx, string email, UserRole role)
+    private User NewUser(Data.AppDbContext ctx, string email, UserRole role)
     {
         var user = new User
         {
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = email,
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = role,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -205,9 +211,9 @@ public sealed class SymbolReferenceEndpointTests : IDisposable
         return user;
     }
 
-    private static async Task<HttpClient> SignInAsync(EndpointFactory factory, string email)
+    private async Task<HttpClient> SignInAsync(string email)
     {
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         var token = await TokenFromAsync(client, "/login");
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
         [

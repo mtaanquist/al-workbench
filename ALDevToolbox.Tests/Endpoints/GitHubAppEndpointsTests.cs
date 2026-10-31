@@ -4,7 +4,6 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Endpoints;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.GitHub;
@@ -14,7 +13,6 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -31,10 +29,17 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// and cache - so each case changes exactly one thing about an otherwise valid state.
 /// GitHub is never reached: an accepted state without a <c>code</c> ends in its own
 /// "not connected" answer, and the one case that needs GitHub to answer gets the fake.</para>
+///
+/// <para>The cases share one host (#1536, #1582). The install callback connects an
+/// organisation, so each test works in an organisation of its own, signs in users of
+/// its own and gives them a GitHub link of its own; it gets a fresh fake GitHub too,
+/// which the host's pooled HTTP handler forwards to, so the calls one test records
+/// never reach another's assertions. The GitHub App itself is configured once for the
+/// host: every test that needs it configures the same one, and the tests that run
+/// without it never reach anything that reads it.</para>
 /// </summary>
-public sealed class GitHubAppEndpointsTests : IDisposable
+public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTests.Host>
 {
-    private const string AlexEmail = "alex@cronus.example";
     private const string Password = "correct horse battery staple";
 
     private const string Refused = "Connecting your GitHub account did not finish in time";
@@ -44,11 +49,16 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     private const string InstallReplayed = "That setup link had already been used. Nothing changed";
     private const string InstallUnfinished = "GitHub has not finished installing the app yet.";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _alexEmail = SharedEndpointHost.UniqueEmail("alex");
+
+    /// <summary>This test's own organisation, so a connected installation stays with the test that connected it.</summary>
+    private readonly int _orgId;
 
     /// <summary>
-    /// One GitHub for the whole host. Besides the account link, it describes installation 42
+    /// This test's GitHub. Besides the account link, it describes installation 42
     /// on <c>cronus-dk</c> and calls the signed-in person an owner there, which is everything
     /// the install callback asks before it connects.
     /// </summary>
@@ -60,16 +70,92 @@ public sealed class GitHubAppEndpointsTests : IDisposable
         .On(HttpMethod.Get, "user/installations", HttpStatusCode.OK, FakeGitHubApi.InstallationsJson(42))
         .On(HttpMethod.Get, "user/memberships/orgs/cronus-dk", HttpStatusCode.OK, FakeGitHubApi.OrgMembershipJson());
 
-    public GitHubAppEndpointsTests()
+    public GitHubAppEndpointsTests(Host host)
     {
-        _factory = new EndpointFactory(_db, services =>
-            services.AddHttpClient<GitHubAppClient>().ConfigurePrimaryHttpMessageHandler(() => _api));
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+        host.Api = _api;
+        _orgId = host.SeedOrganization();
     }
 
-    public void Dispose()
+    /// <summary>
+    /// The shared host. GitHub's HTTP handler is pooled by the client factory and
+    /// outlives a test, so it holds no fake of its own: it forwards each request to
+    /// whichever fake the running test installed.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
     {
-        _factory.Dispose();
-        _db.Dispose();
+        private readonly Holder _holder;
+        private readonly SemaphoreSlim _configureGate = new(1, 1);
+        private bool _configured;
+
+        public Host()
+            : this(new Holder())
+        {
+        }
+
+        private Host(Holder holder)
+            : base(services => services.AddHttpClient<GitHubAppClient>()
+                .ConfigurePrimaryHttpMessageHandler(() => new Forwarder(holder)))
+        {
+            _holder = holder;
+        }
+
+        public FakeGitHubApi Api
+        {
+            get => _holder.Api;
+            set => _holder.Api = value;
+        }
+
+        /// <summary>
+        /// The GitHub App as a deployment sets it up, saved through the host so its key
+        /// ring can read the secret back. It is the same app for every test, so the host
+        /// saves it once.
+        /// </summary>
+        public async Task ConfigureGitHubAppAsync()
+        {
+            await _configureGate.WaitAsync();
+            try
+            {
+                if (_configured) return;
+                using var rsa = RSA.Create(2048);
+                await using var scope = Factory.Services.CreateAsyncScope();
+                await scope.ServiceProvider.GetRequiredService<SystemSettingsService>().SaveGitHubAppAsync(new GitHubAppInput(
+                    AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
+                    ClientSecret: "s3cr3t", ClearClientSecret: false,
+                    PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+                _configured = true;
+            }
+            finally
+            {
+                _configureGate.Release();
+            }
+        }
+
+        public override void Dispose()
+        {
+            _configureGate.Dispose();
+            base.Dispose();
+        }
+
+        private sealed class Holder
+        {
+            public FakeGitHubApi Api { get; set; } = null!;
+        }
+
+        private sealed class Forwarder : HttpMessageHandler
+        {
+            private readonly Holder _holder;
+
+            public Forwarder(Holder holder) => _holder = holder;
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                using var invoker = new HttpMessageInvoker(_holder.Api, disposeHandler: false);
+                return invoker.SendAsync(request, cancellationToken);
+            }
+        }
     }
 
     [Fact]
@@ -124,7 +210,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [Fact]
     public async Task The_admin_repositories_marker_is_the_only_place_a_link_returns_to()
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync();
 
         var marked = MintState(GitHubAppEndpoints.LinkStateProtectionPurpose, userId, GitHubAppEndpoints.AdminRepositoriesReturn);
@@ -146,7 +232,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [Fact]
     public async Task An_owners_fresh_install_state_connects_the_installation_once()
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync(UserRole.Admin);
         await LinkGitHubAccountAsync(userId);
         var state = MintState(GitHubAppEndpoints.StateProtectionPurpose, userId);
@@ -162,7 +248,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [Fact]
     public async Task A_state_minted_for_the_link_handshake_is_refused_by_the_install_callback()
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync(UserRole.Admin);
         await LinkGitHubAccountAsync(userId);
         var state = MintState(GitHubAppEndpoints.LinkStateProtectionPurpose, userId);
@@ -175,7 +261,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [Fact]
     public async Task An_install_state_issued_to_another_admin_is_refused()
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync(UserRole.Admin);
         await LinkGitHubAccountAsync(userId);
         var colleagueId = await SeedColleagueAsync(UserRole.Admin);
@@ -189,7 +275,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [Fact]
     public async Task An_expired_install_state_is_refused()
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync(UserRole.Admin);
         await LinkGitHubAccountAsync(userId);
         var state = MintState(GitHubAppEndpoints.StateProtectionPurpose, userId,
@@ -207,7 +293,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [InlineData("forty-two")]
     public async Task An_install_callback_without_a_usable_installation_id_connects_nothing(string? installationId)
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync(UserRole.Admin);
         await LinkGitHubAccountAsync(userId);
         var state = MintState(GitHubAppEndpoints.StateProtectionPurpose, userId);
@@ -221,7 +307,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
     [Fact]
     public async Task A_member_who_is_not_an_admin_cannot_complete_an_install()
     {
-        await ConfigureGitHubAppAsync();
+        await _host.ConfigureGitHubAppAsync();
         var (client, userId) = await SignInAsync(UserRole.User);
         await LinkGitHubAccountAsync(userId);
         var state = MintState(GitHubAppEndpoints.StateProtectionPurpose, userId);
@@ -250,12 +336,12 @@ public sealed class GitHubAppEndpointsTests : IDisposable
         return response.Headers.Location!.OriginalString;
     }
 
-    /// <summary>The installation the default organisation is connected to, if any.</summary>
+    /// <summary>The installation this test's organisation is connected to, if any.</summary>
     private async Task<long?> ConnectedInstallationAsync()
     {
         await using var ctx = _db.NewContext();
         return await ctx.OrganizationSettings.IgnoreQueryFilters().AsNoTracking()
-            .Where(s => s.OrganizationId == TestDb.DefaultOrgId)
+            .Where(s => s.OrganizationId == _orgId)
             .Select(s => s.GitHubInstallationId)
             .FirstOrDefaultAsync();
     }
@@ -272,7 +358,8 @@ public sealed class GitHubAppEndpointsTests : IDisposable
             UserId = userId,
             Provider = GitHubAccessService.ProviderName,
             Issuer = GitHubAccessService.IssuerValue,
-            Subject = "4711",
+            // A subject of this test's own: a GitHub account links to one person only.
+            Subject = Random.Shared.NextInt64(1_000_000, long.MaxValue).ToString(),
             DisplayIdentity = "cronus-dev",
             CreatedAt = DateTime.UtcNow,
             AccessTokenEncrypted = _factory.Services.GetRequiredService<IDataProtectionProvider>()
@@ -300,20 +387,9 @@ public sealed class GitHubAppEndpointsTests : IDisposable
         var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
         _factory.Services.GetRequiredService<IMemoryCache>()
             .Set($"github-state:{purpose}:{nonce}", true, TimeSpan.FromMinutes(15));
-        var payload = $"{TestDb.DefaultOrgId}|{userId}|{nonce}|{(issuedAt ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds()}";
+        var payload = $"{_orgId}|{userId}|{nonce}|{(issuedAt ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds()}";
         if (returnTo is not null) payload += $"|{returnTo}";
         return _factory.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector(purpose).Protect(payload);
-    }
-
-    /// <summary>The GitHub App as a deployment sets it up, saved through the host so its key ring can read the secret back.</summary>
-    private async Task ConfigureGitHubAppAsync()
-    {
-        using var rsa = RSA.Create(2048);
-        await using var scope = _factory.Services.CreateAsyncScope();
-        await scope.ServiceProvider.GetRequiredService<SystemSettingsService>().SaveGitHubAppAsync(new GitHubAppInput(
-            AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
-            ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
     }
 
     private async Task<int> SeedColleagueAsync(UserRole role = UserRole.User)
@@ -321,7 +397,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
         await using var ctx = _db.NewContext();
         var user = new User
         {
-            OrganizationId = TestDb.DefaultOrgId, Email = "nils@cronus.example", DisplayName = "Nils",
+            OrganizationId = _orgId, Email = SharedEndpointHost.UniqueEmail("nils"), DisplayName = "Nils",
             PasswordHash = "x", Role = role, Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
         };
@@ -337,8 +413,8 @@ public sealed class GitHubAppEndpointsTests : IDisposable
         {
             var user = new User
             {
-                OrganizationId = TestDb.DefaultOrgId, Email = AlexEmail, DisplayName = "Alex Hansen",
-                PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+                OrganizationId = _orgId, Email = _alexEmail, DisplayName = "Alex Hansen",
+                PasswordHash = _host.HashPassword(Password),
                 Role = role, Status = UserStatus.Active,
                 CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
             };
@@ -354,7 +430,7 @@ public sealed class GitHubAppEndpointsTests : IDisposable
             """name="__RequestVerificationToken"[^>]*value="([^"]+)""").Groups[1].Value;
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
         [
-            new("Email", AlexEmail), new("Password", Password), new("__RequestVerificationToken", token),
+            new("Email", _alexEmail), new("Password", Password), new("__RequestVerificationToken", token),
         ]));
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");

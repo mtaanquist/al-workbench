@@ -290,6 +290,14 @@ collection to serialise them.
     configures, or a rate limiter or slot gate it drains on purpose. When only
     one or two tests in a class do, give just those a host of their own
     (`CompareEndpointTests` does).
+  - State an organisation shares (the tools it switched off or marked for
+    step-up, a connected GitHub installation, its translation memory) does
+    not need a host per test: give each test an organisation of its own with
+    `SharedEndpointHost.SeedOrganization()`, seed its users there, and assert
+    on that organisation only (`McpRequestFilterTests`,
+    `GitHubAppEndpointsTests`). Site-wide state (`system_settings`, the
+    site-wide tool switches read at startup) still takes a host per test
+    (`ToolAccessGateTests`, `McpEnabledToggleTests`).
   - Don't leave background work running in a shared host. A test that queues
     a job (an import, a backfill, a build) runs on a fixture that takes that
     queue's worker out of the host, the way
@@ -301,7 +309,10 @@ collection to serialise them.
     reads the running test's instance off the fixture, and install fresh ones
     in the test class constructor (`GitHubWebhookEndpointTests.Host`). A
     per-caller rate limiter most of the tests hit gets a caller address per
-    test instead of a host per test (`OAuthRedirectUriTests.Host`).
+    test instead of a host per test (`OAuthRedirectUriTests.Host`,
+    `GitHubWebhookEndpointTests.Host`). A pooled HTTP handler outlives a
+    test, so a fake behind one is reached through a forwarding handler that
+    reads the running test's fake (`GitHubAppEndpointsTests.Host`).
   - Fakes a class swaps in go through a fixture that derives from
     `SharedEndpointHost` and passes `configureServices` or `settings` to its
     protected constructor. Fakes with per-test state are read through the

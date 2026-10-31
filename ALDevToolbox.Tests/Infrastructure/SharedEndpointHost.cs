@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services.Account;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -60,6 +61,23 @@ public class SharedEndpointHost : IDisposable
     /// </summary>
     public static string UniqueEmail(string name) =>
         $"{name}-{Guid.NewGuid().ToString("N")[..12]}@cronus.example";
+
+    /// <summary>
+    /// Adds an organisation no other test uses and returns its id, shaped like the
+    /// default one <see cref="TestDb"/> seeds. For a test whose subject is state the
+    /// whole organisation shares - a connected GitHub installation, the tools it
+    /// switched off - so the tests of a class can each change it without seeing
+    /// another's.
+    /// </summary>
+    public int SeedOrganization()
+    {
+        using var ctx = Db.NewContext();
+        var slug = $"org-{Guid.NewGuid().ToString("N")[..12]}";
+        var org = new Organization { Name = slug, Slug = slug, CreatedAt = DateTime.UtcNow };
+        ctx.Organizations.Add(org);
+        ctx.SaveChanges();
+        return org.Id;
+    }
 
     /// <summary>
     /// The production bcrypt hash of <paramref name="password"/>, computed once per

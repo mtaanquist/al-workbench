@@ -1,11 +1,9 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -13,24 +11,25 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// Approving or rejecting a signup that has already been decided - a double
 /// click, or a second admin on a page they loaded earlier - lands back on the
 /// users page with the reason, not on the error page (#1260).
+///
+/// <para>The cases share one host (#1536, #1582). Each seeds an admin and a
+/// newcomer of its own and asserts only on its own signup request.</para>
 /// </summary>
-public sealed class SignupDecisionEndpointTests : IDisposable
+public sealed class SignupDecisionEndpointTests : IClassFixture<SharedEndpointHost>
 {
-    private const string AdminEmail = "admin@cronus.example";
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _adminEmail = SharedEndpointHost.UniqueEmail("admin");
+    private readonly string _newcomerEmail = SharedEndpointHost.UniqueEmail("newcomer");
 
-    public SignupDecisionEndpointTests()
+    public SignupDecisionEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Theory]
@@ -70,18 +69,18 @@ public sealed class SignupDecisionEndpointTests : IDisposable
         await using var read = _db.NewContext();
         (await read.SignupRequests.IgnoreQueryFilters().SingleAsync(r => r.Id == requestId)).Decision
             .Should().Be(SignupDecision.Pending);
-        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "newcomer@cronus.example"))
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == _newcomerEmail))
             .Should().BeTrue("a refused rejection must not delete the other org's pending user");
     }
 
     private async Task<int> SeedAsync(int requestOrgId = TestDb.DefaultOrgId)
     {
         await using var seed = _db.NewContext();
-        var hash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password);
+        var hash = _host.HashPassword(Password);
         seed.Users.Add(new User
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Email = AdminEmail,
+            Email = _adminEmail,
             DisplayName = "Ada Admin",
             PasswordHash = hash,
             Role = UserRole.Admin,
@@ -91,7 +90,7 @@ public sealed class SignupDecisionEndpointTests : IDisposable
         var pending = new User
         {
             OrganizationId = requestOrgId,
-            Email = "newcomer@cronus.example",
+            Email = _newcomerEmail,
             DisplayName = "Nina Newcomer",
             PasswordHash = hash,
             Role = UserRole.User,
@@ -119,7 +118,7 @@ public sealed class SignupDecisionEndpointTests : IDisposable
         using var loginPage = await client.GetAsync("/login");
         using var login = await PostAsync(client, "/auth/login",
             AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()),
-            ("Email", AdminEmail), ("Password", Password));
+            ("Email", _adminEmail), ("Password", Password));
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");
 
