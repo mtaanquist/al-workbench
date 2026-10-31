@@ -220,7 +220,11 @@ public class ReleaseManagementService
     /// Removes the Release row plus every dependent <c>oe_*</c> row via FK
     /// cascade. Refuses when another Release still points at this one as its
     /// <c>parent_release_id</c> — pre-checked here so the failure message is
-    /// precise instead of a generic Postgres FK-violation.
+    /// precise instead of a generic Postgres FK-violation. Also refuses while a
+    /// solution build links it as a third-party dependency: that link cascades
+    /// away silently and the build's references into the vendor objects stop
+    /// resolving; and while it is still importing, which would pull the release
+    /// out from under the running import (#1616).
     ///
     /// The supplied <paramref name="confirmLabel"/> must match the Release's
     /// actual label exactly. The UI requires admins to type the label before
@@ -249,6 +253,14 @@ public class ReleaseManagementService
             });
         }
 
+        if (release.Status == "ingesting")
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Release"] = "This release is still importing. Wait for the import to finish or fail, then delete it.",
+            });
+        }
+
         var hasChildren = await _db.OeReleases.AsNoTracking()
             .AnyAsync(r => r.ParentReleaseId == releaseId, ct).ConfigureAwait(false);
         if (hasChildren)
@@ -259,17 +271,25 @@ public class ReleaseManagementService
             });
         }
 
+        // No count in the message: some of the builds may be on solutions this
+        // person cannot see.
+        var linkedByBuilds = await _db.OeReleaseDependencies.AsNoTracking()
+            .AnyAsync(d => d.DependencyReleaseId == releaseId, ct).ConfigureAwait(false);
+        if (linkedByBuilds)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Release"] = "Solution builds use this release for their third-party symbols. Delete those builds first, or keep this release.",
+            });
+        }
+
         // Capture the distinct content hashes this Release's files reference
         // BEFORE the cascade removes the oe_module_files rows. The shared
         // oe_file_contents blobs aren't cascade-deleted (the FK is Restrict, and
         // they may be shared with other releases/orgs), so we reclaim the ones
         // that become orphaned afterwards. Org-scoped read here is fine — we
         // only need this org's referenced hashes as GC candidates.
-        var candidateHashes = await _db.OeModuleFiles.AsNoTracking()
-            .Where(f => f.Module!.ReleaseId == releaseId)
-            .Select(f => f.ContentHash)
-            .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false);
+        var candidateHashes = await CandidateHashesAsync(releaseId, ct).ConfigureAwait(false);
 
         // The single cascading DELETE fans out through every dependent oe_*
         // table; for a large first-party release (tens of thousands of objects)
@@ -308,11 +328,7 @@ public class ReleaseManagementService
         // Capture the file content hashes before the cascade drops the
         // oe_module_files rows, same as HardDeleteAsync, so we can GC blobs that
         // no longer have any referrer afterwards.
-        var candidateHashes = await _db.OeModuleFiles.AsNoTracking()
-            .Where(f => f.Module!.ReleaseId == releaseId)
-            .Select(f => f.ContentHash)
-            .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false);
+        var candidateHashes = await CandidateHashesAsync(releaseId, ct).ConfigureAwait(false);
 
         // Same cascade exposure as HardDeleteAsync — the module-wide DELETE can
         // run long on a large release, so lift the command timeout off the 30 s
@@ -331,8 +347,29 @@ public class ReleaseManagementService
     }
 
     /// <summary>
+    /// The shared blobs a release's modules reference: every file's content, plus
+    /// the raw <c>SymbolReference.json</c> a module kept when the import was asked
+    /// to store it, which on a full DVD runs to hundreds of MB (#1616).
+    /// </summary>
+    private async Task<List<string>> CandidateHashesAsync(int releaseId, CancellationToken ct)
+    {
+        var fileHashes = await _db.OeModuleFiles.AsNoTracking()
+            .Where(f => f.Module!.ReleaseId == releaseId)
+            .Select(f => f.ContentHash)
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false);
+        var symbolReferenceHashes = await _db.OeModules.AsNoTracking()
+            .Where(m => m.ReleaseId == releaseId && m.SymbolReferenceContentHash != null)
+            .Select(m => m.SymbolReferenceContentHash!)
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false);
+        return fileHashes.Union(symbolReferenceHashes, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
     /// Deletes the supplied content-hash blobs from <c>oe_file_contents</c> that
-    /// no <c>oe_module_files</c> row references any more. Raw SQL so the
+    /// no <c>oe_module_files</c> row, and no module's stored
+    /// <c>SymbolReference.json</c>, references any more. Raw SQL so the
     /// <c>NOT EXISTS</c> check sees ALL orgs (the EF query filter doesn't apply)
     /// — a blob still used by another tenant must survive. Returns the count
     /// reclaimed. Shared by hard-delete and retry-clear.
@@ -361,6 +398,7 @@ public class ReleaseManagementService
                         "DELETE FROM oe_file_contents c WHERE c.content_hash IN (" +
                         "SELECT o.content_hash FROM oe_file_contents o WHERE o.content_hash = ANY({0}) " +
                         "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = o.content_hash) " +
+                        "AND NOT EXISTS (SELECT 1 FROM oe_modules m WHERE m.symbol_reference_content_hash = o.content_hash) " +
                         "FOR UPDATE SKIP LOCKED)",
                         new object[] { chunk }, ct).ConfigureAwait(false);
                     break;

@@ -192,37 +192,7 @@ internal static class StartupTasks
         // (#1107). Builds go back on their own queue at once; it never waits.
         ALDevToolbox.Services.ObjectExplorer.Import.ResumedImportJobs.QueueWhenStarted(app.Lifetime, queue, buildQueue, resumable, logger);
 
-        // Belt-and-suspenders: any OeRelease row still left in "ingesting"
-        // WITHOUT a re-queued durable job (synchronous individual-file imports
-        // that crashed mid-way, or pre-table-existing in-flight rows) gets the
-        // generic "interrupted by restart" treatment so the list page doesn't
-        // strand them. Excluding releases with a queued job row is important —
-        // the reconciler above just re-enqueued those for resume; flipping
-        // them to failed here would silently undo the resume. Cross-org by
-        // design — same blessed startup-maintenance category as the
-        // migration/seed/bootstrap steps above, never a request.
-        // Fence category 3 (startup, no request org): job rows only, ids out.
-        var resumableReleaseIds = await db.OeImportJobs
-            .IgnoreQueryFilters()
-            .Where(j => j.Status == "queued")
-            .Select(j => j.ReleaseId)
-            .ToListAsync(stopping);
-        var stranded = await db.OeReleases
-            // Same category 3 read: the stranded releases matching the ids above.
-            .IgnoreQueryFilters()
-            .Where(r => r.Status == "ingesting" && !resumableReleaseIds.Contains(r.Id))
-            .ToListAsync(stopping);
-        if (stranded.Count > 0)
-        {
-            foreach (var release in stranded)
-            {
-                release.Status = "failed";
-                release.StatusMessage = "Import was interrupted by a server restart. Re-import to try again.";
-                release.UpdatedAt = DateTime.UtcNow;
-            }
-            await db.SaveChangesAsync(stopping);
-            logger.LogWarning("Marked {Count} interrupted release import(s) as failed on startup.", stranded.Count);
-        }
+        await FailStrandedImportsAsync(db, logger, stopping);
 
         // Their build rows too, or a preview check would wait on one for good (#1111).
         // Every row with no importing release, not just this start's: one left behind by
@@ -269,6 +239,49 @@ internal static class StartupTasks
                 logger.LogWarning(ex, "Stamping app ids on build artifacts failed; retried on the next start.");
             }
         }, stopping);
+    }
+
+    /// <summary>
+    /// The startup sweep for releases left "ingesting" with nothing to resume them.
+    /// Internal so a test can drive it without the rest of startup.
+    /// </summary>
+    internal static async Task FailStrandedImportsAsync(AppDbContext db, ILogger logger, CancellationToken stopping)
+    {
+        // Belt-and-suspenders: any OeRelease row still left in "ingesting"
+        // WITHOUT a re-queued durable job (synchronous individual-file imports
+        // that crashed mid-way, or pre-table-existing in-flight rows) gets the
+        // generic "interrupted by restart" treatment so the list page doesn't
+        // strand them. Excluding releases with a queued job row is important —
+        // the startup reconciler (PersistedImportJobs.ReconcileOnStartupAsync)
+        // has just re-enqueued those for resume; flipping them to failed here
+        // would silently undo the resume. Cross-org by design — same blessed
+        // startup-maintenance category as the migration/seed/bootstrap steps,
+        // never a request.
+        // A queued backfill does not count: it re-reads a ready release and never
+        // resumes an import, so it must not keep a release a crashed Add modules
+        // left "ingesting" from being failed here (#1616).
+        // Fence category 3 (startup, no request org): job rows only, ids out.
+        var resumableReleaseIds = await db.OeImportJobs
+            .IgnoreQueryFilters()
+            .Where(j => j.Status == "queued" && j.Kind != "backfill_system_references")
+            .Select(j => j.ReleaseId)
+            .ToListAsync(stopping);
+        var stranded = await db.OeReleases
+            // Same category 3 read: the stranded releases matching the ids above.
+            .IgnoreQueryFilters()
+            .Where(r => r.Status == "ingesting" && !resumableReleaseIds.Contains(r.Id))
+            .ToListAsync(stopping);
+        if (stranded.Count > 0)
+        {
+            foreach (var release in stranded)
+            {
+                release.Status = "failed";
+                release.StatusMessage = "Import was interrupted by a server restart. Re-import to try again.";
+                release.UpdatedAt = DateTime.UtcNow;
+            }
+            await db.SaveChangesAsync(stopping);
+            logger.LogWarning("Marked {Count} interrupted release import(s) as failed on startup.", stranded.Count);
+        }
     }
 
     /// <summary>
