@@ -258,7 +258,7 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
             (await act.Should().ThrowAsync<PlanValidationException>())
                 .Which.Errors.Should().ContainKey("Release")
-                .WhoseValue.Should().Contain("third-party symbols");
+                .WhoseValue.Should().Contain("third-party symbols").And.Contain("\"CRONUS build 1\"");
         }
 
         await using var read = _db.NewContext();
@@ -340,6 +340,22 @@ public sealed class ReleaseManagementServiceTests : IDisposable
         }
         shared.Should().NotBeEmpty("both imports stored the same .app's SymbolReference.json");
 
+        // A file only the deleted release uses, so its blob must go. It is offered in
+        // the same reclaim as the shared symbol blobs: without the reclaim's check on
+        // stored symbol references, the foreign key refuses that whole batch and this
+        // blob would be left too.
+        var onlyHere = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        await using (var seed = _db.NewContext())
+        {
+            var moduleId = await seed.OeModules.Where(m => m.ReleaseId == dropId).Select(m => m.Id).FirstAsync();
+            seed.OeFileContents.Add(new OeFileContent { ContentHash = onlyHere, Content = "// x", ContentLength = 4, LineCount = 1 });
+            seed.OeModuleFiles.Add(new OeModuleFile
+            {
+                OrganizationId = TestDb.DefaultOrgId, ModuleId = moduleId, Path = "src/OnlyHere.al", ContentHash = onlyHere, LineCount = 1,
+            });
+            await seed.SaveChangesAsync();
+        }
+
         await using (var ctx = _db.NewContext())
         {
             var svc = NewManagement(ctx);
@@ -350,6 +366,8 @@ public sealed class ReleaseManagementServiceTests : IDisposable
         await using var after = _db.NewContext();
         (await after.OeFileContents.AsNoTracking().CountAsync(c => shared.Contains(c.ContentHash)))
             .Should().Be(shared.Distinct().Count());
+        (await after.OeFileContents.AsNoTracking().AnyAsync(c => c.ContentHash == onlyHere))
+            .Should().BeFalse("a blob only the deleted release used is reclaimed alongside the kept ones");
     }
 
     [Fact]

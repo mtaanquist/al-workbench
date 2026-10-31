@@ -62,9 +62,9 @@ internal sealed class ModuleConfiguration : IEntityTypeConfiguration<OeModule>
         // Backs the nullable symbol_reference_content_hash FK (OnDelete Restrict):
         // without it the blob reclaim after a release delete or retry
         // (ReleaseManagementService.ReclaimOrphanedBlobsAsync) and any Restrict
-        // enforcement on a content delete seq-scan oe_modules. Partial on IS NOT NULL because most
-        // modules carry no captured SymbolReference.json. See issue #374, and the
-        // parallel ix_oe_module_files_content_hash.
+        // enforcement on a content delete seq-scan oe_modules. Partial on IS NOT
+        // NULL because most modules carry no captured SymbolReference.json. See
+        // issue #374, and the parallel ix_oe_module_files_content_hash.
         entity.HasIndex(e => e.SymbolReferenceContentHash)
             .HasDatabaseName("ix_oe_modules_symbol_reference_content_hash")
             .HasFilter("\"symbol_reference_content_hash\" IS NOT NULL");

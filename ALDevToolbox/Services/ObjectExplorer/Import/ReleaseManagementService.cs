@@ -271,15 +271,30 @@ public class ReleaseManagementService
             });
         }
 
-        // No count in the message: some of the builds may be on solutions this
-        // person cannot see.
         var linkedByBuilds = await _db.OeReleaseDependencies.AsNoTracking()
             .AnyAsync(d => d.DependencyReleaseId == releaseId, ct).ConfigureAwait(false);
         if (linkedByBuilds)
         {
+            // Names only builds this person can see, and no count: some of them may
+            // be on solutions hidden from them. Soft-deleted builds count too, and
+            // are named, because restoring one would bring back the broken link.
+            var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+            var linkingIds = _db.OeReleaseDependencies
+                .Where(d => d.DependencyReleaseId == releaseId)
+                .Select(d => d.ReleaseId);
+            var visibleLabels = await _db.OeReleases.AsNoTracking()
+                .Where(r => linkingIds.Contains(r.Id))
+                .Where(_access.VisibleReleasePredicate(snapshot))
+                .OrderByDescending(r => r.Id)
+                .Select(r => r.Label)
+                .Take(3)
+                .ToListAsync(ct).ConfigureAwait(false);
+            var named = visibleLabels.Count == 0
+                ? string.Empty
+                : ", such as " + string.Join(", ", visibleLabels.Select(l => $"\"{l}\""));
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Release"] = "Solution builds use this release for their third-party symbols. Delete those builds first, or keep this release.",
+                ["Release"] = $"Solution builds use this release for their third-party symbols{named}. Delete those builds first (soft-deleted ones count too), or keep this release.",
             });
         }
 
