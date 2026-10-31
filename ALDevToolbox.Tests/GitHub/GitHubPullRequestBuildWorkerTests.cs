@@ -132,7 +132,6 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         var maintenance = new MaintenanceModeState();
         maintenance.Enter("Restoring a backup");
         var worker = NewWorker(queue, maintenance);
-        worker.MaintenanceRetryDelay = TimeSpan.FromMilliseconds(10);
 
         var run = worker.RunOneAsync(NewJob(), TestContext.Current.CancellationToken);
         await Task.Delay(200, TestContext.Current.CancellationToken);
@@ -791,10 +790,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
             queue ?? new GitHubWebhookQueue(), provider,
             maintenance ?? new MaintenanceModeState(),
             NullLogger<GitHubPullRequestBuildWorker>.Instance,
-            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry(TimeProvider.System))
-        {
-            MaintenanceRetryDelay = TimeSpan.Zero,
-        };
+            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry(TimeProvider.System));
     }
 
     private async Task ConfigureDeploymentAsync()

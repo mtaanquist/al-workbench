@@ -44,12 +44,6 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
     private readonly MaintenanceModeState _maintenance;
     private readonly ILogger<GitHubPullRequestBuildWorker> _logger;
 
-    /// <summary>
-    /// How often a delivery held during a restore checks whether the site has
-    /// reopened. Settable for tests, which cannot afford to wait half a minute.
-    /// </summary>
-    internal TimeSpan MaintenanceRetryDelay { get; set; } = TimeSpan.FromSeconds(30);
-
     public GitHubPullRequestBuildWorker(
         GitHubWebhookQueue queue,
         IServiceProvider services,
@@ -116,10 +110,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
             Heartbeat.EndActive();
             do
             {
-                while (_maintenance.IsActive)
-                {
-                    await Task.Delay(MaintenanceRetryDelay, ct).ConfigureAwait(false);
-                }
+                await WaitUntilOpenAsync(ct).ConfigureAwait(false);
             }
             while (!_maintenance.TryBeginJob());
             Heartbeat.BeginActive();

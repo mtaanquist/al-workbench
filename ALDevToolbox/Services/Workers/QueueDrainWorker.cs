@@ -176,7 +176,8 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
         }
     }
 
-    private async Task WaitUntilOpenAsync(CancellationToken ct)
+    /// <summary>Waits until maintenance mode is off. For a worker that holds a job itself.</summary>
+    protected async Task WaitUntilOpenAsync(CancellationToken ct)
     {
         while (_maintenance!.IsActive)
         {

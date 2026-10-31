@@ -149,9 +149,11 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
     /// outermost middleware and the gate (#1599).
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task A_command_the_database_guard_refuses_gets_the_maintenance_page_not_an_error(bool atTheGate)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task A_command_the_database_guard_refuses_gets_the_maintenance_page_not_an_error(bool atTheGate, bool asAWrite)
     {
         var maintenance = new MaintenanceModeState();
         using var services = new ServiceCollection().AddSingleton(maintenance).BuildServiceProvider();
@@ -163,7 +165,10 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
             // The request started while the site was open; the restore began under it.
             maintenance.Enter("Restoring from a backup.");
             ctx.Response.Headers["X-Half-Written"] = "yes";
-            throw new DatabaseClosedForMaintenanceException();
+            // A refused write reaches the request wrapped, as SaveChanges reports it.
+            throw asAWrite
+                ? new Microsoft.EntityFrameworkCore.DbUpdateException("An error occurred while saving.", new DatabaseClosedForMaintenanceException())
+                : new DatabaseClosedForMaintenanceException();
         });
         var pipeline = app.Build();
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = services };
@@ -175,9 +180,34 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         context.Response.StatusCode.Should().Be(503);
         context.Response.Headers.RetryAfter.ToString().Should().Be("30");
         context.Response.Headers.ContainsKey("X-Half-Written").Should().BeFalse("the half-built response is cleared");
+        context.Response.Headers.XContentTypeOptions.ToString().Should().Be("nosniff", "the security headers survive the clear");
         context.Response.Body.Position = 0;
         (await new StreamReader(context.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken))
             .Should().Contain(MaintenancePage);
+    }
+
+    /// <summary>
+    /// A refused restore reopens the site at once, so a request the guard refused may
+    /// answer once maintenance mode is already off: the page then neither promises a
+    /// restore nor prints an empty start time.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_answered_after_the_site_reopened_does_not_print_an_empty_start_time()
+    {
+        var maintenance = new MaintenanceModeState();
+        using var services = new ServiceCollection().AddSingleton(maintenance).BuildServiceProvider();
+        var app = new ApplicationBuilder(services);
+        ALDevToolbox.Endpoints.MaintenanceModeMiddleware.UseMaintenanceMode(app);
+        app.Run(_ => throw new DatabaseClosedForMaintenanceException());
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = services };
+        context.Response.Body = new MemoryStream();
+
+        await app.Build()(context);
+
+        context.Response.StatusCode.Should().Be(503);
+        context.Response.Body.Position = 0;
+        var body = await new StreamReader(context.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken);
+        body.Should().Contain("briefly closed").And.NotContain("Started:").And.NotContain("being restored");
     }
 
     private static async Task AssertGatedAsync(HttpClient client, string path)
