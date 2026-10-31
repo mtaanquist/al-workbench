@@ -407,36 +407,58 @@ public sealed class ReleaseImportRequestService
         // is being worked on, so a build polling it would take it for abandoned (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, visible, ct).ConfigureAwait(false);
-        await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
-        ReleaseImportSource source;
-        if (artifactUrl is not null)
+        // From the reopen on the release reads as importing, but nothing works on it
+        // until its job is queued. Anything that stops the steps below (leaving the
+        // page during the long wipe, which cancels the request; the wipe's command
+        // timeout; a failed insert) fails it again rather than leave it stuck until a
+        // restart (#1612). A wipe cut off half way rolls back, so the next Retry
+        // clears the same rows.
+        string? stagedPath = null;
+        try
         {
-            source = new ReleaseImportSource.BcArtifact(artifactUrl);
-        }
-        else if (urlToUse is not null)
-        {
-            source = new ReleaseImportSource.Url(urlToUse);
-        }
-        else if (hasFolderZip)
-        {
-            var tempPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
-            // otherwise honour the original staged flag (defaults to the
-            // whole-archive / workspace walk).
-            var isDvd = origin?.Kind == "url" || (origin?.StagedIsDvd ?? false);
-            source = new ReleaseImportSource.StagedZip(tempPath, isDvd);
-        }
-        else
-        {
-            var tempPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            source = new ReleaseImportSource.CalTxt(tempPath, submission.CalEncoding);
-        }
+            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
-        await EnqueueImportAsync(releaseId, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
-        return new ReleaseImportOutcome.Queued(releaseId);
+            ReleaseImportSource source;
+            if (artifactUrl is not null)
+            {
+                source = new ReleaseImportSource.BcArtifact(artifactUrl);
+            }
+            else if (urlToUse is not null)
+            {
+                source = new ReleaseImportSource.Url(urlToUse);
+            }
+            else if (hasFolderZip)
+            {
+                stagedPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+                // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
+                // otherwise honour the original staged flag (defaults to the
+                // whole-archive / workspace walk).
+                var isDvd = origin?.Kind == "url" || (origin?.StagedIsDvd ?? false);
+                source = new ReleaseImportSource.StagedZip(stagedPath, isDvd);
+            }
+            else
+            {
+                stagedPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+                source = new ReleaseImportSource.CalTxt(stagedPath, submission.CalEncoding);
+            }
+
+            await EnqueueImportAsync(releaseId, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
+            return new ReleaseImportOutcome.Queued(releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Retry of release {ReleaseId} stopped before its import was queued; failing it again.", releaseId);
+            // No job will open the staged upload, so it would sit in the temp folder until the next start.
+            if (stagedPath is not null)
+            {
+                try { File.Delete(stagedPath); } catch { /* swallow */ }
+            }
+            await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>

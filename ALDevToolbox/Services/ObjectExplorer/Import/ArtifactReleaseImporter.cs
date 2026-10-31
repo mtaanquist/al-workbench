@@ -113,7 +113,8 @@ public sealed class ArtifactReleaseImporter
     /// Re-runs a failed artifact import into its own release row: back to
     /// <c>ingesting</c>, the previous attempt's partial data wiped, and a fresh job
     /// queued from <paramref name="resolved"/>'s download URL. The same steps the
-    /// manage page's Retry takes.
+    /// manage page's Retry takes, and like it, a failure after the reopen fails the
+    /// release again rather than leave it importing with no job behind it (#1612).
     /// </summary>
     private async Task RequeueFailedAsync(int releaseId, ResolvedArtifact resolved, CancellationToken ct)
     {
@@ -121,11 +122,20 @@ public sealed class ArtifactReleaseImporter
         // take it for abandoned while the wipe runs (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
-        await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
-        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
-        var jobRowId = await _persistedJobs.CreateAsync(
-            releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
-        await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
+        try
+        {
+            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
+            var jobRowId = await _persistedJobs.CreateAsync(
+                releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
+            await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Re-run of failed artifact import {ReleaseId} stopped before its job was queued; failing it again.", releaseId);
+            await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>

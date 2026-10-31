@@ -191,6 +191,38 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_fails_a_re_run_again_when_its_wipe_is_cut_short()
+    {
+        // #1612: the re-run reopens the release as importing before the long wipe of
+        // the earlier attempt. A wipe cut short (the Artifacts tab left, a timeout)
+        // must not leave it importing with nothing queued.
+        await using (var setup = _db.NewContext())
+        {
+            var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+            failed.StatusMessage = "The download was cut off.";
+            setup.OeReleases.Add(failed);
+            await setup.SaveChangesAsync();
+        }
+        using var request = new CancellationTokenSource();
+        var interceptor = new ReleaseImportRequestServiceTests.OnModuleWipe(token => { request.Cancel(); token.ThrowIfCancellationRequested(); });
+        var queue = new ReleaseImportQueue();
+
+        await using (var ctx = _db.NewContext(interceptor))
+        {
+            var act = () => NewImporter(ctx, queue).ImportAsync("dk", version: null, request.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        interceptor.Calls.Should().Be(1);
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-onprem:28.2:dk");
+        release.Status.Should().Be("failed", "nothing will import it, so the next sweep or click can re-run it");
+        release.StatusMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+        (await read.OeImportJobs.AnyAsync(j => j.ReleaseId == release.Id)).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ImportAsync_does_not_re_run_a_failed_import_for_an_org_over_its_storage_quota()
     {
         // #1338: the re-run re-ingests a whole release, so it is a write and the

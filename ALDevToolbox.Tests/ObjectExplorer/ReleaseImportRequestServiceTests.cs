@@ -224,6 +224,159 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         (await StatusAsync(release.Id)).Should().Be("failed");
     }
 
+    // ── A retry cut short after the reopen fails the release again (#1612) ──
+
+    [Fact]
+    public async Task A_retry_whose_request_ends_during_the_wipe_fails_the_release_again_and_it_can_be_retried()
+    {
+        // The page looks frozen while a large release's earlier attempt is wiped, so
+        // the person leaves it and the request is cancelled mid-DELETE.
+        using var request = new CancellationTokenSource();
+        var interceptor = new OnModuleWipe(token => { request.Cancel(); token.ThrowIfCancellationRequested(); });
+        int releaseId;
+        await using (var setup = _db.NewContext())
+        {
+            releaseId = await SeedFailedArtifactImportAsync(setup);
+        }
+        var ingests = new ReleaseIngests();
+        var queue = new ReleaseImportQueue();
+
+        await using (var ctx = _db.NewContext(interceptor))
+        {
+            var act = () => NewService(ctx, queue, ingests: ingests).RetryAsync(releaseId, new ReleaseRetrySubmission(
+                DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null), request.Token);
+
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        interceptor.Calls.Should().Be(1, "the request was cancelled during the wipe");
+        await using (var read = _db.NewContext())
+        {
+            var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+            release.Status.Should().Be("failed", "nothing will import it, so it must not read as importing");
+            release.StatusMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+        }
+        ingests.IsRunning(releaseId).Should().BeFalse();
+        queue.Reader.TryRead(out _).Should().BeFalse();
+
+        // Failed, not stuck: the next Retry is accepted and queued.
+        await using (var again = _db.NewContext())
+        {
+            var outcome = await NewService(again, queue).RetryAsync(releaseId, new ReleaseRetrySubmission(
+                DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+            outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        }
+        (await StatusAsync(releaseId)).Should().Be("ingesting");
+        queue.Reader.TryRead(out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_retry_whose_wipe_fails_fails_the_release_again_and_rethrows()
+    {
+        // The wipe's ten-minute command timeout, or any other database error.
+        var interceptor = new OnModuleWipe(_ => throw new TimeoutException("The DELETE timed out."));
+        int releaseId;
+        await using (var setup = _db.NewContext())
+        {
+            releaseId = await SeedFailedArtifactImportAsync(setup);
+        }
+        var queue = new ReleaseImportQueue();
+
+        await using (var ctx = _db.NewContext(interceptor))
+        {
+            var act = () => NewService(ctx, queue).RetryAsync(releaseId, new ReleaseRetrySubmission(
+                DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+
+            await act.Should().ThrowAsync<TimeoutException>();
+        }
+
+        (await StatusAsync(releaseId)).Should().Be("failed");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_retry_with_a_re_uploaded_zip_cut_short_at_the_enqueue_fails_the_release_and_removes_the_staged_file()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 26.0 (DK)", Kind = "first_party", Status = "failed",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        // A full queue holds the retry at the enqueue, after the upload is staged.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var retry = NewService(ctx, queue).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false,
+            FolderZip: EmptyZip("applications.zip"), CalTxtFile: null), request.Token);
+        string? stagedPath = null;
+        while (!retry.IsCompleted && (stagedPath = await StagedPathAsync(release.Id)) is null)
+        {
+            await Task.Delay(20);
+        }
+        stagedPath.Should().NotBeNull("the retry stages the upload and writes its job row before the enqueue");
+        Track(stagedPath!);
+        File.Exists(stagedPath).Should().BeTrue();
+        await request.CancelAsync();
+
+        await retry.Awaiting(r => r.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        (await StatusAsync(release.Id)).Should().Be("failed");
+        File.Exists(stagedPath).Should().BeFalse("no job will open the staged upload");
+    }
+
+    private async Task<string?> StagedPathAsync(int releaseId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeImportJobs.AsNoTracking()
+            .Where(j => j.ReleaseId == releaseId)
+            .Select(j => j.StagedZipPath)
+            .FirstOrDefaultAsync();
+    }
+
+    private static async Task<int> SeedFailedArtifactImportAsync(Data.AppDbContext ctx)
+    {
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "Business Central 27.2 (DK)", Kind = "first_party", Status = "failed",
+            StatusMessage = "The download was cut off.", DedupKey = "bc-onprem:27.2:dk", ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.BcArtifact("https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.2.0.0/dk"),
+            storeSymbolReference: false);
+        return release.Id;
+    }
+
+    /// <summary>Runs <paramref name="onWipe"/> when the retry's module wipe is sent, before it reaches the database.</summary>
+    internal sealed class OnModuleWipe(Action<CancellationToken> onWipe) : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        public int Calls { get; private set; }
+
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.StartsWith("DELETE FROM oe_modules", StringComparison.Ordinal))
+            {
+                Calls++;
+                onWipe(cancellationToken);
+            }
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
     private async Task<string?> StatusAsync(int releaseId)
     {
         await using var read = _db.NewContext();

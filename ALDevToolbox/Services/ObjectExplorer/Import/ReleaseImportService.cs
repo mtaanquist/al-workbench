@@ -333,6 +333,34 @@ public class ReleaseImportService
         await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
+    /// <summary>The status message a release gets when a Retry reopened it but could not queue its import (#1612).</summary>
+    public const string RetryNotQueuedMessage =
+        "The retry stopped before its import was queued, so nothing was imported. Retry the import again.";
+
+    /// <summary>
+    /// Fails a release that a Retry reopened (<see cref="ReopenForRetryAsync(int, bool, CancellationToken)"/>)
+    /// but never queued a job for. The reopen commits the release as <c>ingesting</c>
+    /// before the long wipe of the earlier attempt and the enqueue, so a failure in
+    /// between (the request cut off when the page was left, the wipe's command timeout,
+    /// a failed insert) would otherwise leave it importing with nothing working on it,
+    /// refusing Retry and Add modules until the next restart (#1612, the Retry half of
+    /// #1331). Never cancelled, on a cleared tracker so a half-saved entity from the
+    /// failure is not saved along with it, and only while the release is still
+    /// <c>ingesting</c>. A failure to write the status is logged rather than thrown,
+    /// so the caller rethrows the error that got it here.
+    /// </summary>
+    public async Task FailUnqueuedRetryAsync(int releaseId)
+    {
+        try
+        {
+            await StampFailedAsync(releaseId, RetryNotQueuedMessage, onlyWhileIngesting: true).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not fail release {ReleaseId} after its retry stopped before the import was queued.", releaseId);
+        }
+    }
+
     /// <summary>
     /// Adds more <c>.app</c> uploads to an existing <c>ready</c> Release.
     /// Used when partner / project modules trickle in after the first-party
@@ -757,7 +785,8 @@ public class ReleaseImportService
     /// in-progress while the re-queued job runs. The caller wipes any partial
     /// data from the previous attempt
     /// (<see cref="ReleaseManagementService.ClearIngestedDataAsync"/>) and
-    /// re-enqueues the import job — this method only owns the Release-row state
+    /// re-enqueues the import job, and calls <see cref="FailUnqueuedRetryAsync"/>
+    /// if it cannot — this method only owns the Release-row state
     /// flip and its validation. Refuses anything that isn't a failed,
     /// non-deleted Release in this org with a field-keyed (<c>Retry</c>) error
     /// so the manage page renders it inline. See the <c>/retry</c> endpoint.
