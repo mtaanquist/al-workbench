@@ -194,8 +194,10 @@ public sealed class PersistedImportJobs
 
     /// <summary>
     /// Startup reconciliation. Returns the resumable jobs to re-enqueue (URL,
-    /// artifact and build imports, and backfills that never started); the
-    /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>, oldest first.
+    /// artifact and build imports, backfills that never started, and a backfill
+    /// a restart cut off, once - see <see cref="CutOffBackfillNote"/>); the
+    /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>,
+    /// oldest first, with the cut-off backfills last.
     /// Staged-zip jobs are flipped to <c>failed</c> in-place (their temp file
     /// is gone) along with their owning <c>oe_releases</c> row so the admin sees
     /// the failure reason on the list and can re-submit.
@@ -226,6 +228,8 @@ public sealed class PersistedImportJobs
 
         var now = _clock.GetUtcNow().UtcDateTime;
         var toResume = new List<ReleaseImportJob>();
+        // Backfills a restart cut off go after everything else (see below).
+        var cutOffBackfills = new List<ReleaseImportJob>();
         // releaseId → human noun for the lost upload, so the failure copy names
         // the right thing (a ZIP vs a C/AL file).
         var lostReleases = new Dictionary<int, string>();
@@ -296,13 +300,35 @@ public sealed class PersistedImportJobs
                             : ProjectBuildOrder.Unordered,
                         Resumed: true));
                     break;
-                case "backfill_system_references" when row.Status == "queued":
-                    // A backfill that never started. A bulk run queues every
-                    // release and works through them for hours, so a deploy in
-                    // the middle must not fail the rest (#1542). It re-reads
-                    // stored source and has changed nothing yet, so it simply
-                    // runs: not Resumed, which would wipe the release's rows.
-                    toResume.Add(new ReleaseImportJob(
+                case "backfill_system_references" when row.Status == "running" && row.ErrorMessage == CutOffBackfillNote:
+                    // Cut off a second time. It may be the backfill itself that
+                    // takes the process down (out of memory, say); running it
+                    // again on every start would loop the container and the
+                    // rest of the run would never finish. So it fails, and an
+                    // admin decides.
+                    row.Status = "failed";
+                    row.ErrorMessage = "The system-reference backfill was cut off by a restart twice, so it was not "
+                        + "started again. Its system references may be incomplete. Re-trigger it from the release.";
+                    row.CompletedAt = now;
+                    break;
+                case "backfill_system_references":
+                {
+                    // A bulk run queues every release and works through them for
+                    // hours, so a deploy in the middle must not fail the rest
+                    // (#1542). One that never started has changed nothing; one
+                    // the restart cut off had deleted the release's system
+                    // references and emitted only some of them again, and left
+                    // failed it would leave Find System References quietly
+                    // incomplete for that release (OEI2-2). Both run again: a
+                    // backfill deletes before it emits, so a second run is safe.
+                    // Not Resumed, which would wipe the release's rows. A cut-off
+                    // one is marked, so a second cut-off fails it (above), and
+                    // goes last, so the rest of the run is not stuck behind it.
+                    var cutOff = row.Status == "running";
+                    row.Status = "queued";
+                    row.StartedAt = null;
+                    if (cutOff) row.ErrorMessage = CutOffBackfillNote;
+                    (cutOff ? cutOffBackfills : toResume).Add(new ReleaseImportJob(
                         ReleaseId: row.ReleaseId,
                         Identity: new AmbientOrganizationScope.OrganizationIdentity(
                             row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
@@ -310,16 +336,7 @@ public sealed class PersistedImportJobs
                         StoreSymbolReference: false,
                         JobRowId: row.Id));
                     break;
-                case "backfill_system_references":
-                    // A maintenance backfill interrupted by a restart while it
-                    // ran. The release stays ready (backfill never flips its
-                    // status); its system refs may be partially repopulated.
-                    // Mark failed so the admin re-triggers, which is cheap and
-                    // idempotent. No lost upload to report. See #291.
-                    row.Status = "failed";
-                    row.ErrorMessage = "The system-reference backfill was interrupted by a restart. Re-trigger it from the release.";
-                    row.CompletedAt = now;
-                    break;
+                }
                 default:
                     // Staged-zip / cal-txt can't be resumed — the temp file is
                     // gone. The existing OeRelease row reconciler in StartupTasks
@@ -353,8 +370,18 @@ public sealed class PersistedImportJobs
         }
 
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        toResume.AddRange(cutOffBackfills);
         return toResume;
     }
+
+    /// <summary>
+    /// Left on a backfill row that a restart cut off and that startup queued
+    /// again. Found on a row that is running at the next start, it means the
+    /// second run was cut off too, and the row is failed rather than queued a
+    /// third time. Kept in the existing message column so no schema change is
+    /// needed; it stays on the row once the backfill completes, as a note.
+    /// </summary>
+    internal const string CutOffBackfillNote = "Started again after a restart cut it off.";
 
     /// <summary>
     /// The releases of the current organisation (EF query filter) that already have a
