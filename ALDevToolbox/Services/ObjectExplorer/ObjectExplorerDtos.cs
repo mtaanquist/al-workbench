@@ -410,7 +410,9 @@ public sealed record SourceFileHeader(
 
 /// <summary>
 /// One procedure-search hit on the Release search page. Carries the source
-/// file pointer so the row can deep-link straight to the declaration line.
+/// file pointer so the row can deep-link straight to the declaration line:
+/// <c>LineNumber</c> is the procedure's own line, or the owning object's when
+/// the procedure has none (an app imported from symbols only).
 /// </summary>
 public sealed record ReleaseProcedureMatch(
     long Id,
@@ -423,7 +425,7 @@ public sealed record ReleaseProcedureMatch(
     string? Signature,
     string? ReturnType,
     long? SourceFileId,
-    int ObjectLineNumber);
+    int LineNumber);
 
 /// <summary>
 /// One content-search hit on the Release search page. The snippet is the
