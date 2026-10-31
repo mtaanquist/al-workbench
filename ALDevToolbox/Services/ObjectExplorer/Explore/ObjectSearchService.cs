@@ -335,7 +335,8 @@ public sealed class ObjectSearchService
                 s.Signature,
                 s.ReturnType,
                 s.Object.SourceFileId,
-                s.Object.LineNumber))
+                // The procedure's own line, so View source opens at it (OEX2-4).
+                s.LineNumber > 0 ? s.LineNumber : s.Object.LineNumber))
             .ToListAsync(ct);
     }
 
