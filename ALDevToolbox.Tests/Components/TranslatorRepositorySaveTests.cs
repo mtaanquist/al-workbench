@@ -151,7 +151,10 @@ public sealed class TranslatorRepositorySaveTests
 
         js.Should().Contain("putBaseStream(fileName, sourceLang, targetLang, streamRef, repo)")
             .And.Contain("repo: repo || null")
-            .And.Contain("repo: rec.repo || null");
+            .And.Contain("repo: rec.repo || null")
+            // An overlay is never written onto another file's record (a second tab's).
+            .And.Contain("export async function putEdits(fileName, editsJson, learnedJson)")
+            .And.Contain("rec.fileName !== fileName");
     }
 
     // Blazor's JS interop deserialises with the web defaults.

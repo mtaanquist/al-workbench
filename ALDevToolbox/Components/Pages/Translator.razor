@@ -844,7 +844,7 @@ else
         [JsonPropertyName("s")] public string? S { get; set; }
     }
 
-    private sealed class SessionPeek
+    internal sealed class SessionPeek
     {
         [JsonPropertyName("fileName")] public string FileName { get; set; } = string.Empty;
         [JsonPropertyName("savedAt")] public long SavedAt { get; set; }
@@ -2605,7 +2605,11 @@ else
             {
                 await Task.Delay(400, token);
                 if (token.IsCancellationRequested || _module is null) return;
-                await _module.InvokeVoidAsync("putEdits", json, learned);
+                // The name lets the browser refuse to write this overlay onto a
+                // record another tab has since replaced with a different file.
+                // Read now, not when the save was queued, so a rename in the
+                // meantime (which renames the record too) does not refuse it.
+                await _module.InvokeVoidAsync("putEdits", _fileName, json, learned);
             }
             catch { /* debounced away or storage unavailable */ }
         });

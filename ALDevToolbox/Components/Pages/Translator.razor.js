@@ -79,9 +79,13 @@ export async function putBaseStream(fileName, sourceLang, targetLang, streamRef,
 // Debounced incremental edit save (for resume). `editsJson` is the full overlay;
 // `learnedJson` is what each unit last taught the translation memory, kept
 // beside it so a reload does not teach the same units again (#1343).
-export async function putEdits(editsJson, learnedJson) {
+// `fileName` is the file this tab has open: when the record holds another file
+// (a second tab opened one since), the overlay does not belong to it, and
+// writing it there would restore one file's edits - and repository origin -
+// onto another.
+export async function putEdits(fileName, editsJson, learnedJson) {
     const rec = await getRec();
-    if (!rec) return;
+    if (!rec || rec.fileName !== fileName) return;
     try {
         rec.edits = JSON.parse(editsJson);
         if (learnedJson) rec.learned = JSON.parse(learnedJson);
