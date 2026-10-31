@@ -17,6 +17,13 @@
 //      it, so we land the user on xhr.responseURL. Antiforgery failures come back
 //      as a 4xx with plain text instead, which we surface inline.
 //
+// The release manage page's Retry, Backfill and Upload & rebuild forms opt in too,
+// so a request that runs for minutes (the wipe before a retry) shows it is working
+// and a second click cannot abandon it (#1632). They name their own wording:
+// data-oe-busy-label on the submit button replaces "Importing...", and
+// data-oe-wait-label / data-oe-wait-hint on the form replace the banner's label
+// and hint once the bytes are up.
+//
 // Loaded once at the shell (App.razor) because Blazor's enhanced-nav diff doesn't
 // execute <script> tags from page responses; the scan()/observer pattern mirrors
 // generate.js so it binds whenever the form appears.
@@ -52,6 +59,9 @@
         const submit = form.querySelector("[data-oe-import-submit]");
         const submitLabel = submit ? submit.querySelector("span") : null;
         const originalSubmitText = submitLabel ? submitLabel.textContent : null;
+        const busyText = (submit && submit.dataset.oeBusyLabel) || "Importing...";
+        const waitHint = form.dataset.oeWaitHint;
+        const waitLabel = form.dataset.oeWaitLabel;
 
         const xhr = new XMLHttpRequest();
         xhr.open("POST", form.action);
@@ -61,7 +71,7 @@
             submit.disabled = true;
             submit.classList.add("btn--loading");
         }
-        if (submitLabel) submitLabel.textContent = "Importing...";
+        if (submitLabel) submitLabel.textContent = busyText;
         if (label) label.textContent = "Uploading...";
         if (hint) hint.textContent = "";
         if (bar) bar.value = 0;
@@ -76,14 +86,14 @@
         const isBackground = hasUrl || hasFolderZip;
 
         function switchToIngesting() {
-            if (label) label.textContent = isBackground ? "Queuing..." : "Ingesting...";
+            if (label) label.textContent = waitLabel ? waitLabel : isBackground ? "Queuing..." : "Ingesting...";
             if (pct) pct.textContent = "";
             // Removing the value attribute puts <progress> into its
             // indeterminate (animated) state — we have no byte signal for
             // the server-side phase.
             if (bar) bar.removeAttribute("value");
             if (hint) {
-                hint.textContent = isBackground
+                hint.textContent = waitHint ? waitHint : isBackground
                     ? "This import will finish in the background — taking you to the releases list. "
                         + "Refresh that page to check on its progress."
                     : "Parsing .app files and resolving references. "
@@ -93,7 +103,21 @@
 
         function fail(message) {
             if (label) label.textContent = "Failed";
-            if (hint) hint.textContent = message;
+            if (hint) {
+                hint.textContent = message;
+            } else {
+                // Forms without the progress banner (a bare button) still need to
+                // say what went wrong.
+                let note = form.querySelector("[data-oe-import-error]");
+                if (!note) {
+                    note = document.createElement("p");
+                    note.className = "form-sec__cap";
+                    note.setAttribute("role", "alert");
+                    note.setAttribute("data-oe-import-error", "");
+                    form.appendChild(note);
+                }
+                note.textContent = message;
+            }
             if (bar) bar.value = 0;
             if (submit) {
                 submit.disabled = false;

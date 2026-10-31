@@ -283,6 +283,7 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
+            ILoggerFactory loggers,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -317,6 +318,17 @@ internal static class ObjectExplorerEndpoints
             catch (ProjectAccessDeniedException)
             {
                 RedirectManage(ctx, id, "Retry", CannotRebuild);
+            }
+            // Anything else (the wipe's command timeout, a failed insert) lands on the
+            // manage page rather than the generic error page. An error after the reopen
+            // has normally failed the release again inside RetryAsync; one before it
+            // leaves the release as it was. A request the browser abandoned has nobody
+            // to redirect, so that one is left to propagate (#1632).
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                loggers.CreateLogger("ALDevToolbox.Endpoints.ObjectExplorerEndpoints")
+                    .LogError(ex, "Retry of release {ReleaseId} could not be queued.", id);
+                RedirectManage(ctx, id, "Retry", RetryNotQueued);
             }
         })
         .RequireObjectExplorerAuthoring()
@@ -564,6 +576,8 @@ internal static class ObjectExplorerEndpoints
 
     private const string CannotRebuild =
         "Only someone who can manage this solution can build it again.";
+
+    private const string RetryNotQueued = "The retry could not be queued. Try again.";
 
     private static void RedirectManage(HttpContext ctx, int releaseId, string errKey, string message)
     {

@@ -76,13 +76,35 @@ public sealed class AdminReleaseManageTests : IDisposable
         (await ExistsAsync(id)).Should().BeFalse();
     }
 
-    private async Task<int> SeedReleaseAsync(bool softDeleted = false)
+    /// <summary>
+    /// #1632: the long-running forms show they are working and cannot be submitted
+    /// twice - a second click would abandon the first request mid-wipe.
+    /// </summary>
+    [Theory]
+    [InlineData("failed", "retry")]
+    [InlineData("ready", "backfill-system-references")]
+    public async Task Long_running_forms_disable_their_button_while_they_post(string status, string action)
+    {
+        var id = await SeedReleaseAsync(status: status);
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignedInAdminAsync(factory);
+
+        var html = await GetAsync(client, $"/admin/object-explorer/release/{id}/manage");
+
+        var form = new HtmlParser().ParseDocument(html)
+            .QuerySelector($"form[action='/admin/object-explorer/{id}/{action}']");
+        form.Should().NotBeNull();
+        form!.HasAttribute("data-oe-import-form").Should().BeTrue();
+        form.QuerySelector("button[type=submit]")!.HasAttribute("data-oe-import-submit").Should().BeTrue();
+    }
+
+    private async Task<int> SeedReleaseAsync(bool softDeleted = false, string status = "ready")
     {
         await using var seed = _db.NewContext();
         var release = new OeRelease
         {
             OrganizationId = TestDb.DefaultOrgId, Label = Label, DedupKey = "bc:26.0:dk",
-            Kind = "first_party", Status = "ready", DeletedAt = softDeleted ? DateTime.UtcNow : null,
+            Kind = "first_party", Status = status, DeletedAt = softDeleted ? DateTime.UtcNow : null,
             ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         };
         seed.OeReleases.Add(release);
