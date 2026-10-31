@@ -88,6 +88,24 @@ jobs:
   build:
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    # The suite keeps all four cores of one runner busy for the whole Test
+    # step, so it runs as two shards side by side, each on its own runner with
+    # its own Postgres (#1581). Each shard builds for itself: the build is
+    # about two minutes and happens in parallel, which beats a build job
+    # followed by an artifact round trip that both shards would wait on.
+    #
+    # Shard a runs the namespaces in SHARD_A_NAMESPACES, shard b runs
+    # everything else. Both are built from that one list (include versus
+    # exclude), so together they always cover the whole suite exactly once and
+    # a new namespace lands in shard b on its own. Move a namespace across only
+    # to rebalance the two by duration.
+    name: build (shard ${{ matrix.shard }})
+    strategy:
+      # Let the other shard finish when one fails, so a run reports every
+      # failing test rather than half of them. ci-gate fails either way.
+      fail-fast: false
+      matrix:
+        shard: [a, b]
     runs-on: ubuntu-latest
     # Without a limit a hung test holds the runner for GitHub's six-hour
     # default. The job took about 28 minutes before #1535.
@@ -122,6 +140,9 @@ jobs:
 
     env:
       ALDT_TEST_POSTGRES_CONNECTION: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
+      # Top-level test namespaces (under ALDevToolbox.Tests) that shard a runs.
+      # About half the suite's time as measured in #1581.
+      SHARD_A_NAMESPACES: "ObjectExplorer Components Mcp Palette"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,6 +152,9 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Install PostgreSQL 18 client tools
+        # Only shard b runs the tests that need it (SiteAdmin and
+        # Infrastructure), so shard a skips the apt round trip.
+        if: matrix.shard == 'b'
         # BackupServiceTests / BackupSchedulerTests shell out to pg_dump and
         # pg_restore, and PgToolAvailability requires v18 to match the dump
         # format the postgres:18 service container emits. Ubuntu 24.04 runners
@@ -149,6 +173,7 @@ jobs:
           echo "/usr/lib/postgresql/18/bin" >> $GITHUB_PATH
 
       - name: Verify pg_dump version
+        if: matrix.shard == 'b'
         run: pg_dump --version
 
       - name: Restore
@@ -168,6 +193,8 @@ jobs:
         run: dotnet build --configuration Release --no-restore
 
       - name: Check the model matches the snapshot
+        # Once per run is enough; shard b has the shorter test list.
+        if: matrix.shard == 'b'
         # Catches editing an entity or a configuration without generating a
         # migration. It needs no database: the check compares the model EF
         # builds against AppDbContextModelSnapshot.cs, and --no-build reuses
@@ -196,7 +223,23 @@ jobs:
         # --timeout is the testing platform's built-in whole-run limit (no extra
         # package), so a hung run ends inside this step, ahead of the job's
         # timeout-minutes.
-        run: dotnet test --configuration Release --no-build --output Detailed --timeout 40m
+        #
+        # --filter-namespace / --filter-not-namespace are xUnit's own testing
+        # platform options. Repeating one ORs its values, so shard a runs any
+        # listed namespace and shard b runs every test outside all of them.
+        # A name is not a string prefix (Mcp would not pull in a McpFoo).
+        # Whatever the matching rule, both shards use the same names, so a
+        # test outside shard a is always inside shard b.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ "$SHARD" = "a" ]; then flag=--filter-namespace; else flag=--filter-not-namespace; fi
+          args=()
+          for ns in $SHARD_A_NAMESPACES; do
+            args+=("$flag" "ALDevToolbox.Tests.$ns")
+          done
+          echo "Shard $SHARD: ${args[*]}"
+          dotnet test --configuration Release --no-build --output Detailed --timeout 40m "${args[@]}"
 
   compose-smoke:
     # Builds the image from this checkout and boots it against a real `db`
@@ -424,6 +467,11 @@ jobs:
     # when every heavy job succeeded or was skipped; fails if any failed or was
     # cancelled. This is what makes "the build must be green" enforceable
     # without the paths-ignore deadlock. See #416.
+    #
+    # `build` is a matrix of two test shards (#1581). needs.build.result folds
+    # the legs into one: failure or cancelled if either leg was, success only
+    # when both succeeded, skipped when the changes filter skipped the job. So
+    # this gate requires both shards without naming them.
     needs: [changes, build, compose-smoke, migration-forward-compat]
     if: always()
     runs-on: ubuntu-latest
