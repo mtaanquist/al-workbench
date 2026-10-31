@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// hand it back that way, so a <c>da-DK.xlf</c> full of Danish declared
 /// <c>target-language="en-US"</c> and AL ignored it (#1250).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class TranslatorExportEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";
@@ -171,6 +170,27 @@ public sealed class TranslatorExportEndpointTests : IDisposable
             learn: """["Table 1 - Field 3 - Property Caption"]""");
         await exports.UntilAsync(2);
         Learned().Should().Equal("Posting Date");
+    }
+
+    /// <summary>
+    /// #1540: the Translator sends an empty list for a copy of a file it opened
+    /// from a repository, because this endpoint learns without one and a pair
+    /// with no repository is suggested to the whole organisation. An empty list
+    /// has to mean "learn nothing", not "no list, learn everything".
+    /// </summary>
+    [Fact]
+    public async Task An_empty_learn_list_downloads_and_teaches_nothing()
+    {
+        await SeedUserAsync();
+        var exports = new FinishedExports();
+        using var factory = CountingExports(exports);
+        using var client = await SignInAsync(factory);
+
+        var exported = await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited, learn: "[]");
+
+        exported.Should().Contain("Beloeb").And.Contain("Bogfoeringsdato");
+        await exports.UntilAsync(1);
+        Learned().Should().BeEmpty();
     }
 
     /// <summary>The real host, counting the exports that have finished learning.</summary>

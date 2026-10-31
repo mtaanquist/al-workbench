@@ -195,6 +195,40 @@ public sealed class AdminCookbookSuggestionReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task Approve_after_the_submitter_changed_it_is_refused_and_shows_the_new_version()
+    {
+        var id = await SeedAsync();
+        _db.OrgContext.CurrentUserId = 801; // the reviewer
+        var cut = _ctx.Render<AdminCookbookSuggestionReview>(p => p.Add(x => x.Id, id));
+        cut.WaitForAssertion(() => cut.Find(".page-head__actions .btn--primary"));
+
+        // The submitter revises the suggestion while the reviewer has it open.
+        await using (var edit = _db.NewContext())
+        {
+            var s = await edit.RecipeSuggestions.Include(x => x.Files).SingleAsync(x => x.Id == id);
+            s.Title = "Release rules v2";
+            s.Files.Single(f => f.Ordering == 0).Content = "codeunit 50100 Check { /* changed */ }";
+            await edit.SaveChangesAsync();
+        }
+
+        cut.Find(".page-head__actions .btn--primary").Click();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Publish this recipe?"));
+        cut.FindAll(".confirm-dialog button").Single(b => b.TextContent.Trim() == "Approve and publish").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("This suggestion was changed after you opened it");
+            cut.Find("h1").TextContent.Should().Contain("Release rules v2",
+                "the page reloads so the reviewer reads the new version");
+            cut.Markup.Should().Contain("Approve and publish", "it is still pending and can be approved again");
+        });
+        await using var read = _db.NewContext();
+        (await read.RecipeSuggestions.SingleAsync(s => s.Id == id)).Decision
+            .Should().Be(RecipeSuggestionDecision.Pending);
+        (await read.Recipes.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Clicking_a_file_in_the_tree_shows_that_file()
     {
         var id = await SeedAsync();

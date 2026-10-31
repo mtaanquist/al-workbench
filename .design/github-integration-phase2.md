@@ -1002,7 +1002,12 @@ suggestions without anyone uploading anything.
   can already see it, and the pair is the same whichever file taught it last. A
   Translator save to a repository records that repository too (#1324), so a pull
   request that is never merged - and so never read by the ingest - does not leave its
-  pairs visible to everyone. Pairs saved before that fix are not backfilled (their
+  pairs visible to everyone. "Export a copy" of a file opened from a repository teaches
+  the memory nothing (#1540), also after a page reload, because the browser's session
+  record keeps the file's repository and path: the export endpoint has no repository to attach, so its
+  pairs would be visible to everyone; Save to repository and the ingest of a copy
+  committed by hand learn the same units with the repository named. Pairs saved before
+  #1324 are not backfilled (their
   `Origin` is only the file name) and stay visible; and the comparison is against each
   Solution's stored repository URL, so a repository renamed after it was tracked is
   matched by its old name.

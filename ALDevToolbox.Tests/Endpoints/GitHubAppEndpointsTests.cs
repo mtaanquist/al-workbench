@@ -32,7 +32,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// GitHub is never reached: an accepted state without a <c>code</c> ends in its own
 /// "not connected" answer, and the one case that needs GitHub to answer gets the fake.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GitHubAppEndpointsTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";

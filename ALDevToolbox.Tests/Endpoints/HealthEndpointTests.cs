@@ -15,7 +15,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// background worker that is merely stuck must show on <c>/healthz/workers</c> only,
 /// while a database the app cannot reach must fail <c>/healthz</c>.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class HealthEndpointTests : IDisposable
 {
     private readonly TestDb _db = new();

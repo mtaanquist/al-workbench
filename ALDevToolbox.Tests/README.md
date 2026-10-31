@@ -63,7 +63,7 @@ should copy rather than reinvent.
 | `Validation/`     | `PlanValidationException` field-key surface tests.                 |
 | `Dashboard/`      | `DashboardService` — the counts and queues behind `/admin` and `/`. |
 | `Routing/`        | End-to-end endpoint inspection — boots the app via                  |
-|                   | `WebApplicationFactory<Program>` and asserts the endpoint map is    |
+|                   | `EndpointFactory` and asserts the endpoint map is                   |
 |                   | unambiguous (catches `MapPost` / `@page` collisions at build time). |
 | `Endpoints/`      | HTTP-layer behaviour for the minimal-API handlers in `Program.cs`   |
 |                   | (antiforgery enforcement, anonymous → redirect, /site-admin 404).   |
@@ -242,6 +242,36 @@ that renders it joins that collection.
 **Culture.** `CultureDefaults` is a module initializer that applies the app's
 own culture before any test runs, so numbers and dates format the way the app
 formats them whatever the machine's locale. Don't set a culture in a test.
+
+### Endpoint tests
+
+Boot the app with `EndpointFactory`, never with a hand-built
+`WebApplicationFactory<Program>`. The factory gives its host the fixture's
+connection string through configuration, so endpoint test classes run in
+parallel with each other and with everything else. Don't put them in a
+collection to serialise them.
+
+- **Configuration.** Anything the app reads through `IConfiguration`
+  (`Auth:WebAuthn:RpId`, say) goes in the `settings:` argument. It reaches
+  that host only.
+- **Environment.** A knob startup reads straight off the environment
+  (`PUBLIC_BASE_URL`, `SINGLE_TENANT_MODE`) goes in `environment:`. That sets
+  a process-wide variable, so the class must carry
+  `[Collection(ProcessEnvironmentCollection.Name)]`, which runs it on its own
+  after the parallel collections. Keep that list short: if a knob can move to
+  `settings:`, move it.
+- **Schedulers.** The factory takes the polled schedulers out of the host
+  (backups, the BCQuality mirror, the Microsoft feed sync and the rest), so a
+  host that lives past their startup delay doesn't clone repositories or call
+  out to Microsoft and GitHub. Test a scheduler by driving it directly.
+  `keepSchedulers: true` keeps them for the one test that checks they are
+  registered. Those are the real schedulers: a host built that way that
+  lives past their 20-second startup delay starts ticking them, network calls
+  included. Keep such a host short-lived.
+- **Key files.** `KeyDirectoryDefaults` points every host at a key folder of
+  the test process's own and creates the OAuth keys there before any host
+  boots, so parallel first boots only read them. Don't set
+  `DATA_PROTECTION_KEY_DIR` or `OAUTH_KEY_DIR` in a test.
 
 ### Builders
 

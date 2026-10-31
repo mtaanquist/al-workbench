@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Auth;
 /// change on an account that signs in with Microsoft and has no password
 /// it knows (#1259).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class MfaEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

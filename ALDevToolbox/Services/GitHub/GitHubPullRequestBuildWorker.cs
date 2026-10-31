@@ -59,10 +59,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         // Routing only - the build itself is the release-import worker's active
         // duration, not this one's. Five minutes is generous for "ask a few orgs
         // what they connected, then open a check run".
-        : base(queue.Reader, logger, heartbeats, nameof(GitHubPullRequestBuildWorker), TimeSpan.FromMinutes(5),
-            // Not handed to the base: RunJobAsync puts the delivery back on the queue
-            // itself while maintenance is on; the base's wait would pre-empt that (#1538).
-            maintenance: null)
+        : base(queue.Reader, logger, heartbeats, nameof(GitHubPullRequestBuildWorker), TimeSpan.FromMinutes(5), maintenance)
     {
         _queue = queue;
         _services = services;
@@ -80,6 +77,13 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         GitHubMergedPullRequestJob merged => $"{merged.RepositoryFullName}#{merged.Number} merged",
         _ => job.RepositoryFullName,
     };
+
+    /// <summary>
+    /// This worker applies its own maintenance policy in <see cref="RunJobAsync"/>
+    /// (#1321), so the base does not hold its jobs; it still counts them, so a
+    /// restore waits for a running one to finish (#1538).
+    /// </summary>
+    protected override bool HoldsJobsDuringMaintenance => false;
 
     protected override async Task RunJobAsync(GitHubWebhookJob job, CancellationToken ct)
     {

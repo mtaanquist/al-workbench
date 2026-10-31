@@ -183,7 +183,7 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     /// <see cref="GitHubWebhookRecoveryScheduler"/> asks it to once the backlog
     /// has drained (#1121).</para>
     /// </summary>
-    public bool TryEnqueue(GitHubWebhookJob job) => Writer.TryWrite(job);
+    public bool TryEnqueue(GitHubWebhookJob job) => TryWrite(job);
 
     /// <summary>
     /// Records <paramref name="headSha"/> as the newest head for
@@ -223,7 +223,7 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     {
         ArgumentNullException.ThrowIfNull(job);
         var record = Record(job.Key, job.HeadSha, job.UpdatedAt);
-        if (!Writer.TryWrite(job))
+        if (!TryWrite(job))
         {
             Restore(job.Key, record);
             return false;

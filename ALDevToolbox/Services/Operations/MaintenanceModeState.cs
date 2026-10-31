@@ -41,9 +41,9 @@ public sealed class MaintenanceModeState
     /// </summary>
     /// <remarks>
     /// A full fence, not a plain volatile write: a restore turns the flag on and then
-    /// counts the running imports and builds, while a worker marks its job running
-    /// and then reads the flag. The fence keeps either side from missing the other
-    /// (#1538).
+    /// reads <see cref="ActiveJobs"/>, while a worker counts its job in and then reads
+    /// the flag (<see cref="TryBeginJob"/>). The fence keeps either side from missing
+    /// the other (#1538).
     /// </remarks>
     public void Enter(string reason) => Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
 
@@ -61,4 +61,62 @@ public sealed class MaintenanceModeState
     public void Restore(Snapshot snapshot) => _state = snapshot;
 
     public void Exit() => _state = new(null, default, false);
+
+    // ---- Background jobs across a restore (#1538) ----------------------------------
+
+    private long _epoch;
+    private int _activeJobs;
+
+    /// <summary>
+    /// Counts restores that replaced the database. A job queued or picked up under an
+    /// earlier epoch belongs to a database that is gone, so the queues and workers
+    /// drop it rather than run it against the restored one. Advanced before
+    /// maintenance mode lifts, so nothing held through the restore can miss it.
+    /// </summary>
+    public long Epoch => Interlocked.Read(ref _epoch);
+
+    /// <summary>Called by the restore once the database it dropped has been replaced (or failed to be).</summary>
+    public void AdvanceEpoch() => Interlocked.Increment(ref _epoch);
+
+    /// <summary>Background jobs that have started and not finished.</summary>
+    public int ActiveJobs => Volatile.Read(ref _activeJobs);
+
+    /// <summary>
+    /// Claims a slot for a job about to run. False while maintenance mode is on, and
+    /// the job must then wait. The count goes up before the flag is read, and
+    /// <see cref="Enter"/> is a full fence, so a restore that turns the flag on and
+    /// then waits for <see cref="ActiveJobs"/> to reach zero either sees this job or
+    /// this job sees the flag.
+    /// </summary>
+    public bool TryBeginJob()
+    {
+        Interlocked.Increment(ref _activeJobs);
+        if (!IsActive) return true;
+        Interlocked.Decrement(ref _activeJobs);
+        return false;
+    }
+
+    /// <summary>
+    /// Counts a job that runs whatever the flag says, for a worker that applies its
+    /// own maintenance policy inside the job. The restore still waits for it.
+    /// </summary>
+    public void BeginJobRegardless() => Interlocked.Increment(ref _activeJobs);
+
+    /// <summary>Releases what <see cref="TryBeginJob"/> or <see cref="BeginJobRegardless"/> claimed.</summary>
+    public void EndJob() => Interlocked.Decrement(ref _activeJobs);
+
+    /// <summary>
+    /// Waits up to <paramref name="timeout"/> for every running job to finish. Call
+    /// with the flag on, so no new job can start meanwhile. True when none is left.
+    /// </summary>
+    public async Task<bool> WaitForActiveJobsAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (ActiveJobs > 0)
+        {
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(TimeSpan.FromMilliseconds(50), ct).ConfigureAwait(false);
+        }
+        return true;
+    }
 }

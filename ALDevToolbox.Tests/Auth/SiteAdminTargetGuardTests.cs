@@ -226,6 +226,25 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
         (await ReadUserAsync(soloId)).Status.Should().Be(UserStatus.Active);
     }
 
+    [Fact]
+    public async Task A_site_admin_demoted_while_their_page_was_open_cannot_change_a_site_admin()
+    {
+        // The circuit still carries the site_admin claim from when the page
+        // connected; the row says otherwise, and the row wins (#1534).
+        var actorId = await SeedUserAsync("operator@example.com", UserRole.Admin, siteAdmin: true);
+        var otherId = await SeedUserAsync("second-operator@example.com", UserRole.Admin, siteAdmin: true);
+        ActAs(actorId, siteAdmin: true);
+        await SetSiteAdminAsync(actorId, false);
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> act = () => NewUserAdmin(ctx).ChangeRoleAsync(otherId, UserRole.User, OrgId);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UserId");
+        }
+
+        (await ReadUserAsync(otherId)).Role.Should().Be(UserRole.Admin);
+    }
+
     private UserAdministrationService NewUserAdmin(Data.AppDbContext ctx) =>
         _db.NewUserAdministrationService(ctx, _clock);
 

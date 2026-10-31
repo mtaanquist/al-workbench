@@ -27,8 +27,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<ReleaseImportWorker> _logger;
-    // Set on the import worker only; the build workers count theirs on ProjectBuildQueue.
-    private readonly ReleaseImportQueue? _importQueue;
+    private readonly ReleaseImportQueue? _queue;
 
     public ReleaseImportWorker(
         ReleaseImportQueue queue,
@@ -40,7 +39,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         Operations.MaintenanceModeState? maintenance = null)
         : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker), maintenance)
     {
-        _importQueue = queue;
+        _queue = queue;
     }
 
     /// <summary>For a worker that runs the same jobs from another queue.</summary>
@@ -62,11 +61,8 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 
     protected override string Describe(ReleaseImportJob job) => $"ReleaseId={job.ReleaseId}";
 
-    // Counted from pick-up, before the base's maintenance gate, so a restore that
-    // checks after turning maintenance on either sees this job or holds it back (#1538).
-    protected override void OnJobStarting(ReleaseImportJob job) => _importQueue?.MarkRunning();
-
-    protected override void OnJobFinished(ReleaseImportJob job) => _importQueue?.MarkFinished();
+    /// <summary>Frees the slot a paced bulk job held on the queue, so the feed can write the next one.</summary>
+    protected override void OnJobStarting(ReleaseImportJob job) => _queue?.MarkPickedUp(job);
 
     /// <summary>
     /// Publishes the finished build as a GitHub Release when its pipeline names a

@@ -69,7 +69,6 @@ public sealed class LinkPreviewTests
 }
 
 /// <summary>The same card through the real pipeline, as a chat app fetches it.</summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class LinkPreviewEndpointTests : IDisposable
 {
     private readonly TestDb _db = new();

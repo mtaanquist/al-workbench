@@ -18,7 +18,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// "Download all" zip is streamed to the response (#1263), and the server refuses
 /// synchronous writes to it, so these unzip what actually came back.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class ArtifactEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";

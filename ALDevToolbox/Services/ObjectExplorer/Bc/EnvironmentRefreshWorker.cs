@@ -36,9 +36,7 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         // One project is a token call plus two admin-center calls per environment, so 15
         // minutes is ample even for a customer with many sandboxes while still catching a
         // wedged job.
-        // Not handed to the base: RunJobAsync applies this worker's own maintenance
-        // policy (#1321), which the base's hold-and-wait would pre-empt (#1538).
-        : base(queue.Reader, logger, heartbeats, nameof(EnvironmentRefreshWorker), TimeSpan.FromMinutes(15), maintenance: null)
+        : base(queue.Reader, logger, heartbeats, nameof(EnvironmentRefreshWorker), TimeSpan.FromMinutes(15), maintenance)
     {
         _queue = queue;
         _services = services;
@@ -49,6 +47,13 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
 
     private readonly Operations.MaintenanceModeState? _maintenance;
     private readonly TimeProvider _clock;
+
+    /// <summary>
+    /// This worker applies its own maintenance policy in <see cref="RunJobAsync"/>
+    /// (#1321), so the base does not hold its jobs; it still counts them, so a
+    /// restore waits for a running one to finish (#1538).
+    /// </summary>
+    protected override bool HoldsJobsDuringMaintenance => false;
 
     /// <summary>
     /// A breath between one customer and the next. The sweep is a run of back-to-back

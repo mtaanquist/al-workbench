@@ -17,7 +17,8 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// stop it) and once when it goes through. A change whose notice can't be sent
 /// is not made at all, and the admin is never handed a confirmation link.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
+// Sets PUBLIC_BASE_URL, which startup reads off the environment.
+[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class AdminEmailChangeNoticeTests : IDisposable
 {
     private const string AdminEmail = "sam.berg@cronus.example";

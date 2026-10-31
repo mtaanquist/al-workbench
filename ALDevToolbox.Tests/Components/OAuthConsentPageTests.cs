@@ -14,7 +14,6 @@ namespace ALDevToolbox.Tests.Components;
 /// the permissions AL Workbench grants, in the approver's words, however many others the
 /// request names (#1438).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class OAuthConsentPageTests : IDisposable
 {
     private const string Email = "alice@cronus.example";

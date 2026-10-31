@@ -33,7 +33,6 @@ namespace ALDevToolbox.Tests.OAuth;
 /// silently — Claude won't add the connector, and there's no error
 /// surface beyond "couldn't reach the MCP server."
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class OAuthMetadataTests : IDisposable
 {
     private readonly TestDb _db = new();

@@ -21,7 +21,6 @@ namespace ALDevToolbox.Tests.Routing;
 /// each page (deliberately mirroring the page it forwards to) doesn't swallow the
 /// redirect under test. See issue #700 for why these are kept rather than deleted.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class LegacyRedirectTests : IDisposable
 {
     private const string AdminEmail = "legacy-admin@cronus.test";

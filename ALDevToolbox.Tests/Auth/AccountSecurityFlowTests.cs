@@ -258,6 +258,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
                     CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 5400;
         string token;
         await using (var ctx = _db.NewContext())
         {
@@ -298,6 +299,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
                     CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 5450;
         string firstToken, secondToken;
         await using (var ctx = _db.NewContext())
         {
@@ -334,9 +336,10 @@ public sealed class AccountSecurityFlowTests : IDisposable
                 CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 5500;
         await using var ctx = _db.NewContext();
         var act = () => NewUserAdmin(ctx).RequestEmailChangeAsync(5500, "fresh@example.com", orgId, 5500);
-        await act.Should().ThrowAsync<PlanValidationException>();
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("NewEmail");
     }
 
     [Fact]

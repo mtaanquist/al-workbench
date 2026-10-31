@@ -1,10 +1,9 @@
 using System.Reflection;
 using ALDevToolbox.Services;
-using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Workers;
 using AwesomeAssertions;
-using Microsoft.Extensions.DependencyInjection;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Services;
@@ -21,7 +20,8 @@ public sealed class WorkerBaseTests
 
     private sealed class TestQueue : JobQueue<TestJob, int>
     {
-        public TestQueue() : base(capacity: 8, keySelector: job => job.Id) { }
+        public TestQueue(MaintenanceModeState? maintenance = null)
+            : base(capacity: 8, keySelector: job => job.Id, maintenance: maintenance) { }
     }
 
     private sealed class RerunningTestQueue : JobQueue<TestJob, int>
@@ -32,20 +32,47 @@ public sealed class WorkerBaseTests
     private sealed class TestDrainWorker : QueueDrainWorker<TestJob>
     {
         private readonly TestQueue _queue;
+        private readonly bool _holds;
         public List<int> Ran { get; } = new();
 
-        public TestDrainWorker(TestQueue queue, WorkerHeartbeatRegistry heartbeats, MaintenanceModeState? maintenance = null)
-            : base(queue.Reader, NullLogger.Instance, heartbeats, "TestDrainWorker", TimeSpan.FromMinutes(1), maintenance) =>
-            _queue = queue;
+        /// <summary>Every job that finished, ran or not, in order. Tests await it instead of sleeping.</summary>
+        public Channel<int> Finished { get; } = Channel.CreateUnbounded<int>();
 
-        protected override Task RunJobAsync(TestJob job, CancellationToken ct)
+        /// <summary>Runs as a job is picked up, before the maintenance gate.</summary>
+        public Action<TestJob>? Starting { get; init; }
+
+        /// <summary>The job's body, after it is recorded in <see cref="Ran"/>.</summary>
+        public Func<TestJob, Task>? Body { get; init; }
+
+        public TestDrainWorker(
+            TestQueue queue, WorkerHeartbeatRegistry heartbeats, MaintenanceModeState? maintenance = null, bool holds = true)
+            : base(queue.Reader, NullLogger.Instance, heartbeats, "TestDrainWorker", TimeSpan.FromMinutes(1), maintenance)
+        {
+            _queue = queue;
+            _holds = holds;
+        }
+
+        protected override bool HoldsJobsDuringMaintenance => _holds;
+
+        protected override async Task RunJobAsync(TestJob job, CancellationToken ct)
         {
             lock (Ran) Ran.Add(job.Id);
             if (job.Throws) throw new InvalidOperationException("job blew up");
-            return Task.CompletedTask;
+            if (Body is not null) await Body(job);
         }
 
-        protected override void OnJobFinished(TestJob job) => _queue.Complete(job.Id);
+        protected override void OnJobStarting(TestJob job) => Starting?.Invoke(job);
+
+        protected override void OnJobFinished(TestJob job)
+        {
+            _queue.Complete(job.Id);
+            Finished.Writer.TryWrite(job.Id);
+        }
+
+        public bool HasRun(int id)
+        {
+            lock (Ran) return Ran.Contains(id);
+        }
 
         public Task RunLoopAsync(CancellationToken ct) => ExecuteAsync(ct);
     }
@@ -53,6 +80,7 @@ public sealed class WorkerBaseTests
     private sealed class TestScheduler : PolledScheduler
     {
         public int Ticks;
+        public Func<Task>? OnTick { get; init; }
 
         public TestScheduler(WorkerHeartbeatRegistry heartbeats, string disableEnvVar, MaintenanceModeState? maintenance = null)
             : base(NullLogger.Instance, heartbeats, "TestScheduler",
@@ -66,7 +94,7 @@ public sealed class WorkerBaseTests
         protected override Task TickAsync(CancellationToken ct)
         {
             Interlocked.Increment(ref Ticks);
-            return Task.CompletedTask;
+            return OnTick?.Invoke() ?? Task.CompletedTask;
         }
 
         public Task RunLoopAsync(CancellationToken ct) => ExecuteAsync(ct);
@@ -216,15 +244,41 @@ public sealed class WorkerBaseTests
     }
 
     /// <summary>
-    /// A job picked up during a restore waits for the site to reopen and then runs. It
-    /// is not dropped: an import has no scheduler that would offer it again (#1538).
+    /// A scheduler tick that is running counts as an active job, so a restore that
+    /// starts mid-sweep waits for it to finish (#1538).
     /// </summary>
     [Fact]
-    public async Task QueueDrainWorker_holds_a_job_while_maintenance_mode_is_on_and_runs_it_after()
+    public async Task PolledScheduler_counts_a_running_tick_as_an_active_job()
+    {
+        var maintenance = new MaintenanceModeState();
+        var inTick = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scheduler = new TestScheduler(new WorkerHeartbeatRegistry(), "DISABLE_UNUSED_" + Guid.NewGuid().ToString("N"), maintenance)
+        {
+            OnTick = async () =>
+            {
+                inTick.TrySetResult(maintenance.ActiveJobs);
+                await release.Task;
+            },
+        };
+
+        var tick = scheduler.RunTickAsync(TestContext.Current.CancellationToken);
+        (await inTick.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Should().Be(1);
+        release.SetResult();
+        (await tick.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Should().BeTrue();
+        maintenance.ActiveJobs.Should().Be(0, "the tick released its count when it finished");
+    }
+
+    /// <summary>
+    /// While a restore runs a worker picks up nothing new, so the job stays queued; it
+    /// runs once the site reopens if no restore replaced the database meanwhile (#1538).
+    /// </summary>
+    [Fact]
+    public async Task QueueDrainWorker_picks_up_nothing_while_maintenance_mode_is_on()
     {
         var maintenance = new MaintenanceModeState();
         maintenance.Enter("Restoring backup test.dump");
-        var queue = new TestQueue();
+        var queue = new TestQueue(maintenance);
         var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         cts.CancelAfter(TimeSpan.FromSeconds(10));
@@ -233,67 +287,158 @@ public sealed class WorkerBaseTests
         var loop = worker.RunLoopAsync(cts.Token);
         try
         {
-            // Long enough for the loop to have picked the job up and reached the gate.
-            while (queue.Reader.Count > 0 && !cts.IsCancellationRequested) await Task.Delay(10, cts.Token);
-            await Task.Delay(QueueDrainWorker<TestJob>.MaintenancePollInterval / 2, cts.Token);
-            lock (worker.Ran) worker.Ran.Should().BeEmpty("nothing runs during a restore");
-            queue.IsInFlight(1).Should().BeTrue("the job is held, not dropped");
+            queue.Reader.Count.Should().Be(1, "the job is still queued, not taken");
+            worker.HasRun(1).Should().BeFalse();
 
             maintenance.Exit();
-            while (!worker.Ran.Contains(1) && !cts.IsCancellationRequested) await Task.Delay(10, cts.Token);
-            lock (worker.Ran) worker.Ran.Should().Equal(1);
+            (await worker.Finished.Reader.ReadAsync(cts.Token)).Should().Be(1);
+            worker.HasRun(1).Should().BeTrue("no restore replaced the database, so the job is still good");
         }
         finally
         {
             await cts.CancelAsync();
-            try { await loop; } catch (OperationCanceledException) { }
+            await loop;
         }
     }
 
     /// <summary>
-    /// An import the worker has picked up and is holding still counts as pending, so a
-    /// restore that starts meanwhile is refused rather than dropping the schema under
-    /// it once the site reopens (#1538).
+    /// A job taken off the queue just as a restore began is held, not run into the
+    /// database being dropped. If the restore replaced the database, the job is
+    /// dropped when the site reopens, because it belongs to the old one (#1538).
     /// </summary>
     [Fact]
-    public async Task An_import_held_by_its_worker_still_counts_as_pending()
+    public async Task A_job_held_across_a_restore_that_replaced_the_database_is_dropped()
     {
         var maintenance = new MaintenanceModeState();
-        maintenance.Enter("Restoring backup test.dump");
-        var queue = new ReleaseImportQueue();
-        using var services = new ServiceCollection().BuildServiceProvider();
-        var worker = new ExposedReleaseImportWorker(queue, services, maintenance);
+        var queue = new TestQueue(maintenance);
+        var holding = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance)
+        {
+            // The restore begins between the worker taking the job and starting it.
+            Starting = _ => maintenance.Enter("Restoring backup test.dump"),
+        };
+        worker.Holding += job => holding.TrySetResult(job.Id);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-        await queue.EnqueueAsync(new ReleaseImportJob(
-            7,
-            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(1, isSystem: false),
-            new ReleaseImportSource.Url("https://example.invalid/dvd.zip")), cts.Token);
-        queue.PendingCount.Should().Be(1, "a queued import is pending");
-
+        await queue.EnqueueAsync(new TestJob(1), cts.Token);
         var loop = worker.RunLoopAsync(cts.Token);
         try
         {
-            while (queue.Reader.Count > 0 && !cts.IsCancellationRequested) await Task.Delay(10, cts.Token);
-            queue.Reader.Count.Should().Be(0, "the worker has picked the import up");
-            queue.PendingCount.Should().Be(1, "a held import is still pending");
+            (await holding.Task.WaitAsync(cts.Token)).Should().Be(1);
+            maintenance.ActiveJobs.Should().Be(0, "a held job is not counted, so the restore need not wait for it");
+
+            maintenance.AdvanceEpoch();
+            maintenance.Exit();
+
+            (await worker.Finished.Reader.ReadAsync(cts.Token)).Should().Be(1);
+            worker.HasRun(1).Should().BeFalse("the job was queued against the database the restore replaced");
+            queue.IsInFlight(1).Should().BeFalse("a dropped job still releases its key");
+            maintenance.ActiveJobs.Should().Be(0);
         }
         finally
         {
             await cts.CancelAsync();
-            try { await loop; } catch (OperationCanceledException) { }
+            await loop;
         }
-        queue.PendingCount.Should().Be(0, "an import the worker let go of is no longer pending");
     }
 
-    private sealed class ExposedReleaseImportWorker : ReleaseImportWorker
+    /// <summary>The same hold, ended without the database being replaced, runs the job (#1538).</summary>
+    [Fact]
+    public async Task A_job_held_while_nothing_was_replaced_runs_once_the_site_reopens()
     {
-        public ExposedReleaseImportWorker(ReleaseImportQueue queue, IServiceProvider services, MaintenanceModeState maintenance)
-            : base(queue, services, NullLogger<ReleaseImportWorker>.Instance, new WorkerHeartbeatRegistry(), maintenance)
-        { }
+        var maintenance = new MaintenanceModeState();
+        var queue = new TestQueue(maintenance);
+        var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance)
+        {
+            Starting = _ => maintenance.Enter("Restoring backup test.dump"),
+        };
+        worker.Holding += _ => holding.TrySetResult();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-        public Task RunLoopAsync(CancellationToken ct) => ExecuteAsync(ct);
+        await queue.EnqueueAsync(new TestJob(1), cts.Token);
+        var loop = worker.RunLoopAsync(cts.Token);
+        try
+        {
+            await holding.Task.WaitAsync(cts.Token);
+            maintenance.Exit(); // e.g. the restore was refused before the drop
+
+            (await worker.Finished.Reader.ReadAsync(cts.Token)).Should().Be(1);
+            worker.HasRun(1).Should().BeTrue();
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await loop;
+        }
+    }
+
+    /// <summary>
+    /// A running job is counted on the flag for as long as it runs, so the restore
+    /// waits for it; a worker with its own maintenance policy is counted the same way
+    /// (#1538).
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_running_job_counts_as_active_until_it_finishes(bool holds)
+    {
+        var maintenance = new MaintenanceModeState();
+        var queue = new TestQueue(maintenance);
+        var running = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance, holds)
+        {
+            Body = async _ =>
+            {
+                running.TrySetResult(maintenance.ActiveJobs);
+                await release.Task;
+            },
+        };
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
+        await queue.EnqueueAsync(new TestJob(1), cts.Token);
+        var loop = worker.RunLoopAsync(cts.Token);
+        try
+        {
+            (await running.Task.WaitAsync(cts.Token)).Should().Be(1);
+            maintenance.Enter("Restoring backup test.dump");
+            (await maintenance.WaitForActiveJobsAsync(TimeSpan.FromMilliseconds(100), cts.Token))
+                .Should().BeFalse("the job is still running");
+
+            release.SetResult();
+            (await worker.Finished.Reader.ReadAsync(cts.Token)).Should().Be(1);
+            (await maintenance.WaitForActiveJobsAsync(TimeSpan.FromSeconds(5), cts.Token)).Should().BeTrue();
+        }
+        finally
+        {
+            maintenance.Exit();
+            await cts.CancelAsync();
+            await loop;
+        }
+    }
+
+    /// <summary>
+    /// A queue given the flag drops at read a job queued before the epoch moved on,
+    /// and frees its key for the next request (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_queue_drops_a_job_from_before_the_epoch_moved_on()
+    {
+        var maintenance = new MaintenanceModeState();
+        var queue = new TestQueue(maintenance);
+
+        await queue.EnqueueAsync(new TestJob(1), TestContext.Current.CancellationToken);
+        maintenance.AdvanceEpoch();
+        await queue.EnqueueAsync(new TestJob(2), TestContext.Current.CancellationToken);
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Id.Should().Be(2, "job 1 was queued before the restore and is dropped");
+        queue.IsInFlight(1).Should().BeFalse();
+        queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     /// <summary>

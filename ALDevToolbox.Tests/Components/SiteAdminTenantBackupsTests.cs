@@ -25,7 +25,6 @@ namespace ALDevToolbox.Tests.Components;
 /// yes. Saying no to a browser <c>confirm()</c> sends nothing, so "dismiss leaves the
 /// data" is the form's <c>onsubmit</c> returning what <c>confirm()</c> answered.
 /// </remarks>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SiteAdminTenantBackupsTests : IDisposable
 {
     private const string AdminEmail = "siteadmin@cronus.example";

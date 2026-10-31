@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// hold both (#1347). It also writes a file name built from the release label
 /// and the app name, which may hold letters such as the Danish ae (#1339).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SymbolReferenceEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";

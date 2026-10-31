@@ -20,7 +20,6 @@ namespace ALDevToolbox.Tests.Palette;
 /// are a contract with a file that is not compiled against this one, so a
 /// rename here would not break a build - it would quietly empty the palette.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class PaletteEndpointTests : IDisposable
 {
     private const string UserEmail = "palette@cronus.test";

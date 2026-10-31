@@ -67,7 +67,6 @@ public sealed class IgnoreWhitespaceTests
 /// The endpoint half: the Diff tool sends the flag with every re-diff, and a
 /// request that omits it has to keep the behaviour it has always had.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class IgnoreWhitespaceEndpointTests : IDisposable
 {
     private readonly TestDb _db = new();

@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 using ALDevToolbox.Services.Configuration;
-using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Services.Backups;
@@ -56,11 +55,10 @@ public sealed class BackupService
     private readonly string _backupsDirectory;
     private readonly string _pgDumpPath;
     private readonly string _pgRestorePath;
+    private readonly TimeSpan _activeJobsWait;
     private readonly SystemSettingsService? _systemSettings;
     private readonly RestoreInventoryHold? _restoreInventory;
     private readonly DeploymentIdentity? _deployment;
-    private readonly ReleaseImportQueue? _imports;
-    private readonly ProjectBuildQueue? _builds;
 
     public BackupService(
         AppDbContext db,
@@ -80,15 +78,9 @@ public sealed class BackupService
         RestoreInventoryHold? restoreInventory = null,
         // Optional for the same reason; production DI always supplies it. Only
         // the restore of a recovered dump needs it (#1322).
-        DeploymentIdentity? deployment = null,
-        // Optional for the same reason; production DI always supplies the
-        // singletons, so a restore refuses while an import or build is going (#1538).
-        ReleaseImportQueue? imports = null,
-        ProjectBuildQueue? builds = null)
+        DeploymentIdentity? deployment = null)
     {
         _db = db;
-        _imports = imports;
-        _builds = builds;
         _deployment = deployment;
         _systemSettings = systemSettings;
         _restoreInventory = restoreInventory;
@@ -103,6 +95,7 @@ public sealed class BackupService
         _backupsDirectory = backupOptions.Directory;
         _pgDumpPath = backupOptions.PgDumpPath;
         _pgRestorePath = backupOptions.PgRestorePath;
+        _activeJobsWait = backupOptions.ActiveJobsWait;
     }
 
     /// <summary>Absolute path to the backups directory. Created on demand.</summary>
@@ -336,10 +329,6 @@ public sealed class BackupService
             });
         }
 
-        // Checked again below once maintenance mode is on; this early check only
-        // spares the SiteAdmin the read of the whole dump when it would be refused.
-        if (!_maintenance.IsHeldAfterFailedRestore) EnsureNoImportsOrBuilds();
-
         // Read the whole dump before anything is dropped (#1321).
         await EnsureDumpIsReadableAsync(row, path, ct);
 
@@ -354,21 +343,34 @@ public sealed class BackupService
         // if this one fails before the drop, that hold has to come back as it was.
         var before = _maintenance.Capture();
         _maintenance.Enter($"Restoring backup {row.FileName}");
-        // With maintenance mode on, schedulers skip their sweeps and the queue
-        // workers hold whatever they pick up, so nothing new starts; only work
-        // already going can still write. An import or build would keep writing into
-        // the dropped and half-loaded schema, so refuse rather than drop under it
-        // (#1538). Skipped while a failed restore holds the site closed: nothing was
-        // running when that one started, anything picked up since is being held,
-        // and refusing would leave no way to reopen the site.
-        if (!before.HeldAfterFailedRestore)
+        // With maintenance mode on, no scheduler tick or queued job starts. Wait,
+        // for a limited time, for those already running to finish: an import or
+        // build would keep writing into the dropped and half-loaded schema. If they
+        // do not finish, refuse rather than drop under them (#1538). Jobs still
+        // queued do not hold the restore up; they are dropped once it completes.
+        bool quiet;
+        try
         {
-            try { EnsureNoImportsOrBuilds(); }
-            catch
+            quiet = await _maintenance.WaitForActiveJobsAsync(_activeJobsWait, ct);
+        }
+        catch
+        {
+            _maintenance.Restore(before);
+            throw;
+        }
+        if (!quiet)
+        {
+            var running = _maintenance.ActiveJobs;
+            _maintenance.Restore(before);
+            _logger.LogWarning(
+                "Refusing to restore {FileName}: {Running} background job(s) were still running after {Wait}.",
+                row.FileName, running, _activeJobsWait);
+            throw new PlanValidationException(new Dictionary<string, string>
             {
-                _maintenance.Restore(before);
-                throw;
-            }
+                ["BackupId"] = "An import, a build or another background task is still running, and a restore would "
+                    + "replace the database under it. Wait until imports and builds have finished, then restore. "
+                    + "Nothing was changed.",
+            });
         }
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
@@ -449,6 +451,10 @@ public sealed class BackupService
         }
         finally
         {
+            // Anything queued or held from before belongs to the database just
+            // replaced; moving the epoch on, before the site reopens, makes the
+            // queues and workers drop it (#1538).
+            if (dropped) _maintenance.AdvanceEpoch();
             if (restored) _maintenance.Exit();
             // Nothing was dropped, so put back whatever was there before: open, or
             // still held closed by an earlier failed restore.
@@ -474,37 +480,6 @@ public sealed class BackupService
                 "Restored backup {FileName}, made by another installation; this installation now treats that installation's off-site backups as restorable here.",
                 row.FileName);
         }
-    }
-
-    /// <summary>
-    /// Refuses the restore while an import or build is running or waiting to run in
-    /// this process. Those jobs write to the database for minutes to hours, and a
-    /// restore would drop the schema under them and let them write into the one
-    /// being loaded (#1538). Reads the in-memory queues rather than the job tables:
-    /// they are what is actually running here, they span every organisation without
-    /// crossing the tenant filter, and a row left queued by a crash has no job behind
-    /// it and is no reason to refuse.
-    /// </summary>
-    private void EnsureNoImportsOrBuilds()
-    {
-        var imports = _imports?.PendingCount ?? 0;
-        var builds = (_builds?.WaitingCount ?? 0) + (_builds?.RunningCount ?? 0);
-        if (imports == 0 && builds == 0) return;
-
-        _logger.LogWarning(
-            "Refusing to restore: {Imports} import(s) and {Builds} build(s) are running or waiting to run.",
-            imports, builds);
-        string going;
-        if (imports > 0 && builds > 0) going = $"{Count(imports, "import")} and {Count(builds, "build")} are";
-        else if (imports > 0) going = imports == 1 ? "An import is" : $"{imports} imports are";
-        else going = builds == 1 ? "A build is" : $"{builds} builds are";
-        throw new PlanValidationException(new Dictionary<string, string>
-        {
-            ["BackupId"] = $"{going} running or waiting to run, and a restore would replace the database under them. "
-                + "Wait until they have finished, then restore. Nothing was changed.",
-        });
-
-        static string Count(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n} {noun}s";
     }
 
     /// <summary>
@@ -573,15 +548,27 @@ public sealed class BackupService
     /// other place migrations run, so without this every query on a newer
     /// column fails until the next restart (#1255).
     /// </summary>
+    /// <remarks>
+    /// The command timeout is startup's half hour, which a large data migration may
+    /// need. Waiting for a lock is another matter: a session left holding one would
+    /// otherwise keep the restore, with the site closed, waiting the full half hour
+    /// before it failed. A short <c>lock_timeout</c> on the migrating connection
+    /// makes that fail in a minute instead (#1538).
+    /// </remarks>
     private async Task MigrateAsync(CancellationToken ct)
     {
         _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
+        await _db.Database.OpenConnectionAsync(ct);
         try
         {
+            await _db.Database.ExecuteSqlRawAsync("SET lock_timeout = '1min'", ct);
             await _db.Database.MigrateAsync(ct);
         }
         finally
         {
+            try { await _db.Database.ExecuteSqlRawAsync("RESET lock_timeout", CancellationToken.None); }
+            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException) { /* connection is closing anyway */ }
+            await _db.Database.CloseConnectionAsync();
             _db.Database.SetCommandTimeout((int?)null);
         }
     }

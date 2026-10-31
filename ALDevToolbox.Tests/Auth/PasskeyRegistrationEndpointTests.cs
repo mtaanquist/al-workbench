@@ -19,7 +19,6 @@ namespace ALDevToolbox.Tests.Auth;
 /// does not do to passkeys: they stay, and the person is asked to look them
 /// over. See ".design/auth-and-audit.md", "Passkeys (WebAuthn)".
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class PasskeyRegistrationEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
@@ -31,10 +30,10 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 
     public PasskeyRegistrationEndpointTests()
     {
-        _factory = new EndpointFactory(_db, environment: new Dictionary<string, string?>
+        _factory = new EndpointFactory(_db, settings: new Dictionary<string, string?>
         {
-            ["Auth__WebAuthn__RpId"] = "localhost",
-            ["Auth__WebAuthn__OriginsCsv"] = "https://localhost",
+            ["Auth:WebAuthn:RpId"] = "localhost",
+            ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
         });
     }
 

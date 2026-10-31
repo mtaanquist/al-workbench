@@ -40,16 +40,20 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
         Operations.MaintenanceModeState? maintenance = null)
         // A single publish uploads a handful of apps and polls install status; 30
         // minutes is generous headroom while still catching a wedged run.
-        : base(queue.Reader, logger, heartbeats, $"{nameof(DeliveryWorker)} {slot}", TimeSpan.FromMinutes(30),
-            // Not handed to the base: RunJobAsync holds the delivery back itself and the
-            // scheduler offers it again (#1321); the base's wait would pre-empt that (#1538).
-            maintenance: null)
+        : base(queue.Reader, logger, heartbeats, $"{nameof(DeliveryWorker)} {slot}", TimeSpan.FromMinutes(30), maintenance)
     {
         _queue = queue;
         _services = services;
         _logger = logger;
         _maintenance = maintenance;
     }
+
+    /// <summary>
+    /// This worker applies its own maintenance policy in <see cref="RunJobAsync"/>
+    /// (#1321), so the base does not hold its jobs; it still counts them, so a
+    /// restore waits for a running one to finish (#1538).
+    /// </summary>
+    protected override bool HoldsJobsDuringMaintenance => false;
 
     protected override async Task RunJobAsync(DeliveryJob job, CancellationToken ct)
     {

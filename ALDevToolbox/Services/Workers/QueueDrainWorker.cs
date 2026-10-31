@@ -12,11 +12,15 @@ namespace ALDevToolbox.Services.Workers;
 /// in-flight release in <c>finally</c>.
 ///
 /// <para>
-/// It also owns the maintenance gate: a job picked up while a full restore runs, or
-/// while a failed one holds the site closed, waits until the site reopens and then runs
-/// (#1538). It is held, not dropped, because not every queue has a scheduler that would
-/// offer the job again. The wait sits outside the heartbeat's active bracket, so a long
-/// restore never reads as a stuck job. See <c>.design/deployment.md</c>.
+/// It also owns the worker's side of a full restore (#1538). While maintenance mode is
+/// on it picks up nothing new. Every job it runs is counted on
+/// <see cref="MaintenanceModeState.ActiveJobs"/>, which the restore waits on (with a
+/// time limit) before it drops anything. A job that was taken off the queue just as
+/// the restore began is held until the site reopens; if the restore replaced the
+/// database meanwhile (<see cref="MaintenanceModeState.Epoch"/> moved on) it is
+/// dropped, because it belongs to the old one. The waits sit outside the heartbeat's
+/// active bracket, so a long restore never reads as a stuck job. See
+/// <c>.design/deployment.md</c>.
 /// </para>
 /// </summary>
 public abstract class QueueDrainWorker<TJob> : BackgroundService
@@ -31,14 +35,28 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
 
     protected WorkerHeartbeat Heartbeat { get; }
 
+    /// <summary>The maintenance flag this worker was given. Internal so a test can check DI handed it on.</summary>
+    internal MaintenanceModeState? Maintenance => _maintenance;
+
+    /// <summary>Raised as a job starts being held for maintenance mode. Test seam.</summary>
+    internal event Action<TJob>? Holding;
+
+    /// <summary>
+    /// False for a worker that applies its own maintenance policy inside
+    /// <see cref="RunJobAsync"/> (hold back and let a scheduler offer the job again, or
+    /// put it back on the queue). Such a worker keeps picking jobs up during a restore;
+    /// its jobs are still counted, so the restore waits for them to finish.
+    /// </summary>
+    protected virtual bool HoldsJobsDuringMaintenance => true;
+
     /// <param name="maxActiveDuration">
     /// The longest legitimate single job. Queue-driven workers legitimately sit idle
     /// between jobs, so they opt out of the idle-silence check entirely (see
     /// <see cref="WorkerHeartbeat"/>).
     /// </param>
     /// <param name="maintenance">
-    /// The process-wide maintenance flag; jobs wait while it is on. Required so a new
-    /// worker has to pass it on; null only for a worker a test builds by hand.
+    /// The process-wide maintenance flag. Required so a new worker has to pass it on;
+    /// null only for a worker a test builds by hand.
     /// </param>
     protected QueueDrainWorker(
         ChannelReader<TJob> reader,
@@ -57,44 +75,90 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await foreach (var job in _reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
+        var holds = _maintenance is not null && HoldsJobsDuringMaintenance;
+        try
         {
-            var active = false;
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                // Marked started before the gate, so a restore that turns maintenance
-                // on and then counts what is running either sees this job or holds it.
-                OnJobStarting(job);
-                await WaitWhileMaintenanceAsync(job, stoppingToken).ConfigureAwait(false);
-                Heartbeat.BeginActive();
-                active = true;
-                await RunJobAsync(job, stoppingToken).ConfigureAwait(false);
+                // Pick up nothing new while a restore runs: whatever is queued stays
+                // queued, and the queue drops it afterwards if it is from before.
+                if (holds) await WaitUntilOpenAsync(stoppingToken).ConfigureAwait(false);
+                if (!await _reader.WaitToReadAsync(stoppingToken).ConfigureAwait(false)) return;
+                if (holds && _maintenance!.IsActive) continue;
+                if (!_reader.TryRead(out var job)) continue;
+                await RunOneAsync(job, stoppingToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                // Jobs capture their own failures on the row or cache they own; this is
-                // the last-resort net so one bad job never kills the worker loop.
-                _logger.LogError(ex, "{Worker} tripped on {Job}.", _name, Describe(job));
-            }
-            finally
-            {
-                OnJobFinished(job);
-                if (active) Heartbeat.EndActive();
-            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
         }
     }
 
-    private async Task WaitWhileMaintenanceAsync(TJob job, CancellationToken ct)
+    private async Task RunOneAsync(TJob job, CancellationToken stoppingToken)
     {
-        if (_maintenance?.IsActive != true) return;
-        _logger.LogInformation(
-            "{Worker} is holding {Job}: maintenance mode is active. It runs once the site reopens.",
-            _name, Describe(job));
-        while (_maintenance.IsActive)
+        var epoch = _maintenance?.Epoch ?? 0;
+        var counted = false;
+        var active = false;
+        try
+        {
+            OnJobStarting(job);
+            if (_maintenance is not null)
+            {
+                if (HoldsJobsDuringMaintenance)
+                {
+                    // Taken just as a restore began: it has not touched the database,
+                    // so hold it rather than make the restore wait for it.
+                    if (!_maintenance.TryBeginJob())
+                    {
+                        _logger.LogInformation(
+                            "{Worker} is holding {Job}: maintenance mode is active.", _name, Describe(job));
+                        Holding?.Invoke(job);
+                        do
+                        {
+                            await WaitUntilOpenAsync(stoppingToken).ConfigureAwait(false);
+                        }
+                        while (!_maintenance.TryBeginJob());
+                    }
+                    counted = true;
+                    if (_maintenance.Epoch != epoch)
+                    {
+                        _logger.LogWarning(
+                            "{Worker} dropped {Job}: a restore replaced the database it was queued against.",
+                            _name, Describe(job));
+                        return;
+                    }
+                }
+                else
+                {
+                    _maintenance.BeginJobRegardless();
+                    counted = true;
+                }
+            }
+            Heartbeat.BeginActive();
+            active = true;
+            await RunJobAsync(job, stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Jobs capture their own failures on the row or cache they own; this is
+            // the last-resort net so one bad job never kills the worker loop.
+            _logger.LogError(ex, "{Worker} tripped on {Job}.", _name, Describe(job));
+        }
+        finally
+        {
+            if (counted) _maintenance!.EndJob();
+            OnJobFinished(job);
+            if (active) Heartbeat.EndActive();
+        }
+    }
+
+    private async Task WaitUntilOpenAsync(CancellationToken ct)
+    {
+        while (_maintenance!.IsActive)
         {
             await Task.Delay(MaintenancePollInterval, ct).ConfigureAwait(false);
         }

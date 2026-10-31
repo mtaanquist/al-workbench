@@ -19,10 +19,11 @@ namespace ALDevToolbox.Services.Workers;
 ///
 /// <para>
 /// It also owns the maintenance gate: while a full restore runs, or a failed one holds
-/// the site closed, no tick runs, so no sweep reads or writes a database that is being
-/// dropped and reloaded (#1538). The heartbeat still beats, so a long restore never
-/// reads as a stalled worker. A sweep due during the restore runs on the first poll
-/// after it. See <c>.design/deployment.md</c>.
+/// the site closed, no tick starts, and a tick that is running is counted on
+/// <see cref="MaintenanceModeState.ActiveJobs"/>, which the restore waits on before it
+/// drops anything (#1538). The heartbeat still beats, so a long restore never reads as
+/// a stalled worker. A sweep due during the restore runs on the first poll after it.
+/// See <c>.design/deployment.md</c>.
 /// </para>
 /// </summary>
 public abstract class PolledScheduler : BackgroundService
@@ -41,6 +42,9 @@ public abstract class PolledScheduler : BackgroundService
     private readonly MaintenanceModeState? _maintenance;
 
     protected WorkerHeartbeat Heartbeat { get; }
+
+    /// <summary>The maintenance flag this scheduler was given. Internal so a test can check DI handed it on.</summary>
+    internal MaintenanceModeState? Maintenance => _maintenance;
 
     /// <param name="pollInterval">How often <see cref="TickAsync"/> is offered a turn.</param>
     /// <param name="maxActiveDuration">The longest legitimate single tick.</param>
@@ -111,15 +115,24 @@ public abstract class PolledScheduler : BackgroundService
     /// </summary>
     internal async Task<bool> RunTickAsync(CancellationToken ct)
     {
-        if (_maintenance?.IsActive == true)
+        // Counted on the flag while it runs, so a restore that starts mid-sweep waits
+        // for the sweep to finish (or refuses) before it drops anything.
+        if (_maintenance is not null && !_maintenance.TryBeginJob())
         {
             _logger.LogDebug("{Scheduler} skipped a poll: maintenance mode is active.", _name);
             return false;
         }
 
-        Heartbeat.BeginActive();
-        try { await TickAsync(ct).ConfigureAwait(false); }
-        finally { Heartbeat.EndActive(); }
+        try
+        {
+            Heartbeat.BeginActive();
+            try { await TickAsync(ct).ConfigureAwait(false); }
+            finally { Heartbeat.EndActive(); }
+        }
+        finally
+        {
+            _maintenance?.EndJob();
+        }
         return true;
     }
 

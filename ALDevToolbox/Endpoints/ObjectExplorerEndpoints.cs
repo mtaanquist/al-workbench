@@ -445,8 +445,10 @@ internal static class ObjectExplorerEndpoints
             ctx.Response.Redirect($"/admin/object-explorer/release/{id}/manage?ok=backfill-queued");
         }).RequireObjectExplorerAuthoring();
 
-        // Bulk variant: enqueue a backfill for every ready, non-deleted release
+        // Bulk variant: queue a backfill for every ready, non-deleted release
         // in the org — the "I don't want to reimport my whole catalogue" path.
+        // The jobs are fed to the queue in the background, never awaited here:
+        // a catalogue is hours of work for the one import worker (#1542).
         app.MapPost("/admin/object-explorer/backfill-system-references-all", async (
             HttpContext ctx,
             ReleaseManagementService management,
@@ -456,12 +458,8 @@ internal static class ObjectExplorerEndpoints
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var releaseIds = await management.ListBackfillableReleaseIdsAsync(ct);
-            foreach (var rid in releaseIds)
-            {
-                var source = new ReleaseImportSource.Backfill();
-                await imports.EnqueueImportAsync(rid, source, storeSymbolReference: false, ct);
-            }
-            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={releaseIds.Count}");
+            var result = await imports.QueueBackfillAllAsync(releaseIds, ct);
+            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={result.Queued}&skipped={result.Skipped}");
         }).RequireObjectExplorerAuthoring();
 
         app.MapPost("/admin/object-explorer/{id:int}/restore", async (

@@ -156,7 +156,9 @@ public sealed class SiteAdminServiceTests : IDisposable
 
             var outcomes = await Task.WhenAll(
                 AttemptAsync(ctx => NewSiteAdminService(ctx).DemoteAsync(demoteFirst ? first : second)),
-                AttemptAsync(ctx => NewUserAdministrationService(ctx)
+                // The disable is the SiteAdmin on their own row, so its actor
+                // is still an active Admin whichever way the race goes.
+                AttemptAsync(ctx => NewUserAdministrationService(ctx, actorId: demoteFirst ? second : first)
                     .DisableUserAsync(demoteFirst ? second : first, TestDb.DefaultOrgId)));
 
             outcomes.Count(ok => ok).Should().Be(1, $"exactly one of the two may go ahead (round {round})");
@@ -175,8 +177,10 @@ public sealed class SiteAdminServiceTests : IDisposable
             await ctx.Users.IgnoreQueryFilters()
                 .ExecuteUpdateAsync(s => s.SetProperty(u => u.IsSiteAdmin, false));
         }
-        var first = await SeedSingleUser(email: $"race-{round}-a@example.com", siteAdmin: true);
-        var second = await SeedSingleUser(email: $"race-{round}-b@example.com", siteAdmin: true);
+        // Admins as well, since the org Admin page that disables one only acts
+        // for an active Admin.
+        var first = await SeedSingleUser(email: $"race-{round}-a@example.com", siteAdmin: true, role: UserRole.Admin);
+        var second = await SeedSingleUser(email: $"race-{round}-b@example.com", siteAdmin: true, role: UserRole.Admin);
         return (first, second);
     }
 
@@ -217,8 +221,12 @@ public sealed class SiteAdminServiceTests : IDisposable
     private static SiteAdminService NewSiteAdminService(ALDevToolbox.Data.AppDbContext ctx) =>
         new(ctx, NewSiteAdminContext(), NullLogger<SiteAdminService>.Instance);
 
-    private UserAdministrationService NewUserAdministrationService(ALDevToolbox.Data.AppDbContext ctx) =>
-        new(ctx, TimeProvider.System, _db.OpenIddictTokens, NewSiteAdminContext());
+    private UserAdministrationService NewUserAdministrationService(ALDevToolbox.Data.AppDbContext ctx, int actorId)
+    {
+        var orgContext = NewSiteAdminContext();
+        orgContext.CurrentUserId = actorId;
+        return new(ctx, TimeProvider.System, _db.OpenIddictTokens, orgContext);
+    }
 
     [Fact]
     public async Task Promote_without_site_admin_context_throws()
@@ -316,10 +324,10 @@ public sealed class SiteAdminServiceTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private async Task<int> SeedSingleUser(string email = "promote@example.com", bool siteAdmin = false)
+    private async Task<int> SeedSingleUser(string email = "promote@example.com", bool siteAdmin = false, UserRole role = UserRole.User)
     {
         await using var ctx = _db.NewContext();
-        var user = NewUser(email, TestDb.DefaultOrgId);
+        var user = NewUser(email, TestDb.DefaultOrgId, role);
         user.IsSiteAdmin = siteAdmin;
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();

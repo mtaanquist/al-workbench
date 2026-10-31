@@ -67,19 +67,25 @@ async function putRec(rec) {
 
 // Called once when a file is opened. The original XML arrives as a
 // DotNetStreamReference so multi-MB files don't hit the interop arg limit.
-// Resets the edit overlay.
-export async function putBaseStream(fileName, sourceLang, targetLang, streamRef) {
+// Resets the edit overlay. `repo` ({ repository, path }) is where a file opened
+// from a repository came from, null otherwise: a restored session has to know,
+// so its export still teaches the translation memory nothing (#1540).
+export async function putBaseStream(fileName, sourceLang, targetLang, streamRef, repo) {
     const buf = await streamRef.arrayBuffer();
     const originalXml = new TextDecoder("utf-8").decode(buf);
-    await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {} });
+    await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null });
 }
 
 // Debounced incremental edit save (for resume). `editsJson` is the full overlay;
 // `learnedJson` is what each unit last taught the translation memory, kept
 // beside it so a reload does not teach the same units again (#1343).
-export async function putEdits(editsJson, learnedJson) {
+// `fileName` is the file this tab has open: when the record holds another file
+// (a second tab opened one since), the overlay does not belong to it, and
+// writing it there would restore one file's edits - and repository origin -
+// onto another.
+export async function putEdits(fileName, editsJson, learnedJson) {
     const rec = await getRec();
-    if (!rec) return;
+    if (!rec || rec.fileName !== fileName) return;
     try {
         rec.edits = JSON.parse(editsJson);
         if (learnedJson) rec.learned = JSON.parse(learnedJson);
@@ -113,6 +119,7 @@ export async function loadMeta() {
         targetLang: rec.targetLang || null,
         edits: rec.edits || {},
         learned: rec.learned || null,
+        repo: rec.repo || null,
     };
 }
 

@@ -118,11 +118,14 @@ is cut short, damaged part-way, not a backup at all, or taken by a newer
 PostgreSQL is refused at this point; the backups page says so, nothing has
 changed and the app stays open. The check costs one extra read of the file.
 
-It also refuses while a release import or a solution build is running or
-waiting to run: those write to the database for minutes to hours, and a
-restore would drop it under them. Wait until they have finished and try again.
-Once the restore has started, the background sweeps skip their turns and
-anything a worker picks up waits until the site reopens.
+Once the site is closed, the restore stops background work from starting and
+waits up to a minute for imports, builds and background sweeps that are
+already running. If one is still running after that, the restore is refused,
+the site reopens and nothing has changed: wait until imports and builds have
+finished and try again. Imports, builds and solution scans that were only
+waiting in line are dropped when the restore completes, because they belong
+to the database it replaced; start them again afterwards if they are still
+needed.
 
 What it cannot catch is a file that reads cleanly but that the database then
 refuses part-way through loading it. That is the case below.

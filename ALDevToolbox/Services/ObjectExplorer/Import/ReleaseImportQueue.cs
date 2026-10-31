@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Workers;
 
@@ -28,19 +29,58 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     // the sibling queues: the durable oe_import_jobs row is this queue's guard
     // against a duplicate run, and a re-import of the same release is a
     // legitimate request rather than a double-click to coalesce.
-    public ReleaseImportQueue() : base(capacity: 16) { }
+    //
+    // Given the maintenance flag (production DI always does), an import queued
+    // before a restore replaced the database is dropped rather than run against
+    // the restored one (#1538).
+    public ReleaseImportQueue(Operations.MaintenanceModeState? maintenance = null)
+        : base(capacity: 16, maintenance: maintenance) { }
 
-    private int _running;
+    /// <summary>A paced job dropped across a restore frees its slot like one the worker took.</summary>
+    protected override void OnDiscarded(ReleaseImportJob job) => MarkPickedUp(job);
 
     /// <summary>
-    /// Imports waiting in the channel plus the one the worker has picked up. A full
-    /// restore refuses to start while this is above zero (#1538).
+    /// How many paced jobs may wait in the channel at once. One keeps the worker
+    /// busy (the next backfill is always ready) while an import someone submits
+    /// meanwhile waits behind at most one of them, plus the one running (#1542).
     /// </summary>
-    public int PendingCount => Reader.Count + Volatile.Read(ref _running);
+    public const int PacedJobLimit = 1;
 
-    internal void MarkRunning() => Interlocked.Increment(ref _running);
+    private readonly SemaphoreSlim _pacedSlots = new(PacedJobLimit, PacedJobLimit);
+    private readonly ConcurrentDictionary<long, byte> _pacedRowIds = new();
 
-    internal void MarkFinished() => Interlocked.Decrement(ref _running);
+    /// <summary>
+    /// Queues a job of a bulk run (the system-reference backfill of every release)
+    /// without letting the run fill the channel: waits until fewer than
+    /// <see cref="PacedJobLimit"/> paced jobs are waiting, then writes it. The worker
+    /// frees the slot through <see cref="MarkPickedUp"/>. Without this the feed kept
+    /// all sixteen slots full for hours, so a user's import, a Retry or the nightly
+    /// auto-import sat behind sixteen backfills.
+    /// </summary>
+    public async Task EnqueuePacedAsync(ReleaseImportJob job, CancellationToken ct = default)
+    {
+        await _pacedSlots.WaitAsync(ct).ConfigureAwait(false);
+        _pacedRowIds[job.JobRowId] = 0;
+        try
+        {
+            await EnqueueAsync(job, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (_pacedRowIds.TryRemove(job.JobRowId, out _)) _pacedSlots.Release();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The worker calls this as it takes a job off the channel. Frees a paced slot
+    /// when the job was queued by <see cref="EnqueuePacedAsync"/>; any other job is
+    /// ignored.
+    /// </summary>
+    public void MarkPickedUp(ReleaseImportJob job)
+    {
+        if (_pacedRowIds.TryRemove(job.JobRowId, out _)) _pacedSlots.Release();
+    }
 }
 
 /// <summary>

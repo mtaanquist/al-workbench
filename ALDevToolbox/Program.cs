@@ -143,6 +143,7 @@ app.MapAccountEndpoints();
 app.MapNotificationEndpoints();
 app.MapEntraAuthEndpoints();
 app.MapStepUpEndpoints();
+app.MapSessionRefresh();
 app.MapGitHubAppEndpoints();
 app.MapGitHubWebhookEndpoints();
 app.MapAdminUserEndpoints();

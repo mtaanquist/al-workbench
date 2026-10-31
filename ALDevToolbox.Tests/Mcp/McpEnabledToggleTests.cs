@@ -17,7 +17,6 @@ namespace ALDevToolbox.Tests.Mcp;
 /// 404 when the toggle is off, regardless of whether the caller has a
 /// valid PAT.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class McpEnabledToggleTests : IDisposable
 {
     private readonly TestDb _db = new();

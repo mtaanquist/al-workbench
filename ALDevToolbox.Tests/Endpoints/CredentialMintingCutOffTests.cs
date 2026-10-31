@@ -27,7 +27,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// before the owner's reset could still create an access token, and the token
 /// would be dated after the reset, so nothing would refuse it later.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class CredentialMintingCutOffTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
@@ -40,10 +39,10 @@ public sealed class CredentialMintingCutOffTests : IDisposable
     {
         // Passkeys configured, so the passkey leg reaches its filter rather
         // than failing to bind.
-        _factory = new EndpointFactory(_db, environment: new Dictionary<string, string?>
+        _factory = new EndpointFactory(_db, settings: new Dictionary<string, string?>
         {
-            ["Auth__WebAuthn__RpId"] = "localhost",
-            ["Auth__WebAuthn__OriginsCsv"] = "https://localhost",
+            ["Auth:WebAuthn:RpId"] = "localhost",
+            ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
         });
     }
 
