@@ -407,36 +407,80 @@ public sealed class ReleaseImportRequestService
         // is being worked on, so a build polling it would take it for abandoned (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, visible, ct).ConfigureAwait(false);
-        await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
-        ReleaseImportSource source;
-        if (artifactUrl is not null)
+        // From the reopen on the release reads as importing, but nothing works on it
+        // until its job is queued. Anything that stops the steps below (leaving the
+        // page during the long wipe, which cancels the request; the wipe's command
+        // timeout; a failed insert) fails it again rather than leave it stuck until a
+        // restart (#1612). The module DELETE is one statement, so cut off it rolls back
+        // and the earlier attempt's modules stay; a failure after it (the blob reclaim,
+        // staging, the job row) leaves them already removed. Either way the next Retry
+        // starts by wiping again.
+        string? stagedPath = null;
+        long? jobRowId = null;
+        try
         {
-            source = new ReleaseImportSource.BcArtifact(artifactUrl);
-        }
-        else if (urlToUse is not null)
-        {
-            source = new ReleaseImportSource.Url(urlToUse);
-        }
-        else if (hasFolderZip)
-        {
-            var tempPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
-            // otherwise honour the original staged flag (defaults to the
-            // whole-archive / workspace walk).
-            var isDvd = origin?.Kind == "url" || (origin?.StagedIsDvd ?? false);
-            source = new ReleaseImportSource.StagedZip(tempPath, isDvd);
-        }
-        else
-        {
-            var tempPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            source = new ReleaseImportSource.CalTxt(tempPath, submission.CalEncoding);
-        }
+            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
-        await EnqueueImportAsync(releaseId, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
-        return new ReleaseImportOutcome.Queued(releaseId);
+            ReleaseImportSource source;
+            if (artifactUrl is not null)
+            {
+                source = new ReleaseImportSource.BcArtifact(artifactUrl);
+            }
+            else if (urlToUse is not null)
+            {
+                source = new ReleaseImportSource.Url(urlToUse);
+            }
+            else if (hasFolderZip)
+            {
+                stagedPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+                // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
+                // otherwise honour the original staged flag (defaults to the
+                // whole-archive / workspace walk).
+                var isDvd = origin?.Kind == "url" || (origin?.StagedIsDvd ?? false);
+                source = new ReleaseImportSource.StagedZip(stagedPath, isDvd);
+            }
+            else
+            {
+                stagedPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+                source = new ReleaseImportSource.CalTxt(stagedPath, submission.CalEncoding);
+            }
+
+            // EnqueueImportAsync's two steps, inline so a row written but never queued
+            // (the request ended while the queue was full) can be failed below.
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, submission.StoreSymbolReference, jobRowId.Value),
+                ct).ConfigureAwait(false);
+            return new ReleaseImportOutcome.Queued(releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Retry of release {ReleaseId} stopped before its import was queued; failing it again.", releaseId);
+            // A queued row with no job behind it would be resumed at the next start,
+            // wiping the release first, even after a later Retry has imported it.
+            if (jobRowId is long rowId)
+            {
+                try
+                {
+                    await _persistedJobs.FailUnqueuedAsync(rowId, ReleaseImportService.RetryNotQueuedMessage).ConfigureAwait(false);
+                }
+                catch (Exception rowEx)
+                {
+                    _logger.LogError(rowEx, "Could not fail import job row {JobRowId} of release {ReleaseId}.", rowId, releaseId);
+                }
+            }
+            // No job will open the staged upload, so it would sit in the temp folder until the next start.
+            if (stagedPath is not null)
+            {
+                try { File.Delete(stagedPath); } catch { /* swallow */ }
+            }
+            await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
@@ -558,9 +602,19 @@ public sealed class ReleaseImportRequestService
         UploadedFile file, string prefix, string extension, CancellationToken ct)
     {
         var tempPath = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N") + extension);
-        await using var fs = File.Create(tempPath);
-        await using var src = file.OpenRead();
-        await src.CopyToAsync(fs, ct).ConfigureAwait(false);
+        try
+        {
+            await using var fs = File.Create(tempPath);
+            await using var src = file.OpenRead();
+            await src.CopyToAsync(fs, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A half-written copy has no job to delete it, so it would sit in the
+            // temp folder until the next start. The file is closed by now.
+            try { File.Delete(tempPath); } catch { /* swallow */ }
+            throw;
+        }
         return tempPath;
     }
 

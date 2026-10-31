@@ -159,6 +159,27 @@ public sealed class PersistedImportJobs
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Fails a <c>queued</c> row a request wrote but could not put on the in-memory
+    /// queue (the request ended while the queue was full). Left queued, the startup
+    /// reconciler would resume it, and a resumed job wipes its release first, by then
+    /// perhaps one a later Retry has imported (#1612). Unlike
+    /// <see cref="MarkFailedAsync"/> this keeps the organisation filter on: the row
+    /// was written by the calling request, for its own organisation. Never cancelled,
+    /// since the request's token may be why the enqueue failed.
+    /// </summary>
+    public Task FailUnqueuedAsync(long jobRowId, string errorMessage)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var message = Truncate(errorMessage, 4000);
+        return _db.OeImportJobs
+            .Where(j => j.Id == jobRowId && j.Status == "queued")
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(j => j.Status, "failed")
+                .SetProperty(j => j.ErrorMessage, message)
+                .SetProperty(j => j.CompletedAt, now), CancellationToken.None);
+    }
+
     public async Task MarkFailedAsync(long jobRowId, string errorMessage, CancellationToken ct = default)
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
