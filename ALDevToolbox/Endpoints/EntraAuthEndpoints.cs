@@ -92,7 +92,7 @@ internal static class EntraAuthEndpoints
             {
                 var first = ex.Errors.FirstOrDefault();
                 ctx.Response.Redirect(
-                    $"/accept-invite?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}");
+                    $"/accept-invite?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&reason={FormErrorReasons.CodeFor(first.Value)}");
                 return;
             }
 
@@ -318,8 +318,8 @@ internal static class EntraAuthEndpoints
             if (invite is null)
             {
                 ctx.Response.Redirect(
-                    $"/accept-invite?token={Uri.EscapeDataString(inviteToken)}&err=Token&msg="
-                    + Uri.EscapeDataString("This invite link is no longer valid. Ask the admin for a new one."));
+                    $"/accept-invite?token={Uri.EscapeDataString(inviteToken)}&err=Token&reason="
+                    + FormErrorReasons.InviteInvalid);
                 return;
             }
             var displayName = ctx.Properties.Items.TryGetValue(InviteDisplayNameItem, out var typedName) ? typedName ?? string.Empty : string.Empty;
