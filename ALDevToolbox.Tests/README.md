@@ -283,11 +283,25 @@ collection to serialise them.
     fixture instead of once per test.
   - Keep a host per test (an `EndpointFactory` in the test, or in the class
     constructor as before) when a test changes state the host or the whole
-    database shares: the `system_settings` row, maintenance mode, an
+    database shares: a `system_settings` value the tests set differently
+    (every webhook test stores the same secret, so that class shares; its
+    one test without a secret boots a host of its own), maintenance mode, an
     organisation-wide setting another test asserts on, a singleton the test
     configures, or a rate limiter or slot gate it drains on purpose. When only
     one or two tests in a class do, give just those a host of their own
     (`CompareEndpointTests` does).
+  - Don't leave background work running in a shared host. A test that queues
+    a job (an import, a backfill, a build) runs on a fixture that takes that
+    queue's worker out of the host, the way
+    `ObjectExplorerLowsEndpointTests.Host` removes the release import worker,
+    or gives that test a host of its own. Otherwise the job keeps writing to
+    the shared database while later tests run.
+  - Per-test state that lives in a singleton (a queue, a slot gate, an
+    allow-list) can still be shared safely. Register it as a transient that
+    reads the running test's instance off the fixture, and install fresh ones
+    in the test class constructor (`GitHubWebhookEndpointTests.Host`). A
+    per-caller rate limiter most of the tests hit gets a caller address per
+    test instead of a host per test (`OAuthRedirectUriTests.Host`).
   - Fakes a class swaps in go through a fixture that derives from
     `SharedEndpointHost` and passes `configureServices` or `settings` to its
     protected constructor. Fakes with per-test state are read through the

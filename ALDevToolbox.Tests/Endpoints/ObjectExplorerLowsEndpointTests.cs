@@ -8,6 +8,8 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -21,18 +23,37 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// own and looking only at the releases it seeded. The busy-slot case swaps the
 /// host's diff gate, so it boots a host of its own.</para>
 /// </summary>
-public sealed class ObjectExplorerLowsEndpointTests : IClassFixture<SharedEndpointHost>
+public sealed class ObjectExplorerLowsEndpointTests : IClassFixture<ObjectExplorerLowsEndpointTests.Host>
 {
     private const string Password = "correct horse battery staple";
 
-    private readonly SharedEndpointHost _host;
+    private readonly Host _host;
     private readonly TestDb _db;
     private readonly string _editorEmail = SharedEndpointHost.UniqueEmail("erik");
 
-    public ObjectExplorerLowsEndpointTests(SharedEndpointHost host)
+    public ObjectExplorerLowsEndpointTests(Host host)
     {
         _host = host;
         _db = host.Db;
+    }
+
+    /// <summary>
+    /// The shared host, without the release import worker. A queued backfill is the
+    /// row and the queue entry these tests look at; run for real, it would keep
+    /// working in the shared host while later tests run.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
+    {
+        public Host()
+            : base(services =>
+            {
+                var worker = services.FirstOrDefault(d =>
+                    d.ServiceType == typeof(IHostedService)
+                    && d.ImplementationType == typeof(ReleaseImportWorker));
+                if (worker is not null) services.Remove(worker);
+            })
+        {
+        }
     }
 
     // ── Backfill system references ──────────────────────────────────────

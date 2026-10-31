@@ -6,6 +6,7 @@ using ALDevToolbox.Services.Palette;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ALDevToolbox.Tests.Palette;
 
@@ -61,6 +62,9 @@ public sealed class PaletteEndpointTests : IClassFixture<PaletteEndpointTests.Ho
         private Host(Holder holder)
             : base(services =>
             {
+                // Only the fakes: the real sources would search the shared database,
+                // where other tests' solutions live.
+                services.RemoveAll<IPaletteSource>();
                 services.AddScoped<IPaletteSource>(_ => holder.Solutions!);
                 services.AddScoped<IPaletteSource>(_ => holder.Recipes!);
             })
