@@ -4,10 +4,8 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -17,16 +15,26 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// solution gets the same 404 as for a build that does not exist (#1274). The
 /// "Download all" zip is streamed to the response (#1263), and the server refuses
 /// synchronous writes to it, so these unzip what actually came back.
+///
+/// <para>The cases share one host (#1536, #1582). Each seeds its own colleague,
+/// owner and builds, and asks only for those.</para>
 /// </summary>
-public sealed class ArtifactEndpointTests : IDisposable
+public sealed class ArtifactEndpointTests : IClassFixture<SharedEndpointHost>
 {
-    private const string AlexEmail = "alex@cronus.example";
     private const string Password = "correct horse battery staple";
-    private const int OwnerUserId = 12740;
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _alexEmail = SharedEndpointHost.UniqueEmail("alex");
+    private int _ownerUserId;
 
-    public void Dispose() => _db.Dispose();
+    public ArtifactEndpointTests(SharedEndpointHost host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+    }
 
     private sealed record SeededBuild(int BuildId, int[] ArtifactIds);
 
@@ -37,8 +45,7 @@ public sealed class ArtifactEndpointTests : IDisposable
         var build = await SeedBuildAsync(ProjectVisibility.Public,
             ("CRONUS_Core_1.0.0.0.app", new byte[] { 1, 2, 3 }),
             ("CRONUS_Sales_1.0.0.0.app", Enumerable.Range(0, 200_000).Select(i => (byte)(i % 251)).ToArray()));
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
 
         using var response = await client.GetAsync($"/artifacts/build/{build.BuildId}/all");
 
@@ -59,8 +66,7 @@ public sealed class ArtifactEndpointTests : IDisposable
     {
         await SeedUsersAsync();
         var build = await SeedBuildAsync(ProjectVisibility.Public);
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
 
         using var response = await client.GetAsync($"/artifacts/build/{build.BuildId}/all");
 
@@ -73,8 +79,7 @@ public sealed class ArtifactEndpointTests : IDisposable
         await SeedUsersAsync();
         var hidden = await SeedBuildAsync(ProjectVisibility.Private, ("CRONUS_Core_1.0.0.0.app", new byte[] { 1, 2, 3 }));
         var open = await SeedBuildAsync(ProjectVisibility.Public, ("CRONUS_Sales_1.0.0.0.app", new byte[] { 4, 5 }));
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
 
         foreach (var path in new[]
                  {
@@ -106,21 +111,23 @@ public sealed class ArtifactEndpointTests : IDisposable
     private async Task SeedUsersAsync()
     {
         await using var ctx = _db.NewContext();
-        var hash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password);
+        var hash = _host.HashPassword(Password);
+        var owner = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId, Email = SharedEndpointHost.UniqueEmail("olive"),
+            DisplayName = "Olive Owner", PasswordHash = "x", Role = UserRole.Editor, Status = UserStatus.Active,
+            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+        };
         ctx.Users.AddRange(
             new User
             {
-                OrganizationId = TestDb.DefaultOrgId, Email = AlexEmail, DisplayName = "Alex Hansen",
+                OrganizationId = TestDb.DefaultOrgId, Email = _alexEmail, DisplayName = "Alex Hansen",
                 PasswordHash = hash, Role = UserRole.User, Status = UserStatus.Active,
                 CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
             },
-            new User
-            {
-                Id = OwnerUserId, OrganizationId = TestDb.DefaultOrgId, Email = "olive@cronus.example",
-                DisplayName = "Olive Owner", PasswordHash = "x", Role = UserRole.Editor, Status = UserStatus.Active,
-                CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
-            });
+            owner);
         await ctx.SaveChangesAsync();
+        _ownerUserId = owner.Id;
     }
 
     private async Task<SeededBuild> SeedBuildAsync(ProjectVisibility visibility, params (string FileName, byte[] Content)[] apps)
@@ -129,7 +136,7 @@ public sealed class ArtifactEndpointTests : IDisposable
         var now = DateTime.UtcNow;
         var project = new OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId, Name = $"CRONUS {visibility}", CreatedByUserId = OwnerUserId,
+            OrganizationId = TestDb.DefaultOrgId, Name = $"CRONUS {visibility} {Guid.NewGuid().ToString("N")[..8]}", CreatedByUserId = _ownerUserId,
             Visibility = visibility, CreatedAt = now, UpdatedAt = now,
         };
         ctx.OeProjects.Add(project);
@@ -162,13 +169,13 @@ public sealed class ArtifactEndpointTests : IDisposable
         return new SeededBuild(build.Id, rows.Select(r => r.Id).ToArray());
     }
 
-    private static async Task<HttpClient> SignInAsync(EndpointFactory factory)
+    private async Task<HttpClient> SignInAsync()
     {
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         var token = await TokenFromAsync(client, "/login");
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
         [
-            new("Email", AlexEmail), new("Password", Password), new("__RequestVerificationToken", token),
+            new("Email", _alexEmail), new("Password", Password), new("__RequestVerificationToken", token),
         ]));
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");

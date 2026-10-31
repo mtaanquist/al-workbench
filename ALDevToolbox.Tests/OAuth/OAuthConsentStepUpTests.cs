@@ -24,24 +24,30 @@ namespace ALDevToolbox.Tests.OAuth;
 /// step up before it shows the form, and the approval POST checks again for a
 /// form left open past the window. Declining needs no confirmation. See
 /// ".design/auth-and-audit.md", "Step-up for sensitive tools".
+///
+/// <para>The cases share one host (#1536, #1582). The tools marked for step-up
+/// are organisation-wide, so each test works in an organisation of its own, with
+/// a user of its own.</para>
 /// </summary>
-public sealed class OAuthConsentStepUpTests : IDisposable
+public sealed class OAuthConsentStepUpTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
     private const string RedirectUri = "http://127.0.0.1:41999/callback";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _email = SharedEndpointHost.UniqueEmail("consent");
 
-    public OAuthConsentStepUpTests()
-    {
-        _factory = new EndpointFactory(_db);
-    }
+    /// <summary>This test's own organisation.</summary>
+    private readonly int _orgId;
 
-    public void Dispose()
+    public OAuthConsentStepUpTests(SharedEndpointHost host)
     {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+        _orgId = host.SeedOrganization();
     }
 
     [Fact]
@@ -103,8 +109,8 @@ public sealed class OAuthConsentStepUpTests : IDisposable
     private async Task<(HttpClient Client, int UserId, Dictionary<string, string?> Authorize)> StartAsync()
     {
         await EnableMcpAsync();
-        var userId = await SeedUserAsync("consent@cronus.example");
-        var client = await SignInAsync("consent@cronus.example");
+        var userId = await SeedUserAsync(_email);
+        var client = await SignInAsync(_email);
 
         var registration = JsonSerializer.Serialize(new { redirect_uris = new[] { RedirectUri }, client_name = "CRONUS assistant" });
         using var registered = await client.PostAsync("/oauth/register",
@@ -146,7 +152,7 @@ public sealed class OAuthConsentStepUpTests : IDisposable
     private async Task MarkStepUpAsync(params ToolKey[] tools)
     {
         await using var ctx = _db.NewContext();
-        var org = await ctx.Organizations.FirstAsync(o => o.Id == TestDb.DefaultOrgId);
+        var org = await ctx.Organizations.FirstAsync(o => o.Id == _orgId);
         org.StepUpTools = ToolCatalog.Format(tools);
         await ctx.SaveChangesAsync();
     }
@@ -176,10 +182,10 @@ public sealed class OAuthConsentStepUpTests : IDisposable
         await using var seed = _db.NewContext();
         var user = new User
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = DateTime.UtcNow,

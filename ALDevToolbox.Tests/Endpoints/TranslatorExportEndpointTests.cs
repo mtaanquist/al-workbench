@@ -1,12 +1,11 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -16,10 +15,14 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// that text says its target language is its source one; the export used to
 /// hand it back that way, so a <c>da-DK.xlf</c> full of Danish declared
 /// <c>target-language="en-US"</c> and AL ignored it (#1250).
+///
+/// <para>The cases share one host (#1536, #1582). An export teaches the
+/// organisation's translation memory after the download is sent, so each test
+/// works in an organisation of its own and reads only its memory; and each counts
+/// only the exports it started itself.</para>
 /// </summary>
-public sealed class TranslatorExportEndpointTests : IDisposable
+public sealed class TranslatorExportEndpointTests : IClassFixture<TranslatorExportEndpointTests.Host>
 {
-    private const string AlexEmail = "alex@cronus.example";
     private const string Password = "correct horse battery staple";
 
     private const string Generated = """
@@ -39,16 +42,86 @@ public sealed class TranslatorExportEndpointTests : IDisposable
 
     private const string Edits = """{"Table 1 - Field 2 - Property Caption":{"t":"Beloeb","s":"translated"}}""";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _alexEmail = SharedEndpointHost.UniqueEmail("alex");
+    private readonly FinishedExports _exports = new();
 
-    public void Dispose() => _db.Dispose();
+    /// <summary>This test's own organisation, whose translation memory the exports teach.</summary>
+    private readonly int _orgId;
+
+    public TranslatorExportEndpointTests(Host host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+        _orgId = host.SeedOrganization();
+        host.Exports = _exports;
+    }
+
+    /// <summary>
+    /// The shared host, counting each finished export against the test that was
+    /// running when it started, so a late finish from one test cannot count as
+    /// another's.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
+    {
+        private readonly Holder _holder;
+
+        public Host()
+            : this(new Holder())
+        {
+        }
+
+        private Host(Holder holder)
+            : base(services => services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter>(new CountingFilter(holder)))
+        {
+            _holder = holder;
+        }
+
+        internal FinishedExports Exports
+        {
+            get => _holder.Exports;
+            set => _holder.Exports = value;
+        }
+
+        private sealed class Holder
+        {
+            public FinishedExports Exports { get; set; } = new();
+        }
+
+        private sealed class CountingFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
+        {
+            private readonly Holder _holder;
+
+            public CountingFilter(Holder holder) => _holder = holder;
+
+            public Action<IApplicationBuilder> Configure(
+                Action<IApplicationBuilder> next) => app =>
+            {
+                app.Use(async (context, inner) =>
+                {
+                    var exports = _holder.Exports;
+                    try
+                    {
+                        await inner();
+                    }
+                    finally
+                    {
+                        if (context.Request.Path == "/api/translator/export") exports.Release();
+                    }
+                });
+                next(app);
+            };
+        }
+    }
 
     [Fact]
     public async Task A_copy_of_a_translation_started_from_the_generated_file_names_its_language()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
 
         var exported = await ExportAsync(client, Generated, "da-DK");
 
@@ -61,8 +134,7 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task A_language_file_keeps_the_language_it_already_names()
     {
         await SeedUserAsync();
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
         var danish = Generated.Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal);
 
         var exported = await ExportAsync(client, danish, "sv-SE");
@@ -80,9 +152,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task Export_teaches_the_memory_only_the_units_that_were_edited()
     {
         await SeedUserAsync();
-        var exports = new FinishedExports();
-        using var factory = CountingExports(exports);
-        using var client = await SignInAsync(factory);
+        var exports = _exports;
+        using var client = await SignInAsync();
         var danish = Generated
             .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
             .Replace("</group>", """
@@ -108,9 +179,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task Export_teaches_the_memory_only_the_edits_the_editor_marks_as_new()
     {
         await SeedUserAsync();
-        var exports = new FinishedExports();
-        using var factory = CountingExports(exports);
-        using var client = await SignInAsync(factory);
+        var exports = _exports;
+        using var client = await SignInAsync();
         var danish = Generated
             .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
             .Replace("</group>", """
@@ -137,9 +207,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task Export_without_a_learn_list_teaches_every_edit()
     {
         await SeedUserAsync();
-        var exports = new FinishedExports();
-        using var factory = CountingExports(exports);
-        using var client = await SignInAsync(factory);
+        var exports = _exports;
+        using var client = await SignInAsync();
 
         await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited);
 
@@ -155,9 +224,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task A_malformed_learn_list_still_downloads_and_teaches_nothing()
     {
         await SeedUserAsync();
-        var exports = new FinishedExports();
-        using var factory = CountingExports(exports);
-        using var client = await SignInAsync(factory);
+        var exports = _exports;
+        using var client = await SignInAsync();
 
         var exported = await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited, learn: "{not a list");
         exported.Should().Contain("Beloeb").And.Contain("Bogfoeringsdato");
@@ -182,9 +250,8 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     public async Task An_empty_learn_list_downloads_and_teaches_nothing()
     {
         await SeedUserAsync();
-        var exports = new FinishedExports();
-        using var factory = CountingExports(exports);
-        using var client = await SignInAsync(factory);
+        var exports = _exports;
+        using var client = await SignInAsync();
 
         var exported = await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited, learn: "[]");
 
@@ -193,15 +260,13 @@ public sealed class TranslatorExportEndpointTests : IDisposable
         Learned().Should().BeEmpty();
     }
 
-    /// <summary>The real host, counting the exports that have finished learning.</summary>
-    private EndpointFactory CountingExports(FinishedExports exports) =>
-        new(_db, services => services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter>(exports));
-
-    /// <summary>What the memory holds; read once every export has finished learning.</summary>
+    /// <summary>What this test's organisation's memory holds; read once every export has finished learning.</summary>
     private List<string> Learned()
     {
         using var ctx = _db.NewContext();
-        return ctx.TranslationMemory.Select(e => e.SourceText).ToList();
+        return ctx.TranslationMemory.IgnoreQueryFilters()
+            .Where(e => e.OrganizationId == _orgId)
+            .Select(e => e.SourceText).ToList();
     }
 
     /// <summary>
@@ -209,7 +274,7 @@ public sealed class TranslatorExportEndpointTests : IDisposable
     /// endpoint learns after the download is sent but before it returns, so a test
     /// that waits for a row instead can read before a late write lands (#1439).
     /// </summary>
-    private sealed class FinishedExports : Microsoft.AspNetCore.Hosting.IStartupFilter
+    internal sealed class FinishedExports
     {
         private readonly SemaphoreSlim _finished = new(0);
 
@@ -222,22 +287,7 @@ public sealed class TranslatorExportEndpointTests : IDisposable
             }
         }
 
-        public Action<IApplicationBuilder> Configure(
-            Action<IApplicationBuilder> next) => app =>
-        {
-            app.Use(async (context, inner) =>
-            {
-                try
-                {
-                    await inner();
-                }
-                finally
-                {
-                    if (context.Request.Path == "/api/translator/export") _finished.Release();
-                }
-            });
-            next(app);
-        };
+        public void Release() => _finished.Release();
     }
 
     private static readonly string TwoUnitDanish = Generated
@@ -279,10 +329,10 @@ public sealed class TranslatorExportEndpointTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.Users.Add(new User
         {
-            OrganizationId = TestDb.DefaultOrgId,
-            Email = AlexEmail,
+            OrganizationId = _orgId,
+            Email = _alexEmail,
             DisplayName = "Alex Hansen",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -290,13 +340,13 @@ public sealed class TranslatorExportEndpointTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private static async Task<HttpClient> SignInAsync(EndpointFactory factory)
+    private async Task<HttpClient> SignInAsync()
     {
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         var token = await TokenFromAsync(client, "/login");
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
         [
-            new("Email", AlexEmail), new("Password", Password), new("__RequestVerificationToken", token),
+            new("Email", _alexEmail), new("Password", Password), new("__RequestVerificationToken", token),
         ]));
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");

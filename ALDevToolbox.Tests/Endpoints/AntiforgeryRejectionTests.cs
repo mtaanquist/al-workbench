@@ -1,13 +1,11 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Components.Endpoints;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -18,11 +16,13 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// the validation up: a POST with no token gets the helper's fixed 400 and the
 /// handler never runs. <c>UseAntiforgery()</c> does not cover a handler that
 /// reads the form itself (#671), so the call is the only guard.
+///
+/// <para>The cases share one host (#1536, #1582), each with a user of its own. A
+/// refused POST changes nothing, which is what every case asserts.</para>
 /// </summary>
-public sealed class AntiforgeryRejectionTests : IDisposable
+public sealed class AntiforgeryRejectionTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
-    private const string Email = "mette@cronus.example";
     private const string RefusalBody = "Antiforgery validation failed. Reload the form and try again.";
 
     /// <summary>
@@ -45,18 +45,16 @@ public sealed class AntiforgeryRejectionTests : IDisposable
             ["/auth/step-up/passkey/options"] = "WebAuthn JSON ceremony; hands out a challenge and changes nothing",
         };
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _email = SharedEndpointHost.UniqueEmail("mette");
 
-    public AntiforgeryRejectionTests()
+    public AntiforgeryRejectionTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     /// <summary>
@@ -75,7 +73,7 @@ public sealed class AntiforgeryRejectionTests : IDisposable
         using var client = _factory.CreateClient();
         var body = new FormUrlEncodedContent(new[]
         {
-            new KeyValuePair<string, string>("Email", Email),
+            new KeyValuePair<string, string>("Email", _email),
             new KeyValuePair<string, string>("Password", Password),
         });
 
@@ -105,7 +103,7 @@ public sealed class AntiforgeryRejectionTests : IDisposable
         var token = await TokenFromAsync(client, "/login");
         using (var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
         {
-            ["Email"] = Email,
+            ["Email"] = _email,
             ["Password"] = Password,
             ["__RequestVerificationToken"] = token,
         })))
@@ -200,9 +198,9 @@ public sealed class AntiforgeryRejectionTests : IDisposable
         ctx.Users.Add(new User
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Email = Email,
+            Email = _email,
             DisplayName = "Mette",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.Admin,
             IsSiteAdmin = isSiteAdmin,
             Status = UserStatus.Active,

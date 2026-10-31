@@ -22,23 +22,24 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// The recipient's half of Sealed over the real stack (.design/sealed.md): the page
 /// and the reveal answer without an account, loading the page spends nothing, the
 /// reveal is never cached, and the sender's page still needs a sign-in.
+///
+/// <para>The cases share one host (#1536, #1582). Each creates its own links from
+/// a sender of its own. The one that switches the tool off site-wide boots a host
+/// of its own.</para>
 /// </summary>
-public sealed class SealedEndpointTests : IDisposable
+public sealed class SealedEndpointTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public SealedEndpointTests()
+    public SealedEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Fact]
@@ -159,7 +160,7 @@ public sealed class SealedEndpointTests : IDisposable
             ctx.Users.Add(new User
             {
                 OrganizationId = TestDb.DefaultOrgId, Email = email, DisplayName = "Alex Hansen",
-                PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+                PasswordHash = _host.HashPassword(Password),
                 Role = UserRole.User, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
             });
             await ctx.SaveChangesAsync();

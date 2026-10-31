@@ -3,11 +3,9 @@ using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -16,23 +14,32 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// refuses synchronous writes to the response body, which is what
 /// <c>ZipArchive</c> does on its own; these tests unzip what actually came
 /// back, so a body that only starts out as a ZIP fails them.
+///
+/// <para>The cases share one host (#1536, #1582). Each signs in a user of its own
+/// and asserts only on the recipe it seeded.</para>
 /// </summary>
-public sealed class CookbookDownloadEndpointTests : IDisposable
+public sealed class CookbookDownloadEndpointTests : IClassFixture<SharedEndpointHost>
 {
-    private const string AlexEmail = "alex@cronus.example";
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+    private readonly string _alexEmail = SharedEndpointHost.UniqueEmail("alex");
 
-    public void Dispose() => _db.Dispose();
+    public CookbookDownloadEndpointTests(SharedEndpointHost host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+    }
 
     [Fact]
     public async Task Download_returns_a_zip_holding_every_file_of_the_recipe()
     {
         await SeedUserAsync();
         var recipeId = await SeedRecipeAsync();
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
 
         using var response = await client.GetAsync($"/api/cookbook/{recipeId}/download");
 
@@ -55,8 +62,7 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
     {
         await SeedUserAsync();
         var recipeId = await SeedRecipeAsync();
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
         using var request = new HttpRequestMessage(
             HttpMethod.Get, $"/api/cookbook/{recipeId}/download?customer=CRONUS%20A%2FS");
         request.Headers.Add("Sec-Fetch-Site", "same-origin");
@@ -91,8 +97,7 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
     {
         await SeedUserAsync();
         var recipeId = await SeedRecipeAsync();
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
         using var request = new HttpRequestMessage(
             HttpMethod.Get, $"/api/cookbook/{recipeId}/download?customer=CRONUS%20A%2FS");
         if (fetchSite is not null) request.Headers.Add("Sec-Fetch-Site", fetchSite);
@@ -112,8 +117,7 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
     {
         await SeedUserAsync();
         var foreignId = await SeedRecipeAsync(TestDb.OtherOrgId);
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/cookbook/{foreignId}/download");
         request.Headers.Add("Sec-Fetch-Site", "same-origin");
 
@@ -137,8 +141,7 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
             (await ctx.Recipes.SingleAsync(r => r.Id == recipeId)).DeletedAt = DateTime.UtcNow;
             await ctx.SaveChangesAsync();
         }
-        using var factory = new EndpointFactory(_db);
-        using var client = await SignInAsync(factory);
+        using var client = await SignInAsync();
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/cookbook/{recipeId}/download");
         request.Headers.Add("Sec-Fetch-Site", "same-origin");
 
@@ -162,7 +165,9 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
         var recipe = new Recipe
         {
             OrganizationId = organizationId,
-            Title = "Setup table pattern",
+            // Titles are unique in an organisation, and the class shares one. The
+            // prefix keeps the name the download is asserted to carry at its end.
+            Title = $"{Guid.NewGuid().ToString("N")[..8]} Setup table pattern",
             Description = "A setup table with its page.",
             Type = RecipeType.Pattern,
             CreatedAt = now,
@@ -192,9 +197,9 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
         ctx.Users.Add(new User
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Email = AlexEmail,
+            Email = _alexEmail,
             DisplayName = "Alex Hansen",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -202,13 +207,13 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private static async Task<HttpClient> SignInAsync(EndpointFactory factory)
+    private async Task<HttpClient> SignInAsync()
     {
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         var token = await TokenFromAsync(client, "/login");
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
         [
-            new("Email", AlexEmail), new("Password", Password), new("__RequestVerificationToken", token),
+            new("Email", _alexEmail), new("Password", Password), new("__RequestVerificationToken", token),
         ]));
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");
