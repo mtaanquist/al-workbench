@@ -590,6 +590,15 @@ public sealed class ReleaseComparisonService
     /// <c>(AppId, Path)</c> — populates the "Compare with release" picker on
     /// the source-file viewer. Only ready Releases that actually carry a
     /// matching file are returned, keeping the dropdown dead-link-free.
+    /// <para>
+    /// A file in a pipeline build is offered the other builds of its own
+    /// Solution, as the build's release page is (#1075): same order (own
+    /// pipeline first, newest first), same "Build #N of {pipeline}" labels and
+    /// the same cap, from <see cref="BuildCompareCandidates"/>. Every build
+    /// shares one release label, so the plain list showed hundreds of
+    /// identical entries (#1570). Any other file is offered every other
+    /// release with the file except builds, which the global pickers never list.
+    /// </para>
     /// </summary>
     public async Task<List<CompareTargetOption>> GetCompareTargetsAsync(
         long fileId, CancellationToken ct = default)
@@ -601,6 +610,7 @@ public sealed class ReleaseComparisonService
                 f.Path,
                 AppId = f.Module!.AppId,
                 ReleaseId = f.Module!.ReleaseId,
+                ReleaseKind = f.Module!.Release!.Kind,
                 BcVersion = f.Module!.Release!.BcVersion,
                 ImportedAt = f.Module!.Release!.ImportedAt,
             })
@@ -611,13 +621,30 @@ public sealed class ReleaseComparisonService
         var snapshot = await _access.GetSnapshotAsync(ct);
         var visibleRelease = _access.VisibleReleasePredicate(snapshot);
 
-        var candidates = await _db.OeModuleFiles.AsNoTracking()
+        var files = _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.Path == anchor.Path
                 && f.Module!.AppId == anchor.AppId
                 && f.Module!.ReleaseId != anchor.ReleaseId
                 && f.Module!.Release!.Status == "ready"
                 && f.Module!.Release!.DeletedAt == null)
-            .Where(f => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == f.Module!.ReleaseId))
+            .Where(f => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == f.Module!.ReleaseId));
+
+        // Build releases: the picker's order and labels come from the build list.
+        List<ReleaseListItem>? builds = null;
+        if (anchor.ReleaseKind == OeRelease.ProjectBuildKind)
+        {
+            builds = await BuildCompareCandidates.ListAsync(_db, _access, anchor.ReleaseId, ct,
+                withFile: (anchor.AppId, anchor.Path));
+            if (builds.Count == 0) return new();
+            var buildReleaseIds = builds.Select(b => b.Id).ToList();
+            files = files.Where(f => buildReleaseIds.Contains(f.Module!.ReleaseId));
+        }
+        else
+        {
+            files = files.Where(f => f.Module!.Release!.Kind != OeRelease.ProjectBuildKind);
+        }
+
+        var candidates = await files
             .OrderBy(f => f.Module!.Release!.Label)
             .Select(f => new
             {
@@ -645,12 +672,22 @@ public sealed class ReleaseComparisonService
             .Select(g => OneModulePerApp(g.Select(m => new ModuleCompareRow(m.Id, m.AppId, m.Name, m.Publisher, m.Version)).ToList())[anchor.AppId].ModuleId)
             .ToHashSet();
 
-        return candidates
-            .Where(c => winningModuleIds.Contains(c.ModuleId))
-            .Select(c => new CompareTargetOption(
-                c.ReleaseId, c.Label, c.FileId,
-                TargetIsOlder: IsOlderRelease(c.BcVersion, c.ImportedAt, anchor.BcVersion, anchor.ImportedAt)))
+        var offered = candidates.Where(c => winningModuleIds.Contains(c.ModuleId)).ToList();
+        if (builds is not null)
+        {
+            var byRelease = offered.GroupBy(c => c.ReleaseId).ToDictionary(g => g.Key, g => g.First());
+            return builds
+                .Where(b => byRelease.ContainsKey(b.Id))
+                .Select(b => ToOption(b.Id, b.Label, byRelease[b.Id].FileId, b.BcVersion, byRelease[b.Id].ImportedAt))
+                .ToList();
+        }
+        return offered
+            .Select(c => ToOption(c.ReleaseId, c.Label, c.FileId, c.BcVersion, c.ImportedAt))
             .ToList();
+
+        CompareTargetOption ToOption(int releaseId, string label, long fileId, string? bcVersion, DateTime importedAt)
+            => new(releaseId, label, fileId,
+                TargetIsOlder: IsOlderRelease(bcVersion, importedAt, anchor.BcVersion, anchor.ImportedAt));
     }
 
     /// <summary>

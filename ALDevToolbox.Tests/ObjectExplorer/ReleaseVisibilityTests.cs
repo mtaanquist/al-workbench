@@ -749,15 +749,17 @@ public sealed class ReleaseVisibilityTests : IDisposable
     /// The "Compare with release" picker lists every other release holding the
     /// same file. Without its visibility filter it would name a Private
     /// project's release, and hand out its file id, to anyone viewing the same
-    /// file in a public release.
+    /// file in a public release. (A pipeline build is offered only from another
+    /// build of its own Solution since #1570, so the private release here is one
+    /// imported under the project.)
     /// </summary>
     [Fact]
     public async Task The_compare_target_picker_offers_a_private_release_only_to_its_teams_members()
     {
         var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
         var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
-        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
-        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var hidden = await SeedReleaseAsync("CRONUS 1.0", kind: "third_party");
+        await LinkByImportJobAsync(projectId, hidden.ReleaseId);
         await using (var ctx = _db.NewContext())
         {
             // Same app and path in both releases: the shape the picker matches on.
