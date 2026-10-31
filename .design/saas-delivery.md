@@ -732,11 +732,15 @@ that names the environment and says what the click does there:
   there can give its environment the turn but still goes after the bookings ahead of it;
   for the same reason a single window booking only counts in the middle group while no
   batch that has not started sits ahead of it on its environment, because the turn would
-  send that batch's first app. So a started window batch keeps the turn until it is done,
+  send that batch's first app, and an environment's place in the middle group is the
+  booking time of the first such row in its order, not of an older row queued behind it. So a started window batch keeps the turn until it is done,
   ahead of other customers' window batches that have not started: when the window closes
-  the rest of every batch not yet started moves whole to the next opening, and at most the
-  customer whose batch was running is left with part of it installed, rather than every
-  customer with a batch booked for that window. A single window booking is not held behind
+  the rest of every batch not yet started moves whole to the next opening, and within one
+  organisation at most the customer whose batch was running is left with part of it
+  installed, rather than every customer with a batch booked for that window. If a single
+  window booking that has the turn is skipped (its window closed, or a cancel won), the
+  turn does not pass to a batch not yet started behind it while another batch is
+  part-installed; that batch waits for a later sweep. A single window booking is not held behind
   another customer's batch, because one app can never be left part-installed: if it was
   booked before that batch, it goes between two of the batch's apps on the next sweep,
   whichever night the batch started, and the batch takes one install longer; if the

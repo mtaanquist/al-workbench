@@ -269,6 +269,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         var updates = pass != SweepPass.OneUpload;
 
         List<DueAction> due;
+        var startedBatches = new HashSet<Guid>();
         using (AmbientOrganizationScope.Enter(
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
         await using (var scope = _services.CreateAsyncScope())
@@ -301,7 +302,7 @@ public sealed class UpgradeActionWorker : BackgroundService
 
             if (uploads)
             {
-                due = await InEnvironmentTurnOrderAsync(db, due, now, ct).ConfigureAwait(false);
+                (due, startedBatches) = await InEnvironmentTurnOrderAsync(db, due, now, ct).ConfigureAwait(false);
             }
         }
 
@@ -324,10 +325,24 @@ public sealed class UpgradeActionWorker : BackgroundService
             }
             else
             {
+                // A single window booking that took the turn and was skipped (its window
+                // closed, or a cancel won the claim) must not hand the turn to the batch
+                // queued behind it while another customer's batch is part-installed: that
+                // would leave two customers part-installed (#1625). It waits a sweep.
+                var skippedSingle = false;
                 foreach (var action in due.Where(a => UpgradeActionService.IsAppInstall(a.Kind)))
                 {
                     if (ct.IsCancellationRequested) break;
-                    if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false) != RunOutcome.Sent) continue;
+                    if (skippedSingle && startedBatches.Count > 0 && action.ScheduledByWindow != null
+                        && action.BatchId is { } batch && !startedBatches.Contains(batch))
+                    {
+                        continue;
+                    }
+                    if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false) != RunOutcome.Sent)
+                    {
+                        if (action.ScheduledByWindow != null && action.BatchId == null) skippedSingle = true;
+                        continue;
+                    }
                     sent++;
                     break;
                 }
@@ -372,13 +387,13 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// Install now, an upload for now, or a time they set - still goes ahead of both,
     /// because nobody asked that row to wait for a window.</para>
     /// </summary>
-    private static async Task<List<DueAction>> InEnvironmentTurnOrderAsync(
+    private static async Task<(List<DueAction> Due, HashSet<Guid> StartedBatches)> InEnvironmentTurnOrderAsync(
         AppDbContext db, List<DueAction> due, DateTime now, CancellationToken ct)
     {
         var byEnvironment = due.Where(a => UpgradeActionService.IsAppInstall(a.Kind))
             .GroupBy(a => a.BcEnvironment)
             .ToDictionary(g => g.Key, g => g.ToList());
-        if (byEnvironment.Count < 2) return due;
+        if (byEnvironment.Count < 2) return (due, new HashSet<Guid>());
 
         // Every solution's row for those environments - a shared environment's history is
         // on the other solution's row too - then each row's latest install, through the
@@ -445,7 +460,9 @@ public sealed class UpgradeActionWorker : BackgroundService
                 else if (a.BatchId is { } b ? started.Contains(b) : !unstartedAhead)
                 {
                     tier = Math.Min(tier, 1);
-                    if (a.RequestedAt < firstBooked) firstBooked = a.RequestedAt;
+                    // The row the turn reaches first, not the oldest: an older single
+                    // queued behind a started batch must not lend the batch its place.
+                    if (firstBooked == DateTime.MaxValue) firstBooked = a.RequestedAt;
                 }
                 else if (a.BatchId != null)
                 {
@@ -469,10 +486,10 @@ public sealed class UpgradeActionWorker : BackgroundService
             .Select((k, i) => (k, i))
             .ToDictionary(x => x.k, x => x.i);
 
-        return due
+        return (due
             .OrderBy(a => UpgradeActionService.IsAppInstall(a.Kind))
             .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind) ? rank[a.BcEnvironment] : 0)
-            .ToList();
+            .ToList(), started);
     }
 
     /// <summary>
