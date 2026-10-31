@@ -144,6 +144,87 @@ public sealed class BuildCompareCandidatesTests : IDisposable
         (await NewQuery(read).ListBuildCompareCandidatesAsync(release)).Should().BeEmpty();
     }
 
+    // ── The file viewer's "Compare with release..." picker (#1570) ──────
+
+    private ReleaseComparisonService NewComparison(AppDbContext ctx) =>
+        new(ctx, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseComparisonService>.Instance);
+
+    [Fact]
+    public async Task File_in_a_build_is_offered_the_solutions_other_builds_with_the_file_named_and_newest_first()
+    {
+        // Every build release shares "CRONUS on BC 28.2", so the picker used to
+        // list each one under that label, sorted by it - no way to tell which
+        // was the previous build.
+        long anchorFile;
+        int olderSamePipeline, newerSamePipeline, olderBuild, newerBuild;
+        var now = DateTime.UtcNow;
+        var appId = Guid.NewGuid();
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var main = await SeedPipelineAsync(seed, projectId, "main");
+
+            var self = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, projectId, main, self, ProjectBuildStatus.Ready, now.AddDays(-2));
+            anchorFile = await SeedAppFileAsync(seed, self, appId, "src/Sales.al");
+
+            olderSamePipeline = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            olderBuild = await SeedBuildAsync(seed, projectId, main, olderSamePipeline, ProjectBuildStatus.Ready, now.AddDays(-3));
+            await SeedAppFileAsync(seed, olderSamePipeline, appId, "src/Sales.al");
+
+            newerSamePipeline = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            newerBuild = await SeedBuildAsync(seed, projectId, main, newerSamePipeline, ProjectBuildStatus.Ready, now.AddDays(-1));
+            await SeedAppFileAsync(seed, newerSamePipeline, appId, "src/Sales.al");
+
+            // A build of the same app without this file: nothing to compare against.
+            var withoutFile = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, projectId, main, withoutFile, ProjectBuildStatus.Ready, now);
+            await SeedAppFileAsync(seed, withoutFile, appId, "src/Other.al");
+
+            // Another solution's build carrying the same app and path.
+            var otherProjectId = await SeedProjectAsync(seed, "Other customer");
+            var otherProject = await SeedProjectReleaseAsync(seed, "Other customer on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, otherProjectId, pipelineId: null, otherProject, ProjectBuildStatus.Ready, now);
+            await SeedAppFileAsync(seed, otherProject, appId, "src/Sales.al");
+        }
+
+        await using var read = _db.NewContext();
+        var targets = await NewComparison(read).GetCompareTargetsAsync(anchorFile);
+
+        targets.Select(t => t.ReleaseId).Should().Equal(newerSamePipeline, olderSamePipeline);
+        targets.Select(t => t.ReleaseLabel).Should().Equal(
+            $"Build #{newerBuild} of main on BC 28.2",
+            $"Build #{olderBuild} of main on BC 28.2");
+    }
+
+    [Fact]
+    public async Task File_in_an_imported_release_is_not_offered_builds()
+    {
+        // Builds stay out of the global pickers; only the build's own Solution
+        // offers them.
+        long anchorFile;
+        int otherImport;
+        var appId = Guid.NewGuid();
+        await using (var seed = _db.NewContext())
+        {
+            var anchorRelease = await SeedReleaseAsync(seed, "CRONUS 1.0", "third_party");
+            anchorFile = await SeedAppFileAsync(seed, anchorRelease, appId, "src/Sales.al");
+            otherImport = await SeedReleaseAsync(seed, "CRONUS 1.1", "third_party");
+            await SeedAppFileAsync(seed, otherImport, appId, "src/Sales.al");
+
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var build = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, projectId, pipelineId: null, build, ProjectBuildStatus.Ready, DateTime.UtcNow);
+            await SeedAppFileAsync(seed, build, appId, "src/Sales.al");
+        }
+
+        await using var read = _db.NewContext();
+        var targets = await NewComparison(read).GetCompareTargetsAsync(anchorFile);
+
+        targets.Should().ContainSingle().Which.Should().Match<CompareTargetOption>(t =>
+            t.ReleaseId == otherImport && t.ReleaseLabel == "CRONUS 1.1");
+    }
+
     // ── Seed helpers ─────────────────────────────────────────────────────
 
     private static async Task<int> SeedProjectAsync(AppDbContext ctx, string name)
@@ -215,5 +296,55 @@ public sealed class BuildCompareCandidatesTests : IDisposable
         ctx.OeProjectBuilds.Add(build);
         await ctx.SaveChangesAsync();
         return build.Id;
+    }
+
+    private static async Task<int> SeedReleaseAsync(AppDbContext ctx, string label, string kind)
+    {
+        var release = new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = label,
+            Kind = kind,
+            Status = "ready",
+            ImportedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        return release.Id;
+    }
+
+    /// <summary>One module of <paramref name="appId"/> in the release, holding one file at <paramref name="path"/>.</summary>
+    private static async Task<long> SeedAppFileAsync(AppDbContext ctx, int releaseId, Guid appId, string path)
+    {
+        const string hash = "build-compare-hash";
+        if (!ctx.OeFileContents.Any(c => c.ContentHash == hash))
+        {
+            ctx.OeFileContents.Add(new OeFileContent { ContentHash = hash, Content = "// x", ContentLength = 4, LineCount = 1 });
+        }
+        var module = new OeModule
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ReleaseId = releaseId,
+            AppId = appId,
+            Name = "CRONUS Sales",
+            Publisher = "CRONUS",
+            Version = "1.0.0.0",
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.OeModules.Add(module);
+        await ctx.SaveChangesAsync();
+        var file = new OeModuleFile
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ModuleId = module.Id,
+            Path = path,
+            ContentHash = hash,
+            LineCount = 1,
+        };
+        ctx.OeModuleFiles.Add(file);
+        await ctx.SaveChangesAsync();
+        return file.Id;
     }
 }

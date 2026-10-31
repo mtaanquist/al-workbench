@@ -234,74 +234,11 @@ public class ObjectExplorerService
     /// the caller cannot see it. See <c>.design/artifacts.md</c>.
     /// </para>
     /// </summary>
-    public async Task<List<ReleaseListItem>> ListBuildCompareCandidatesAsync(int releaseId, CancellationToken ct = default)
-    {
-        if (!await ReleaseVisibleAsync(releaseId, ct)) return [];
-        var own = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ReleaseId == releaseId)
-            .OrderBy(b => b.Id)
-            .Select(b => new { b.ProjectId, b.PipelineId })
-            .FirstOrDefaultAsync(ct);
-        if (own is null) return [];
+    public Task<List<ReleaseListItem>> ListBuildCompareCandidatesAsync(int releaseId, CancellationToken ct = default)
+        => BuildCompareCandidates.ListAsync(_db, _access, releaseId, ct);
 
-        var snapshot = await _access.GetSnapshotAsync(ct);
-        var visibleRelease = _access.VisibleReleasePredicate(snapshot);
-        var rows = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == own.ProjectId
-                        && b.ReleaseId != null
-                        && b.ReleaseId != releaseId
-                        && b.Status == ProjectBuildStatus.Ready
-                        && b.Release!.Status == "ready"
-                        && b.Release!.DeletedAt == null
-                        // A deleted pipeline's builds go with it, as on the Pipelines pages.
-                        && (b.Pipeline == null || b.Pipeline.DeletedAt == null))
-            .Where(OeProjectBuild.HasIndexedObjects)
-            .Where(b => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId))
-            .OrderBy(b => own.PipelineId != null && b.PipelineId == own.PipelineId ? 0 : 1)
-            .ThenByDescending(b => b.StartedAt)
-            .ThenByDescending(b => b.Id)
-            .Take(BuildCompareCandidateCap)
-            .Select(b => new
-            {
-                BuildId = b.Id,
-                b.BcTarget,
-                PipelineName = b.Pipeline != null ? b.Pipeline.Name : null,
-                Item = new ReleaseListItem(
-                    b.Release!.Id, b.Release.Label, b.Release.Kind, b.Release.Status,
-                    b.Release.BcVersion, b.Release.ParentReleaseId,
-                    ParentLabel: b.Release.ParentRelease != null ? b.Release.ParentRelease.Label : null,
-                    Publisher: b.Release.Publisher,
-                    ProjectName: b.Project!.Name,
-                    ImportedAt: b.Release.ImportedAt,
-                    SourceFileCount: b.Release.SourceFileCount,
-                    SourceContentLength: b.Release.SourceContentLength,
-                    DeletedAt: b.Release.DeletedAt,
-                    StatusMessage: b.Release.StatusMessage,
-                    PipelineName: b.Pipeline != null ? b.Pipeline.Name : null,
-                    IsPrerelease: b.Release.IsPrerelease),
-            })
-            .ToListAsync(ct);
-
-        return rows
-            .Select(r => r.Item with { Label = BuildCompareLabel(r.BuildId, r.BcTarget, r.PipelineName, r.Item.BcVersion) })
-            .ToList();
-    }
-
-    /// <summary>
-    /// How many builds the compare picker offers. A busy solution has hundreds;
-    /// the recent ones are the ones anyone compares against, and the picker is a
-    /// plain dropdown.
-    /// </summary>
-    internal const int BuildCompareCandidateCap = 50;
-
-    private static string BuildCompareLabel(int buildId, string bcTarget, string? pipelineName, string? bcVersion)
-    {
-        var label = bcTarget == ProjectBuildTarget.Current
-            ? $"Build #{buildId}"
-            : $"{ProjectBuildTarget.Label(bcTarget)} preview build #{buildId}";
-        if (!string.IsNullOrWhiteSpace(pipelineName)) label += $" of {pipelineName}";
-        return string.IsNullOrWhiteSpace(bcVersion) ? label : $"{label} on BC {bcVersion}";
-    }
+    /// <summary>How many builds the compare picker offers; see <see cref="BuildCompareCandidates.Cap"/>.</summary>
+    internal const int BuildCompareCandidateCap = BuildCompareCandidates.Cap;
 
     /// <summary>
     /// Returns the Release header plus a denormalised module count for the
