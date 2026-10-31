@@ -922,17 +922,6 @@ public class ObjectExplorerService
     }
 
     /// <summary>
-    /// Body-bearing symbol kinds — what counts as a "procedure" the
-    /// forward-edge tools can read source for. Mirrors the kinds the
-    /// procedure walker pushes a scope frame for.
-    /// </summary>
-    private static readonly HashSet<string> BodyBearingKinds = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "procedure", "local_procedure", "internal_procedure", "protected_procedure",
-        "trigger", "event_publisher", "event_subscriber",
-    };
-
-    /// <summary>
     /// Resolves a procedure / trigger to its <c>oe_module_symbols.id</c>
     /// by (release, object, kind, procedure name). Throws
     /// <see cref="McpException"/> with copy steering the agent to the
@@ -973,7 +962,7 @@ public class ObjectExplorerService
             .Select(s => new { s.Id, s.Kind, s.LineNumber })
             .ToListAsync(ct);
 
-        var bodied = candidates.Where(c => BodyBearingKinds.Contains(c.Kind)).ToList();
+        var bodied = candidates.Where(c => ProcedureKinds.IsProcedureLike(c.Kind)).ToList();
         if (bodied.Count == 0)
         {
             throw new McpException($"No procedure or trigger named '{procName}' on {ownerKind} '{objectName}' in release {releaseLabelOrId}. Call get_object_outline to see what this object exposes.");

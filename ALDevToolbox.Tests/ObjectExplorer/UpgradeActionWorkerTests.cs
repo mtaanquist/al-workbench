@@ -1651,6 +1651,56 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_single_booking_keeps_its_place_ahead_of_later_batches_when_its_window_moves_it_to_the_next_opening()
+    {
+        // One organisation: a single urgent app booked first, then a three-app batch, both
+        // for tonight's delivery window, 22:00-00:00 in Copenhagen (20:00-22:00 UTC).
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        var single = (await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "Urgent.app")).Single();
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "X1.app", "X2.app", "X3.app");
+        (await _f.ReadActionAsync(single)).BatchOrder.Should().BeNull("a single booking has no batch");
+
+        // Nothing got a turn before the window closed (00:30 in Copenhagen): everything moves.
+        var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+        _f.Clock.Advance(opening.AddMinutes(150) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await SweepUntilQuietAsync()).Should().Be(0);
+        _f.Apps.InstalledFiles.Should().BeEmpty();
+        (await _f.ReadActionAsync(single)).ExecuteAfter.Should().Be(opening.AddDays(1));
+
+        // Another batch is booked for the new night after the move.
+        await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "Y1.app");
+
+        // At the next opening the single booking goes first, then the batch booked before
+        // the new one, then the new one.
+        _f.Clock.Advance(opening.AddDays(1) - _f.Clock.GetUtcNow().UtcDateTime);
+        for (var i = 0; i < 5; i++)
+        {
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        }
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Urgent.app", "X1.app", "X2.app", "X3.app", "Y1.app" },
+            "the move to the next opening keeps each booking's place in the queue");
+    }
+
+    [Fact]
+    public async Task A_single_booking_due_with_a_batch_booked_after_it_goes_first()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(0, 0));
+        await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "Urgent.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(5));
+        await BookInWindowAsync(projectId, envId, UploadAppTiming.DeliveryWindow, "X1.app", "X2.app");
+
+        // Both are due at the same opening, 22:00 in Copenhagen (20:00 UTC).
+        _f.Clock.Advance(new DateTime(2026, 9, 11, 20, 10, 0, DateTimeKind.Utc) - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Urgent.app" },
+            "a single booking is not sorted behind every batch due at the same time");
+    }
+
+    [Fact]
     public async Task The_install_turn_rotates_between_organisations_so_a_long_batch_does_not_starve_another()
     {
         // This organisation booked two ten-app batches for 09:00...

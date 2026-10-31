@@ -547,12 +547,14 @@ internal static class AccountAuthEndpoints
                 // Same session: keep its method and strong moment exactly as
                 // they were (typing the current password proves nothing new),
                 // but a fresh signed_in_at so this cookie survives the cut the
-                // change just made. The stamps are mirrored on ctx.User as claims.
+                // change just made. The stamps are mirrored on ctx.User as claims,
+                // and are rewritten from the new properties so the sign-in claim
+                // an open page compares against is the fresh one too (#1567).
                 var props = PersistentSignIn(ctx,
                     StepUpAuth.Method(ctx.User) ?? SignInMethod.Password,
                     StepUpAuth.StrongAuthAt(ctx.User),
                     signedInAt: clock.GetUtcNow().UtcDateTime);
-                await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, props);
+                await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, WithStampsFrom(ctx.User, props), props);
                 ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=password");
             }
             catch (PlanValidationException ex)

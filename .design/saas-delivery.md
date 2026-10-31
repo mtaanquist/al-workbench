@@ -703,7 +703,12 @@ that names the environment and says what the click does there:
   booked for one organisation's opening alternates with another organisation's install
   in the same window instead of running to the end first. The order is read from the
   rows each sweep, so it survives a restart. It shares the one install out; it does not
-  make the queue shorter.
+  make the queue shorter. Inside one organisation the installs go by due time, then
+  first booked, first served (`requested_at`), then batch order, a single booking
+  counting as a batch's first app (#1568). A row moved to a window's next opening ties
+  on time with everything booked for that opening, so its booking time is what keeps
+  its place: a single booking moved past a closed window goes ahead of the leftovers of
+  a batch booked after it and of a batch booked for the new night.
 
   **A time a window chose stays inside the window** - the deployments rule (#1124),
   extended to booked installs (#1539). The row records which window applied
@@ -1288,7 +1293,10 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   says how many it left out. The solution filter narrows the fleet query itself; the other
   filters run over the visible fleet in memory, which is one row per environment. Each of
   these lists also stops at the shared character budget (#1524, see `object-explorer.md`,
-  "Bounded MCP answers"), so a page of long rows still fits one answer.
+  "Bounded MCP answers"), so a page of long rows still fits one answer. `list_deployments`,
+  `list_solution_builds` and `list_pipeline_builds` stop at it too (#1572), each deployment's
+  per-app rows being what makes a row long, and their `note` points at the `before...Id`
+  that reads on.
 
 ## Suggested phasing
 

@@ -69,16 +69,16 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "list_solution_builds", ReadOnly = true)]
-    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit; to read further back, pass the oldest id returned as beforeBuildId. A failure message is cut at 300 characters, and get_solution_build has the whole of it.")]
-    public async Task<IReadOnlyList<BuildRow>> ListProjectBuildsAsync(
+    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit, and fewer when the builds carry long messages, so the answer stays readable; Truncated and Note say when more were left out. To read further back, pass the oldest id returned as beforeBuildId. A failure message is cut at 300 characters, and get_solution_build has the whole of it.")]
+    public async Task<CappedRows<BuildRow>> ListProjectBuildsAsync(
         [Description("Solution name or numeric id (from list_solutions).")] string solutionNameOrId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
         [Description(BeforeBuildIdDescription)] int? beforeBuildId = null,
         CancellationToken ct = default)
     {
         var projectId = await _projects.ResolveProjectAsync(solutionNameOrId, ct);
-        var rows = await _artifacts.ListBuildsForProjectAsync(projectId, McpListLimit.Clamp(limit), ct, beforeBuildId);
-        return ShortenFailures(rows);
+        var cap = McpListLimit.Clamp(limit);
+        return CapBuilds(await _artifacts.ListBuildsForProjectAsync(projectId, cap + 1, ct, beforeBuildId), cap);
     }
 
     private const string BeforeBuildIdDescription =
@@ -98,8 +98,8 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "list_pipeline_builds", ReadOnly = true)]
-    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit; to read further back, pass the oldest id returned as beforeBuildId. A failure message is cut at 300 characters, and get_solution_build has the whole of it.")]
-    public async Task<IReadOnlyList<BuildRow>> ListPipelineBuildsAsync(
+    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit, and fewer when the builds carry long messages, so the answer stays readable; Truncated and Note say when more were left out. To read further back, pass the oldest id returned as beforeBuildId. A failure message is cut at 300 characters, and get_solution_build has the whole of it.")]
+    public async Task<CappedRows<BuildRow>> ListPipelineBuildsAsync(
         [Description("Pipeline id (from list_pipelines).")] int pipelineId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
         [Description(BeforeBuildIdDescription)] int? beforeBuildId = null,
@@ -107,7 +107,8 @@ public sealed class ArtifactsTools
     {
         try
         {
-            return ShortenFailures(await _artifacts.ListBuildsAsync(pipelineId, McpListLimit.Clamp(limit), ct: ct, beforeBuildId: beforeBuildId));
+            var cap = McpListLimit.Clamp(limit);
+            return CapBuilds(await _artifacts.ListBuildsAsync(pipelineId, cap + 1, ct: ct, beforeBuildId: beforeBuildId), cap);
         }
         catch (ProjectAccessDeniedException)
         {
@@ -205,8 +206,20 @@ public sealed class ArtifactsTools
     /// </summary>
     private static McpException NotFound(string message) => new(message);
 
-    private static List<BuildRow> ShortenFailures(IEnumerable<BuildRow> rows) =>
-        rows.Select(r => r with { FailureMessage = McpListLimit.ShortenFailure(r.FailureMessage, "get_solution_build") }).ToList();
+    /// <summary>
+    /// A build list's rows, fetched one past <paramref name="cap"/>, with long messages cut
+    /// and the list stopped at the row cap or the answer budget, whichever comes first
+    /// (#1572): fifty builds, each with a GitHub release error, ran past what an assistant reads.
+    /// </summary>
+    private static CappedRows<BuildRow> CapBuilds(IEnumerable<BuildRow> rows, int cap)
+    {
+        var shortened = rows
+            .Select(r => r with { FailureMessage = McpListLimit.ShortenFailure(r.FailureMessage, "get_solution_build") })
+            .ToList();
+        return CappedRows<BuildRow>.From(shortened, cap, "builds", "newest first",
+            "Pass the oldest build's id as beforeBuildId to read the rest.",
+            cap < McpListLimit.Max ? CappedRows<BuildRow>.RaiseLimitHint : null);
+    }
 
     /// <summary>
     /// The first commits of each repository's changelog, with a summary row (no

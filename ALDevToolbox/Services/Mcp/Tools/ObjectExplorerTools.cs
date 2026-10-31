@@ -223,7 +223,7 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_procedures", ReadOnly = true)]
-    [Description("Searches a BC release for procedures (methods / triggers / event publishers) by name. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
+    [Description("Searches a BC release for procedures (global, local, internal and protected methods, triggers, event publishers and event subscribers) by name. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
     public async Task<CappedRows<ReleaseProcedureMatch>> SearchProceduresAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Substring of the procedure name.")] string namePattern,

@@ -57,7 +57,6 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
     private readonly TimeProvider _clock;
     private readonly MaintenanceModeState _maintenance;
     private readonly ILogger<SessionRevalidationCircuitHandler> _logger;
-    private readonly DateTime _openedAt;
 
     private DateTime? _lastCheckedAt;
     private volatile bool _stale;
@@ -79,8 +78,6 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         _clock = clock;
         _maintenance = maintenance;
         _logger = logger;
-        // The circuit's scope is created when it opens, and so is this handler.
-        _openedAt = clock.GetUtcNow().UtcDateTime;
     }
 
     public override Func<CircuitInboundActivityContext, Task> CreateInboundActivityHandler(
@@ -149,7 +146,7 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         }
 
         _lastCheckedAt = now;
-        if (!StillMatches(principal, row, _openedAt))
+        if (!StillMatches(principal, row))
         {
             _stale = true;
             _logger.LogInformation("Session for user {UserId} no longer matches the account; reloading the page.", userId);
@@ -160,11 +157,16 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
     /// <summary>
     /// Whether the principal a circuit connected with still describes the
     /// account: active, the same organisation role, the same SiteAdmin flag,
-    /// and no credential change since the circuit opened (a password reset or
-    /// a disable stamps one; the refresh endpoint then compares it with the
-    /// session's own start, which the circuit cannot see).
+    /// and no credential change since the session signed in (a password reset
+    /// or an email change stamps one). The comparison is with the session's
+    /// sign-in moment, mirrored on the principal, not with when the circuit
+    /// opened: a page opened just after a reset, while the cookie re-check
+    /// was still throttled, would otherwise keep the old session (#1567). A
+    /// principal without the claim (a cookie from before it existed) counts
+    /// as older than any change, so it takes one trip through the refresh
+    /// endpoint, which reads the real stamp and re-issues the cookie with it.
     /// </summary>
-    internal static bool StillMatches(ClaimsPrincipal principal, UserSnapshot? row, DateTime circuitOpenedAt)
+    internal static bool StillMatches(ClaimsPrincipal principal, UserSnapshot? row)
     {
         if (row is null || row.Status != UserStatus.Active) return false;
         var orgRoles = principal.FindAll(ClaimTypes.Role)
@@ -177,7 +179,7 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         {
             return false;
         }
-        return row.CredentialsChangedAt is not { } changedAt || changedAt <= circuitOpenedAt;
+        return row.CredentialsChangedAt is not { } changedAt || EndpointHelpers.SignedInAt(principal) >= changedAt;
     }
 
     private void SendToRefresh()

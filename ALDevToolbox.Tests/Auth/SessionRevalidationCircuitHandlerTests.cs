@@ -85,6 +85,43 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_page_opened_after_a_reset_by_a_session_from_before_it_is_caught()
+    {
+        // The session signed in at T-1h, the owner reset the password at T,
+        // and the throttled cookie check let a page load through at T+1min.
+        var userId = await SeedAsync(UserRole.User);
+        var signedInAt = _clock.GetUtcNow().UtcDateTime.AddHours(-1);
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User, signedInAt: signedInAt));
+
+        (await DispatchAsync(handler)).Should().BeFalse("the session predates the reset, however late the page opened");
+        _navigation.Navigations.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_session_signed_in_after_the_credential_change_runs()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User, signedInAt: _clock.GetUtcNow().UtcDateTime));
+
+        (await DispatchAsync(handler)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_cookie_without_the_sign_in_claim_goes_through_the_refresh_once_a_credential_has_changed()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime.AddDays(-10));
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User, signedInAt: null));
+
+        (await DispatchAsync(handler)).Should().BeFalse("without the claim the session's age is unknown, so the refresh reads the cookie's own stamp");
+        _navigation.Navigations.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task The_row_is_read_at_most_once_per_interval()
     {
         var adminId = await SeedAsync(UserRole.Admin);
@@ -163,13 +200,13 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     [Fact]
     public void A_matching_principal_matches_and_an_extra_org_role_does_not()
     {
-        var opened = _clock.GetUtcNow().UtcDateTime;
-        var row = new SessionRevalidationCircuitHandler.UserSnapshot(UserStatus.Active, UserRole.Editor, false, opened.AddDays(-1));
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var row = new SessionRevalidationCircuitHandler.UserSnapshot(UserStatus.Active, UserRole.Editor, false, now.AddDays(-1));
 
-        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), row, opened).Should().BeTrue();
-        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), row, opened).Should().BeFalse();
-        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor, siteAdmin: true), row, opened).Should().BeFalse();
-        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), null, opened).Should().BeFalse();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), row).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), row).Should().BeFalse();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor, siteAdmin: true), row).Should().BeFalse();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), null).Should().BeFalse();
     }
 
     private async Task<bool> DispatchAsync(SessionRevalidationCircuitHandler handler)
@@ -184,7 +221,11 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
         new(new FixedAuthState(principal), new FixtureContextFactory(_db), _db.OrgContext, _navigation, _clock,
             maintenance ?? new MaintenanceModeState(), NullLogger<SessionRevalidationCircuitHandler>.Instance);
 
-    private static ClaimsPrincipal PrincipalFor(int userId, UserRole role, bool siteAdmin = false)
+    private ClaimsPrincipal PrincipalFor(int userId, UserRole role, bool siteAdmin = false) =>
+        PrincipalFor(userId, role, _clock.GetUtcNow().UtcDateTime, siteAdmin);
+
+    /// <param name="signedInAt">The session's sign-in claim; null leaves it off, as on a cookie issued before it existed.</param>
+    private static ClaimsPrincipal PrincipalFor(int userId, UserRole role, DateTime? signedInAt, bool siteAdmin = false)
     {
         var claims = new List<Claim>
         {
@@ -192,6 +233,10 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
             new(HttpOrganizationContext.UserIdClaim, userId.ToString()),
             new(HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString()),
         };
+        if (signedInAt is { } at)
+        {
+            claims.Add(new Claim(EndpointHelpers.SignedInAtClaim, at.ToString("o", System.Globalization.CultureInfo.InvariantCulture)));
+        }
         if (siteAdmin)
         {
             claims.Add(new Claim(HttpOrganizationContext.SiteAdminClaim, "true"));

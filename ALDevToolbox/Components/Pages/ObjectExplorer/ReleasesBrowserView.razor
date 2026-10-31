@@ -290,8 +290,14 @@
         // (the hero's "Ready" pill is honest by construction). Symbol packages a
         // build pulled from the feeds with no source in them are left out too
         // (#1092).
-        _releases = await ObjectExplorer.ListReleasesAsync(browsableOnly: true);
+        //
+        // _releases is what ends the loading state, so it is set last. The first
+        // call can complete without yielding, and ComponentBase renders at the
+        // first await that does: had _releases been set first, that render drew
+        // the tabs without Solutions, which popped in a moment later (#1564).
+        var releases = await ObjectExplorer.ListReleasesAsync(browsableOnly: true);
         _pipelineReleases = await ObjectExplorer.ListLatestPipelineBuildReleasesAsync();
+        _releases = releases;
     }
 
     /// <summary>True once a tab is clicked during a search: the search then looks in that tab alone.</summary>
