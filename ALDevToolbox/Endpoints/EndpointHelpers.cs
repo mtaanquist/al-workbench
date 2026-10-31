@@ -194,6 +194,21 @@ internal static class EndpointHelpers
             : DateTime.MinValue;
 
     /// <summary>
+    /// A copy of <paramref name="user"/> whose mirrored stamps (sign-in
+    /// method, strong moment, sign-in time) are rewritten from
+    /// <paramref name="properties"/>. For re-issuing a cookie from the
+    /// principal it already carries: signing in with <c>ctx.User</c> and fresh
+    /// properties as they are would leave the old stamps on the claims, and
+    /// the interactive-page re-check reads the claims (#1567).
+    /// </summary>
+    public static ClaimsPrincipal WithStampsFrom(ClaimsPrincipal user, Microsoft.AspNetCore.Authentication.AuthenticationProperties properties)
+    {
+        var identity = (user.Identity as ClaimsIdentity)?.Clone() ?? new ClaimsIdentity();
+        Services.Account.StepUpAuth.ApplyClaims(identity, properties);
+        return new ClaimsPrincipal(identity);
+    }
+
+    /// <summary>
     /// Marks the auth cookie persistent so it survives browser restarts for
     /// the full <c>ExpireTimeSpan</c> window (see Program.cs). Without this the
     /// cookie is a session cookie and the browser drops it on close, defeating
