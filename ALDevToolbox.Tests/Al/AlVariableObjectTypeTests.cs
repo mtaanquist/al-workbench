@@ -83,4 +83,18 @@ public sealed class AlVariableObjectTypeTests
         AlGoToDefinitionLocator.ResolveVariableDeclarationLine(code, clicked).Should().Be(3);
         AlGoToDefinitionLocator.ResolveVariableObjectType(code, clicked).Should().Be(("table", "Sales Line"));
     }
+
+    /// <summary>
+    /// A quoted local's uses are found between quotes only, so a longer quoted
+    /// name that starts with it is not taken for it.
+    /// </summary>
+    [Theory]
+    [InlineData("    \"Temp Sales Line\".Insert();", 5)]
+    [InlineData("    \"Temp Sales Line Buffer\".Insert();", -1)]
+    [InlineData("    TempSalesLine.Insert();", -1)]
+    public void A_quoted_name_is_found_only_between_quotes(string line, int expected)
+    {
+        ALDevToolbox.Services.ObjectExplorer.Explore.ReferenceSessionService
+            .IndexOfWord(line, "Temp Sales Line", 0).Should().Be(expected);
+    }
 }

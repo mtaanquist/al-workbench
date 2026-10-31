@@ -354,9 +354,10 @@ public sealed class ObjectExplorerTools
     /// <summary>
     /// Whether a usage-filtered find_references saw every reference. The
     /// reference query fetches one row past the cap, so more than the cap means
-    /// it was cut. Only that bucket is capped: the declarations and interface
-    /// implementations a member search adds before and after it are not, so
-    /// they are left out of the count, or a complete answer reads as cut.
+    /// it was cut. The declarations and interface implementations a member
+    /// search adds before and after it are separate queries with caps of their
+    /// own, so they are left out of the count, or a complete answer reads as
+    /// cut.
     /// </summary>
     internal static bool UsageFilterCheckedAll(IEnumerable<ReferenceMatch> matches) =>
         matches.Count(m => m.Category is not ("declaration" or "implementation"))

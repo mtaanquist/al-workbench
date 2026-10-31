@@ -156,7 +156,7 @@ public sealed class BuiltInCallsTests : IDisposable
         narrowed.Token.Should().Be(session.Token);
         widened!.Token.Should().Be(session.Token);
         cache.Count.Should().Be(before, "a pick replaces the cached list rather than adding one");
-        sessions.Get(session.Token, "owner")!.Method.Should().BeNull("the last pick is what the token now holds");
+        (await sessions.GetAsync(session.Token, "owner"))!.Method.Should().BeNull("the last pick is what the token now holds");
     }
 
     [Fact]
