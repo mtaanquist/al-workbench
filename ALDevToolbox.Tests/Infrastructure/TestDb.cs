@@ -264,14 +264,21 @@ public sealed class TestDb : IDisposable
     public void Dispose()
     {
         _memoryCache.Dispose();
-        // Before ClearAllPools: this provider owns scoped AppDbContexts, and a
-        // live one would hand a connection straight back to the pool after the
-        // clear and block the drop.
+        // Before clearing the pool: this provider owns scoped AppDbContexts, and
+        // a live one would hand a connection straight back to the pool after the
+        // clear.
         if (_scopeProvider.IsValueCreated) _scopeProvider.Value.Dispose();
         if (_openIddict.IsValueCreated) _openIddict.Value.Dispose();
-        // Idle pool connections hold open the per-fixture database and would
-        // block DROP DATABASE; clear them before issuing the drop.
-        NpgsqlConnection.ClearAllPools();
+        // Close this fixture's idle pooled connections, so the drop has no
+        // sessions of ours to end. Only this database's pool: ClearAllPools()
+        // also threw away the idle connections of every fixture running beside
+        // this one, and each paid a new physical connection and Npgsql's type
+        // load on its next query (#1583). A connection opened under another
+        // connection string is ended by the drop's WITH (FORCE).
+        using (var connection = new NpgsqlConnection(_connectionString))
+        {
+            NpgsqlConnection.ClearPool(connection);
+        }
         SharedHost.Value.DropDatabase(_databaseName);
     }
 
