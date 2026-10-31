@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
@@ -5,6 +6,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Generation;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Services.Templates;
 
@@ -55,6 +57,18 @@ public class GenerationService
         _logger = logger;
     }
 
+    /// <summary>
+    /// A read-only snapshot for one generation. The template or module, its
+    /// folders and its files are separate reads, and an Editor's save or a
+    /// repository refresh in between would otherwise leave extension folders
+    /// empty in a download that reports success (#1600). Null when the caller
+    /// already runs in a transaction, whose isolation then applies.
+    /// </summary>
+    private async Task<IDbContextTransaction?> BeginSnapshotAsync(CancellationToken ct) =>
+        _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct)
+            : null;
+
     private Task<OrganizationConfig> GetOrgConfigAsync(CancellationToken ct) =>
         _orgConfig.GetForAsync(
             _orgContext.CurrentOrganizationId
@@ -94,6 +108,7 @@ public class GenerationService
     public async Task<GeneratedArchive> GenerateWorkspaceAsync(ProjectPlan plan, CancellationToken ct = default)
     {
         var stopwatch = Stopwatch.StartNew();
+        await using var snapshot = await BeginSnapshotAsync(ct);
         var (resolvedPlan, template, extensions, orgConfig) = await PrepareWorkspaceAsync(plan, pathsOnly: false, ct);
 
         var (stream, fileCount) = await _zipBuilder.BuildWorkspaceAsync(resolvedPlan, template, extensions, orgConfig, ct);
@@ -146,6 +161,7 @@ public class GenerationService
         plan = await ResolveLatestVersionAsync(plan, ct);
 
         var stopwatch = Stopwatch.StartNew();
+        await using var snapshot = await BeginSnapshotAsync(ct);
         var template = await LoadTemplateAsync(plan.TemplateKey, ct);
 
         // OrgConfig is needed both for the sibling-rewrite path (which
@@ -668,6 +684,9 @@ public class GenerationService
         if (string.IsNullOrWhiteSpace(plan.TemplateKey)) errors[nameof(plan.TemplateKey)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.ExtensionName) || !ExtensionNameRegex.IsMatch(plan.ExtensionName))
             errors[nameof(plan.ExtensionName)] = "Required. Letters, digits and spaces only; must start with a letter.";
+        else if (plan.ExtensionName.Length > CustomerNaming.MaxExtensionNameLength)
+            errors[nameof(plan.ExtensionName)] =
+                $"At most {CustomerNaming.MaxExtensionNameLength} characters, which is the most Business Central accepts.";
         // Not a form field: the publisher always comes from the org's defaults.
         // "Required." would send the user hunting for an input that isn't there.
         if (string.IsNullOrWhiteSpace(plan.Publisher))

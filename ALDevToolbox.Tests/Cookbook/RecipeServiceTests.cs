@@ -135,6 +135,53 @@ public sealed class RecipeServiceTests : IDisposable
         names.Should().Equal("A.al", "C.al");
     }
 
+    /// <summary>
+    /// The editor page keeps its context between saves. An assistant's
+    /// update_recipe drops a file in between, and the page's next save must not
+    /// update or delete that file a second time (#1600).
+    /// </summary>
+    [Fact]
+    public async Task A_page_that_saved_once_can_save_again_after_someone_else_removed_a_file()
+    {
+        int recipeId;
+        await using (var ctx = _db.NewContext())
+        {
+            var s = RecipeBuilder.Default("Shared Edit").WithFile("A.al", "// a").WithFile("B.al", "// b");
+            ctx.Recipes.Add(s);
+            await ctx.SaveChangesAsync();
+            recipeId = s.Id;
+        }
+        RecipeInput With(params RecipeFileInput[] files) =>
+            new("Shared Edit", "Synthetic recipe used in tests.", "test", RecipeType.Snippet, false, files);
+
+        await using var page = _db.NewContext();
+        var pageService = NewService(page);
+        await pageService.UpdateAsync(recipeId, With(new RecipeFileInput("A.al", "// a"), new RecipeFileInput("B.al", "// b")));
+        await using (var other = _db.NewContext())
+        {
+            await NewService(other).UpdateAsync(recipeId, With(new RecipeFileInput("A.al", "// a")));
+        }
+        await pageService.UpdateAsync(recipeId, With(new RecipeFileInput("A.al", "// a fixed"), new RecipeFileInput("B.al", "// b")));
+
+        await using var verify = _db.NewContext();
+        (await verify.RecipeFiles.Where(f => f.RecipeId == recipeId).OrderBy(f => f.Ordering).Select(f => f.Content).ToListAsync())
+            .Should().Equal("// a fixed", "// b");
+    }
+
+    [Fact]
+    public async Task Create_rejects_more_files_than_a_recipe_may_hold()
+    {
+        await using var ctx = _db.NewContext();
+        var files = Enumerable.Range(0, RecipeService.MaxFiles + 1)
+            .Select(i => new RecipeFileInput($"File{i}.al", "// x"))
+            .ToArray();
+
+        Func<Task> act = () => NewService(ctx).CreateAsync(new RecipeInput(
+            "Too Many", "Synthetic recipe used in tests.", "test", RecipeType.Snippet, false, files));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Files");
+    }
+
     [Fact]
     public async Task SoftDelete_then_restore_round_trips_DeletedAt()
     {

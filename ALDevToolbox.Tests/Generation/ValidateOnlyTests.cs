@@ -311,6 +311,20 @@ public sealed class ValidateOnlyTests : IDisposable
     }
 
     /// <summary>
+    /// #1600: a standalone extension name over the 200-character ceiling
+    /// (AppSourceCop AS0047) is refused up front, like a workspace one.
+    /// </summary>
+    [Fact]
+    public async Task A_standalone_extension_name_over_200_characters_is_reported_and_refused()
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.ExtensionPlan(extensionName: "A" + new string('b', 200));
+
+        (await NewService().ValidateExtensionAsync(plan)).Should().ContainKey("ExtensionName");
+        await AssertGenerateRefusesAsync(plan, "ExtensionName");
+    }
+
+    /// <summary>
     /// The other half of #520: a spaced name must pass inline validation, or the
     /// generator page would refuse a name the service happily generates.
     /// </summary>

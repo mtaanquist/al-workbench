@@ -42,6 +42,8 @@ public sealed class RecipeService
     public const int MaxCustomerNameLength = 200;
     /// <summary>Cap on a recorded repository's <c>owner/name</c>, matching the column.</summary>
     public const int MaxRepositoryLength = 300;
+    /// <summary>Cap on how many files one recipe or suggestion carries, so a suggestion cannot be used to store without limit.</summary>
+    public const int MaxFiles = 100;
 
     // One segment in a recipe file's RelativePath. Letters/digits/`._-`,
     // plus space anywhere but the first character. Matches the same shape
@@ -214,6 +216,11 @@ public sealed class RecipeService
     {
         await _quotaGuard.EnsureCanWriteAsync(ct);
         var orgId = RequireOrganizationId();
+        // The editor page's context outlives one save, and EF hands back the
+        // instances it already tracks without re-reading them. Forget them, so a
+        // file someone else removed since (an assistant's update_recipe, another
+        // tab) is not updated or deleted a second time (#1600).
+        _db.ChangeTracker.Clear();
         var existing = await _db.Recipes
             .Include(s => s.Files)
             .FirstOrDefaultAsync(s => s.Id == id, ct)
@@ -699,7 +706,15 @@ public sealed class RecipeService
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
+            // The entries that failed stay tracked otherwise, and the page's
+            // next save would try them again alongside its own (#1600).
+            _db.ChangeTracker.Clear();
             throw new PlanValidationException(new Dictionary<string, string> { ["Title"] = message });
+        }
+        catch
+        {
+            _db.ChangeTracker.Clear();
+            throw;
         }
     }
 
@@ -823,6 +838,11 @@ public sealed class RecipeService
         if (files.Count == 0)
         {
             errors["Files"] = "At least one file is required.";
+            return;
+        }
+        if (files.Count > MaxFiles)
+        {
+            errors["Files"] = $"A recipe can hold at most {MaxFiles} files.";
             return;
         }
 

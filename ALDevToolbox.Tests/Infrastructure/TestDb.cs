@@ -558,7 +558,7 @@ public sealed class TestDb : IDisposable
         var access = NewGitHubAccessService(ctx, client);
         return new ALDevToolbox.Services.Templates.ModuleSourceService(
             ctx,
-            new ModuleService(ctx, NullLogger<ModuleService>.Instance, OrgContext, new FolderTreeHydrator(ctx)),
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, OrgContext, new FolderTreeHydrator(ctx), NewQuotaGuard(ctx)),
             client,
             NewGitHubConnectionService(ctx, access),
             access,
@@ -899,6 +899,30 @@ public sealed class TestDb : IDisposable
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
             throw new HttpRequestException("api.github.com is not reachable from tests.");
+    }
+
+    /// <summary>
+    /// Puts every organisation at or over its storage quota (a 0 MB default:
+    /// billable bytes are always at least 0), the cheapest way to force a
+    /// service's quota refusal without staging real bytes. Clears the guard's
+    /// cached decision for both test organisations.
+    /// </summary>
+    public async Task SetZeroStorageQuotaAsync()
+    {
+        await using var ctx = NewContext();
+        var row = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        if (row is null)
+        {
+            row = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(row);
+        }
+        row.DefaultStorageQuotaMb = 0;
+        await ctx.SaveChangesAsync();
+        // The guard caches its decision per organisation, so a write made before
+        // this call would otherwise keep answering "under quota".
+        var guard = NewQuotaGuard(ctx);
+        guard.Invalidate(DefaultOrgId);
+        guard.Invalidate(OtherOrgId);
     }
 
     /// <summary>

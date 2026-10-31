@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using System.Text.Json;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Templates;
@@ -19,13 +20,17 @@ public class ModuleService
     private readonly ILogger<ModuleService> _logger;
     private readonly IOrganizationContext _orgContext;
     private readonly FolderTreeHydrator _folderTree;
+    private readonly StorageQuotaGuard _quotaGuard;
 
-    public ModuleService(AppDbContext db, ILogger<ModuleService> logger, IOrganizationContext orgContext, FolderTreeHydrator folderTree)
+    public ModuleService(
+        AppDbContext db, ILogger<ModuleService> logger, IOrganizationContext orgContext, FolderTreeHydrator folderTree,
+        StorageQuotaGuard quotaGuard)
     {
         _db = db;
         _logger = logger;
         _orgContext = orgContext;
         _folderTree = folderTree;
+        _quotaGuard = quotaGuard;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -77,6 +82,7 @@ public class ModuleService
     /// </summary>
     public async Task<Module> CreateAsync(ModuleInput input, CancellationToken ct = default)
     {
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         await ValidateAsync(input, existingId: null, ct);
 
         var now = DateTime.UtcNow;
@@ -129,6 +135,7 @@ public class ModuleService
     /// </summary>
     public async Task UpdateAsync(int id, ModuleInput input, CancellationToken ct = default, bool keepSourceCopy = false)
     {
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         // One transaction for the whole save, with the row locked first, so a
         // repository refresh running at the same time (#1415) either finishes
         // before this reads the module or sees what this saved.
