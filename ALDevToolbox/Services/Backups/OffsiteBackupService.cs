@@ -583,7 +583,14 @@ public sealed class OffsiteBackupService
         _db.Backups.Add(row);
         try
         {
-            await _db.SaveChangesAsync(ct);
+            // Under the backup lock, so the row cannot land while a restore is
+            // between reading the backup list and putting it back, where it
+            // would be dropped with the old database or wiped from the new one
+            // (#1579). Waits out a backup or restore in progress.
+            await using (await _backups.WaitForBackupLockAsync(ct))
+            {
+                await _db.SaveChangesAsync(ct);
+            }
         }
         catch
         {
@@ -738,7 +745,20 @@ public sealed class OffsiteBackupService
             OffsiteUploadedAt = _clock.GetUtcNow().UtcDateTime,
         };
         _db.PerTenantBackups.Add(row);
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            // Under the backup lock, as for a whole-database dump (#1579).
+            await using (await _backups.WaitForBackupLockAsync(ct))
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+        }
+        catch
+        {
+            // As above: no snapshot on disk without its row.
+            TryDeleteFile(finalPath);
+            throw;
+        }
 
         _logger.LogInformation(
             "Downloaded off-site per-tenant snapshot {Bucket}/{Key} ({Bytes} bytes) for org {Slug} into local row {RowId}.",

@@ -102,6 +102,13 @@ public sealed class BackupService
     public string BackupsDirectory => _backupsDirectory;
 
     /// <summary>
+    /// Waits for the backup/restore lock (<see cref="BackupCoordination.WaitAsync"/>)
+    /// and holds it until the result is disposed.
+    /// </summary>
+    internal Task<IAsyncDisposable> WaitForBackupLockAsync(CancellationToken ct) =>
+        BackupCoordination.WaitAsync(_connectionString, ct);
+
+    /// <summary>
     /// Cross-org listing of every backup row, newest first. The
     /// <c>/site-admin/backups</c> page calls this on load and after every
     /// pin / unpin / delete action.

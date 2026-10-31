@@ -123,7 +123,10 @@ waits up to a minute for imports, builds and background sweeps that are
 already running, and for any database command that is still in progress,
 including one started by a click on an open page. If one is still running
 after that, the restore is refused, the site reopens and nothing has changed:
-wait until imports and builds have finished and try again. Imports, builds and
+wait until imports and builds have finished and try again. A download from
+off-site storage counts too: if one is running, let it finish before you
+restore. One started while a restore runs waits until the restore is over.
+Imports, builds and
 solution scans that were only waiting in line are dropped when the restore
 completes, because they belong to the database it replaced; start them again
 afterwards if they are still needed.
@@ -158,7 +161,9 @@ puts it back with that restore. Then investigate the failure in the logs.
 
 Off-site storage settings live in the database. If the failure left it empty,
 they are gone with everything else, so to pull a backup back from the bucket
-re-enter them at `/site-admin/settings/offsite` first.
+re-enter them at `/site-admin/settings/offsite` first. Downloads from the
+bucket on the backups page work while the site is held closed like this, and
+the downloaded backup then appears in the list ready to restore.
 
 ### Restarting the container instead
 

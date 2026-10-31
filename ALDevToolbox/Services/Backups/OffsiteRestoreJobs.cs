@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Workers;
 
 namespace ALDevToolbox.Services.Backups;
@@ -216,6 +217,18 @@ public sealed class OffsiteRestoreJobs
 /// and runs each download in a scoped <see cref="OffsiteBackupService"/>.
 /// Sequential by design — concurrent multi-gigabyte downloads to the
 /// same volume would just thrash disk.
+///
+/// <para>
+/// A download is a background job like any other across a restore (#1579,
+/// #1597): started while the site is open it is counted, so a restore waits
+/// for it (and refuses if it does not finish); one picked up while a restore
+/// is running waits until the site reopens. The exception is a site held
+/// closed after a failed restore, where pulling a good backup from the bucket
+/// is how the SiteAdmin recovers: then the download runs, uncounted so it
+/// does not hold up the restore that follows. Either way it is given the
+/// database (<see cref="MaintenanceModeState.AllowDatabase"/>), and its final
+/// insert takes the backup lock, so the row cannot land inside a restore.
+/// </para>
 /// </summary>
 public sealed class OffsiteRestoreWorker : BackgroundService
 {
@@ -223,16 +236,22 @@ public sealed class OffsiteRestoreWorker : BackgroundService
     private readonly IServiceProvider _services;
     private readonly ILogger<OffsiteRestoreWorker> _logger;
     private readonly WorkerHeartbeat _heartbeat;
+    private readonly MaintenanceModeState _maintenance;
+
+    /// <summary>How often a download waiting for a restore to finish checks again.</summary>
+    internal TimeSpan MaintenancePollInterval { get; init; } = TimeSpan.FromSeconds(1);
 
     public OffsiteRestoreWorker(
         OffsiteRestoreJobs jobs,
         IServiceProvider services,
         ILogger<OffsiteRestoreWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        MaintenanceModeState maintenance)
     {
         _jobs = jobs;
         _services = services;
         _logger = logger;
+        _maintenance = maintenance;
         // Queue-driven; downloads can be large (multi-GB pg_dump archives) and
         // network-bound. 4-hour active ceiling lets a real restore complete
         // even on a slow link while still flagging a hung connection.
@@ -274,6 +293,46 @@ public sealed class OffsiteRestoreWorker : BackgroundService
         var job = _jobs.Get(jobId);
         if (job is null) return;
 
+        var counted = await WaitForDatabaseAsync(jobId, stoppingToken);
+        try
+        {
+            await RunCountedAsync(jobId, job, stoppingToken);
+        }
+        finally
+        {
+            if (counted) _maintenance.EndJob();
+        }
+    }
+
+    /// <summary>
+    /// Claims a job slot while the site is open (true). While a restore runs,
+    /// waits for the site to reopen; while it is held closed after a failed
+    /// restore, goes ahead uncounted (false). See the class remarks.
+    /// </summary>
+    private async Task<bool> WaitForDatabaseAsync(Guid jobId, CancellationToken stoppingToken)
+    {
+        var logged = false;
+        while (true)
+        {
+            if (_maintenance.TryBeginJob()) return true;
+            if (_maintenance.IsHeldAfterFailedRestore) return false;
+            if (!logged)
+            {
+                _logger.LogInformation(
+                    "Off-site restore job {JobId} is waiting for the restore in progress to finish.", jobId);
+                logged = true;
+            }
+            await Task.Delay(MaintenancePollInterval, stoppingToken);
+        }
+    }
+
+    private async Task RunCountedAsync(Guid jobId, OffsiteRestoreJob job, CancellationToken stoppingToken)
+    {
+        // Counted, or let through on purpose by WaitForDatabaseAsync: either way
+        // the database guard must not refuse this job's commands (#1597). Taken
+        // inside this method, so it ends with the job; the download starts no
+        // detached work that could keep it.
+        using var allowDatabase = _maintenance.AllowDatabase();
         await using var scope = _services.CreateAsyncScope();
         var offsite = scope.ServiceProvider.GetRequiredService<OffsiteBackupService>();
 
