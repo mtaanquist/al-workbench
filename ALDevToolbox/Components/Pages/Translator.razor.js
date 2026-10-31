@@ -69,6 +69,15 @@ async function getOwnRec(openId) {
     return rec && openId && rec.openId === openId ? rec : null;
 }
 
+// For export and save: "replaced" when the record is no longer this open's -
+// another tab opened a file over it, or opened one and closed it again, which
+// deletes it - and null when it is. A tab that holds no id owns nothing, so a
+// missing record is then simply "empty".
+function notOwned(rec, openId) {
+    if (rec && openId && rec.openId === openId) return null;
+    return openId || rec ? "replaced" : "empty";
+}
+
 async function putRec(rec) {
     try {
         rec.savedAt = Date.now();
@@ -192,8 +201,9 @@ export async function clear(openId) {
 // is posted.
 export async function exportNow(openId, fileName, editsJson, learnJson) {
     const rec = await getRec();
-    if (!rec || !rec.originalXml) return "empty";
-    if (rec.openId !== openId) return "replaced";
+    const refused = notOwned(rec, openId);
+    if (refused) return refused;
+    if (!rec.originalXml) return "empty";
     const form = document.getElementById("tr-export-form");
     if (!form) return "empty";
     // The form submit below is a navigation, which would otherwise fire the
@@ -296,8 +306,9 @@ async function ensureWritePermission(handle) {
 // posted or written - writing through it would overwrite the other file.
 export async function saveInPlace(openId, fileName, editsJson, learnJson) {
     const rec = await getRec();
-    if (!rec || !rec.originalXml) return "empty";
-    if (rec.openId !== openId) return "replaced";
+    const refused = notOwned(rec, openId);
+    if (refused) return refused;
+    if (!rec.originalXml) return "empty";
     if (!rec.handle) return "no-handle";
     const handle = rec.handle;
     // What the session record held when the save began, to tell afterwards

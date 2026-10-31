@@ -2371,12 +2371,15 @@ else
                 RememberLearned(_learnedLocally, learn);
                 break;
             case "replaced":
-                // The browser's stored copy is now another tab's file, so
-                // nothing was posted, and these edits are still unsaved.
+                // The browser's stored copy is now another tab's file, or gone,
+                // so nothing was posted, and these edits are still unsaved.
                 SetUnsaved(wasUnsaved);
-                Flash(ReplacedInAnotherTab("export"), ToastKind.Danger);
+                // The generated file's button says "Download translation".
+                Flash(ReplacedInAnotherTab(_fromGeneratedFile ? "download" : "export"), ToastKind.Danger);
                 break;
             default:
+                // Nothing was posted either, so nothing was saved.
+                SetUnsaved(wasUnsaved);
                 Flash("Nothing to export yet", ToastKind.Warn);
                 break;
         }
@@ -2385,9 +2388,11 @@ else
     /// <summary>
     /// What the page says when the browser refuses an export or save because
     /// another tab has opened a file over this tab's stored copy (#1595).
+    /// Opening the file again starts from the file, so it says plainly that
+    /// the edits typed here go.
     /// </summary>
     internal static string ReplacedInAnotherTab(string action) =>
-        $"This file was replaced by one opened in another tab - open it again to {action}";
+        $"This file was replaced by one opened in another tab - open it again to {action}. Unsaved edits in this tab will be lost.";
 
     /// <summary>The units in <paramref name="editsJson"/> the translation memory has not yet learned with their current text.</summary>
     private Dictionary<string, string> PendingLearning(string editsJson)

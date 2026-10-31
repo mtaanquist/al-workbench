@@ -87,7 +87,8 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         _module.Mode = JSRuntimeMode.Loose;
         _export = _module.Setup<string>("exportNow", _ => true);
         _export.SetResult("exported");
-        _openIds = _module.Setup<string?>("putBaseStream", _ => true);
+        // A new open; a repository save's rebase passes one more argument.
+        _openIds = _module.Setup<string?>("putBaseStream", i => i.Arguments.Count <= 5);
         _openIds.SetResult(UploadOpenId);
 
         _api = new FakeGitHubApi()
@@ -284,9 +285,72 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
             .And.Contain("export async function saveInPlace(openId, fileName, editsJson, learnJson)")
             .And.Contain("export async function putEdits(openId, editsJson, learnedJson)")
             .And.Contain("export async function putMeta(openId, fileName, targetLang)")
-            .And.Contain("rec.openId === openId");
+            .And.Contain("rec.openId === openId")
+            // A missing record (another tab opened a file and closed it) is
+            // refused too, not reported as nothing to export.
+            .And.Contain("""return openId || rec ? "replaced" : "empty";""")
+            // A repository save's rebase writes nothing onto another open's record.
+            .And.Contain("if (arguments.length > 5 && !(await getOwnRec(replaceOpenId))) return null;");
         // Both readers of the base refuse before anything is posted or written.
-        Regex.Matches(js, @"if \(rec\.openId !== openId\) return ""replaced"";").Count.Should().Be(2);
+        Regex.Matches(js, @"const refused = notOwned\(rec, openId\);\s+if \(refused\) return refused;").Count.Should().Be(2);
+    }
+
+    [Fact]
+    public void An_export_with_nothing_to_send_keeps_the_edits_unsaved()
+    {
+        _export.SetResult("empty");
+        var cut = _ctx.Render<TranslatorPage>();
+        cut.FindComponent<InputFile>().UploadFiles(InputFileContent.CreateFromText(DanishXliff, "App.da-DK.xlf"));
+        cut.WaitForElement("textarea.tr-tgtarea");
+        Type(cut, "Beloeb");
+
+        cut.FindAll("button").First(b => b.ClassList.Contains("btn--primary") && b.TextContent.Contains("Export")).Click();
+
+        ExportCall(cut);
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Nothing to export yet"));
+        cut.FindAll("button.btn--primary").Should().Contain(b => b.TextContent.Contains("Export .xlf (1)"),
+            "nothing was exported, so the edit is still unsaved");
+    }
+
+    [Fact]
+    public async Task A_repository_save_rebases_only_its_own_record_and_drops_the_id_when_refused()
+    {
+        await ReadyAsync();
+        // No translation branch or language file yet, so the save cuts one and opens a pull request.
+        _api.On(HttpMethod.Get, $"/repos/{Repo}/contents/App/Translations/App.da-DK.xlf", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/main", HttpStatusCode.OK,
+                """{"ref":"refs/heads/main","object":{"sha":"base-sha"}}""")
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("base-sha"))
+            .On(HttpMethod.Put, $"/repos/{Repo}/contents/", HttpStatusCode.OK,
+                """{"content":{"sha":"written-blob-sha"},"commit":{"sha":"new-commit-sha"}}""")
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
+            .On(HttpMethod.Post, $"/repos/{Repo}/pulls", HttpStatusCode.Created,
+                $$"""{"number":12,"html_url":"https://github.com/{{Repo}}/pull/12"}""");
+        // The rebase carries the tab's id; the browser answers null because
+        // another tab has opened a file over the record since.
+        _module.Setup<string?>("putBaseStream", i => i.Arguments.Count > 5).SetResult(null);
+
+        var cut = _ctx.Render<TranslatorPage>();
+        var picker = cut.FindComponent<RepositoryPicker>();
+        await cut.InvokeAsync(() => picker.Instance.SelectedChanged.InvokeAsync(new GitHubRepositorySummary(
+            Repo, OrgLogin, "private-app", "main", IsPrivate: true, Description: null,
+            HtmlUrl: $"https://github.com/{Repo}", CloneUrl: $"https://github.com/{Repo}.git")));
+        cut.WaitForElement(".trepo__file").Click();
+        Type(cut, "Beloeb");
+
+        cut.FindAll("button").First(b => b.TextContent.Contains("Save to repository")).Click();
+        cut.WaitForAssertion(() => cut.FindAll("button").Should().Contain(b => b.TextContent.Contains("Save and open a pull request")));
+        cut.FindAll("button").First(b => b.TextContent.Contains("Save and open a pull request")).Click();
+
+        cut.WaitForAssertion(() => _module.Invocations["putBaseStream"].Should().HaveCount(2), TimeSpan.FromSeconds(5));
+        var rebase = _module.Invocations["putBaseStream"][1];
+        rebase.Arguments.Should().HaveCount(6);
+        rebase.Arguments[5].Should().Be(UploadOpenId, "the rebase names the open it may replace");
+
+        // The tab owns no record any more, so its next export is refused by the browser.
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Export a copy")).Click();
+        ExportCall(cut).Arguments[0].Should().BeNull();
     }
 
     private IRenderedComponent<TranslatorPage> Restore(TranslatorPage.RepositoryOriginDto? repo, string primaryLabel = "Export .xlf (1)")
