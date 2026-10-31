@@ -59,6 +59,7 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
         _ctx.Services.AddSingleton<IMemoryCache>(new MemoryCache(Options.Create(new MemoryCacheOptions())));
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddScoped<RecipeService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddSingleton<MarkdownRenderer>();
         _ctx.Services.AddDataProtection();

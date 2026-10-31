@@ -716,7 +716,7 @@ public sealed class TestDb : IDisposable
 
     /// <summary>The Cookbook's recipe service, wired to this fixture's database.</summary>
     public RecipeService NewRecipeService(AppDbContext ctx) =>
-        new(ctx, NullLogger<RecipeService>.Instance, OrgContext, NewQuotaGuard(ctx));
+        new(ctx, NullLogger<RecipeService>.Instance, OrgContext, NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext));
 
     /// <summary>"Apply a recipe to a repository": the access gate, the commit, and the attribution row.</summary>
     public ALDevToolbox.Services.GitHub.GitHubRecipeDeliveryService NewGitHubRecipeDeliveryService(

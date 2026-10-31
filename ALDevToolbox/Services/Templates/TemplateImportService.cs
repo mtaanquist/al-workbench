@@ -448,7 +448,14 @@ public sealed class TemplateImportService
         return p;
     }
 
-    private async Task<ApplicationVersion> EnsureApplicationVersionAsync(
+    /// <summary>
+    /// The acting org's application version for <paramref name="sourceVersion"/>'s
+    /// key, cloning it in when the org has none. Null when the org has one but
+    /// deleted it: the imported template then has no default version, rather
+    /// than one the end-user picker hides, the way a deleted module is left out
+    /// of its defaults (#1327, #1545).
+    /// </summary>
+    private async Task<ApplicationVersion?> EnsureApplicationVersionAsync(
         ApplicationVersion sourceVersion, int actingOrgId, DateTime now, CancellationToken ct)
     {
         var existing = await _db.ApplicationVersions
@@ -456,7 +463,7 @@ public sealed class TemplateImportService
             // OrganizationId == actingOrgId; the clone is written into the acting org only.
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(v => v.OrganizationId == actingOrgId && v.Key == sourceVersion.Key, ct);
-        if (existing is not null) return existing;
+        if (existing is not null) return existing.DeletedAt == null ? existing : null;
 
         var maxOrdering = await _db.ApplicationVersions
             // Same category 4 read, pinned to v.OrganizationId == actingOrgId.

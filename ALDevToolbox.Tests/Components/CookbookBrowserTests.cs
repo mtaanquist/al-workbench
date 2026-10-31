@@ -38,6 +38,7 @@ public sealed class CookbookBrowserTests : IDisposable
                 .AddInterceptors(_db.CommandTracker));
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddScoped<RecipeService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>),

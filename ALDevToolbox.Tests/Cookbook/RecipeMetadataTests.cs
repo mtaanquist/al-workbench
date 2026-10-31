@@ -296,5 +296,5 @@ public sealed class RecipeMetadataTests : IDisposable
     }
 
     private RecipeService NewService(ALDevToolbox.Data.AppDbContext ctx) =>
-        new(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx));
+        new(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 }

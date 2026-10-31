@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 
 namespace ALDevToolbox.Services.Cookbook;
@@ -54,13 +55,17 @@ public sealed class RecipeService
     private readonly ILogger<RecipeService> _logger;
     private readonly IOrganizationContext _orgContext;
     private readonly StorageQuotaGuard _quotaGuard;
+    private readonly ProjectAccess _projectAccess;
 
-    public RecipeService(AppDbContext db, ILogger<RecipeService> logger, IOrganizationContext orgContext, StorageQuotaGuard quotaGuard)
+    public RecipeService(
+        AppDbContext db, ILogger<RecipeService> logger, IOrganizationContext orgContext, StorageQuotaGuard quotaGuard,
+        ProjectAccess projectAccess)
     {
         _db = db;
         _logger = logger;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
+        _projectAccess = projectAccess;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -360,17 +365,24 @@ public sealed class RecipeService
     /// <c>ILike</c> because a customer name may legitimately contain <c>_</c> or
     /// <c>%</c>, which <c>ILike</c> would read as wildcards and match the wrong
     /// project. Org-scoped by the EF query filter. See issue #541.
+    ///
+    /// Only solutions the caller can see are matched: a Private solution's exact
+    /// name typed by someone outside its team is recorded as a plain customer
+    /// name, so the download neither lands on that solution nor confirms the
+    /// name exists (#1545).
     /// </summary>
-    private Task<int?> ResolveProjectIdAsync(string name, CancellationToken ct)
+    private async Task<int?> ResolveProjectIdAsync(string name, CancellationToken ct)
     {
         // Explicit even though RecordUseAsync repeats it: this query runs first,
         // and a lookup that leans on the tenant filter should refuse outright
         // rather than quietly match nothing when there's no org in context.
         RequireOrganizationId();
         var lowered = name.ToLowerInvariant();
-        return _db.OeProjects
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct);
+        return await _db.OeProjects
             .AsNoTracking()
             .Where(p => p.DeletedAt == null && p.Name.ToLower() == lowered)
+            .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
             .Select(p => (int?)p.Id)
             .FirstOrDefaultAsync(ct);
     }

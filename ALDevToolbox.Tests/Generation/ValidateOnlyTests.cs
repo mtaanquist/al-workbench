@@ -92,6 +92,29 @@ public sealed class ValidateOnlyTests : IDisposable
         errors.Should().BeEmpty();
     }
 
+    [Theory]
+    [InlineData("CRONUS tenant")]
+    [InlineData("8a4f1c3e1b2d4e6f9c1a3d5b7e9f2a4c")]
+    public async Task A_tenant_id_that_is_not_a_guid_is_reported_and_refused(string tenantId)
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.WorkspacePlan() with { TenantId = tenantId };
+
+        (await NewService().ValidateWorkspaceAsync(plan)).Should().ContainKey("TenantId");
+        await AssertGenerateRefusesAsync(plan, "TenantId");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("8a4f1c3e-1b2d-4e6f-9c1a-3d5b7e9f2a4c")]
+    public async Task A_blank_or_well_formed_tenant_id_is_accepted(string tenantId)
+    {
+        await SeedTemplateAsync();
+        var plan = PlanBuilder.WorkspacePlan() with { TenantId = tenantId };
+
+        (await NewService().ValidateWorkspaceAsync(plan)).Should().BeEmpty();
+    }
+
     [Fact]
     public async Task An_inverted_core_id_range_is_reported_and_refused()
     {
