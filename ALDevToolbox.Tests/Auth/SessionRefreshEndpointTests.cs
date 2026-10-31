@@ -3,6 +3,8 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Operations;
+using Microsoft.Extensions.DependencyInjection;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -87,6 +89,35 @@ public sealed class SessionRefreshEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task During_maintenance_a_site_admin_is_sent_back_untouched()
+    {
+        // A SiteAdmin is the one user the maintenance gate lets through, and a
+        // restore empties the users table; checking then would sign them out
+        // in the middle of it (#1269).
+        var (client, userId) = await SignedInAdminAsync(siteAdmin: true);
+        using (var first = await client.GetAsync(RouteConstants.AdminUsers)) { }
+        var maintenance = _factory.Services.GetRequiredService<MaintenanceModeState>();
+        maintenance.Enter("Restoring a backup");
+        try
+        {
+            await using (var ctx = _db.NewContext())
+            {
+                (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).Status = UserStatus.Disabled;
+                await ctx.SaveChangesAsync();
+            }
+
+            using var refresh = await client.GetAsync($"{CookieSessionRevalidation.RefreshPath}?return=%2Fsite-admin");
+            refresh.StatusCode.Should().Be(HttpStatusCode.Redirect);
+            refresh.Headers.Location!.OriginalString.Should().Be("/site-admin");
+            refresh.Headers.Contains("Set-Cookie").Should().BeFalse("the session is left as it is");
+        }
+        finally
+        {
+            maintenance.Exit();
+        }
+    }
+
+    [Fact]
     public async Task The_return_address_stays_on_this_site()
     {
         var (client, _) = await SignedInAdminAsync();
@@ -102,7 +133,7 @@ public sealed class SessionRefreshEndpointTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private async Task<(HttpClient Client, int UserId)> SignedInAdminAsync()
+    private async Task<(HttpClient Client, int UserId)> SignedInAdminAsync(bool siteAdmin = false)
     {
         int userId;
         await using (var seed = _db.NewContext())
@@ -115,6 +146,7 @@ public sealed class SessionRefreshEndpointTests : IDisposable
                 PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
                     .HashPassword(Password),
                 Role = UserRole.Admin,
+                IsSiteAdmin = siteAdmin,
                 Status = UserStatus.Active,
                 CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
             };

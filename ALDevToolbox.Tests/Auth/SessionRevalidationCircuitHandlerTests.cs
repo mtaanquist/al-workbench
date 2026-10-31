@@ -111,6 +111,21 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_failed_send_is_tried_again_on_the_next_event()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin));
+        await UpdateAsync(adminId, u => u.Role = UserRole.User);
+        _navigation.FailNext = true;
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+        _navigation.Navigations.Should().BeEmpty();
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+        _navigation.Navigations.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task An_anonymous_page_is_left_alone()
     {
         var handler = NewHandler(new ClaimsPrincipal(new ClaimsIdentity()));
@@ -203,7 +218,16 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
         public RecordingNavigationManager() =>
             Initialize("https://workbench.cronus.example/", "https://workbench.cronus.example/admin/administration/users");
 
-        protected override void NavigateToCore(string uri, NavigationOptions options) =>
+        public bool FailNext { get; set; }
+
+        protected override void NavigateToCore(string uri, NavigationOptions options)
+        {
+            if (FailNext)
+            {
+                FailNext = false;
+                throw new InvalidOperationException("The circuit went away.");
+            }
             Navigations.Add((ToAbsoluteUri(uri).ToString(), options.ForceLoad));
+        }
     }
 }

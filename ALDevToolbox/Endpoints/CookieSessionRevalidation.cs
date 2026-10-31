@@ -121,8 +121,15 @@ internal static class CookieSessionRevalidation
     /// </summary>
     public static IEndpointRouteBuilder MapSessionRefresh(this IEndpointRouteBuilder app)
     {
-        app.MapGet(RefreshPath, async (HttpContext ctx, IOrganizationContext org, AppDbContext db, TimeProvider clock, CancellationToken ct) =>
+        app.MapGet(RefreshPath, async (HttpContext ctx, IOrganizationContext org, AppDbContext db, TimeProvider clock,
+            MaintenanceModeState maintenance, CancellationToken ct) =>
         {
+            var back = EndpointHelpers.ResolveSafeReturn(ctx.Request.Query["return"].ToString());
+            // As in ValidateAsync: during a restore the users table is empty or
+            // gone, so a check now would sign a SiteAdmin out or fail. Leave the
+            // cookie alone and send them back (#1269).
+            if (maintenance.IsActive) return Results.Redirect(back);
+
             var cookie = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             User? user = null;
             if (cookie.Succeeded && cookie.Properties is not null && org.CurrentUserId is int userId)
@@ -144,7 +151,7 @@ internal static class CookieSessionRevalidation
             ALDevToolbox.Services.Account.StepUpAuth.ApplyClaims(rebuilt, properties);
             properties.Items[LastValidatedKey] = clock.GetUtcNow().UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
             await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(rebuilt), properties);
-            return Results.Redirect(EndpointHelpers.ResolveSafeReturn(ctx.Request.Query["return"].ToString()));
+            return Results.Redirect(back);
         }).RequireAuthorization();
         return app;
     }

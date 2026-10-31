@@ -117,7 +117,7 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
                 .Select(u => new UserSnapshot(u.Status, u.Role, u.IsSiteAdmin, u.CredentialsChangedAt))
                 .FirstOrDefaultAsync(ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             // The services keep their own checks; a database hiccup should
             // not take every open page down with it.
@@ -169,7 +169,9 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
         }
         catch (Exception ex)
         {
-            // The event is still dropped; the page just does not move.
+            // The event is still dropped. Let a later event try again, so a
+            // failed send does not leave the page dead.
+            Interlocked.Exchange(ref _redirected, 0);
             _logger.LogWarning(ex, "Could not send a stale session to the refresh page.");
         }
     }
