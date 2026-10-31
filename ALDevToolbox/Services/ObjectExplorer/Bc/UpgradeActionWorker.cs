@@ -251,7 +251,7 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (first is null) return null;
         var lastSent = await installs
-            .Where(a => a.SentAt != null)
+            .Where(ReachedBusinessCentral)
             .MaxAsync(a => a.SentAt, ct).ConfigureAwait(false);
         return new InstallTurn(lastSent, first.ExecuteAfter, first.RequestedAt);
     }
@@ -421,7 +421,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         var sentPerRow = await db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => rowIds.Contains(a.EnvironmentId)
                         && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
-                        && a.SentAt != null && a.SentAt >= since)
+                        && a.SentAt >= since)
+            .Where(ReachedBusinessCentral)
             .GroupBy(a => a.EnvironmentId)
             .Select(g => new { EnvironmentId = g.Key, LastSentAt = g.Max(a => a.SentAt) })
             .ToListAsync(ct).ConfigureAwait(false);
@@ -498,6 +499,17 @@ public sealed class UpgradeActionWorker : BackgroundService
             .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind) ? rank[a.BcEnvironment] : 0)
             .ToList(), started);
     }
+
+    /// <summary>
+    /// An install row that took a turn with Business Central, for both turns' "last
+    /// served": one it accepted (its operation was stamped) or one recorded as sent. A
+    /// dependent skipped because the app before it failed, or a booking whose requester
+    /// was disabled, is stamped with a sent time too but never reached Business Central,
+    /// and counting it put its organisation or environment at the back of the turn for an
+    /// install it never got (#1603).
+    /// </summary>
+    private static readonly System.Linq.Expressions.Expression<Func<OeEnvironmentUpgradeAction, bool>> ReachedBusinessCentral =
+        a => a.SentAt != null && (a.BcOperationId != null || a.Status == UpgradeActionStatus.Sent);
 
     /// <summary>
     /// How far back the install turn looks for an environment's last install. An

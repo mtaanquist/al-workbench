@@ -702,8 +702,11 @@ that names the environment and says what the click does there:
   never served first - then to the longest-waiting due install, and on a tie to the one booked first (a row moved to a window's next opening ties with everything booked for it). So a twenty-app batch
   booked for one organisation's opening alternates with another organisation's install
   in the same window instead of running to the end first. The order is read from the
-  rows each sweep, so it survives a restart. It shares the one install out; it does not
-  make the queue shorter. Inside one organisation the turn rotates the same way between
+  rows each sweep, so it survives a restart. Only installs that reached Business Central
+  count as sent here (accepted by it, or recorded as sent): a dependent settled as not
+  tried after a failure, or a booking whose requester was disabled, gets a sent time but
+  no install, and does not send its organisation or environment to the back (#1603). It
+  shares the one install out; it does not make the queue shorter. Inside one organisation the turn rotates the same way between
   environments (#1596): the environment whose most recent install was sent longest ago
   goes first, one never served first of all. So an Install now, or an upload for now, on
   one customer's environment waits for at most the install already running, not for the

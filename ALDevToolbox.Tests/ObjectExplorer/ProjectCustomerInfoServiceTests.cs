@@ -296,6 +296,26 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
             .Equal(ProjectPersonRole.Developer, ProjectPersonRole.ProjectLeader);
     }
 
+    /// <summary>
+    /// The picker offers active accounts only; the service holds the same rule, so a
+    /// stale form or a crafted post cannot name someone who can no longer sign in (#1603).
+    /// </summary>
+    [Fact]
+    public async Task A_disabled_colleague_cannot_be_put_on_the_people_list()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        await ctx.Users.Where(u => u.Id == OtherUserId)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
+            .Should().Be("That account is disabled. Choose someone who can still sign in.");
+        await using var read = _db.NewContext();
+        (await Svc(read).ListPeopleAsync(id)).Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_colleague_needs_at_least_one_role()
     {
