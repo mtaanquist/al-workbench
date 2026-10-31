@@ -124,7 +124,11 @@ Tools live in `Services/Mcp/Tools/CookbookTools.cs`:
   (`"Snippet"` / `"Pattern"` / `"Module"`) and a list of files each with
   its own `RelativePath`.
 - `update_recipe_suggestion(input)` — edit a pending suggestion; same
-  `GuidanceToken` gate.
+  `GuidanceToken` gate. Because the submitter can still edit while a
+  reviewer has the suggestion open, approval publishes only the version
+  the reviewer saw: the review page passes a fingerprint of the content
+  it rendered, and approval is refused (and the page reloads with the new
+  version) if the suggestion changed since.
 - `update_recipe(input)` — full-replace edit of an already-published
   recipe. Same `GuidanceToken` gate, plus a role gate: the acting user
   must be Editor or Admin (or SiteAdmin), mirroring the web admin pages.
