@@ -1,4 +1,6 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Backups;
 using ALDevToolbox.Services.Configuration;
@@ -152,6 +154,78 @@ public sealed class OffsiteDownloadMaintenanceTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_counted_download_lets_a_restore_that_began_meanwhile_go_ahead_and_lands_its_row_after_it()
+    {
+        await ConfigureOffsiteAsync();
+        _store.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = NewWorker();
+        await worker.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            var id = _jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, Key, Key);
+            await WaitUntilAsync(() => _store.Opened);
+            _maintenance.ActiveJobs.Should().Be(1);
+
+            // A restore begins as the restore does: the backup lock first, then
+            // maintenance mode, then the wait for running jobs.
+            var restoreLock = await BackupCoordination.AcquireAsync(_db.ConnectionString, TestContext.Current.CancellationToken);
+            _maintenance.Enter("Restoring backup test.dump");
+            _store.Gate.SetResult();
+
+            (await _maintenance.WaitForActiveJobsAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken))
+                .Should().BeTrue("once the file is down, the download must not hold the restore up");
+            _jobs.Get(id)!.Status.Should().Be(OffsiteRestoreJobStatus.Running, "its row waits for the restore");
+            await using (var check = _db.NewContext())
+            {
+                (await check.Backups.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+            }
+
+            // The restore finishes: the site reopens and the lock is released.
+            _maintenance.Exit();
+            await restoreLock.DisposeAsync();
+            var job = await WaitForTerminalAsync(id);
+
+            job.Status.Should().Be(OffsiteRestoreJobStatus.Completed, job.Error);
+            _maintenance.ActiveJobs.Should().Be(0, "the count is released once, not twice");
+            await using var after = _db.NewContext();
+            (await after.Backups.AsNoTracking().AnyAsync(b => b.Id == job.BackupId, TestContext.Current.CancellationToken))
+                .Should().BeTrue();
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task A_per_tenant_download_whose_row_cannot_be_written_leaves_no_file_behind()
+    {
+        await ConfigureOffsiteAsync();
+        PerTenantBackup snapshot;
+        await using (var ctx = _db.NewContext())
+        {
+            snapshot = await NewPerTenant(ctx).CreateAsync(TestDb.DefaultOrgId, BackupKind.AdHoc, TestContext.Current.CancellationToken);
+        }
+        var snapshotDir = Path.Combine(_options.Directory, "tenants", TestDb.DefaultOrgSlug);
+        _store.Body = await File.ReadAllBytesAsync(Path.Combine(snapshotDir, snapshot.FileName), TestContext.Current.CancellationToken);
+        File.Delete(Path.Combine(snapshotDir, snapshot.FileName));
+        var fileName = $"{TestDb.DefaultOrgSlug}-pulled{PerTenantBackupService.FileSuffix}";
+        var key = $"{OffsiteBackupService.PerTenantKeyPrefix}{TestDb.DefaultOrgSlug}/{fileName}";
+
+        // The lock is held and the wait for it is cancelled, so the insert never happens.
+        await using var held = await BackupCoordination.AcquireAsync(_db.ConnectionString, TestContext.Current.CancellationToken);
+        using var cts = new CancellationTokenSource();
+        await using var ctx2 = _db.NewContext();
+        var download = NewOffsite(ctx2).DownloadPerTenantAsync(key, progress: null, cts.Token);
+        await WaitUntilAsync(() => File.Exists(Path.Combine(snapshotDir, fileName)));
+        await cts.CancelAsync();
+
+        var act = () => download;
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        File.Exists(Path.Combine(snapshotDir, fileName)).Should().BeFalse("a file with no row would block a retry");
+    }
+
     // ---- helpers ---------------------------------------------------------------
 
     private async Task<OffsiteRestoreJob> RunJobAsync()
@@ -225,13 +299,14 @@ public sealed class OffsiteDownloadMaintenanceTests : IDisposable
         var backups = new BackupService(
             ctx, _db.OrgContext, _maintenance, Config(),
             NullLogger<BackupService>.Instance, _clock, _options, systemSettings: null, deployment: _us);
-        var perTenant = new PerTenantBackupService(
-            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), Config(),
-            NullLogger<PerTenantBackupService>.Instance, _clock, _options, _us);
         return new OffsiteBackupService(
-            ctx, NewSystemSettings(ctx), backups, perTenant,
+            ctx, NewSystemSettings(ctx), backups, NewPerTenant(ctx),
             new Factory(_store), NullLogger<OffsiteBackupService>.Instance, _clock, _us);
     }
+
+    private PerTenantBackupService NewPerTenant(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), Config(),
+            NullLogger<PerTenantBackupService>.Instance, _clock, _options, _us);
 
     private sealed class Factory(OneObjectProvider store) : IOffsiteStorageProviderFactory
     {
@@ -245,11 +320,13 @@ public sealed class OffsiteDownloadMaintenanceTests : IDisposable
 
         public volatile bool Opened;
 
+        public byte[] Body { get; set; } = [1, 2, 3];
+
         public async Task<OffsiteDownload> OpenReadAsync(string key, CancellationToken ct)
         {
             Opened = true;
             if (Gate is not null) await Gate.Task.WaitAsync(ct);
-            return new OffsiteDownload(new MemoryStream([1, 2, 3]), new Dictionary<string, string>(), 3);
+            return new OffsiteDownload(new MemoryStream(Body), new Dictionary<string, string>(), Body.Length);
         }
 
         public Task<OffsiteTestResult> TestConnectionAsync(CancellationToken ct) =>
@@ -261,7 +338,7 @@ public sealed class OffsiteDownloadMaintenanceTests : IDisposable
         public Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct) =>
             Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
 
-        public Task<bool> ExistsAsync(string key, CancellationToken ct) => Task.FromResult(key == Key);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct) => Task.FromResult(true);
 
         public Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<OffsiteStorageObject>>([]);

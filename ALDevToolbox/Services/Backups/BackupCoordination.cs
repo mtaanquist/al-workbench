@@ -57,32 +57,29 @@ internal static class BackupCoordination
 
     /// <summary>
     /// Takes the same lock as <see cref="AcquireAsync"/>, waiting for it rather
-    /// than refusing. For the off-site download's final <c>backups</c> insert:
-    /// the file has already been fetched, so being refused because a backup or
-    /// restore is running would throw that work away. A restore holds the lock
-    /// from before it reads the backup inventory until it has put it back, so an
-    /// insert made under it can never land inside one and be wiped (#1579).
+    /// than refusing: tries again every <paramref name="retryInterval"/> (one
+    /// second by default) until it is free or <paramref name="ct"/> fires. For
+    /// the off-site download's final <c>backups</c> insert: the file has already
+    /// been fetched, so being refused because a backup or restore is running
+    /// would throw that work away. A restore holds the lock from before it reads
+    /// the backup inventory until it has put it back, so an insert made under it
+    /// can never land inside one and be wiped (#1579).
     /// </summary>
     public static async Task<IAsyncDisposable> WaitAsync(
-        string connectionString, CancellationToken ct)
+        string connectionString, CancellationToken ct, TimeSpan? retryInterval = null)
     {
-        var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
-        try
+        while (true)
         {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT pg_advisory_lock(@k)";
-            cmd.Parameters.AddWithValue("@k", BackupLockKey);
-            // A restore can hold the lock for as long as its pg_restore runs.
-            cmd.CommandTimeout = 0;
-            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            try
+            {
+                return await AcquireAsync(connectionString, ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException)
+            {
+                // Held by another backup or restore; wait and try again.
+            }
+            await Task.Delay(retryInterval ?? TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
         }
-        catch
-        {
-            await conn.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-        return new Handle(conn);
     }
 
     private sealed class Handle : IAsyncDisposable
