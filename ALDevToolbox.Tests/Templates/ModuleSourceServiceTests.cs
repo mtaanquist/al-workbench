@@ -69,7 +69,8 @@ public sealed class ModuleSourceServiceTests : IDisposable
         saved.SourceRef.Should().BeNull();
         saved.SourceCommitSha.Should().Be(ShaA);
         saved.SourceFetchedAt.Should().NotBeNull();
-        saved.IdRangeSize.Should().Be(100, "a blank size takes the repository's own app.json range");
+        saved.IdRangeSize.Should().BeNull("the Editor left it blank, so it goes on following the repository");
+        saved.SourceIdRangeSize.Should().Be(100, "a blank size takes the repository's own app.json range");
         ModuleSourceColumns.ReadDependencies(saved.SourceDependenciesJson)
             .Should().ContainSingle(d => d.DepName == "Continia Core");
         ModuleSourceColumns.ReadSkipped(saved.SourceSkippedJson)
@@ -263,6 +264,44 @@ public sealed class ModuleSourceServiceTests : IDisposable
         (await ctx.ModuleExtensionFiles.Where(f => f.Folder!.ModuleId == module.Id).Select(f => f.Content).SingleAsync())
             .Should().Contain("v2");
     }
+
+    [Fact]
+    public async Task A_refresh_follows_a_repository_that_widened_its_id_range()
+    {
+        var module = await CreateAsync(PublicApi(ShaA, SimpleExtension()), new ModuleSourceInput(Public, null, null));
+
+        var outcome = await RefreshAsync(PublicApi(ShaB, ExtensionWithRange(91000, 91199)), module.Id);
+
+        outcome.Should().Be(ModuleSourceRefreshOutcome.Updated);
+        await using var ctx = _db.NewContext();
+        var saved = await ctx.Modules.SingleAsync(m => m.Id == module.Id);
+        saved.SourceIdRangeSize.Should().Be(200, "the range follows the repository the way its dependencies do");
+        saved.IdRangeSize.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_size_the_editor_typed_survives_a_refresh()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewModuleSourceService(ctx, _db.NewGitHubAppClient(ctx, PublicApi(ShaA, SimpleExtension())))
+                .CreateAsync(Input() with { IdRangeSize = 40 }, new ModuleSourceInput(Public, null, null));
+        }
+        int id;
+        await using (var ctx = _db.NewContext()) id = await ctx.Modules.Select(m => m.Id).SingleAsync();
+
+        await RefreshAsync(PublicApi(ShaB, ExtensionWithRange(91000, 91199)), id);
+
+        await using var read = _db.NewContext();
+        var saved = await read.Modules.SingleAsync(m => m.Id == id);
+        saved.IdRangeSize.Should().Be(40);
+        saved.SourceIdRangeSize.Should().Be(200);
+    }
+
+    private static byte[] ExtensionWithRange(int from, int to) => Tarball([
+        Entry.Text("app.json", $$"""{ "id": "11111111-1111-1111-1111-111111111111", "name": "Document Capture", "idRanges": [ { "from": {{from}}, "to": {{to}} } ] }"""),
+        Entry.Text("src/Codeunits/DocAdapter.Codeunit.al", "codeunit 91000 \"{{affix}} Doc Adapter v2\" { }"),
+    ]);
 
     [Fact]
     public async Task A_failed_refresh_keeps_the_copy_and_records_why()

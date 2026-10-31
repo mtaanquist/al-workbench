@@ -26,7 +26,8 @@ public record ModuleSourceState(
     string CommitSha,
     DateTime FetchedAt,
     IReadOnlyList<ModuleSourceSkippedFile> Skipped,
-    IReadOnlyList<ModuleDependencyInput> Dependencies);
+    IReadOnlyList<ModuleDependencyInput> Dependencies,
+    int? IdRangeSize = null);
 
 /// <summary>
 /// A file a copy left out, and why, in words for the module page. When the list

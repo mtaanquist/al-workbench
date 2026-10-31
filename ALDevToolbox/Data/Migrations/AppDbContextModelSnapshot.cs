@@ -905,6 +905,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("source_fetched_at");
 
+                    b.Property<int?>("SourceIdRangeSize")
+                        .HasColumnType("integer")
+                        .HasColumnName("source_id_range_size");
+
                     b.Property<string>("SourcePath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)")

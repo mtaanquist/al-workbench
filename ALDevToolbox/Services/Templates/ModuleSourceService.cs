@@ -79,15 +79,15 @@ public class ModuleSourceService
     /// Creates a module whose files are copied from <paramref name="source"/>. The
     /// copy is made first, so a repository that cannot be read refuses the save
     /// with the reason under the field and no module is created without files.
-    /// A blank ID range size takes the size of the repository's own <c>app.json</c>
-    /// ranges.
+    /// A blank ID range size follows the size of the repository's own <c>app.json</c>
+    /// ranges, through every later refresh (#1631).
     /// </summary>
     /// <exception cref="PlanValidationException">The module or the source is invalid, or the copy failed.</exception>
     public async Task<Module> CreateAsync(ModuleInput input, ModuleSourceInput source, CancellationToken ct = default)
     {
         var (state, snapshot) = await CopyForSaveAsync(source, ct);
         var module = await _modules.CreateAsync(
-            input with { Folders = snapshot.Folders, IdRangeSize = input.IdRangeSize ?? snapshot.IdRangeSize, Source = state }, ct);
+            input with { Folders = snapshot.Folders, Source = state }, ct);
         _logger.LogInformation(
             "Created module '{Key}' from {Repository} at {Commit} ({FileCount} files, {Skipped} left out).",
             module.Key, state.Repository, state.CommitSha, snapshot.FileCount, state.Skipped.Count);
@@ -103,7 +103,7 @@ public class ModuleSourceService
     {
         var (state, snapshot) = await CopyForSaveAsync(source, ct);
         await _modules.UpdateAsync(
-            id, input with { Folders = snapshot.Folders, IdRangeSize = input.IdRangeSize ?? snapshot.IdRangeSize, Source = state }, ct);
+            id, input with { Folders = snapshot.Folders, Source = state }, ct);
         _logger.LogInformation(
             "Saved module {ModuleId} from {Repository} at {Commit} ({FileCount} files, {Skipped} left out).",
             id, state.Repository, state.CommitSha, snapshot.FileCount, state.Skipped.Count);
@@ -252,7 +252,7 @@ public class ModuleSourceService
             var archive = await pass.ArchiveAsync(current, commit, () => DownloadArchiveAsync(token, currentOwner, currentRepo, commit, ct));
             var snapshot = await ModuleSourceArchiveReader.ReadAsync(new MemoryStream(archive, writable: false), module.SourcePath, ct);
             var expected = new ModuleSourceState(repository, module.SourceRef, module.SourcePath, copiedCommit, now, [], []);
-            var fresh = new ModuleSourceState(current, module.SourceRef, module.SourcePath, commit, now, snapshot.Skipped, snapshot.Dependencies);
+            var fresh = new ModuleSourceState(current, module.SourceRef, module.SourcePath, commit, now, snapshot.Skipped, snapshot.Dependencies, snapshot.IdRangeSize);
             if (!await _modules.ReplaceSourceCopyAsync(module.Id, expected, snapshot.Folders, fresh, ct))
             {
                 _logger.LogInformation(
@@ -410,7 +410,7 @@ public class ModuleSourceService
 
             var snapshot = await DownloadAsync(token, owner, repo, commit, path, ct);
             var now = _clock.GetUtcNow().UtcDateTime;
-            return (new ModuleSourceState(fullName, gitRef, path, commit, now, snapshot.Skipped, snapshot.Dependencies), snapshot);
+            return (new ModuleSourceState(fullName, gitRef, path, commit, now, snapshot.Skipped, snapshot.Dependencies, snapshot.IdRangeSize), snapshot);
         }
         catch (ModuleSourceException ex)
         {
