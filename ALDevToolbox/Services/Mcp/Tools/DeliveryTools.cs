@@ -83,8 +83,8 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_deployments", ReadOnly = true)]
-    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit; a number above 1 on the oldest row means there are older ones, which beforeDeploymentId reads. In the list, the failure message and each app's message are cut at 300 characters; pass deploymentId to read that one deployment with every message whole.")]
-    public async Task<IReadOnlyList<DeliveryHistoryRow>> ListDeliveriesAsync(
+    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit, and fewer when the deployments carry many apps, so the answer stays readable; Truncated and Note say when more were left out, and passing the oldest returned id as beforeDeploymentId reads further back (a number above 1 on the oldest row also means there are older ones). In the list, the failure message and each app's message are cut at 300 characters; pass deploymentId to read that one deployment with every message whole.")]
+    public async Task<CappedRows<DeliveryHistoryRow>> ListDeliveriesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
         [Description("Optional deployment id from this list: returns just that deployment, with its failure message and each app's message whole.")] int? deploymentId = null,
@@ -99,19 +99,25 @@ public sealed class DeliveryTools
             var one = await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, 1, ct, onlyDeliveryId: id);
             if (one.Count == 0)
                 throw new McpException($"Deployment {id} is not one of deployment pipeline {deploymentPipelineId}'s deployments.");
-            return one;
+            return new CappedRows<DeliveryHistoryRow>(one, false, null);
         }
 
         // Business Central's install errors run to thousands of characters and twenty of
-        // them ran past what an assistant can read in one answer (#1525).
+        // them ran past what an assistant can read in one answer (#1525). Cutting them is
+        // not enough on its own: each deployment carries a row per app, so twenty
+        // deployments of a five-app solution still ran past the answer budget (#1572).
         const string whole = "list_deployments with deploymentId";
+        var cap = McpListLimit.Clamp(limit);
         var rows = await _deliveries.ListDeliveryHistoryAsync(
-            deploymentPipelineId, McpListLimit.Clamp(limit), ct, beforeDeliveryId: beforeDeploymentId);
-        return rows.Select(d => d with
+            deploymentPipelineId, cap + 1, ct, beforeDeliveryId: beforeDeploymentId);
+        var shortened = rows.Select(d => d with
         {
             FailureMessage = McpListLimit.ShortenFailure(d.FailureMessage, whole),
             Apps = d.Apps.Select(a => a with { Message = McpListLimit.ShortenFailure(a.Message, whole) }).ToList(),
         }).ToList();
+        return CappedRows<DeliveryHistoryRow>.From(shortened, cap, "deployments", "newest first",
+            "Pass the oldest deployment's id as beforeDeploymentId to read the rest.",
+            cap < McpListLimit.Max ? CappedRows<DeliveryHistoryRow>.RaiseLimitHint : null);
     }
 
     [McpServerTool(Name = "deploy_build", ReadOnly = false, Idempotent = false)]

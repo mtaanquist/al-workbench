@@ -1288,7 +1288,10 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   says how many it left out. The solution filter narrows the fleet query itself; the other
   filters run over the visible fleet in memory, which is one row per environment. Each of
   these lists also stops at the shared character budget (#1524, see `object-explorer.md`,
-  "Bounded MCP answers"), so a page of long rows still fits one answer.
+  "Bounded MCP answers"), so a page of long rows still fits one answer. `list_deployments`,
+  `list_solution_builds` and `list_pipeline_builds` stop at it too (#1572), each deployment's
+  per-app rows being what makes a row long, and their `note` points at the `before...Id`
+  that reads on.
 
 ## Suggested phasing
 
