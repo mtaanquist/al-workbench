@@ -181,14 +181,17 @@ internal static class AccountMfaEndpoints
         // --- TOTP self-service ----------------------------------------------
 
         app.MapPost("/auth/account/2fa/totp/confirm", async (
-            HttpContext ctx, TotpService totp, IOrganizationContext org,
-            IDataProtectionProvider protection, IAntiforgery antiforgery, CancellationToken ct) =>
+            HttpContext ctx, TotpService totp, IOrganizationContext org, AppDbContext db,
+            IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin, TimeProvider clock,
+            IDataProtectionProvider protection, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
             try
             {
                 var codes = await totp.ConfirmEnrollmentAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct);
+                await NotifyAuthenticatorAppChangedAsync(ctx, db, email, emailRenderer, publicOrigin, clock,
+                    org.CurrentUserId.Value, turnedOn: true, loggerFactory.CreateLogger("TotpSetup"));
                 // Stash the plaintext codes in a 60-second protected cookie so the
                 // recovery-codes page can render them once.
                 SetOneShotRecoveryCodesCookie(ctx, protection, codes);
@@ -207,13 +210,16 @@ internal static class AccountMfaEndpoints
 
         app.MapPost("/auth/account/2fa/totp/disable", async (
             HttpContext ctx, TotpService totp, AuthService auth, AppDbContext db,
-            IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
+            IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin, TimeProvider clock,
+            IOrganizationContext org, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
             var user = await AccountEndpoints.LoadUserAndVerifyPasswordAsync(ctx, db, auth, org, form["Password"].ToString(), ct);
             if (user is null) return;
             await totp.DisableAsync(user.Id, ct);
+            await NotifyAuthenticatorAppChangedAsync(ctx, db, email, emailRenderer, publicOrigin, clock,
+                user.Id, turnedOn: false, loggerFactory.CreateLogger("TotpSetup"));
             ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=totp-disabled");
         }).RequireAuthorization();
 
@@ -333,6 +339,36 @@ internal static class AccountMfaEndpoints
     }
 
     /// <summary>
+    /// Queues the "authenticator app set up / turned off" notice to the
+    /// account's own address, so a second step someone else added with a
+    /// borrowed session (which would lock the owner out of password sign-in)
+    /// or took away does not go unnoticed (#1614). Like the passkey-added
+    /// notice it is sent after the change is saved and a failure is logged,
+    /// not shown: the change already happened.
+    /// </summary>
+    private static async Task NotifyAuthenticatorAppChangedAsync(
+        HttpContext ctx, AppDbContext db, IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin,
+        TimeProvider clock, int userId, bool turnedOn, ILogger logger)
+    {
+        try
+        {
+            // Filtered: the signed-in user's own row, inside their org.
+            var owner = await db.Users.AsNoTracking()
+                .Where(u => u.Id == userId)
+                .Select(u => new { u.Email, u.DisplayName })
+                .FirstAsync(CancellationToken.None);
+            var changedAt = clock.GetUtcNow().UtcDateTime.ToString("d MMM yyyy, HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+            var content = await AuthenticatorAppChangedEmail.RenderAsync(emailRenderer, owner.DisplayName, turnedOn, changedAt,
+                $"{publicOrigin.For(ctx)}{RouteConstants.AccountSecurity}", CancellationToken.None);
+            await email.SendAsync(owner.Email, content, EmailPurpose.AuthenticatorAppChanged, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not queue the authenticator-app notice for user {UserId}.", userId);
+        }
+    }
+
+    /// <summary>
     /// Finalises an MFA-gated login: completes the second factor, issues the
     /// auth cookie, clears the pending-MFA cookie and redirects to the stashed
     /// return URL. Shared by the TOTP / email-code / recovery-code challenge
@@ -345,9 +381,15 @@ internal static class AccountMfaEndpoints
             await StepUpEndpoints.CompleteStepUpAsync(ctx, auth, state, method, ct, logger);
             return;
         }
-        var user = await auth.CompleteMfaAsync(state.UserId, ResolveIp(ctx), ct);
-        await SignInUserAsync(ctx, user, method);
+        var (user, refusedWith) = await auth.CompleteMfaAsync(state.UserId, state.IssuedAt, ResolveIp(ctx), ct);
         ClearMfaPendingCookie(ctx);
+        if (user is null)
+        {
+            logger.LogInformation("MFA-gated sign-in for user {UserId} refused at completion ({Reason}).", state.UserId, refusedWith);
+            ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}={refusedWith}");
+            return;
+        }
+        await SignInUserAsync(ctx, user, method);
         logger.LogInformation("MFA-gated sign-in completed for {Email} (org {OrgId}).", user.Email, user.OrganizationId);
         ctx.Response.Redirect(string.IsNullOrEmpty(state.ReturnUrl) ? "/" : state.ReturnUrl);
     }
