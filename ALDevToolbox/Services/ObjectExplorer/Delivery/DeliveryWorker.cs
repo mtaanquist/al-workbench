@@ -50,8 +50,9 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
 
     /// <summary>
     /// This worker applies its own maintenance policy in <see cref="RunJobAsync"/>
-    /// (#1321), so the base does not hold its jobs; it still counts them, so a
-    /// restore waits for a running one to finish (#1538).
+    /// (#1321) without touching the database, so the base does not hold its jobs. A
+    /// job it started while the site was open is counted, so a restore waits for it
+    /// to finish; one it picks up during maintenance only defers and is not (#1538).
     /// </summary>
     protected override bool HoldsJobsDuringMaintenance => false;
 

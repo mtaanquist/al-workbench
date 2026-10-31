@@ -499,6 +499,8 @@ public sealed class ReleaseImportRequestService
     public async Task<BackfillQueueResult> QueueBackfillAllAsync(IReadOnlyList<int> releaseIds, CancellationToken ct = default)
     {
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a system-reference backfill");
+        // Before the rows are written, so a restore from here on drops the feed (#1538).
+        var epoch = _queue.Epoch;
         var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, ct).ConfigureAwait(false);
         var source = new ReleaseImportSource.Backfill();
         var jobs = rows
@@ -506,7 +508,7 @@ public sealed class ReleaseImportRequestService
             .ToList();
         if (jobs.Count > 0)
         {
-            _ = ResumedImportJobs.EnqueueAllAsync(_queue, jobs, _logger, "system-reference backfill", _lifetime.ApplicationStopping, paced: true);
+            _ = ResumedImportJobs.EnqueueAllAsync(_queue, jobs, _logger, "system-reference backfill", _lifetime.ApplicationStopping, paced: true, epoch: epoch);
         }
         var skipped = releaseIds.Distinct().Count() - jobs.Count;
         _logger.LogInformation(

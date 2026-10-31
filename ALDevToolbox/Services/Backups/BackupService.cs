@@ -559,12 +559,8 @@ public sealed class BackupService
     private async Task MigrateAsync(CancellationToken ct)
     {
         var original = _db.Database.GetConnectionString();
-        var withLockTimeout = new NpgsqlConnectionStringBuilder(original)
-        {
-            Options = "-c lock_timeout=" + (long)RestoreMigrateLockTimeout.TotalMilliseconds,
-        };
         await _db.Database.CloseConnectionAsync();
-        _db.Database.SetConnectionString(withLockTimeout.ConnectionString);
+        _db.Database.SetConnectionString(WithRestoreMigrateLockTimeout(original!));
         _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
         try
         {
@@ -580,6 +576,19 @@ public sealed class BackupService
 
     /// <summary>How long the restore's migrate waits for a lock before it fails.</summary>
     internal static readonly TimeSpan RestoreMigrateLockTimeout = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// <paramref name="connectionString"/> with the restore migrate's lock timeout
+    /// added to its startup options. Appended, so options the operator set stay; a
+    /// later <c>-c</c> for the same setting wins.
+    /// </summary>
+    internal static string WithRestoreMigrateLockTimeout(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        var lockTimeout = "-c lock_timeout=" + (long)RestoreMigrateLockTimeout.TotalMilliseconds;
+        builder.Options = string.IsNullOrWhiteSpace(builder.Options) ? lockTimeout : builder.Options + " " + lockTimeout;
+        return builder.ConnectionString;
+    }
 
     /// <summary>
     /// Best effort after a restore that failed once the database was dropped:

@@ -422,6 +422,72 @@ public sealed class WorkerBaseTests
     }
 
     /// <summary>
+    /// A worker with its own maintenance policy that picks a job up during maintenance
+    /// only defers it, so the job is not counted: otherwise a job deferring and
+    /// requeueing for as long as the site is closed would make every restore wait it
+    /// out and refuse (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_job_deferred_during_maintenance_is_not_counted()
+    {
+        var maintenance = new MaintenanceModeState();
+        maintenance.Enter("Restoring backup test.dump");
+        var queue = new TestQueue(maintenance);
+        var inBody = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry(), maintenance, holds: false)
+        {
+            Body = async _ =>
+            {
+                inBody.TrySetResult(maintenance.ActiveJobs);
+                await release.Task; // deferring, as the webhook worker waits before requeueing
+            },
+        };
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
+        await queue.EnqueueAsync(new TestJob(1), cts.Token);
+        var loop = worker.RunLoopAsync(cts.Token);
+        try
+        {
+            (await inBody.Task.WaitAsync(cts.Token)).Should().Be(0);
+            (await maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, cts.Token))
+                .Should().BeTrue("a restore does not wait for a job that only defers");
+        }
+        finally
+        {
+            release.TrySetResult();
+            maintenance.Exit();
+            await cts.CancelAsync();
+            await loop;
+        }
+    }
+
+    /// <summary>
+    /// A key left queued from before a restore does not swallow a new request for the
+    /// same key: the old job is dropped at read, and the new one takes its place
+    /// without the drop freeing the new one's key (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_key_queued_before_a_restore_does_not_swallow_a_new_request()
+    {
+        var maintenance = new MaintenanceModeState();
+        var queue = new TestQueue(maintenance);
+
+        (await queue.EnqueueAsync(new TestJob(7), TestContext.Current.CancellationToken)).Should().BeTrue();
+        maintenance.AdvanceEpoch();
+
+        queue.TryEnqueue(new TestJob(7)).Should().BeTrue("the queued slot belongs to a job that will be dropped");
+        queue.TryEnqueue(new TestJob(7)).Should().BeFalse("the new request gates the key as usual");
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Id.Should().Be(7);
+        queue.IsInFlight(7).Should().BeTrue("dropping the old job left the new one's key alone");
+        queue.Complete(7);
+        queue.IsInFlight(7).Should().BeFalse();
+    }
+
+    /// <summary>
     /// A queue given the flag drops at read a job queued before the epoch moved on,
     /// and frees its key for the next request (#1538).
     /// </summary>

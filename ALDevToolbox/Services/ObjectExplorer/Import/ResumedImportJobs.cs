@@ -24,6 +24,9 @@ internal static class ResumedImportJobs
         IReadOnlyList<ReleaseImportJob> jobs,
         ILogger logger)
     {
+        // The jobs were built from the database as it is now; a restore before they are
+        // all fed replaces it, and the feed then drops what is left (#1538).
+        var epoch = queue.Epoch;
         var imports = new List<ReleaseImportJob>();
         var backfills = new List<ReleaseImportJob>();
         var resumedBuilds = 0;
@@ -31,7 +34,7 @@ internal static class ResumedImportJobs
         {
             if (job.Source is ReleaseImportSource.ProjectBuild or ReleaseImportSource.PullRequestBuild)
             {
-                builds.Enqueue(job);
+                builds.Enqueue(job, epoch);
                 resumedBuilds++;
             }
             else if (job.Source is ReleaseImportSource.Backfill)
@@ -50,12 +53,12 @@ internal static class ResumedImportJobs
         if (imports.Count > 0)
         {
             lifetime.ApplicationStarted.Register(() =>
-                _ = EnqueueAllAsync(queue, imports, logger, "resumed after restart", lifetime.ApplicationStopping));
+                _ = EnqueueAllAsync(queue, imports, logger, "resumed after restart", lifetime.ApplicationStopping, epoch: epoch));
         }
         if (backfills.Count > 0)
         {
             lifetime.ApplicationStarted.Register(() =>
-                _ = EnqueueAllAsync(queue, backfills, logger, "backfills resumed after restart", lifetime.ApplicationStopping, paced: true));
+                _ = EnqueueAllAsync(queue, backfills, logger, "backfills resumed after restart", lifetime.ApplicationStopping, paced: true, epoch: epoch));
         }
     }
 
@@ -66,6 +69,10 @@ internal static class ResumedImportJobs
     /// labels the log lines. <paramref name="paced"/> writes through
     /// <see cref="ReleaseImportQueue.EnqueuePacedAsync"/>, so a long run never holds more
     /// than a slot or so of the queue and other imports get in promptly.
+    /// <paramref name="epoch"/> is the restore epoch the jobs were built under
+    /// (defaults to now): every job is stamped with it, and the feed stops once a
+    /// restore has moved it on, since the rest belong to the database that was
+    /// replaced (#1538).
     /// </summary>
     internal static async Task EnqueueAllAsync(
         ReleaseImportQueue queue,
@@ -73,14 +80,23 @@ internal static class ResumedImportJobs
         ILogger logger,
         string purpose,
         CancellationToken ct,
-        bool paced = false)
+        bool paced = false,
+        long? epoch = null)
     {
+        var builtUnder = epoch ?? queue.Epoch;
         try
         {
             foreach (var job in jobs)
             {
-                if (paced) await queue.EnqueuePacedAsync(job, ct).ConfigureAwait(false);
-                else await queue.EnqueueAsync(job, ct).ConfigureAwait(false);
+                if (queue.Epoch != builtUnder)
+                {
+                    logger.LogWarning(
+                        "Stopped queuing release imports, {Purpose}: a restore replaced the database they were read from.",
+                        purpose);
+                    return;
+                }
+                if (paced) await queue.EnqueuePacedAsync(job, ct, builtUnder).ConfigureAwait(false);
+                else await queue.EnqueueAsync(job, ct, builtUnder).ConfigureAwait(false);
             }
             logger.LogInformation("Queued {Count} release import(s), {Purpose}.", jobs.Count, purpose);
         }

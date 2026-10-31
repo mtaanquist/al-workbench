@@ -42,10 +42,19 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
     internal event Action<TJob>? Holding;
 
     /// <summary>
+    /// Raised as a worker that does not hold jobs runs one uncounted, so its own
+    /// policy can defer it, while maintenance mode is on. Test seam.
+    /// </summary>
+    internal event Action<TJob>? Deferring;
+
+    /// <summary>
     /// False for a worker that applies its own maintenance policy inside
     /// <see cref="RunJobAsync"/> (hold back and let a scheduler offer the job again, or
-    /// put it back on the queue). Such a worker keeps picking jobs up during a restore;
-    /// its jobs are still counted, so the restore waits for them to finish.
+    /// put it back on the queue), and whose job does not touch the database while
+    /// maintenance mode is on. Such a worker keeps picking jobs up during a restore. A
+    /// job it started before maintenance mode came on is counted, so the restore waits
+    /// for it; one it picks up during maintenance runs uncounted, since all it does is
+    /// defer.
     /// </summary>
     protected virtual bool HoldsJobsDuringMaintenance => true;
 
@@ -128,10 +137,17 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
                         return;
                     }
                 }
+                else if (_maintenance.TryBeginJob())
+                {
+                    counted = true;
+                }
                 else
                 {
-                    _maintenance.BeginJobRegardless();
-                    counted = true;
+                    // Maintenance mode is on: the job's own policy holds it back or
+                    // puts it back on the queue without touching the database, so it
+                    // runs uncounted. Counting it would keep the restore waiting on a
+                    // job that defers, and requeues, for as long as the site is closed.
+                    Deferring?.Invoke(job);
                 }
             }
             Heartbeat.BeginActive();

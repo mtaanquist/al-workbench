@@ -769,10 +769,11 @@ public sealed class BackupServiceTests : IDisposable
         var backupId = await AddBackupRowWithFileAsync();
         _maintenance.BeginJobRegardless();
         // The job finishes as soon as the restore has closed the site.
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _maintenance.Entered += () => closed.TrySetResult();
         var finisher = Task.Run(async () =>
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            while (!_maintenance.IsActive) await Task.Delay(10, cts.Token);
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(30));
             File.Exists(restored).Should().BeFalse("the restore waits for the job before it drops anything");
             _maintenance.EndJob();
         }, TestContext.Current.CancellationToken);
@@ -782,6 +783,52 @@ public sealed class BackupServiceTests : IDisposable
 
         File.Exists(restored).Should().BeTrue();
         _maintenance.IsActive.Should().BeFalse("a restore that completes reopens the site");
+    }
+
+    /// <summary>
+    /// A webhook delivery that arrives while a failed restore holds the site closed is
+    /// put back on the queue by its worker again and again until the site reopens.
+    /// That deferral touches no database and must not count as running work, or no
+    /// restore could ever start, including the one that would reopen the site (#1538,
+    /// #1321).
+    /// </summary>
+    [Fact]
+    public async Task A_webhook_deferred_during_maintenance_does_not_stop_the_restore()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+        var queue = new ALDevToolbox.Services.GitHub.GitHubWebhookQueue();
+        using var services = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(new Microsoft.Extensions.DependencyInjection.ServiceCollection());
+        var worker = new ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker(
+            queue, services, _maintenance,
+            NullLogger<ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker>.Instance,
+            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry())
+        {
+            MaintenanceRetryDelay = TimeSpan.FromMilliseconds(20),
+        };
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.Deferring += _ => deferred.TrySetResult();
+        queue.TryEnqueue(new ALDevToolbox.Services.GitHub.GitHubPushJob(
+            1, "cronus/app", "https://github.com/cronus/app.git", "delivery-1", "main", "abc", "000", "main",
+            "sam", Forced: false, Deleted: false, DateTime.UtcNow, 0, [], DocumentationOnly: false)).Should().BeTrue();
+
+        await worker.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await deferred.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            await NewService(_options with { PgRestorePath = tool, ActiveJobsWait = TimeSpan.FromSeconds(5) })
+                .RestoreAsync(backupId);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        File.Exists(restored).Should().BeTrue("the deferring webhook did not hold the restore up");
+        _maintenance.IsActive.Should().BeFalse();
     }
 
     /// <summary>
@@ -819,6 +866,22 @@ public sealed class BackupServiceTests : IDisposable
         fresh!.ReleaseId.Should().Be(44);
         discovery.TryEnqueue(new(43, identity)).Should().BeTrue();
         discovery.Reader.TryRead(out _).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The lock timeout for the restore's migrate is added to the startup options the
+    /// operator may already have in the connection string, not put in their place.
+    /// </summary>
+    [Fact]
+    public void The_restore_migrate_keeps_the_operators_connection_options()
+    {
+        var plain = new Npgsql.NpgsqlConnectionStringBuilder(
+            BackupService.WithRestoreMigrateLockTimeout("Host=db;Database=app"));
+        plain.Options.Should().Be("-c lock_timeout=60000");
+
+        var withOptions = new Npgsql.NpgsqlConnectionStringBuilder(
+            BackupService.WithRestoreMigrateLockTimeout("Host=db;Database=app;Options=-c statement_timeout=0"));
+        withOptions.Options.Should().Be("-c statement_timeout=0 -c lock_timeout=60000");
     }
 
     /// <summary>

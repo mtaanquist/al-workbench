@@ -171,12 +171,16 @@ public sealed class ProjectBuildQueue
     }
 
     /// <summary>Adds <paramref name="job"/> to the line. Never waits.</summary>
-    public void Enqueue(ReleaseImportJob job)
+    /// <param name="epoch">
+    /// The restore epoch the job was built under, when earlier than this call; a build
+    /// from before a restore is dropped rather than started (#1538).
+    /// </param>
+    public void Enqueue(ReleaseImportJob job, long? epoch = null)
     {
         ArgumentNullException.ThrowIfNull(job);
         lock (_lock)
         {
-            _waiting.Add(new Waiting(job, job.BuildOrder ?? ProjectBuildOrder.Unordered, _sequence++, CurrentEpoch));
+            _waiting.Add(new Waiting(job, job.BuildOrder ?? ProjectBuildOrder.Unordered, _sequence++, epoch ?? CurrentEpoch));
             Signal();
         }
     }
@@ -377,7 +381,10 @@ public sealed class ProjectBuildQueue
 
     private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private long CurrentEpoch => _maintenance?.Epoch ?? 0;
+    /// <summary>The restore epoch now; see <see cref="JobQueue{TJob}.Epoch"/>.</summary>
+    public long Epoch => _maintenance?.Epoch ?? 0;
+
+    private long CurrentEpoch => Epoch;
 
     private sealed record Waiting(ReleaseImportJob Job, ProjectBuildOrder Order, long Sequence, long Epoch);
 

@@ -45,7 +45,14 @@ public sealed class MaintenanceModeState
     /// the flag (<see cref="TryBeginJob"/>). The fence keeps either side from missing
     /// the other (#1538).
     /// </remarks>
-    public void Enter(string reason) => Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
+    public void Enter(string reason)
+    {
+        Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
+        Entered?.Invoke();
+    }
+
+    /// <summary>Raised after <see cref="Enter"/> turns the flag on. Test seam.</summary>
+    internal event Action? Entered;
 
     /// <summary>
     /// Keeps the flag on after a restore failed once the database was dropped.
