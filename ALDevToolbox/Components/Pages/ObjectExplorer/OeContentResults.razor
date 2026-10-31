@@ -58,7 +58,7 @@
 }
 @if (Results is not null)
 {
-    <p class="u-muted">Showing @Results.Count.ToString("N0") line@(Results.Count == 1 ? "" : "s")@(Results.Count >= 200 ? " - the first 200. Narrow the search to see fewer." : ".")</p>
+    <p class="u-muted">Showing @Results.Count.ToString("N0") line@(Results.Count == 1 ? "" : "s")@(CappedAtFiles is { } files ? $" from the first {files:N0} files. Narrow the search to see the rest." : ".")</p>
 }
 <table class="data-table">
     <thead>
@@ -98,4 +98,10 @@
 @code {
     [Parameter] public List<ReleaseContentMatch>? Results { get; set; }
     [Parameter] public string Search { get; set; } = string.Empty;
+    /// <summary>
+    /// The number of files the search stopped at when more files matched, or
+    /// null when every matching file is shown. The search caps files, not
+    /// lines - each file gives up to three - so the notice counts files.
+    /// </summary>
+    [Parameter] public int? CappedAtFiles { get; set; }
 }

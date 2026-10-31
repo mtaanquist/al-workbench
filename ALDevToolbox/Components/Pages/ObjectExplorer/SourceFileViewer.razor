@@ -512,7 +512,7 @@ else
             var owner = OwnerKey(ctx);
             if (owner is not null)
             {
-                _session = ReferenceSessions.Get(refSet, owner);
+                _session = await ReferenceSessions.GetAsync(refSet, owner);
             }
         }
     }
