@@ -539,7 +539,7 @@ internal static class AccountAuthEndpoints
             try
             {
                 await accounts.ChangePasswordAsync(org.CurrentUserId!.Value,
-                    form["CurrentPassword"].ToString(), form["NewPassword"].ToString(), ct);
+                    form["CurrentPassword"].ToString(), form["NewPassword"].ToString(), ResolveIp(ctx), ct);
                 // The change invalidates every cookie issued before it (#675),
                 // including this one — re-issue it so the user who just changed
                 // their own password isn't signed out along with everyone else.

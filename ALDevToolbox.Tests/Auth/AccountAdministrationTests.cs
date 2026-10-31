@@ -505,6 +505,21 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_wrong_current_password_is_recorded_with_the_callers_address()
+    {
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "guess-ip@example.com", "correctpasswordlong");
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> wrong = () => NewService(ctx).ChangePasswordAsync(userId, "guess", "newpasswordlong12345", "203.0.113.7");
+            await wrong.Should().ThrowAsync<PlanValidationException>();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.LoginAttempts.SingleAsync(a => a.Email == "guess-ip@example.com")).Ip.Should().Be("203.0.113.7");
+    }
+
+    [Fact]
     public async Task Change_password_rejects_new_password_that_fails_policy()
     {
         var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");

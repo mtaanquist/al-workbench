@@ -359,12 +359,23 @@ public sealed class PasskeyService
     /// </summary>
     private byte[] SyntheticCredentialId(string normalisedEmail, int index)
     {
-        using var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(_deployment.Id));
-        // Index 0 keeps the input of the single stand-in this replaced, so a
-        // probe repeated across the change sees the same first id.
-        var input = index == 0 ? "passkey-synthetic:" + normalisedEmail : $"passkey-synthetic:{index}:{normalisedEmail}";
-        return hmac.ComputeHash(Encoding.UTF8.GetBytes(input));
+        using var hmac = new System.Security.Cryptography.HMACSHA512(Encoding.UTF8.GetBytes(_deployment.Id));
+        var digest = hmac.ComputeHash(Encoding.UTF8.GetBytes($"passkey-synthetic:{index}:{normalisedEmail}"));
+        // Real credential ids differ in length by authenticator, so stand-ins
+        // that were all one length (32 bytes, as before #1649) showed which
+        // entries were real. Each stand-in takes a length from the common
+        // ones, picked by a digest byte so a repeated probe sees the same list.
+        var length = SyntheticCredentialIdLengths[digest[^1] % SyntheticCredentialIdLengths.Length];
+        return digest[..length];
     }
+
+    /// <summary>
+    /// The credential id lengths stand-ins are drawn from: the sizes common
+    /// authenticators produce (16 and 20 bytes from phone and platform
+    /// passkeys, 32 from Windows Hello, 64 from security keys). A digest of 64
+    /// bytes covers the longest.
+    /// </summary>
+    internal static readonly int[] SyntheticCredentialIdLengths = [16, 20, 32, 64];
 
     /// <summary>
     /// How many entries the sign-in allow-list for an email hint always has,

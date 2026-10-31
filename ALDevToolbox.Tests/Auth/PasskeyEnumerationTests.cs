@@ -73,6 +73,24 @@ public sealed class PasskeyEnumerationTests : IDisposable
         a.AllowCredentials.First().Id.Should().NotEqual(b.AllowCredentials.First().Id);
     }
 
+    [Fact]
+    public async Task Stand_in_ids_come_in_the_lengths_real_ones_do()
+    {
+        // All stand-ins used to be 32 bytes, so a 16- or 64-byte entry was
+        // plainly real and gave the address away (#1649). Across addresses
+        // they now take every common length, and never another one.
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var lengths = new HashSet<int>();
+        for (var i = 0; i < 40; i++)
+        {
+            var (options, _) = await svc.BeginLoginAsync($"nobody{i}@nowhere.test");
+            foreach (var c in options.AllowCredentials) lengths.Add(c.Id.Length);
+        }
+
+        lengths.Should().BeEquivalentTo(PasskeyService.SyntheticCredentialIdLengths);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(3)]
