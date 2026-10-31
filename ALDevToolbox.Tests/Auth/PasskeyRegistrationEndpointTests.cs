@@ -244,6 +244,41 @@ public sealed class PasskeyRegistrationEndpointTests : IClassFixture<PasskeyRegi
         (await page.Content.ReadAsStringAsync()).Should().Contain("Now choose Add a passkey below to finish.");
     }
 
+    [Fact]
+    public async Task A_refused_passkey_sign_in_answers_the_same_for_a_live_account_and_an_unknown_credential()
+    {
+        // A direct caller used to see the exception text, which differed between
+        // an active account's credential and anything else, and so learned which
+        // addresses are live accounts with passkeys (#1614).
+        var userId = await SeedUserAsync("live-passkey@cronus.example", withPasskey: true);
+        byte[] realId;
+        await using (var read = _db.NewContext())
+        {
+            realId = await read.UserPasskeys.IgnoreQueryFilters().Where(p => p.UserId == userId)
+                .Select(p => p.CredentialId).SingleAsync();
+        }
+
+        var bodies = new List<string>();
+        foreach (var id in new[] { realId, System.Security.Cryptography.RandomNumberGenerator.GetBytes(16) })
+        {
+            using var client = _factory.CreateClient();
+            using (var options = await client.PostAsync("/auth/passkey/login/options",
+                       Json("""{"email":"live-passkey@cronus.example"}""")))
+            {
+                options.StatusCode.Should().Be(HttpStatusCode.OK);
+            }
+            var rawId = Convert.ToBase64String(id).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            using var login = await client.PostAsync("/auth/passkey/login", Json($$$"""
+                {"id":"{{{rawId}}}","rawId":"{{{rawId}}}","type":"public-key",
+                 "response":{"clientDataJSON":"AA","authenticatorData":"AA","signature":"AA"}}
+                """));
+            login.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+            bodies.Add(await login.Content.ReadAsStringAsync());
+        }
+
+        bodies.Should().AllBe(AccountPasskeyEndpoints.PasskeyLoginFailedBody);
+    }
+
     private async Task<int> SeedUserAsync(string email, bool withPasskey = false)
     {
         await using var seed = _db.NewContext();

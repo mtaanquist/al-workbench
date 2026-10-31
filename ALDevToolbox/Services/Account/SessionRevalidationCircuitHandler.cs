@@ -125,17 +125,18 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
                     // need the same database that just failed.
                     return;
             }
-            if (_maintenance.IsActive)
+            // The users table may be empty or gone during a restore, so the claim
+            // decides, as it does in the maintenance middleware.
+            var principal = (await _authState.GetAuthenticationStateAsync()).User;
+            var siteAdmin = principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) == "true";
+            if (_maintenance.IsActive && !siteAdmin)
             {
-                // The users table may be empty or gone, so the claim decides,
-                // as it does in the maintenance middleware.
-                var principal = (await _authState.GetAuthenticationStateAsync()).User;
-                if (principal.FindFirstValue(HttpOrganizationContext.SiteAdminClaim) != "true")
-                {
-                    SendToMaintenancePage();
-                    return;
-                }
+                SendToMaintenancePage();
+                return;
             }
+            // Lets the event's database work through the guard in any DI scope while
+            // the page is a console page (#1599). Ends with this event.
+            if (siteAdmin) MaintenanceDatabaseGuard.SiteAdminCircuitOnConsole.Value = OnSiteAdminConsole;
             await next(context);
         };
 

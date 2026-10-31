@@ -226,8 +226,9 @@ public sealed class BackupService
 
     /// <summary>
     /// What is holding a restore up, in the SiteAdmin's words rather than worker
-    /// names (#1579): the background jobs still counted, then the uncounted rest,
-    /// which is mostly pages loading or saving.
+    /// names (#1579): the named background jobs still counted, then the unnamed rest.
+    /// Those are the database guard's per-command counts, which come from pages and
+    /// from the named jobs' own queries alike, so they are described neutrally.
     /// </summary>
     internal static string DescribeRunning(IEnumerable<string> workerNames, int unnamed)
     {
@@ -239,7 +240,7 @@ public sealed class BackupService
             var label = WorkerLabels.GetValueOrDefault(cut < 0 ? name : name[..cut], "background upkeep");
             if (!parts.Contains(label)) parts.Add(label);
         }
-        if (unnamed > 0) parts.Add("a page loading or saving");
+        if (unnamed > 0) parts.Add("a database operation still finishing");
         return parts.Count == 0 ? "background work" : string.Join(", ", parts);
     }
 

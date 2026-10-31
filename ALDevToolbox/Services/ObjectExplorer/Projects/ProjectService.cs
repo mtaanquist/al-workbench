@@ -51,8 +51,8 @@ public sealed class ProjectService
         ?? throw new InvalidOperationException("No organization in scope; project mutation called outside an authenticated request.");
 
     /// <summary>
-    /// True when the current user may manage <paramref name="projectId"/> (owner or
-    /// org Admin / SiteAdmin) — for the UI to hide Build/Add/Delete affordances.
+    /// True when the current user may manage <paramref name="projectId"/> (owner,
+    /// org Admin / SiteAdmin, everyone on a Public one, or its teams) — for the UI to hide Build/Add/Delete affordances.
     /// Returns false when the project no longer exists.
     /// </summary>
     public async Task<bool> CanManageAsync(int projectId, CancellationToken ct = default)

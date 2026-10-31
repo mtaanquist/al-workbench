@@ -892,7 +892,7 @@ public sealed class BackupServiceTests : IDisposable
             var ex = await act.Should().ThrowAsync<PlanValidationException>();
             // It says what is still running, in words rather than worker names (#1579).
             ex.Which.Errors["BackupId"].Should().Contain("still running")
-                .And.Contain("Still running: the nightly Object Explorer clean-up, an import, a page loading or saving.")
+                .And.Contain("Still running: the nightly Object Explorer clean-up, an import, a database operation still finishing.")
                 .And.NotContain("Worker").And.NotContain("Scheduler");
         }
         finally
@@ -957,10 +957,7 @@ public sealed class BackupServiceTests : IDisposable
         var worker = new ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker(
             queue, services, _maintenance,
             NullLogger<ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker>.Instance,
-            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry())
-        {
-            MaintenanceRetryDelay = TimeSpan.FromMilliseconds(20),
-        };
+            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry());
         var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         worker.Deferring += _ => deferred.TrySetResult();
         queue.TryEnqueue(new ALDevToolbox.Services.GitHub.GitHubPushJob(

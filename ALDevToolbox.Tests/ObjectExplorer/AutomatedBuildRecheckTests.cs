@@ -86,6 +86,46 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Building);
     }
 
+    /// <summary>
+    /// A build by hand, or a Retry, can wait in the queue too, and it clones as the person
+    /// who asked. One whose account was disabled meanwhile is refused at pickup, as an
+    /// automatic build is (#1551).
+    /// </summary>
+    [Theory]
+    // A build by hand Bob pressed Build for, still on its first run.
+    [InlineData(ProjectBuildTrigger.Manual, false)]
+    // Bob's Retry of a finished push build Alice's automation started: it runs as Bob.
+    [InlineData(ProjectBuildTrigger.Push, true)]
+    public async Task A_build_by_hand_is_refused_once_the_person_who_asked_has_left(string trigger, bool retry)
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var bob = await SeedUserAsync("bob@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, trigger, retry ? alice : bob, finished: retry);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == bob)
+                .ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, UserStatus.Disabled));
+        }
+
+        var refusal = await RefusalAsync(projectId, releaseId, bob);
+
+        refusal.Should().Be("The person this build runs as no longer has an active account.");
+    }
+
+    [Fact]
+    public async Task A_build_by_hand_is_refused_once_the_person_who_asked_can_no_longer_manage_the_solution()
+    {
+        var owner = await SeedUserAsync("owner@cronus.test");
+        var alice = await SeedUserAsync("alice@cronus.test", UserRole.User);
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner, projectOwner: owner);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, ProjectBuildTrigger.Manual, alice);
+
+        var refusal = await RefusalAsync(projectId, releaseId, alice);
+
+        refusal.Should().Be("The person this build runs as can no longer manage this solution.");
+    }
+
     [Fact]
     public async Task Turning_building_on_push_off_refuses_the_waiting_push_builds()
     {

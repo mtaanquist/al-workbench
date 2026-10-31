@@ -30,7 +30,7 @@
 }
 @if (Results is not null)
 {
-    <p class="u-muted">Showing @Results.Count.ToString("N0") procedure@(Results.Count == 1 ? "" : "s").</p>
+    <p class="u-muted">Showing @Results.Count.ToString("N0") procedure@(Results.Count == 1 ? "" : "s")@(Capped ? " (capped at " + Results.Count.ToString("N0") + " - narrow the search to see more)" : "").</p>
 }
 <table class="data-table">
     <thead>
@@ -67,7 +67,7 @@
                 <td>
                     @if (r.SourceFileId is { } fid)
                     {
-                        <a href="@Links.SourceFile(fid, r.ObjectLineNumber, ViewReleaseSeed)">View source</a>
+                        <a href="@Links.SourceFile(fid, r.LineNumber, ViewReleaseSeed)">View source</a>
                     }
                     else
                     {
@@ -88,6 +88,8 @@
 @code {
     [Parameter] public List<ReleaseProcedureMatch>? Results { get; set; }
     [Parameter] public int? ViewReleaseSeed { get; set; }
+    /// <summary>True when the search found more procedures than it shows.</summary>
+    [Parameter] public bool Capped { get; set; }
 
     /// <summary>Object-detail link, carrying the view-Release seed (so Find
     /// references on an inherited base object stays seeded at this Release).</summary>
