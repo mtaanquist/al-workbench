@@ -141,10 +141,23 @@ public sealed class UpgradesPageTests : IAsyncDisposable
         return _ctx.Render<UpgradesPage>();
     }
 
+    /// <summary>
+    /// The page with its row on screen and its first load finished. The row alone is not
+    /// enough: it can be drawn while the first load is still reading the planned upgrades
+    /// on the page's own context (a query that completes without yielding moves the
+    /// page's first render past the fleet read), and a test that then uses that context,
+    /// or clicks something that does, meets it busy (#1565). The Archive tab's count is
+    /// the last thing that load reads, so once it is drawn the page is quiet.
+    /// </summary>
     private IRenderedComponent<UpgradesPage> RenderWithOneRow()
     {
         var cut = RenderFleet();
-        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(1));
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(1);
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Contains("Archive"))
+                .QuerySelector(".pill-tab__count").Should().NotBeNull("the first load is not finished until the archive is counted");
+        });
         return cut;
     }
 
