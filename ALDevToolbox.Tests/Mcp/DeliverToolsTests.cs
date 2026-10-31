@@ -246,12 +246,48 @@ public sealed class DeliverToolsTests : IDisposable
     public async Task List_environment_history_is_newest_first()
     {
         await using var ctx = _db.NewContext();
-        var history = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+        var answer = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+        var history = answer.Rows;
 
         history.Select(h => h.Action).Should().Equal("RunNow", "PushDateToLatest", "PushDateToLatest");
         history[0].RequestedBy.Should().Be("Viewer");
         history[2].Status.Should().Be("Pending");
         history[2].IsBooking.Should().BeTrue();
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task List_environment_history_cuts_long_failure_reasons_and_stays_within_the_answer_budget()
+    {
+        // #1576: a failed line carries Business Central's whole reason. Fifty of them
+        // used to run past what an assistant client accepts in one answer.
+        var now = DateTime.UtcNow;
+        await using (var seed = _db.NewContext())
+        {
+            for (var i = 0; i < 50; i++)
+            {
+                var failed = NewAction(_seed.Denmark, _seed.DenmarkProduction, UpgradeActionKind.RunNow,
+                    UpgradeActionStatus.Failed, now.AddMinutes(i), now.AddMinutes(i));
+                failed.Outcome = "The update wasn't started. Reason given at the time: " + new string('x', 3000);
+                seed.OeEnvironmentUpgradeActions.Add(failed);
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var answer = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+
+        answer.Rows.Should().NotBeEmpty();
+        answer.Rows.Should().OnlyContain(r => r.Outcome == null || r.Outcome.Length < 500);
+        answer.Rows[0].Outcome.Should().Contain("History page");
+        var json = System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions);
+        json.Length.Should().BeLessThan(25_000);
+        if (answer.Rows.Count < 50)
+        {
+            answer.Truncated.Should().BeTrue();
+            answer.Note.Should().Contain("History page");
+        }
     }
 
     [Fact]

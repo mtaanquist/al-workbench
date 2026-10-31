@@ -281,6 +281,29 @@ public sealed class TranslatorToolsTests : IDisposable
         ex.Message.Should().NotContain("not configured");
     }
 
+    [Fact]
+    public async Task Machine_translate_refuses_text_longer_than_one_string_before_the_provider_is_asked()
+    {
+        // #1576: the provider bills per character on the organisation's key. The
+        // throwing provider shows which side of the ceiling reached it: a refusal
+        // from the provider says "refused or failed", the ceiling says "limit".
+        await using var ctx = _db.NewContext();
+        var settings = _db.NewMachineTranslationSettingsService(ctx);
+        await settings.SaveMachineTranslationAsync(new MtSettingsInput("deepl", "k:fx", false, MtTrigger.OnDemand));
+        var tools = NewMachineTranslationTools(ctx, new ThrowingProvider());
+
+        var tooLong = () => tools.MachineTranslateAsync(new string('a', TranslatorTools.MaxMachineTranslateSource + 1), "da-DK");
+        (await tooLong.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("one string at a time");
+
+        var longContext = () => tools.MachineTranslateAsync("Hello", "da-DK",
+            context: new string('c', TranslatorTools.MaxMachineTranslateContext + 1));
+        (await longContext.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("limit");
+
+        var atTheLimit = () => tools.MachineTranslateAsync(new string('a', TranslatorTools.MaxMachineTranslateSource), "da-DK");
+        (await atTheLimit.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("refused or failed",
+            "a string at the limit still goes to the provider");
+    }
+
     private TranslatorTools NewMachineTranslationTools(AppDbContext ctx, IMachineTranslationProvider provider) =>
         new(new TranslationMemoryService(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance),
             new MachineTranslationService(

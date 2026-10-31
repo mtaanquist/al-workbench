@@ -60,13 +60,19 @@ public sealed class TranslatorTools
             e.SourceRepository, e.SourcePath)).ToList();
     }
 
+    /// <summary>The longest <c>sourceText</c> <c>machine_translate</c> sends to the paid provider.</summary>
+    internal const int MaxMachineTranslateSource = 5_000;
+
+    /// <summary>The longest <c>context</c> hint <c>machine_translate</c> passes along.</summary>
+    internal const int MaxMachineTranslateContext = 1_000;
+
     [McpServerTool(Name = "machine_translate", ReadOnly = true)]
     [Description("Translates a string with the organisation's configured third-party machine-translation provider (e.g. DeepL), if one is set up. Use it to draft a target for a source string that has no good translation-memory match. Pass the developer note or field context to improve domain accuracy. Returns the translated text, the provider name, and the detected source language. Errors if the org hasn't configured machine translation, or if the provider refuses or fails the request.")]
     public async Task<MachineTranslationResult> MachineTranslateAsync(
-        [Description("The source text to translate.")] string sourceText,
+        [Description("The source text to translate: one string, at most 5,000 characters.")] string sourceText,
         [Description("Target language (BCP-47, e.g. 'da-DK').")] string targetLanguage,
         [Description("Optional source language (BCP-47, e.g. 'en-US'). Omit to let the provider auto-detect.")] string? sourceLanguage = null,
-        [Description("Optional context hint (developer note / field caption) to disambiguate domain terms.")] string? context = null,
+        [Description("Optional context hint (developer note / field caption) to disambiguate domain terms, at most 1,000 characters.")] string? context = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(sourceText))
@@ -76,6 +82,21 @@ public sealed class TranslatorTools
         if (string.IsNullOrWhiteSpace(targetLanguage))
         {
             throw new McpException("targetLanguage is required.");
+        }
+        // The provider bills the organisation per character, and the Translator page
+        // only ever sends one string. Without a ceiling, an assistant told to "translate
+        // this document" spends the quota by the megabyte (#1576).
+        if (sourceText.Length > MaxMachineTranslateSource)
+        {
+            throw new McpException(
+                $"sourceText is {sourceText.Length} characters; the limit is {MaxMachineTranslateSource}. "
+                + "Send one string at a time, as the Translator does.");
+        }
+        if (context is { Length: > MaxMachineTranslateContext })
+        {
+            throw new McpException(
+                $"context is {context.Length} characters; the limit is {MaxMachineTranslateContext}. "
+                + "Pass a short developer note or field caption.");
         }
 
         // The service answers null both when nothing is set up and when the provider
