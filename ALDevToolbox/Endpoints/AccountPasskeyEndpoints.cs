@@ -1,7 +1,6 @@
 using System.Security.Claims;
 using System.Text.Json;
 using ALDevToolbox.Data;
-using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
@@ -42,6 +41,9 @@ internal static class AccountPasskeyEndpoints
     /// </summary>
     public static readonly int[] AccessTokenTtlDays = [30, 90, 180, 365, 0];
 
+    /// <summary>The create form's <c>maxlength</c> on the token name.</summary>
+    public const int AccessTokenNameMaxLength = 80;
+
     /// <summary>The expiry the form starts on.</summary>
     public const int DefaultAccessTokenTtlDays = 90;
 
@@ -53,7 +55,12 @@ internal static class AccountPasskeyEndpoints
     public static string CreateTokenAfterStepUpUrlWith(string? name, string? ttlDays)
     {
         var url = CreateTokenAfterStepUpUrl;
-        if (!string.IsNullOrWhiteSpace(name)) url += "&name=" + Uri.EscapeDataString(name.Trim());
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            // The form's maxlength; a longer hand-made name can't be saved anyway.
+            var trimmed = name.Trim();
+            url += "&name=" + Uri.EscapeDataString(trimmed.Length > AccessTokenNameMaxLength ? trimmed[..AccessTokenNameMaxLength] : trimmed);
+        }
         if (int.TryParse(ttlDays, out var ttl) && AccessTokenTtlDays.Contains(ttl)) url += "&ttl=" + ttl;
         return url;
     }
@@ -265,11 +272,7 @@ internal static class AccountPasskeyEndpoints
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
             ALDevToolbox.Services.Tools.ToolEnablement tools,
-            AppDbContext db,
-            IEmailService email,
-            ALDevToolbox.Services.Email.EmailRenderer emailRenderer,
             PublicOrigin publicOrigin,
-            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -303,11 +306,10 @@ internal static class AccountPasskeyEndpoints
 
             try
             {
-                var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct);
+                var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct,
+                    noticeUrl: $"{publicOrigin.For(ctx)}/account/ai");
                 SetOneShotPatCookie(ctx, protection, new OneShotPat(
                     issued.Id, issued.Plaintext, name.Trim(), issued.CreatedAt, issued.ExpiresAt));
-                await NotifyAccessTokenCreatedAsync(ctx, db, email, emailRenderer, publicOrigin, userId.Value,
-                    name.Trim(), issued.CreatedAt, issued.ExpiresAt, loggerFactory.CreateLogger("AccessTokens"));
                 ctx.Response.Redirect("/account/access-tokens/created");
             }
             catch (PlanValidationException ex)
@@ -337,37 +339,5 @@ internal static class AccountPasskeyEndpoints
         }).RequireAuthorization();
 
         return app;
-    }
-
-    /// <summary>
-    /// Queues the "an access token was created" notice to the account's own
-    /// address. A token acts as the person until it expires or is revoked, so,
-    /// like a new passkey, one the owner did not make must not go unnoticed.
-    /// Sent after the token is saved; a failure is logged, not shown, since
-    /// the token already exists and the person is about to copy it.
-    /// </summary>
-    private static async Task NotifyAccessTokenCreatedAsync(
-        HttpContext ctx, AppDbContext db, IEmailService email, ALDevToolbox.Services.Email.EmailRenderer emailRenderer,
-        PublicOrigin publicOrigin, int userId, string tokenName, DateTime createdAt, DateTime? expiresAt, ILogger logger)
-    {
-        try
-        {
-            // Filtered: the signed-in user's own row, inside their org.
-            var owner = await db.Users.AsNoTracking()
-                .Where(u => u.Id == userId)
-                .Select(u => new { u.Email, u.DisplayName })
-                .FirstAsync(CancellationToken.None);
-            var culture = System.Globalization.CultureInfo.InvariantCulture;
-            var content = await ALDevToolbox.Components.Email.AccessTokenCreatedEmail.RenderAsync(emailRenderer,
-                owner.DisplayName, tokenName,
-                createdAt.ToString("d MMM yyyy, HH:mm 'UTC'", culture),
-                expiresAt?.ToString("d MMM yyyy", culture),
-                $"{publicOrigin.For(ctx)}/account/ai", CancellationToken.None);
-            await email.SendAsync(owner.Email, content, EmailPurpose.AccessTokenCreated, CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Could not queue the access-token notice for user {UserId}.", userId);
-        }
     }
 }

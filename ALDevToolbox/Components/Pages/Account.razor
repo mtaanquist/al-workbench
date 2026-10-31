@@ -545,12 +545,12 @@ else
                             @* The organisation asks for a recent second step before a
                                token is made; this goes through it and comes back here
                                with the form open. *@
-                            <div class="u-stack" style="gap: var(--space-1); justify-items: end;">
+                            <div class="u-row">
+                                <span class="form-actions__note u-nowrap">We'll ask you to confirm it's you first.</span>
                                 <a class="btn btn--sm" href="@ALDevToolbox.Endpoints.StepUpEndpoints.Url(ALDevToolbox.Endpoints.AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl)">
                                     <Icon Name="plus" Width="14" Height="14" />
                                     <span>Create token</span>
                                 </a>
-                                <span class="form-actions__note">We'll ask you to confirm it's you first.</span>
                             </div>
                         }
                         else

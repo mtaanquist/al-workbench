@@ -234,7 +234,6 @@ internal static class OAuthEndpoints
             var strongAuthAt = await tools.IsFreshAsync(cookieResult.Principal, cancellationToken)
                 ? StepUpAuth.StrongAuthAt(cookieResult.Principal) : null;
             var strengthened = await UpsertConsentAsync(db, userId, orgId, clientId, canonicalScopes, now, strongAuthAt, cancellationToken);
-            await db.SaveChangesAsync(cancellationToken);
             if (strengthened)
             {
                 // The MCP filter reads the stamp per (user, client), not per
@@ -242,12 +241,16 @@ internal static class OAuthEndpoints
                 // every installation, so a strong re-approval would otherwise
                 // vouch for an older installation's tokens that were approved
                 // without a second factor. End them; this approval signs in a
-                // fresh set below (#1627).
+                // fresh set below (#1627). Revoked before the stronger stamp is
+                // saved: the revoke is idempotent, so a request that fails in
+                // between leaves the consent weak and the next approval revokes
+                // again, never a strong stamp over weak tokens that survive.
                 await RevokeTokensForClientAsync(ctx.RequestServices, userId, clientId, cancellationToken);
                 logger.LogInformation(
                     "OAuth consent for user {UserId} on client {ClientId} was approved with a second step for the first time; earlier tokens revoked.",
                     userId, clientId);
             }
+            await db.SaveChangesAsync(cancellationToken);
 
             // Stamp the org id and granted scopes onto the principal. The
             // OAuth claims transformer turns sub/org into the ALDevToolbox
