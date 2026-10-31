@@ -21,6 +21,7 @@ public sealed class TeamDetailTests : IAsyncDisposable
 {
     private const int ManagerUserId = 9340;
     private const int MemberUserId = 9341;
+    private const int AdminUserId = 9342;
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -114,7 +115,26 @@ public sealed class TeamDetailTests : IAsyncDisposable
         var cut = RenderAs(ManagerUserId, "rita@cronus.test");
 
         Buttons(cut).Should().Contain(["Rename", "Add member", "Remove", "Make manager", "Make member"]);
-        cut.FindAll("input[type=checkbox]").Should().HaveCount(2);
+        // #1547: the update-scheduling grant reaches the customer's production tenant,
+        // so a manager sees it read-only; only an admin hands it out.
+        cut.FindAll("input[type=checkbox]").Should().BeEmpty("a manager could otherwise grant it to themselves");
+        cut.Markup.Should().Contain("Only an admin");
+    }
+
+    [Fact]
+    public void An_org_admin_gets_the_update_scheduling_checkbox_on_every_row()
+    {
+        using (var seed = _db.NewContext())
+        {
+            var admin = NewUser(AdminUserId, "ada@cronus.test", "Ada Admin");
+            admin.Role = UserRole.Admin;
+            seed.Users.Add(admin);
+            seed.SaveChanges();
+        }
+
+        var cut = RenderAs(AdminUserId, "ada@cronus.test");
+
+        cut.WaitForAssertion(() => cut.FindAll("input[type=checkbox]").Should().HaveCount(2));
     }
 
     [Fact]
