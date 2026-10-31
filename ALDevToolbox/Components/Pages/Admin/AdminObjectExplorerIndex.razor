@@ -190,7 +190,7 @@
                 var ok = ctx.Request.Query["ok"].ToString();
                 if (!string.IsNullOrEmpty(ok))
                 {
-                    Status = (FormatOkMessage(ok, ctx.Request.Query["id"].ToString()), false);
+                    Status = (FormatOkMessage(ok, ctx.Request.Query["id"].ToString(), ctx.Request.Query["skipped"].ToString()), false);
                 }
             }
         }
@@ -212,7 +212,7 @@
             !string.IsNullOrEmpty(value) && value.Contains(_search, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string FormatOkMessage(string ok, string id) => ok switch
+    private static string FormatOkMessage(string ok, string id, string skipped) => ok switch
     {
         "queued"       => $"Release {id} queued - importing in the background. Refresh this page to check on its progress.",
         "imported"     => $"Release {id} imported.",
@@ -220,9 +220,19 @@
         "soft-deleted" => $"Release {id} soft-deleted. Restore from this page if it was a mistake.",
         "restored"     => $"Release {id} restored.",
         "hard-deleted" => $"Release {id} permanently deleted.",
-        "backfill-all-queued" => $"Queued a system-reference backfill for {id} ready release(s). They run in the background - watch progress on the workers page.",
+        "backfill-all-queued" => FormatBackfillQueued(id, skipped),
         _              => "Done.",
     };
+
+    private static string FormatBackfillQueued(string queued, string skipped)
+    {
+        var alreadyQueued = int.TryParse(skipped, out var n) && n > 0
+            ? $" {n} release(s) already had one waiting and were left alone."
+            : string.Empty;
+        return queued == "0" && alreadyQueued.Length > 0
+            ? $"Nothing new to queue.{alreadyQueued}"
+            : $"Queued a system-reference backfill for {queued} ready release(s).{alreadyQueued} They run in the background - watch progress on the workers page.";
+    }
 
     private static string FormatKind(string kind) => kind switch
     {

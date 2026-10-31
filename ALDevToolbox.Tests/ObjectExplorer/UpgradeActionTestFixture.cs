@@ -36,6 +36,8 @@ internal sealed class UpgradeActionTestFixture : IDisposable
     public const int FlagUserId = 9701;
     public const int PlainTeamUserId = 9702;
     public const int OutsiderUserId = 9703;
+    /// <summary>The owner of the customer <see cref="SeedOtherOrgCustomerAsync"/> seeds in <see cref="TestDb.OtherOrgId"/>.</summary>
+    public const int OtherOrgOwnerUserId = 9710;
 
     public TestDb Db { get; } = new();
     public FakeUpdatesAdminClient Admin { get; } = new();
@@ -43,8 +45,16 @@ internal sealed class UpgradeActionTestFixture : IDisposable
     public FakeUploadAppClient Apps { get; } = new();
     public FakeTimeProvider Clock { get; } = new(new DateTimeOffset(2026, 9, 11, 8, 0, 0, TimeSpan.Zero));
 
-    /// <summary>How long the worker's sends wait for an install; a test sets it to zero to run the wait out.</summary>
-    public TimeSpan UploadPollTimeout { get; set; } = ProjectConnectionService.DefaultUploadPollTimeout;
+    /// <summary>
+    /// How long the worker's sends wait for an install; a test sets it to zero to run the
+    /// wait out. Seconds, not the production ten minutes: the poller's deadline is real
+    /// time and the poll delay here is zero, so an install a test never lets finish would
+    /// otherwise spin for ten real minutes.
+    /// </summary>
+    public TimeSpan UploadPollTimeout { get; set; } = TestUploadPollTimeout;
+
+    /// <summary>The wait every service built here gives an install. Long enough for a fake that answers on its second poll.</summary>
+    public static readonly TimeSpan TestUploadPollTimeout = TimeSpan.FromSeconds(5);
 
     private ServiceProvider? _provider;
 
@@ -114,6 +124,7 @@ internal sealed class UpgradeActionTestFixture : IDisposable
     {
         // A poll every five seconds is right for Business Central and wrong for a test.
         UploadPollDelay = TimeSpan.Zero,
+        UploadPollTimeout = TestUploadPollTimeout,
     };
 
     /// <summary>
@@ -236,6 +247,72 @@ internal sealed class UpgradeActionTestFixture : IDisposable
 
         await SeedUpdateTeamAsync(projectId);
         return (projectId, environmentId);
+    }
+
+    /// <summary>
+    /// A customer in the second organisation (<see cref="TestDb.OtherOrgId"/>), connected
+    /// and owned by an active Editor there, so a booking made as that owner really sends -
+    /// for the tests of how organisations share the worker's one install turn.
+    /// </summary>
+    public async Task<(int ProjectId, int EnvironmentId)> SeedOtherOrgCustomerAsync(string name = "CRONUS Sweden")
+    {
+        await using (var ctx = Db.NewContext())
+        {
+            var owner = NewUser(OtherOrgOwnerUserId, "owner@cronus.example", UserRole.Editor);
+            owner.OrganizationId = TestDb.OtherOrgId;
+            ctx.Users.Add(owner);
+            await ctx.SaveChangesAsync();
+        }
+
+        int projectId;
+        await using (var ctx = Db.NewContext())
+        {
+            var project = new OeProject
+            {
+                OrganizationId = TestDb.OtherOrgId, Name = name, CreatedByUserId = OtherOrgOwnerUserId,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            projectId = project.Id;
+        }
+
+        await InOtherOrgAsync(async ctx =>
+        {
+            var access = new ProjectAccess(ctx, Db.OrgContext);
+            await Connections(ctx, access).SaveConnectionAsync(projectId, new BcConnectionInput(
+                Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), "Europe/Stockholm"));
+        });
+
+        await using (var ctx = Db.NewContext())
+        {
+            var env = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.OtherOrgId, ProjectId = projectId, Name = "Production", Type = "Production",
+                ApplicationFamily = "BusinessCentral", Status = "Active", Version = "27.5.12345.0", FetchedAt = DateTime.UtcNow,
+            };
+            ctx.OeProjectEnvironments.Add(env);
+            await ctx.SaveChangesAsync();
+            return (projectId, env.Id);
+        }
+    }
+
+    /// <summary>Runs <paramref name="act"/> as the second organisation's owner, in that organisation, and switches back.</summary>
+    public async Task InOtherOrgAsync(Func<AppDbContext, Task> act)
+    {
+        var (org, user) = (Db.OrgContext.CurrentOrganizationId, Db.OrgContext.CurrentUserId);
+        Db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        Db.OrgContext.CurrentUserId = OtherOrgOwnerUserId;
+        try
+        {
+            await using var ctx = Db.NewContext();
+            await act(ctx);
+        }
+        finally
+        {
+            Db.OrgContext.CurrentOrganizationId = org;
+            Db.OrgContext.CurrentUserId = user;
+        }
     }
 
     /// <summary>

@@ -29,6 +29,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.RequestedBy).HasColumnName("requested_by").HasMaxLength(320).IsRequired();
         entity.Property(e => e.RequestedAt).HasColumnName("requested_at").IsRequired();
         entity.Property(e => e.ExecuteAfter).HasColumnName("execute_after").IsRequired();
+        // Which window chose execute_after, so the worker can hold a booked install to it
+        // when its turn comes (#1539). Text, like kind and status.
+        entity.Property(e => e.ScheduledByWindow).HasColumnName("scheduled_by_window")
+            .HasConversion<string>().HasMaxLength(20);
         entity.Property(e => e.SentAt).HasColumnName("sent_at");
         entity.Property(e => e.Outcome).HasColumnName("outcome");
         entity.Property(e => e.CancelledByUserId).HasColumnName("cancelled_by_user_id");

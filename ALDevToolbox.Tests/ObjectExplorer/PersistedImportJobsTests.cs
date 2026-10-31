@@ -43,6 +43,64 @@ public sealed class PersistedImportJobsTests : IDisposable
         return release;
     }
 
+    // ── Bulk backfill rows (#1542) ───────────────────────────────────────
+
+    [Fact]
+    public async Task CreateBackfillsAsync_writes_no_row_at_all_when_one_of_them_fails()
+    {
+        await using var ctx = _db.NewContext();
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+
+        // The second id names no release, so its row breaks the foreign key on save.
+        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id, int.MaxValue - 7], Identity);
+
+        await act.Should().ThrowAsync<DbUpdateException>();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
+            .Should().Be(0, "a half-written bulk run would leave rows nothing ever feeds to the queue");
+    }
+
+    [Fact]
+    public async Task CreateBackfillsAsync_writes_no_row_when_the_request_is_cancelled()
+    {
+        await using var ctx = _db.NewContext();
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id], Identity, cancelled.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Reconcile_queues_a_backfill_that_never_started_again_and_fails_only_the_running_one()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var waiting = await SeedReleaseAsync(ctx, status: "ready");
+        var interrupted = await SeedReleaseAsync(ctx, status: "ready");
+        var rows = await svc.CreateBackfillsAsync([waiting.Id, interrupted.Id], Identity);
+        var waitingRow = rows.Single(r => r.ReleaseId == waiting.Id).JobRowId;
+        var interruptedRow = rows.Single(r => r.ReleaseId == interrupted.Id).JobRowId;
+        await svc.MarkRunningAsync(interruptedRow);
+
+        var resumable = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        var job = resumable.Should().ContainSingle().Subject;
+        job.ReleaseId.Should().Be(waiting.Id);
+        job.JobRowId.Should().Be(waitingRow);
+        job.Source.Should().BeOfType<ReleaseImportSource.Backfill>();
+        job.Resumed.Should().BeFalse("a resumed job wipes the release's ingested rows, and a backfill must never do that");
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == waitingRow)).Status.Should().Be("queued");
+        var failed = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == interruptedRow);
+        failed.Status.Should().Be("failed");
+        failed.ErrorMessage.Should().Contain("interrupted by a restart");
+    }
+
     [Fact]
     public async Task CreateAsync_writes_a_queued_row_with_url_source_fields()
     {

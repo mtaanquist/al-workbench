@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -318,6 +319,14 @@ public sealed class UpgradeActionService
         await _access.EnsureCanManageAsync(booking.ProjectId, booking.OwnerId, ct).ConfigureAwait(false);
 
         var now = _clock.GetUtcNow().UtcDateTime;
+        // The person has picked the time now, so no window holds these rows back any more:
+        // the worker's window check (#1539) must not move them out again. Unmarked before
+        // they are moved, so no row is ever due while still held to a window.
+        var unmarked = await _db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+            .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
+            .Where(a => a.ScheduledByWindow != null)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ScheduledByWindow, (UploadAppTiming?)null), ct).ConfigureAwait(false);
         var moved = await _db.OeEnvironmentUpgradeActions
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
             .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
@@ -325,8 +334,8 @@ public sealed class UpgradeActionService
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep.",
-            _orgContext.CurrentUserId, actionId, booking.PackageFileName ?? booking.AppName, moved);
+            "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep, {Unmarked} no longer held to a window.",
+            _orgContext.CurrentUserId, actionId, booking.PackageFileName ?? booking.AppName, moved, unmarked);
     }
 
     // ── Reading ─────────────────────────────────────────────────────────
