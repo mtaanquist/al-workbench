@@ -369,9 +369,13 @@ public sealed record RecipeDetail(
 /// Distinct from the read-side <see cref="RecipeFileDto"/> (which uses a
 /// single <c>Path</c> field combining folder + name) so the MCP-facing
 /// field names match the domain's <c>RecipeFileInput</c>. <c>RelativePath</c>
-/// is empty for files at the recipe's root.
+/// is empty for files at the recipe's root. <c>Content</c> is nullable for
+/// <c>update_recipe</c>, where a null body means "keep the stored body of the
+/// file at this path": <c>get_recipe</c> lists files that did not fit in its
+/// answer with a null body, and sending that back must not blank them (#1626).
+/// The suggestion tools treat a null body as empty, as before.
 /// </summary>
-public sealed record RecipeFileInputDto(string FileName, string Content, string RelativePath = "");
+public sealed record RecipeFileInputDto(string FileName, string? Content, string RelativePath = "");
 
 /// <summary>
 /// Input shape for the <c>suggest_recipe</c> tool. Mirrors
@@ -400,7 +404,7 @@ public sealed record SuggestRecipeInput(
         Keywords,
         ParseType(Type),
         Files
-            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content, f.RelativePath))
+            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content ?? string.Empty, f.RelativePath))
             .ToList(),
         Instructions,
         MinimumApplicationVersionId,
@@ -445,7 +449,7 @@ public sealed record UpdateRecipeSuggestionInput(
         Keywords,
         SuggestRecipeInput.ParseType(Type),
         Files
-            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content, f.RelativePath))
+            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content ?? string.Empty, f.RelativePath))
             .ToList(),
         Instructions,
         MinimumApplicationVersionId,
@@ -458,9 +462,14 @@ public sealed record UpdateRecipeSuggestionResult(int SuggestionId, string Messa
 /// <summary>
 /// Input shape for the <c>update_recipe</c> tool: a full-replace payload
 /// for an already-published recipe, mirroring <see cref="UpdateRecipeSuggestionInput"/>
-/// plus the fields only published recipes carry. <c>Deprecated</c> is
-/// nullable — omitting it keeps the recipe's current flag rather than
-/// silently un-deprecating on every edit. Requires the same
+/// plus the fields only published recipes carry. The optional fields keep
+/// the recipe's stored value when omitted rather than silently resetting it
+/// on every edit (#1626): <c>Deprecated</c>; <c>EstimatedValueHours</c>
+/// (cleared only by <c>ClearEstimatedValueHours</c>); and the minimum
+/// version, set by <c>MinimumApplicationVersionId</c> or by the
+/// <c>MinimumApplication</c> string <c>get_recipe</c> returns, and cleared by
+/// an empty <c>MinimumApplication</c>. A file sent with a null
+/// <c>Content</c> keeps its stored body. Requires the same
 /// <c>GuidanceToken</c> gate as the suggestion write tools; the caller
 /// must additionally hold the Editor or Admin role.
 /// </summary>
@@ -475,20 +484,30 @@ public sealed record UpdateRecipeInput(
     string? Instructions = null,
     int? MinimumApplicationVersionId = null,
     decimal? EstimatedValueHours = null,
-    bool? Deprecated = null)
+    bool? Deprecated = null,
+    string? MinimumApplication = null,
+    bool ClearEstimatedValueHours = false)
 {
-    public ALDevToolbox.Services.Cookbook.RecipeInput ToDomain(bool currentDeprecated) => new(
+    /// <summary>
+    /// Builds the service input. The tool resolves the parts that need the
+    /// database first: the minimum version id to store (already merged with
+    /// the stored one) and the file list (null bodies already filled from
+    /// the stored files).
+    /// </summary>
+    public ALDevToolbox.Services.Cookbook.RecipeInput ToDomain(
+        bool currentDeprecated,
+        decimal? currentEstimatedValueHours,
+        int? minimumApplicationVersionId,
+        IReadOnlyList<ALDevToolbox.Services.Cookbook.RecipeFileInput> files) => new(
         Title,
         Description,
         Keywords,
         SuggestRecipeInput.ParseType(Type),
         Deprecated ?? currentDeprecated,
-        Files
-            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content, f.RelativePath))
-            .ToList(),
+        files,
         Instructions,
-        MinimumApplicationVersionId,
-        EstimatedValueHours);
+        minimumApplicationVersionId,
+        ClearEstimatedValueHours ? null : EstimatedValueHours ?? currentEstimatedValueHours);
 }
 
 /// <summary>What <c>update_recipe</c> returns: the unchanged recipe id plus a confirmation.</summary>
