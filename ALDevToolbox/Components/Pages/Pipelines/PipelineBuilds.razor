@@ -177,7 +177,7 @@
         </span>
         <span class="meta-item">
             <span class="meta-item__label">Last build</span>
-            <span class="meta-item__value">@if (_latest is null) { <text>—</text> } else { <Timestamp Value="@(_latest.FinishedAt ?? _latest.StartedAt)" Relative="true" /> }</span>
+            <span class="meta-item__value">@if (_latest is null) { <text>—</text> } else { <Timestamp Value="@StartedWhen(_latest)" Relative="true" /> }</span>
         </span>
     </Meta>
     <ChildContent>
@@ -697,7 +697,7 @@
                                             }
                                         </td>
                                         <td>@b.ShownBranch</td>
-                                        <td><Timestamp Value="@ShownTime(b)" Relative="true" /></td>
+                                        <td><Timestamp Value="@StartedWhen(b)" Relative="true" /></td>
                                         <td class="data-table__num">@(Duration(b) is { Length: > 0 } d ? d : "—")</td>
                                         <td class="data-table__num">@(b.ArtifactCount > 0 ? b.ArtifactCount.ToString() : "—")</td>
                                         <td class="data-table__actions">
@@ -1597,8 +1597,16 @@
     };
 
     /// <summary>When a finished build finished; for one still running, when it started.</summary>
-    private static DateTime StartedWhen(BuildRow b) =>
-        b.Status is "ready" or "failed" ? b.FinishedAt ?? b.StartedAt : b.StartedAt;
+    /// <summary>
+    /// The time a build is aged from: its finish once it has finished, otherwise when it
+    /// was queued. A Retry or Recover symbols keeps its last attempt's finish until it
+    /// ends, which is not this attempt's (#1551).
+    /// </summary>
+    internal static DateTime StartedWhen(BuildRow b) => StartedWhen(b.Status, b.StartedAt, b.FinishedAt);
+
+    /// <inheritdoc cref="StartedWhen(BuildRow)"/>
+    internal static DateTime StartedWhen(string status, DateTime startedAt, DateTime? finishedAt) =>
+        status is ProjectBuildStatus.Ready or ProjectBuildStatus.Failed ? finishedAt ?? startedAt : startedAt;
 
     private static string? StartedBy(BuildRow b) => b.StartedByName is { } n
         ? b.FromPush ? $"Started by a push, built with {n}'s access" : $"Started by {n}"
@@ -1627,14 +1635,6 @@
     }
 
     private static bool IsFinished(BuildRow b) => b.Status is ProjectBuildStatus.Ready or ProjectBuildStatus.Failed;
-
-    /// <summary>
-    /// The time a row is aged from: its finish once it has finished, otherwise when a
-    /// worker picked it up or it was queued. A rerun still carries its last attempt's
-    /// finish while it runs, which is not this attempt's.
-    /// </summary>
-    internal static DateTime ShownTime(BuildRow b) =>
-        IsFinished(b) && b.FinishedAt is { } done ? done : b.BuildingStartedAt ?? b.StartedAt;
 
     /// <summary>A build in the compare picker. An option holds text only, so the time goes through the display zone here rather than through a Timestamp.</summary>
     private string BuildLabel(ComparableBuildRow c) =>

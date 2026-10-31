@@ -49,14 +49,17 @@ public sealed class ProjectDetailPipelinesTests : IDisposable
         812, 1, status, null, "main", new DateTime(2026, 10, 1, 9, 50, 0, DateTimeKind.Utc), LastFinish,
         null, "Anna", 0, BuildingStartedAt: buildingStartedAt);
 
-    [Fact]
-    public void A_rerun_that_is_building_shows_no_duration_and_is_aged_from_its_own_start()
+    [Theory]
+    // Retry pressed: queued again, the pickup time cleared, the last finish still on the row.
+    [InlineData(ProjectBuildStatus.Queued, false)]
+    // Picked up again, 31 minutes after the last attempt finished.
+    [InlineData(ProjectBuildStatus.Building, true)]
+    public void A_rerun_shows_no_duration_and_is_not_aged_from_the_last_attempts_finish(string status, bool pickedUp)
     {
-        var rerunStart = LastFinish.AddMinutes(31);
-        var running = Row(ProjectBuildStatus.Building, rerunStart);
+        var rerun = Row(status, pickedUp ? LastFinish.AddMinutes(31) : null);
 
-        PipelineBuilds.Duration(running).Should().BeEmpty("the finish time is the last attempt's, not this one's");
-        PipelineBuilds.ShownTime(running).Should().Be(rerunStart);
+        PipelineBuilds.Duration(rerun).Should().BeEmpty("the finish time is the last attempt's, not this one's");
+        PipelineBuilds.StartedWhen(rerun).Should().Be(rerun.StartedAt);
     }
 
     [Fact]
@@ -65,6 +68,6 @@ public sealed class ProjectDetailPipelinesTests : IDisposable
         var done = Row(ProjectBuildStatus.Failed, LastFinish.AddMinutes(-2));
 
         PipelineBuilds.Duration(done).Should().Be("2m 00s");
-        PipelineBuilds.ShownTime(done).Should().Be(LastFinish);
+        PipelineBuilds.StartedWhen(done).Should().Be(LastFinish);
     }
 }

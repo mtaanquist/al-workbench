@@ -328,6 +328,22 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// Someone who can see the solution but not change it is told who can: its owner,
+    /// anyone on its team, or an admin - not the owner alone (#1551).
+    /// </summary>
+    [Fact]
+    public async Task Someone_who_cannot_change_the_solution_is_told_who_can()
+    {
+        var (projectId, _) = await SeedAsync();
+        _db.OrgContext.CurrentUserId = OutsiderUserId;
+
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(
+            "Only its owner (owner@example.com), someone on its team, or an admin can change or build it"));
+    }
+
+    /// <summary>
     /// A link to a tab this person does not get - here Access, for someone who can only
     /// look - opens Customer at its own address instead of an empty page.
     /// </summary>

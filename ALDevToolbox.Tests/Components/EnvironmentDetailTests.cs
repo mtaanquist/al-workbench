@@ -1092,7 +1092,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             cut.Markup.Should().Contain("Couldn't read the operations from Business Central"));
         cut.FindAll("a.btn[href$='tab=bc']").Should().BeEmpty();
         cut.Find(".empty-state__text").TextContent.Should()
-            .Contain("Ask the solution's owner or an administrator to check its Business Central connection.");
+            .Contain("Ask the solution's owner, someone on its team, or an administrator to check its Business Central connection.");
     }
 
     // ── Sessions ──────────────────────────────────────────────────────────

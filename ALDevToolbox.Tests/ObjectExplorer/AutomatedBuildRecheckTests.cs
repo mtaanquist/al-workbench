@@ -92,14 +92,16 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     /// automatic build is (#1551).
     /// </summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_build_by_hand_is_refused_once_the_person_who_asked_has_left(bool retry)
+    // A build by hand Bob pressed Build for, still on its first run.
+    [InlineData(ProjectBuildTrigger.Manual, false)]
+    // Bob's Retry of a finished push build Alice's automation started: it runs as Bob.
+    [InlineData(ProjectBuildTrigger.Push, true)]
+    public async Task A_build_by_hand_is_refused_once_the_person_who_asked_has_left(string trigger, bool retry)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
         var bob = await SeedUserAsync("bob@cronus.test");
         var (projectId, pipelineId) = await SeedPipelineAsync(alice);
-        var releaseId = await SeedBuildAsync(projectId, pipelineId, ProjectBuildTrigger.Manual, bob, finished: retry);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, trigger, retry ? alice : bob, finished: retry);
         await using (var ctx = _db.NewContext())
         {
             await ctx.Users.Where(u => u.Id == bob)

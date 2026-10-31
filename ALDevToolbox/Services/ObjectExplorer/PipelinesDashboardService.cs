@@ -156,7 +156,7 @@ public sealed class PipelinesDashboardService
                 // build sorts by its finish (#1551).
                 .OrderByDescending(b => (b.Status == ProjectBuildStatus.Ready || b.Status == ProjectBuildStatus.Failed) && b.FinishedAt != null
                     ? b.FinishedAt.Value
-                    : b.BuildingStartedAt ?? b.StartedAt)
+                    : b.StartedAt)
                 .ThenByDescending(b => b.Id)
                 .Take(ActivityRows)
                 .Select(b => new

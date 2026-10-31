@@ -236,9 +236,15 @@ public sealed class ProjectBuildImporter
 
             if (build is not null)
             {
+                // The last attempt's pickup time goes with it (#1551). Its finish time
+                // stays: BuildAsync reads a set FinishedAt as "not a first run", which is
+                // what keeps a Retry from being held to the automation settings, and the
+                // pages show a finish only once the build has finished again.
                 await _db.OeProjectBuilds
                     .Where(b => b.Id == build.Id)
-                    .ExecuteUpdateAsync(u => u.SetProperty(b => b.Status, ProjectBuildStatus.Queued), ct)
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(b => b.Status, ProjectBuildStatus.Queued)
+                        .SetProperty(b => b.BuildingStartedAt, (DateTime?)null), ct)
                     .ConfigureAwait(false);
             }
             return tx;

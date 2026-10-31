@@ -879,8 +879,9 @@ started after the push), the sentence is "Building the latest commit on main" in
 the pipeline is not ahead: there is nothing for anybody to start (#1128). A preview check
 does not count.
 
-- **Builds list**: the sentence under the pipeline's name. An ahead pipeline with no build
-  already queued or running takes the warning keyline, a **Build** button beside the sentence (outline, not in the kebab-only actions cell, and
+- **Builds list**: the sentence under the pipeline's name. A disabled pipeline is never
+  ready to build, here or on the dashboard: it refuses Build, so it is not asked for (#1551).
+  An ahead pipeline with no build already queued or running takes the warning keyline, a **Build** button beside the sentence (outline, not in the kebab-only actions cell, and
   only for someone who manages the solution) and the **Ready to build** tab
   (`?show=ready`). Build queues the build and stays on the list.
 - **Pipeline page**: a **Branch** card above the latest build, per repository: the branch,
@@ -928,8 +929,10 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   runs as is no longer active or can no longer manage the solution
   (`ProjectBuildService.EnsureAutomationStillOnAsync`). The build fails with that reason
   and clones nothing. Such a refusal sends no build email and is not the build the next
-  one is compared with. Only the first run is checked: Retry or Recover symbols on a
-  finished build is a person's own choice and runs as them.
+  one is compared with. Only the first run is held to the pipeline's settings: Retry or
+  Recover symbols on a finished build is a person's own choice and runs as them, and like a
+  build by hand it is refused as it starts only if that person is no longer active or can no
+  longer manage the solution (#1551).
 - **What does not build.** A forced push (it may have removed others' work, so a person
   decides), a deleted branch, a push to any other branch, and a redelivery of a push whose
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
