@@ -297,6 +297,37 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
                     a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow))
                 .ToListAsync(ct).ConfigureAwait(false);
+
+            // The install turn rotates between this org's environments the way it rotates
+            // between organisations (#1596): the environment whose last install went
+            // longest ago goes first, one never served first of all. Without it an
+            // Install now - due now, so later than a batch already running for another
+            // customer since the window opened - waited for that whole batch. Only
+            // environments rotate, never bookings on one environment: two batches for the
+            // same environment still go first booked, first served, because a later
+            // upload may need an app an earlier one brings. The sort is stable, so the
+            // order above holds inside each environment and between equals.
+            if (uploads)
+            {
+                var envIds = due.Where(a => UpgradeActionService.IsAppInstall(a.Kind))
+                    .Select(a => a.EnvironmentId).Distinct().ToList();
+                if (envIds.Count > 1)
+                {
+                    var lastSent = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                        .Where(a => (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
+                                    && a.SentAt != null
+                                    && envIds.Contains(a.EnvironmentId))
+                        .GroupBy(a => a.EnvironmentId)
+                        .Select(g => new { EnvironmentId = g.Key, LastSentAt = g.Max(a => a.SentAt) })
+                        .ToDictionaryAsync(x => x.EnvironmentId, x => x.LastSentAt, ct).ConfigureAwait(false);
+                    due = due
+                        .OrderBy(a => UpgradeActionService.IsAppInstall(a.Kind))
+                        .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind)
+                            ? lastSent.GetValueOrDefault(a.EnvironmentId) ?? DateTime.MinValue
+                            : DateTime.MinValue)
+                        .ToList();
+                }
+            }
         }
 
         var sent = 0;
