@@ -187,6 +187,13 @@ public sealed class UserAdministrationService
         await _db.OAuthConsents
             .Where(c => c.UserId == userId && c.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(c => c.RevokedAt, now), ct);
+        // An invite outlives the person who sent it: an Admin about to be
+        // removed, or whose account is taken over, could otherwise mint an
+        // Admin invite to an address they control and use it for a week after
+        // the disable (#1544). Filtered like the two above.
+        await _db.Invites
+            .Where(i => i.InvitedByUserId == userId && i.AcceptedAt == null && i.RevokedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(i => i.RevokedAt, now), ct);
         await _db.SaveChangesAsync(ct);
         // OpenIddict stores Subject = the user id (OAuthEndpoints.MapAuthorizeComplete).
         // Its manager shares this scoped context, so the revocation joins the transaction.

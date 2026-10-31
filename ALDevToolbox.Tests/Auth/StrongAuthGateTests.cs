@@ -168,7 +168,7 @@ public sealed class StrongAuthGateTests : IDisposable
         // so it should be a conscious edit reviewed alongside this list.
         StrongAuthGate.AllowedPathPrefixes.Should().Equal(
             "/account", "/auth", "/mcp", "/oauth", "/.well-known", "/login", "/signup",
-            "/_blazor", "/_framework", "/_content", "/healthz", "/readyz", "/not-found",
+            "/s", "/api/sealed", "/_blazor", "/_framework", "/_content", "/healthz", "/readyz", "/not-found",
             "/Error", "/favicon.ico");
     }
 
@@ -179,6 +179,11 @@ public sealed class StrongAuthGateTests : IDisposable
     [InlineData("/mcpx", false)]
     [InlineData("/admin", false)]
     [InlineData("/", false)]
+    // A Sealed link opens for an unenrolled member as it would for a stranger,
+    // while the tool that creates links stays behind the requirement (#1544).
+    [InlineData("/s/AbC123", true)]
+    [InlineData("/api/sealed/AbC123/reveal", true)]
+    [InlineData("/sealed", false)]
     public void Allow_list_matching_is_by_segment_not_by_string_prefix(string path, bool allowed) =>
         StrongAuthGate.IsAllowed(path).Should().Be(allowed);
 
