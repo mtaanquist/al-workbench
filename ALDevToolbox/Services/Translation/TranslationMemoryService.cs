@@ -447,9 +447,12 @@ public sealed class TranslationMemoryService
         const int maxAttempts = 3;
         for (var attempt = 1; ; attempt++)
         {
-            // Existence + tenant scope (the query filter). AsNoTracking: Score is
-            // never mutated through the tracked entity — the atomic UPDATE owns it.
-            var entryExists = await _db.TranslationMemory.AsNoTracking()
+            // Existence + tenant scope (the query filter) + solution visibility: an
+            // entry learned from a Private solution's repository is "not found" to
+            // anyone that solution is hidden from, the same as in search (#1547).
+            // AsNoTracking: Score is never mutated through the tracked entity — the
+            // atomic UPDATE owns it.
+            var entryExists = await VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false))
                 .AnyAsync(e => e.Id == entryId, ct).ConfigureAwait(false);
             if (!entryExists)
                 throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
@@ -530,8 +533,14 @@ public sealed class TranslationMemoryService
     public async Task DeleteAsync(long entryId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var entry = await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
+        // Hidden-solution pairs answer "not found", as in search and VoteAsync (#1547).
+        var visible = await VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false))
+            .AnyAsync(e => e.Id == entryId, ct).ConfigureAwait(false);
+        var entry = visible
+            ? await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct).ConfigureAwait(false)
+            : null;
+        if (entry is null)
+            throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
         if (entry.DeletedAt is null)
         {
             entry.DeletedAt = DateTime.UtcNow;

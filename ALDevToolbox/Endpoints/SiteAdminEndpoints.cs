@@ -475,6 +475,13 @@ internal static class SiteAdminEndpoints
                 RedirectFirstError(ctx, RouteConstants.SiteAdminBackups, ex);
                 return;
             }
+            catch (InvalidOperationException ex)
+            {
+                // A backup or restore holds the lock (#1628).
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString(ex.Message));
+                return;
+            }
             ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.OkQuery}=deleted");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
@@ -702,6 +709,13 @@ internal static class SiteAdminEndpoints
             catch (PlanValidationException ex)
             {
                 RedirectFirstError(ctx, RouteConstants.SiteAdminTenantBackups, ex);
+                return;
+            }
+            catch (InvalidOperationException ex)
+            {
+                // A backup or restore holds the lock (#1628).
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString(ex.Message));
                 return;
             }
             ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.OkQuery}=deleted");

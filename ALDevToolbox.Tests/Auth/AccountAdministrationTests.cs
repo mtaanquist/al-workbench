@@ -172,6 +172,39 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Disable_revokes_the_invites_the_user_sent_that_are_still_pending()
+    {
+        // An Admin on the way out could otherwise invite an address they
+        // control as Admin and use it for a week after being disabled (#1544).
+        var orgId = TestDb.DefaultOrgId;
+        var actorId = await SeedActiveAdminAsync(orgId, "primary-default@example.com");
+        ActAs(orgId, actorId);
+        var leaverId = await SeedActiveUserAsync(orgId, "leaver-admin@example.com", UserRole.Admin);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        Invite NewInvite(int by, string email, DateTime? acceptedAt = null) => new()
+        {
+            OrganizationId = orgId, Email = email, Role = UserRole.Admin, TokenHash = "hash-" + email,
+            CreatedAt = now, ExpiresAt = now.AddDays(7), AcceptedAt = acceptedAt, InvitedByUserId = by,
+        };
+        await using (var seed = _db.NewContext())
+        {
+            seed.Invites.AddRange(
+                NewInvite(leaverId, "backdoor@elsewhere.example"),
+                NewInvite(leaverId, "accepted@cronus.example", acceptedAt: now.AddHours(-1)),
+                NewInvite(actorId, "colleague@cronus.example"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(leaverId, orgId);
+
+        await using var read = _db.NewContext();
+        var invites = await read.Invites.IgnoreQueryFilters().AsNoTracking().ToDictionaryAsync(i => i.Email);
+        invites["backdoor@elsewhere.example"].RevokedAt.Should().Be(now);
+        invites["accepted@cronus.example"].RevokedAt.Should().BeNull("an accepted invite has nothing left to revoke");
+        invites["colleague@cronus.example"].RevokedAt.Should().BeNull("another admin's invites are theirs to keep");
+    }
+
+    [Fact]
     public async Task Disable_refuses_to_lock_out_the_last_active_admin()
     {
         var orgId = TestDb.OtherOrgId;

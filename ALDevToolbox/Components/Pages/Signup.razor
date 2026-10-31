@@ -2,6 +2,7 @@
 @layout ALDevToolbox.Components.Layout.AuthLayout
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Services
+@using ALDevToolbox.Services.Account
 @inject IEmailService Email
 @inject ALDevToolbox.Services.SingleTenant.ISingleTenantMode SingleTenant
 
@@ -216,7 +217,9 @@ else
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
     [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
     [SupplyParameterFromQuery(Name = "field")] public string? Field { get; set; }
-    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    // A code, not the sentence: the copy lives in FormErrorReasons so an
+    // edited link can't make this page say anything (#1544).
+    [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
     [SupplyParameterFromQuery(Name = "email")] public string? EmailValue { get; set; }
 
     /// <summary>Set by the "I already have a code" link, so arriving late has a way in.</summary>
@@ -242,7 +245,7 @@ else
                         {
                             <strong>@label:</strong>
                         }
-                        @Message
+                        @FormErrorReasons.MessageFor(Reason)
                     </span>
             </Alert>
         }

@@ -210,15 +210,23 @@ public sealed class DeliverTools
         string.Equals(publisher?.Trim(), "Microsoft", StringComparison.OrdinalIgnoreCase);
 
     [McpServerTool(Name = "list_environment_history", ReadOnly = true)]
-    [Description("Lists an environment's Workbench history, newest first: what was done to it from this workbench and by whom - update dates moved, updates started or booked for a later slot (and cancelled), apps updated or uploaded, sessions ended, copies made, deleted environments recovered - with each line's status ('Pending', 'Sent', 'Failed', 'Cancelled') and outcome. Work done in Business Central's admin centre, or by Microsoft, is not in it. At most the latest 50 lines.")]
-    public async Task<IReadOnlyList<EnvironmentHistoryEntry>> ListEnvironmentHistoryAsync(
+    [Description("Lists an environment's Workbench history, newest first: what was done to it from this workbench and by whom - update dates moved, updates started or booked for a later slot (and cancelled), apps updated or uploaded, sessions ended, copies made, deleted environments recovered - with each line's status ('Pending', 'Sent', 'Failed', 'Cancelled') and outcome (a long failure reason is cut). Work done in Business Central's admin centre, or by Microsoft, is not in it. At most the latest 50 lines; Truncated and Note say when long lines made it stop sooner.")]
+    public async Task<CappedRows<EnvironmentHistoryEntry>> ListEnvironmentHistoryAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         CancellationToken ct = default)
     {
         var row = await _fleet.GetEnvironmentAsync(environmentId, ct) ?? throw EnvironmentNotFound(environmentId);
         var history = await Guard(environmentId, () => _upgradeActions.ListEnvironmentActivityAsync(row.Fleet.ProjectId, environmentId, ct));
-        return history.Select(ToHistory).ToList();
+        // A failed line carries Business Central's whole reason, often thousands of
+        // characters: cut each one and stop at the answer budget, or the history fails
+        // for exactly the environment someone is diagnosing (#1576).
+        return CappedRows<EnvironmentHistoryEntry>.From(
+            history.Select(ToHistory).ToList(), HistoryCap, "lines", "newest first",
+            "The environment's History page in the workbench has every line.");
     }
+
+    /// <summary>The most lines <c>list_environment_history</c> returns; the service reads no more than this.</summary>
+    private const int HistoryCap = 50;
 
     [McpServerTool(Name = "list_upgrades", ReadOnly = true)]
     [Description("Lists the Upgrades fleet: for every live environment of every solution you can see, the platform update Business Central has waiting - target version, when it is scheduled, the latest date it can be moved to, and its status - grouped by solution with Production first, plus any update move booked from this workbench that has not run yet. canChangeDate says whether you hold the environment-updates permission for that solution. Requires the environment-updates permission on at least one team, as the Upgrades page does. The update facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each row carries nextUpdateReadAt. Returns at most 25 environments by default; Truncated and Note say whether more were left out, so pass solution, type or nextUpdateBefore to narrow it.")]
@@ -609,7 +617,9 @@ public sealed class DeliverTools
 
     private static EnvironmentHistoryEntry ToHistory(UpgradeActionRow a) => new(
         a.Id, a.Kind.ToString(), a.Status.ToString(), a.IsBooking, a.RequestedByName, a.RequestedAt,
-        a.ExecuteAfter, a.SentAt, a.Outcome, a.CancelledByName, a.CancelledAt);
+        a.ExecuteAfter, a.SentAt,
+        McpListLimit.ShortenFailure(a.Outcome, "the environment's History page in the workbench"),
+        a.CancelledByName, a.CancelledAt);
 
     private static CustomerModuleRow ToModuleRow(SolutionModule m, int projectId, string projectName, SolutionModules held) => new(
         m.ModuleId, m.Name, m.Publisher, null, projectId, projectName, m.Version,

@@ -86,6 +86,23 @@ public sealed class SessionRefreshEndpointTests : IClassFixture<SharedEndpointHo
     }
 
     [Fact]
+    public async Task A_session_older_than_a_credential_change_is_signed_out()
+    {
+        // A password reset or an email change elsewhere stamps the row after
+        // this session signed in, so the refresh must end it (#1573).
+        var (client, userId) = await SignedInAdminAsync();
+        await SetAsync(userId, u => u.CredentialsChangedAt = DateTime.UtcNow.AddSeconds(1));
+
+        using var refresh = await client.GetAsync($"{CookieSessionRevalidation.RefreshPath}?return=%2Fadmin%2Fadministration%2Fusers");
+        refresh.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        refresh.Headers.Location!.OriginalString.Should().Contain("/login");
+
+        using var after = await client.GetAsync(RouteConstants.AdminUsers);
+        after.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        after.Headers.Location!.OriginalString.Should().Contain("/login");
+    }
+
+    [Fact]
     public async Task During_maintenance_a_site_admin_is_sent_back_untouched()
     {
         // A SiteAdmin is the one user the maintenance gate lets through, and a

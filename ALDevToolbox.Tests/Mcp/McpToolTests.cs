@@ -774,6 +774,88 @@ public sealed class McpToolTests : IDisposable
         Type: "Snippet",
         Files: files ?? new[] { new RecipeFileInputDto("A.al", "// a edited"), new RecipeFileInputDto("B.al", "// b body", "src") });
 
+    // #1547: suggest_recipe and update_recipe_suggestion took only the version id,
+    // which no tool returns. They now take the same MinimumApplication string.
+
+    private async Task SeedVersionsAsync()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.ApplicationVersions.Add(NewApplicationVersion("bc-24", "Business Central 24", "24.0.0.0"));
+        ctx.ApplicationVersions.Add(NewApplicationVersion("bc-25", "Business Central 25", "25.0.0.0"));
+        await ctx.SaveChangesAsync();
+    }
+
+    private static SuggestRecipeInput VersionedSuggestion(string token, string? minimumApplication) => new(
+        GuidanceToken: token,
+        Title: "Versioned",
+        Description: "Needs a recent base app.",
+        Keywords: "",
+        Type: "Snippet",
+        Files: new[] { new RecipeFileInputDto("a.al", "// a") },
+        MinimumApplication: minimumApplication);
+
+    [Fact]
+    public async Task SuggestRecipe_takes_the_minimum_version_as_an_application_version_string()
+    {
+        await SeedSubmitterAsync(userId: 842);
+        await SeedVersionsAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var id = (await tools.SuggestAsync(VersionedSuggestion(token, "24.0.0.0"))).SuggestionId;
+
+        await using var verify = _db.NewContext();
+        var row = await verify.RecipeSuggestions.Include(s => s.MinimumApplicationVersion).SingleAsync(s => s.Id == id);
+        row.MinimumApplicationVersion!.Key.Should().Be("bc-24");
+    }
+
+    [Fact]
+    public async Task SuggestRecipe_refuses_a_version_the_organisation_does_not_have_and_stores_nothing()
+    {
+        await SeedSubmitterAsync(userId: 843);
+        await SeedVersionsAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.SuggestAsync(VersionedSuggestion(token, "99.0.0.0")))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("99.0.0.0");
+
+        await using var verify = _db.NewContext();
+        (await verify.RecipeSuggestions.AnyAsync(s => s.Title == "Versioned")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task UpdateRecipeSuggestion_sets_and_clears_the_minimum_version_by_name()
+    {
+        await SeedSubmitterAsync(userId: 844);
+        await SeedVersionsAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+        var id = (await tools.SuggestAsync(VersionedSuggestion(token, null))).SuggestionId;
+
+        UpdateRecipeSuggestionInput Edit(string? minimum) => new(
+            SuggestionId: id, GuidanceToken: token, Title: "Versioned", Description: "Needs a recent base app.",
+            Keywords: "", Type: "Snippet", Files: new[] { new RecipeFileInputDto("a.al", "// a") },
+            MinimumApplication: minimum);
+
+        await tools.UpdateSuggestionAsync(Edit("business central 25"));
+        await using (var verify = _db.NewContext())
+        {
+            var row = await verify.RecipeSuggestions.Include(s => s.MinimumApplicationVersion).SingleAsync(s => s.Id == id);
+            row.MinimumApplicationVersion!.Application.Should().Be("25.0.0.0");
+        }
+
+        await tools.UpdateSuggestionAsync(Edit(""));
+        await using (var verify = _db.NewContext())
+        {
+            (await verify.RecipeSuggestions.SingleAsync(s => s.Id == id)).MinimumApplicationVersionId.Should().BeNull();
+        }
+    }
+
     [Fact]
     public async Task UpdateRecipe_keeps_minimum_version_and_hours_when_omitted()
     {

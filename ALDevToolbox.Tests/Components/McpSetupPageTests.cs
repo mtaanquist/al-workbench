@@ -52,6 +52,7 @@ public sealed class McpSetupPageTests : IDisposable
         _ctx.Services.AddSingleton<IHttpContextAccessor>(
             new HttpContextAccessor { HttpContext = Request("https", "workbench.cronus.example") });
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
+        _ctx.Services.AddSingleton(new ALDevToolbox.Endpoints.PublicOrigin(null));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
         _ctx.JSInterop.Mode = JSRuntimeMode.Loose;
@@ -113,6 +114,21 @@ public sealed class McpSetupPageTests : IDisposable
             "this path never reaches a snippet, so step 1 is the only place the address can appear");
         connector.TextContent.Should().Contain("steps 2 and 3 are not yours");
         connector.QuerySelector("[data-copy-target]").Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// With PUBLIC_BASE_URL set, the address is the configured one, not the host the
+    /// request arrived on: behind a proxy that does not forward the public host, the
+    /// request names an address the reader's assistant cannot reach (#1547).
+    /// </summary>
+    [Fact]
+    public void The_address_uses_the_configured_public_origin_when_there_is_one()
+    {
+        _ctx.Services.AddSingleton(new ALDevToolbox.Endpoints.PublicOrigin("https://bc-tools.cronus.example"));
+
+        var page = _ctx.Render<ALDevToolbox.Components.Pages.Mcp>();
+
+        page.Find("#mcp-server-url").TextContent.Should().Be("https://bc-tools.cronus.example/mcp");
     }
 
     /// <summary>One primary button, on the path most arrivals need.</summary>

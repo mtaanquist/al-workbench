@@ -186,6 +186,9 @@ public static class ObjectExplorerRegistration
             {
                 AllowAutoRedirect = true,
                 ConnectCallback = ALDevToolbox.Services.OAuth.SsrfGuard.ConnectAsync,
+                // The guard can only vet the address it dials; through a proxy that is
+                // the proxy's, never the target's (#1576).
+                UseProxy = false,
                 // SocketsHttpHandler defaults PooledConnectionLifetime to infinite, so
                 // a cached TCP connection that's silently gone half-dead (CDN edge
                 // dropped state, NAT timeout, …) gets reused for the next request and

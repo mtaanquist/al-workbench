@@ -81,13 +81,13 @@ else
             }
         </Sub>
         <Alerts>
-            @if (Error is not null && Message is not null)
+            @if (Error is not null && Reason is not null)
             {
                 @* err= is the field the endpoint blames; it picks the danger
                    tone but is not shown, since the sentence already says what
                    it is about. *@
                 <Alert Tone="AlertTone.Danger">
-                    <span>@Message</span>
+                    <span>@FormErrorReasons.MessageFor(Reason)</span>
                 </Alert>
             }
         </Alerts>
@@ -132,7 +132,9 @@ else
 @code {
     [SupplyParameterFromQuery(Name = "token")] public string? Token { get; set; }
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
-    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    // A code, not the sentence: the copy lives in FormErrorReasons so an
+    // edited link can't make this page say anything (#1544).
+    [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
 
     private Invite? _invite;
     private bool _loaded;

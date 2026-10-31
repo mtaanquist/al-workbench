@@ -61,7 +61,8 @@ public sealed class EndpointAuthorizationMetadataTests : IDisposable
             ["POST /auth/signup/complete"] = "email-first signup, last step",
             ["POST /auth/accept-invite"] = "invited user sets a password before they have an account; token in the form",
             ["POST /auth/accept-invite/microsoft"] = "invited user accepts with Microsoft before they have an account; token in the form",
-            ["GET /auth/account/email-change/confirm"] = "confirms an email change from the link sent to the new address; token in the URL",
+            ["GET /auth/account/email-change/confirm"] = "forwards an older confirmation link to the confirm page; spends nothing",
+            ["POST /auth/account/email-change/confirm"] = "confirms an email change from the page the new address's link opens; token in the form",
             ["POST /auth/account/email-change/cancel"] = "stops an admin-made email change from the notice sent to the old address; token in the form",
             ["POST /auth/logout"] = "signing out without a cookie does nothing",
 
