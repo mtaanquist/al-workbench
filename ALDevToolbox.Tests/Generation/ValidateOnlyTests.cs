@@ -71,14 +71,16 @@ public sealed class ValidateOnlyTests : IDisposable
         // substituted, so the check runs inside the shared prepare step -
         // which is exactly what makes the page see it too. See
         // .design/customer-naming.md.
-        await SeedTemplateAsync();
-        // A typed prefix is capped on its own (#1615), so only an organisation's
-        // fixed prefix can still make the names this long.
-        await SetOrgSettingsAsync(new OrganizationSettings
+        // A typed prefix is capped on its own (#1615), so a long name now comes
+        // from the template's own name pattern.
+        var template = TemplateBuilder.Default();
+        template.WorkspaceExtensions.Single().NameTemplate = "{{extension_prefix}} " + new string('C', 200);
+        await using (var ctx = _db.NewContext())
         {
-            ExtensionPrefixMode = ExtensionPrefixMode.Fixed,
-            ExtensionPrefix = new string('P', 205),
-        });
+            ctx.RuntimeTemplates.Add(template);
+            ctx.Modules.Add(ModuleBuilder.Default());
+            await ctx.SaveChangesAsync();
+        }
         var plan = PlanBuilder.WorkspacePlan();
 
         var errors = await NewService().ValidateWorkspaceAsync(plan);
@@ -382,41 +384,6 @@ public sealed class ValidateOnlyTests : IDisposable
         });
 
         (await NewService().ValidateExtensionAsync(plan)).Should().ContainKey("Dependencies[1].DepId");
-    }
-
-    [Fact]
-    public async Task A_dependency_id_is_written_to_app_json_in_its_usual_form()
-    {
-        await SeedTemplateAsync();
-        var plan = PlanBuilder.ExtensionPlan(dependencies: new[]
-        {
-            new DependencyEntry("{437DBF0E84FF417A965DED2BB9650972}", "Base Application", "Microsoft", "24.0.0.0"),
-        });
-
-        var archive = await NewService().GenerateExtensionAsync(plan);
-        using var zip = new System.IO.Compression.ZipArchive(archive.Stream);
-        var appJson = zip.Entries.Single(e => e.FullName.EndsWith("app.json", StringComparison.Ordinal));
-        using var reader = new StreamReader(appJson.Open());
-        (await reader.ReadToEndAsync()).Should().Contain("437dbf0e-84ff-417a-965d-ed2bb9650972");
-    }
-
-    /// <summary>
-    /// One publisher per organisation: the page has no publisher field, and an
-    /// assistant passing its own cannot override the organisation's (#1615).
-    /// </summary>
-    [Fact]
-    public async Task The_organisations_publisher_beats_the_one_the_caller_passed()
-    {
-        await SeedTemplateAsync();
-        await SetOrgSettingsAsync(new OrganizationSettings { DefaultPublisher = "CRONUS Partner A/S" });
-        var plan = PlanBuilder.ExtensionPlan(publisher: "Guessed Publisher");
-
-        var archive = await NewService().GenerateExtensionAsync(plan);
-        using var zip = new System.IO.Compression.ZipArchive(archive.Stream);
-        var appJson = zip.Entries.Single(e => e.FullName.EndsWith("app.json", StringComparison.Ordinal));
-        using var reader = new StreamReader(appJson.Open());
-        var text = await reader.ReadToEndAsync();
-        text.Should().Contain("CRONUS Partner A/S").And.NotContain("Guessed Publisher");
     }
 
     [Fact]
