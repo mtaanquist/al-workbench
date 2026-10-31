@@ -152,10 +152,10 @@ public sealed class TranslatorRepositorySaveTests
         js.Should().Contain("putBaseStream(fileName, sourceLang, targetLang, streamRef, repo, replaceOpenId)")
             .And.Contain("repo: repo || null")
             .And.Contain("repo: rec.repo || null")
-            // An overlay is never written onto another open's record (a second
-            // tab's), even one with the same file name (#1574).
+            // An overlay is only ever written onto the tab's own record, read
+            // and written in one transaction (#1574, #1609).
             .And.Contain("export async function putEdits(openId, editsJson, learnedJson)")
-            .And.Contain("const rec = await getOwnRec(openId);");
+            .And.Contain("await updateRec(openId, (rec) => {");
     }
 
     // Blazor's JS interop deserialises with the web defaults.

@@ -364,7 +364,7 @@ public sealed class TranslatorArchetypeTests
         var save = js[js.IndexOf("export async function saveInPlace(", StringComparison.Ordinal)..];
         save = save[..save.IndexOf("\n}\n", StringComparison.Ordinal)];
         var write = save.IndexOf("handle.createWritable()", StringComparison.Ordinal);
-        var reread = save.IndexOf("await getOwnRec(openId)", write, StringComparison.Ordinal);
+        var reread = save.IndexOf("await updateRec(openId", write, StringComparison.Ordinal);
         reread.Should().BeGreaterThan(write, "the record is read again after the file is written");
         save.Should().NotContain("putRec(rec)", "the record read before the save is stale by the time it ends");
 
