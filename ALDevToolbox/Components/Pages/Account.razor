@@ -537,10 +537,23 @@ else
                             <h2 class="card__title">Access tokens</h2>
                             <p class="card__sub">Treat a token like a password - anyone who has it can act as you in connected tools.</p>
                         </div>
-                        <button type="button" class="btn btn--sm" @onclick="() => _showCreateToken = !_showCreateToken">
-                            <Icon Name="plus" Width="14" Height="14" />
-                            <span>Create token</span>
-                        </button>
+                        @if (_tokenNeedsStepUp)
+                        {
+                            @* The organisation asks for a recent second step before a
+                               token is made; this goes through it and comes back here
+                               with the form open. *@
+                            <a class="btn btn--sm" href="@ALDevToolbox.Endpoints.StepUpEndpoints.Url(ALDevToolbox.Endpoints.AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl)">
+                                <Icon Name="plus" Width="14" Height="14" />
+                                <span>Create token</span>
+                            </a>
+                        }
+                        else
+                        {
+                            <button type="button" class="btn btn--sm" @onclick="() => _showCreateToken = !_showCreateToken">
+                                <Icon Name="plus" Width="14" Height="14" />
+                                <span>Create token</span>
+                            </button>
+                        }
                     </div>
 
                     @if (_showCreateToken)
@@ -1211,6 +1224,10 @@ else
     private IReadOnlyList<PersonalAccessToken>? _tokens;
     private IReadOnlyList<ConnectedClient>? _clients;
     private bool _showCreateToken;
+    // A token outlives the session that makes it, so when the organisation has
+    // marked any tool for a second step, making one needs a recent step-up -
+    // the same rule as approving an assistant on the permission screen (#1611).
+    private bool _tokenNeedsStepUp;
 
     // Repository access
     private bool _repoLoading = true;
@@ -1275,6 +1292,12 @@ else
             var methods = await StepUp.AvailableMethodsAsync(_user.Id, StepUpAuth.Method(principal), CancellationToken.None);
             _passkeyCanStepUp = methods?.Any == true;
         }
+        if (AuthStateTask is not null)
+        {
+            _tokenNeedsStepUp = await Tools.AnyStepUpAsync()
+                && !await Tools.IsFreshAsync((await AuthStateTask).User);
+        }
+        _showCreateToken = Ok == "confirmed-token" && !_tokenNeedsStepUp;
         _tokens = await Pats.ListForUserAsync(_user.Id);
         _clients = await OAuthClients.ListForUserAsync(_user.Id);
 
@@ -1509,6 +1532,7 @@ else
         "display-name" => "Full name updated.",
         "confirmed" => "You're confirmed for the next few minutes. You can now get new recovery codes or turn off two-step verification.",
         "confirmed-passkey" => "You're confirmed. Now choose Add a passkey below to finish.",
+        "confirmed-token" => "You're confirmed. Name your token below and choose Create token to finish.",
         "totp-disabled" => "Authenticator app turned off.",
         "email-mfa-sent" => "We sent you a verification code. Enter it below to turn on email codes.",
         "email-mfa-enabled" => "Email codes turned on.",

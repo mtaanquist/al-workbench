@@ -25,6 +25,13 @@ internal static class AccountPasskeyEndpoints
     public const string RegistrationOptionsPath = "/account/passkeys/registration-options";
 
     /// <summary>
+    /// Where a step-up before creating an access token comes back to: the AI
+    /// assistants tab, with the create form open and a line saying the
+    /// confirmation worked.
+    /// </summary>
+    public const string CreateTokenAfterStepUpUrl = "/account/ai?" + RouteConstants.OkQuery + "=confirmed-token";
+
+    /// <summary>
     /// The current password from the registration-options body
     /// (<c>{"password": "..."}</c>; JSON because the caller is a fetch), or
     /// null when there is none. Antiforgery has already been read from the
@@ -225,6 +232,7 @@ internal static class AccountPasskeyEndpoints
             IOrganizationContext org,
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
+            ALDevToolbox.Services.Tools.ToolEnablement tools,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -233,6 +241,17 @@ internal static class AccountPasskeyEndpoints
             if (userId is null || orgId is null)
             {
                 ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+            // Step-up: a token hands an assistant the same tools an approved
+            // permission screen does, and outlives the session, so it asks for
+            // the same thing the consent does - a recent second factor whenever
+            // the organisation has marked any tool (#1611). The page sends a
+            // stale session to step up before showing the form; this is the
+            // backstop for a form left open past the window.
+            if (await tools.AnyStepUpAsync(ct) && !await tools.IsFreshAsync(ctx.User, ct))
+            {
+                ctx.Response.Redirect(StepUpEndpoints.Url(CreateTokenAfterStepUpUrl));
                 return;
             }
             var form = await ctx.Request.ReadFormAsync(ct);
