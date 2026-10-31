@@ -1651,51 +1651,34 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task The_install_turn_goes_to_the_organisation_whose_install_has_waited_longest()
+    public async Task The_install_turn_rotates_between_organisations_so_a_long_batch_does_not_starve_another()
     {
-        // This organisation's install has been due since 09:00...
+        // This organisation booked two ten-app batches for 09:00...
         var (projectId, envId) = await _f.SeedCustomerAsync();
-        await BookUploadAsync(projectId, envId, hoursAhead: 1, "Waited.app");
-        // ...another's only since 10:00. The organisations list in no particular order,
-        // and the other one usually comes first.
-        int otherActionId;
-        await using (var ctx = _f.Db.NewContext())
-        {
-            var project = new OeProject
-            {
-                OrganizationId = TestDb.OtherOrgId, Name = "CRONUS Sweden", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
-            };
-            ctx.OeProjects.Add(project);
-            await ctx.SaveChangesAsync();
-            var env = new OeProjectEnvironment
-            {
-                OrganizationId = TestDb.OtherOrgId, ProjectId = project.Id, Name = "Production", Type = "Production",
-                ApplicationFamily = "BusinessCentral", Status = "Active", FetchedAt = DateTime.UtcNow,
-            };
-            ctx.OeProjectEnvironments.Add(env);
-            await ctx.SaveChangesAsync();
-            var now = _f.Clock.GetUtcNow().UtcDateTime;
-            var action = new OeEnvironmentUpgradeAction
-            {
-                OrganizationId = TestDb.OtherOrgId, ProjectId = project.Id, EnvironmentId = env.Id,
-                Kind = UpgradeActionKind.UploadApp, Status = UpgradeActionStatus.Pending,
-                RequestedBy = "someone <someone@example.com>", RequestedAt = now, ExecuteAfter = now.AddHours(2),
-                PackageFileName = "Newer.app", PackageContent = new byte[] { 1, 2, 3 },
-            };
-            ctx.OeEnvironmentUpgradeActions.Add(action);
-            await ctx.SaveChangesAsync();
-            otherActionId = action.Id;
-        }
+        var batch = Enumerable.Range(1, 10).Select(i => $"A{i:00}.app").ToArray();
+        await BookUploadAsync(projectId, envId, hoursAhead: 1, batch);
+        await BookUploadAsync(projectId, envId, hoursAhead: 1, batch.Select(f => "B" + f).ToArray());
+        // ...another booked one app for 10:00, as an active owner who may install there.
+        var (otherProjectId, otherEnvId) = await _f.SeedOtherOrgCustomerAsync();
+        await _f.InOtherOrgAsync(ctx => _f.Connections(ctx).InstallUploadedAppsAsync(
+            otherProjectId, otherEnvId, new[] { new UploadPackage(new byte[] { 1, 2, 3 }, "Sweden.app") },
+            UploadAppTiming.AtTime, _f.Clock.GetUtcNow().AddHours(2)));
 
         _f.Clock.Advance(TimeSpan.FromHours(3));
-        var sent = await _f.Worker().RunOneUploadAsync(CancellationToken.None);
+        for (var i = 0; i < 3; i++)
+        {
+            (await _f.Worker().RunOneUploadAsync(CancellationToken.None)).Should().BeTrue();
+        }
 
-        sent.Should().BeTrue();
-        _f.Apps.InstalledFiles.Should().Equal(new[] { "Waited.app" }, "the install that has waited longest takes the sweep's one turn");
+        _f.Apps.InstalledFiles.Take(2).Should().Equal(new[] { "A01.app", "Sweden.app" },
+            "the longest-waiting install goes first, then the organisation not yet served, not the rest of the twenty");
+        _f.Apps.InstalledFiles.Should().HaveCount(3);
+        _f.Apps.InstalledFiles[2].Should().NotBe("Sweden.app", "the turn comes back to the first organisation");
         await using var read = _f.Db.NewContext();
-        var other = await read.OeEnvironmentUpgradeActions.IgnoreQueryFilters().AsNoTracking().SingleAsync(a => a.Id == otherActionId);
-        other.Status.Should().Be(UpgradeActionStatus.Pending, "it waits for the next sweep");
-        other.SentAt.Should().BeNull();
+        var other = await read.OeEnvironmentUpgradeActions.IgnoreQueryFilters().AsNoTracking()
+            .SingleAsync(a => a.EnvironmentId == otherEnvId);
+        other.Status.Should().Be(UpgradeActionStatus.Sent);
+        other.RequestedByUserId.Should().Be(UpgradeActionTestFixture.OtherOrgOwnerUserId);
     }
 
     /// <summary>Sets an environment's delivery window and Microsoft's update window, as the environment page and a refresh would.</summary>

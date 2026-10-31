@@ -190,26 +190,33 @@ public sealed class UpgradeActionWorker : BackgroundService
     }
 
     /// <summary>
-    /// The sweep's one booked app install, across every organisation. The turn goes to the
-    /// organisation whose oldest due install (or install still owed a second look) has
-    /// waited longest, not to whichever comes first in the list, so one organisation's
-    /// long queue cannot hold back another's slot until it has drained (#1539). Still one
-    /// install in all - see the comment in <see cref="ExecuteAsync"/>. An organisation
-    /// whose due rows all turn out to be waiting (a batch gate, a window that closed)
-    /// passes the turn on. Internal so a test can drive the pass. True when one was sent.
+    /// The sweep's one booked app install, across every organisation, taken in turns
+    /// (#1539). Among the organisations with an install due (or one still owed a second
+    /// look), the turn goes to the one whose most recent install was sent longest ago -
+    /// one never served first - and only then to the longest-waiting due install, then the
+    /// lowest id. So a twenty-app batch booked for one organisation's opening alternates
+    /// with another organisation's install in the same window instead of running to the
+    /// end first; it does not speed anything up. The order is read from the rows each
+    /// sweep, so it survives a restart. Still one install in all - see the comment in
+    /// <see cref="ExecuteAsync"/>. An organisation whose due rows all turn out to be
+    /// waiting (a batch gate, a window that closed) passes the turn on. Internal so a test
+    /// can drive the pass. True when one was sent.
     /// </summary>
     internal async Task<bool> RunOneUploadAsync(CancellationToken ct)
     {
         var orgs = await ListOrgsAsync(ct).ConfigureAwait(false);
-        var oldest = new Dictionary<int, DateTime>();
+        var turns = new Dictionary<int, InstallTurn>();
         await RunForOrgsAsync(orgs, async (org, sys, token) =>
         {
-            if (await OldestDueInstallAsync(org, sys, token).ConfigureAwait(false) is { } at) oldest[org] = at;
+            if (await InstallTurnAsync(org, sys, token).ConfigureAwait(false) is { } turn) turns[org] = turn;
         }, ct).ConfigureAwait(false);
 
         var sent = false;
         await RunForOrgsAsync(
-            orgs.Where(o => oldest.ContainsKey(o.Id)).OrderBy(o => oldest[o.Id]).ThenBy(o => o.Id),
+            orgs.Where(o => turns.ContainsKey(o.Id))
+                .OrderBy(o => turns[o.Id].LastSentAt ?? DateTime.MinValue)
+                .ThenBy(o => turns[o.Id].OldestDue)
+                .ThenBy(o => o.Id),
             async (org, sys, token) =>
             {
                 if (sent) return;
@@ -218,21 +225,28 @@ public sealed class UpgradeActionWorker : BackgroundService
         return sent;
     }
 
-    /// <summary>When this org's longest-waiting install became due, or null when it has none to send or ask about again.</summary>
-    private async Task<DateTime?> OldestDueInstallAsync(int orgId, bool isSystem, CancellationToken ct)
+    /// <summary>Where one organisation stands for the install turn: when its last install went, and when its longest-waiting one came due.</summary>
+    private sealed record InstallTurn(DateTime? LastSentAt, DateTime OldestDue);
+
+    /// <summary>This org's place in the install turn, or null when it has nothing to send or ask about again.</summary>
+    private async Task<InstallTurn?> InstallTurnAsync(int orgId, bool isSystem, CancellationToken ct)
     {
         var now = _clock.GetUtcNow().UtcDateTime;
         using var ambient = AmbientOrganizationScope.Enter(
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        return await db.OeEnvironmentUpgradeActions.AsNoTracking()
+        var installs = db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp);
+        var oldestDue = await installs
             .Where(a => a.ConfirmationDue
-                        || (a.Status == UpgradeActionStatus.Pending
-                            && a.SentAt == null
-                            && a.ExecuteAfter <= now
-                            && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)))
+                        || (a.Status == UpgradeActionStatus.Pending && a.SentAt == null && a.ExecuteAfter <= now))
             .MinAsync(a => (DateTime?)a.ExecuteAfter, ct).ConfigureAwait(false);
+        if (oldestDue is not { } due) return null;
+        var lastSent = await installs
+            .Where(a => a.SentAt != null)
+            .MaxAsync(a => a.SentAt, ct).ConfigureAwait(false);
+        return new InstallTurn(lastSent, due);
     }
 
     /// <summary>Which of a sweep's two passes a call makes; <see cref="Both"/> is the one-call form a test drives.</summary>
@@ -338,8 +352,10 @@ public sealed class UpgradeActionWorker : BackgroundService
 
     /// <summary>
     /// The deliveries rule (#1124) for a booked install a window chose the time for: judged
-    /// against the environment's window as it is now, the same answer a booking made now
-    /// would get (the delivery window, else Microsoft's update window). When the window
+    /// against the window the booking applied, as it is now on the environment: the
+    /// delivery window for a DeliveryWindow row (Microsoft's, if the delivery window has
+    /// since been removed - where such a booking made now would land), Microsoft's update
+    /// window for a BcUpdateWindow row. When the window
     /// has closed, the row and the rest of its batch still waiting are moved to its next
     /// opening rather than sent. A time the person picked is never held back - those rows
     /// carry no window. Nothing is moved when no window is configured any more. The write

@@ -697,18 +697,23 @@ that names the environment and says what the click does there:
   has apps, no customer's agreed update slot waits behind another's install, and a sweep
   costs at most one install (the worker's heartbeat is ticked on every poll of it). "Now"
   therefore means "shortly", not "within a minute", when another install is running. That
-  one turn goes to the organisation whose due install has waited longest (the earliest
-  `execute_after` among its due installs and installs owed a second look), not to
-  whichever organisation the list happens to return first, so one organisation's long
-  queue cannot hold back another's slot until it has drained (#1539).
+  one turn rotates (#1539): among the organisations with an install due (or one owed a
+  second look), it goes to the one whose most recent install was sent longest ago - one
+  never served first - then to the longest-waiting due install. So a twenty-app batch
+  booked for one organisation's opening alternates with another organisation's install
+  in the same window instead of running to the end first. The order is read from the
+  rows each sweep, so it survives a restart. It shares the one install out; it does not
+  make the queue shorter.
 
   **A time a window chose stays inside the window** - the deployments rule (#1124),
   extended to booked installs (#1539). The row records which window applied
   (`scheduled_by_window`: `DeliveryWindow` or `BcUpdateWindow`, null for a picked time or
   now). One install at a time means a batch, or a queue of other bookings for the same
   opening, can outlast a two-hour window. So before sending a window-chosen upload or
-  AppSource update, the worker judges the moment against the environment's window as it
-  is now (the delivery window, else Microsoft's), and outside it moves that row and the
+  AppSource update, the worker judges the moment against the window the booking applied,
+  as it is now on the environment: the delivery window for a `DeliveryWindow` row (or
+  Microsoft's, if the delivery window has since been removed), Microsoft's for a
+  `BcUpdateWindow` row. Outside it, the worker moves that row and the
   rest of its batch still waiting to the next opening, with a log line, rather than
   installing into the customer's working day. A picked time runs when the person said,
   late or not, and Install now clears the mark because the person has then chosen the
