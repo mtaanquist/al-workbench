@@ -442,33 +442,45 @@ public sealed class UpgradeActionService
             .Select(e => new { e.Project!.BcTenantId, e.Name })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (here is null) return rows;
-        var key = UpgradeActionWorker.EnvironmentKey(here.BcTenantId, projectId, here.Name);
+        var name = here.Name.ToUpperInvariant();
 
         var now = _clock.GetUtcNow().UtcDateTime;
         var holding = EarlierBookingsThatHold(_db.OeEnvironmentUpgradeActions.AsNoTracking(), now);
-        // A shared environment's other solutions book on their own rows; a solution with no
-        // tenant yet counts as its own environment.
+        // A shared environment's other solutions book on their own rows, matched by name
+        // ignoring case (UpgradeActionWorker.EnvironmentKey); a solution with no tenant yet
+        // counts as its own environment.
         holding = here.BcTenantId is { } tenant
-            ? holding.Where(a => a.Project!.BcTenantId == tenant)
-            : holding.Where(a => a.ProjectId == projectId);
-        var holders = (await holding
-                .Select(a => new
-                {
-                    a.Id, a.ProjectId, a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt, a.BatchOrder,
-                    Label = a.PackageFileName ?? a.AppName,
-                })
-                .ToListAsync(ct).ConfigureAwait(false))
-            .Where(h => UpgradeActionWorker.EnvironmentKey(h.BcTenantId, h.ProjectId, h.Name) == key)
-            .OrderBy(h => h.RequestedAt).ThenBy(h => h.BatchOrder ?? 0).ThenBy(h => h.Id)
-            .ToList();
+            ? holding.Where(a => a.Project!.BcTenantId == tenant && a.Environment!.Name.ToUpper() == name)
+            : holding.Where(a => a.ProjectId == projectId && a.Environment!.Name.ToUpper() == name);
+        var holders = await holding
+            .OrderBy(a => a.RequestedAt).ThenBy(a => a.BatchOrder ?? 0).ThenBy(a => a.Id)
+            .Select(a => new { a.ProjectId, a.RequestedAt, Label = a.PackageFileName ?? a.AppName })
+            .ToListAsync(ct).ConfigureAwait(false);
         if (holders.Count == 0) return rows;
+
+        // The earlier booking may be another solution's, and a Private one this person cannot
+        // see: its app is named only when its solution is visible to them
+        // (.design/teams-and-visibility.md).
+        var holderProjects = holders.Select(h => h.ProjectId).Distinct().ToList();
+        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var visibleProjects = (await _db.OeProjects.AsNoTracking()
+                .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+                .Where(p => holderProjects.Contains(p.Id))
+                .Select(p => p.Id)
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToHashSet();
 
         var held = windowed.ToHashSet();
         return rows.Select(r =>
         {
             if (!held.Contains(r.Id)) return r;
             var first = holders.FirstOrDefault(h => h.RequestedAt < r.RequestedAt);
-            return first is null ? r : r with { WaitsFor = first.Label ?? "another app" };
+            if (first is null) return r;
+            return r with
+            {
+                WaitsForEarlierBooking = true,
+                WaitsFor = visibleProjects.Contains(first.ProjectId) ? first.Label : null,
+            };
         }).ToList();
     }
 
@@ -710,9 +722,16 @@ public sealed record UpgradeActionRow(
     Guid? AppId = null,
     /// <summary>The apps a booked AppSource update was agreed to bring along. Null for every other kind.</summary>
     IReadOnlyList<Guid>? PrerequisiteAppIds = null,
-    /// <summary>For a booked install that waits for one booked before it on the same environment (#1629), what that one installs. Null otherwise.</summary>
-    string? WaitsFor = null)
+    /// <summary>For a booked install that waits for one booked before it on the same environment (#1629), what that one installs: null when it is not waiting, or when the earlier booking is on a solution this person cannot see.</summary>
+    string? WaitsFor = null,
+    /// <summary>True when the install waits for one booked before it on the same environment (#1629), whether or not <see cref="WaitsFor"/> can name it.</summary>
+    bool WaitsForEarlierBooking = false)
 {
+    /// <summary>What a held booking says instead of "Starting shortly"; null when it is not held.</summary>
+    public string? WaitingText => !WaitsForEarlierBooking ? null
+        : WaitsFor is { } first ? $"Waits for {first}, booked before it"
+        : "Waits for an app booked before it on this environment";
+
     /// <summary>True while the action is still waiting for its slot — the only state with a Cancel.</summary>
     public bool IsPending => Status == UpgradeActionStatus.Pending;
 

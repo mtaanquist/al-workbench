@@ -2179,8 +2179,39 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await using var ctx = _f.Db.NewContext();
         var addOn = (await _f.Svc(ctx).ListBookedInstallsAsync(addOnProject, addOnEnv)).Single();
         addOn.WaitsFor.Should().Be("Base2.app");
+        addOn.WaitingText.Should().Be("Waits for Base2.app, booked before it");
         (await _f.Svc(ctx).ListEnvironmentActivityAsync(addOnProject, addOnEnv))
             .Single(r => r.Id == addOn.Id).WaitsFor.Should().Be("Base2.app");
+    }
+
+    [Fact]
+    public async Task A_held_add_on_does_not_name_a_base_on_a_solution_the_viewer_cannot_see()
+    {
+        var (addOnProject, addOnEnv, _, baseIds) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
+        // The base solution is Private to a team the viewer is not on.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var baseProject = await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == baseIds[0]).Select(a => a.ProjectId).SingleAsync();
+            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Base team", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+            ctx.Teams.Add(team);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjectTeams.Add(new OeProjectTeam
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = baseProject, TeamId = team.Id, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+            await ctx.OeProjects.Where(p => p.Id == baseProject)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+        }
+
+        _f.ActAs(UpgradeActionTestFixture.OutsiderUserId);
+        await using var read = _f.Db.NewContext();
+        var addOn = (await _f.Svc(read).ListBookedInstallsAsync(addOnProject, addOnEnv)).Single();
+
+        addOn.WaitsFor.Should().BeNull("the base's file is on a solution this person cannot see");
+        addOn.WaitingText.Should().Be("Waits for an app booked before it on this environment");
+        (await _f.Svc(read).ListEnvironmentActivityAsync(addOnProject, addOnEnv))
+            .Single(r => r.Id == addOn.Id).WaitingText.Should().Be("Waits for an app booked before it on this environment");
     }
 
     [Fact]

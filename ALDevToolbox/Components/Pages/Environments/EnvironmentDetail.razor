@@ -2281,7 +2281,7 @@
     private string BookedWhen(UpgradeActionRow booked) =>
         booked.SentAt is not null ? (booked.Kind == UpgradeActionKind.UpdateApp ? "Updating now" : "Installing now")
         : booked.ExecuteAfter <= Clock.GetUtcNow().UtcDateTime
-            ? (booked.WaitsFor is { } first ? $"Waits for {first}, booked before it" : "Starting shortly")
+            ? booked.WaitingText ?? "Starting shortly"
         : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
