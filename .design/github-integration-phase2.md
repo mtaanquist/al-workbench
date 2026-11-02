@@ -304,10 +304,15 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   extension delivery uses.
 - **The recipe id is in the branch name (#1600).** Names were `aldt/recipe-<slug>` at
   first, so two recipes whose titles slug the same shared one branch, and the second
-  apply joined the first recipe's pull request. The id keeps them apart. A pull request
-  opened under the old name is still joined until it is merged or closed: before the
-  walk starts a new branch, it asks the old names (`aldt/recipe-<slug>`, `-2`...) for an
-  open pull request, stopping at the first name with no branch.
+  apply joined the first recipe's pull request. The id keeps them apart. A recipe's pull
+  request opened under the old name is still joined until it is merged or closed: before
+  the walk starts a new branch, it asks the old names (`aldt/recipe-<slug>`, `-2`...) for
+  an open pull request, stopping at the first name with no branch. Because the old name
+  is shared by every recipe with that slug, one found there is joined only when its title
+  is this recipe's ("Apply the <title> recipe") and this recipe has been applied to that
+  repository before; otherwise a new-style branch is started. The new-style walk also
+  steps past an open pull request titled for another recipe, since an old name for a
+  title that starts with a number can equal a new one (`aldt/recipe-12-setup`).
 - **The tree's base is the target's own tree**, not always the default branch's -
   otherwise the second commit on a reused branch would silently revert the first.
   Files are still written over rather than merged, as the issue asks.

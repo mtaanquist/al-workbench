@@ -185,7 +185,7 @@ public sealed class GitHubRecipeDeliveryService
 
         var tree = await _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct);
         var message = target.ExistingPullRequest is null
-            ? $"Apply the {recipe.Title} recipe"
+            ? PullRequestTitle(recipe.Title)
             : $"Update the {recipe.Title} recipe";
         var commit = await _github.CreateCommitAsync(
             token, repo.Owner, repo.Name, message, tree, target.ParentSha, ct: ct);
@@ -210,7 +210,7 @@ public sealed class GitHubRecipeDeliveryService
 
         var pullRequest = target.ExistingPullRequest ?? await _github.CreatePullRequestAsync(
             token, repo.Owner, repo.Name,
-            title: $"Apply the {recipe.Title} recipe",
+            title: PullRequestTitle(recipe.Title),
             head: target.Branch,
             baseBranch: repo.DefaultBranch,
             body: BuildBody(recipe.Title, recipe.Description, recipe.Files.Count),
@@ -231,6 +231,9 @@ public sealed class GitHubRecipeDeliveryService
             repo, pullRequest, IsNewPullRequest: target.ExistingPullRequest is null, recipe.Files.Count);
     }
 
+    /// <summary>The title a recipe's pull request is opened with, and what tells it apart from another recipe's.</summary>
+    private static string PullRequestTitle(string recipeTitle) => $"Apply the {recipeTitle} recipe";
+
     /// <summary>Where the commit is going: which branch, what it is committed on top of, and the pull request it joins if there is one.</summary>
     private sealed record BranchTarget(string Branch, string ParentSha, GitHubPullRequest? ExistingPullRequest);
 
@@ -241,9 +244,12 @@ public sealed class GitHubRecipeDeliveryService
     /// apply lands in the review that is already running), or it does not exist
     /// at all (start it from the default branch). A branch whose pull request
     /// has been merged or closed is stepped past rather than reused - its
-    /// history is somebody's merged work. Before starting a new branch, a pull
-    /// request still open under the name used before the id was added is joined
-    /// instead (<see cref="FindLegacyOpenAsync"/>).
+    /// history is somebody's merged work. So is an open pull request whose
+    /// title names another recipe: an old-style name for a title that starts
+    /// with a number (recipe 7 "12 Setup") can equal this recipe's new-style
+    /// name (recipe 12 "Setup"). Before starting a new branch, a pull request
+    /// of this recipe still open under the name used before the id was added is
+    /// joined instead (<see cref="FindLegacyOpenAsync"/>).
     /// </summary>
     private async Task<BranchTarget> ChooseBranchAsync(
         string token, GitHubRepositorySummary repo, int recipeId, string recipeTitle, CancellationToken ct)
@@ -257,6 +263,13 @@ public sealed class GitHubRecipeDeliveryService
             var branch = attempt == 1 ? baseName : $"{baseName}-{attempt}";
 
             var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
+            if (open is { Title: { } openTitle } && openTitle != PullRequestTitle(recipeTitle))
+            {
+                _logger.LogInformation(
+                    "Branch {Branch} on {RepoFullName} has an open pull request for another recipe; trying the next name.",
+                    branch, repo.FullName);
+                continue;
+            }
             if (open is not null)
             {
                 var head = await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct)
@@ -268,7 +281,7 @@ public sealed class GitHubRecipeDeliveryService
 
             if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is null)
             {
-                if (await FindLegacyOpenAsync(token, repo, BranchPrefix + titlePart, ct) is { } legacy)
+                if (await FindLegacyOpenAsync(token, repo, recipeId, recipeTitle, BranchPrefix + titlePart, ct) is { } legacy)
                 {
                     return legacy;
                 }
@@ -291,22 +304,35 @@ public sealed class GitHubRecipeDeliveryService
     }
 
     /// <summary>
-    /// A pull request still open on a branch named the way they were before the
-    /// recipe id joined the name (<c>aldt/recipe-&lt;slug&gt;</c>, <c>-2</c>...). It
-    /// keeps that name until it is merged or closed, so an apply joins it rather
-    /// than opening a second review beside it (#1600). The walk stops at the first
-    /// name with no branch, as the old walk would have.
+    /// This recipe's pull request still open on a branch named the way they were
+    /// before the recipe id joined the name (<c>aldt/recipe-&lt;slug&gt;</c>,
+    /// <c>-2</c>...). It keeps that name until it is merged or closed, so an
+    /// apply joins it rather than opening a second review beside it (#1600).
+    ///
+    /// <para>The old name is the slug alone, which is what two recipes share, so
+    /// a pull request found there is joined only when it is this recipe's: its
+    /// title is the one this recipe opens with, and this recipe has been applied
+    /// to this repository before. Anything else is left alone and the apply
+    /// starts a new-style branch. So does a pull request whose branch is gone:
+    /// the walk stops at the first name with no branch, without the refusal
+    /// the main walk gives for that case.</para>
     /// </summary>
     private async Task<BranchTarget?> FindLegacyOpenAsync(
-        string token, GitHubRepositorySummary repo, string legacyBase, CancellationToken ct)
+        string token, GitHubRepositorySummary repo, int recipeId, string recipeTitle, string legacyBase,
+        CancellationToken ct)
     {
+        var expectedTitle = PullRequestTitle(recipeTitle);
+        bool? appliedHere = null;
         for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
         {
             var branch = attempt == 1 ? legacyBase : $"{legacyBase}-{attempt}";
             var head = await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct);
             if (head is null) return null;
             var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
-            if (open is not null) return new BranchTarget(branch, head, open);
+            if (open is null || open.Title != expectedTitle) continue;
+            appliedHere ??= (await _recipes.GetAppliedRepositoriesAsync(recipeId, ct))
+                .Contains(repo.FullName, StringComparer.OrdinalIgnoreCase);
+            if (appliedHere == true) return new BranchTarget(branch, head, open);
         }
         return null;
     }
