@@ -29,6 +29,9 @@ public sealed class InFlightCommandTrackerTests : IDisposable
     {
         await using (var ctx = NewTrackedContext())
         {
+            // Open first, and only then start the clock, so it is the command that is
+            // cancelled and not the connection open (which has its own test below).
+            await ctx.Database.OpenConnectionAsync();
             using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
             var slow = () => ctx.Database.ExecuteSqlRawAsync("SELECT pg_sleep(30)", cancel.Token);
             await slow.Should().ThrowAsync<OperationCanceledException>();
