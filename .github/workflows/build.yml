@@ -215,6 +215,14 @@ jobs:
             --project ALDevToolbox --startup-project ALDevToolbox \
             --no-build --configuration Release
 
+      - name: Show the runner's CPU
+        # Hosted runners differ: the same suite took 11 to 18 minutes across
+        # runs (#1584). Printing the CPU lets a slow run be put down to its
+        # runner. Judge a perf change on several runs, not one step time.
+        run: |
+          echo "nproc: $(nproc)"
+          lscpu | grep 'Model name' || true
+
       - name: Test
         # xUnit v3 runs on Microsoft.Testing.Platform (see global.json's `test`
         # section). VSTest options like --logger are not recognised there: the

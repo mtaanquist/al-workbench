@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
@@ -18,8 +19,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// the victim would receive a genuine email whose single-use token pointed at
 /// the attacker. With PUBLIC_BASE_URL set the forged host must be ignored.
 /// </summary>
-// Sets PUBLIC_BASE_URL, which startup reads off the environment.
-[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class CredentialEmailLinkTests : IDisposable
 {
     private const string PublicBaseUrl = "https://workbench.cronus.example";
@@ -31,6 +30,15 @@ public sealed class CredentialEmailLinkTests : IDisposable
 
     public void Dispose() => _db.Dispose();
 
+    /// <summary>
+    /// Stands in for PUBLIC_BASE_URL. Startup only parses the variable into
+    /// this singleton, so registering it directly tests the same thing without
+    /// setting a process-wide variable, which would force this class to run
+    /// alone after everything else (#1584).
+    /// </summary>
+    private static void WithOrigin(IServiceCollection services, string? configured) =>
+        services.AddSingleton(new PublicOrigin(PublicOrigin.Parse(configured)));
+
     [Fact]
     public async Task Reset_link_uses_the_configured_public_base_url_not_the_request_host()
     {
@@ -38,8 +46,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
         var email = new CapturingEmailService();
         using var factory = new EndpointFactory(
             _db,
-            services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = PublicBaseUrl });
+            services => WithOrigin(services.AddSingleton<IEmailService>(email), PublicBaseUrl));
 
         await PostForgotPasswordAsync(factory, forgedHost: "attacker.example");
 
@@ -60,8 +67,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
         var email = new CapturingEmailService();
         using var factory = new EndpointFactory(
             _db,
-            services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = null });
+            services => WithOrigin(services.AddSingleton<IEmailService>(email), configured: null));
 
         await PostForgotPasswordAsync(factory, forgedHost: "fallback.example");
 
@@ -81,8 +87,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
         var email = new CapturingEmailService();
         using var factory = new EndpointFactory(
             _db,
-            services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = PublicBaseUrl });
+            services => WithOrigin(services.AddSingleton<IEmailService>(email), PublicBaseUrl));
         using var client = await SignedInAdminAsync(factory);
 
         using var page = await client.GetAsync("/admin/administration/users");

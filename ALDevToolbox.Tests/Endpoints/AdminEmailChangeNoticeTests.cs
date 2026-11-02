@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
@@ -17,8 +18,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// stop it) and once when it goes through. A change whose notice can't be sent
 /// is not made at all, and the admin is never handed a confirmation link.
 /// </summary>
-// Sets PUBLIC_BASE_URL, which startup reads off the environment.
-[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class AdminEmailChangeNoticeTests : IDisposable
 {
     private const string AdminEmail = "sam.berg@cronus.example";
@@ -203,8 +202,8 @@ public sealed class AdminEmailChangeNoticeTests : IDisposable
     }
 
     private EndpointFactory NewFactory(FakeEmail email) =>
-        new(_db, services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = "https://workbench.cronus.example" });
+        new(_db, services => services.AddSingleton<IEmailService>(email)
+            .AddSingleton(new PublicOrigin(PublicOrigin.Parse("https://workbench.cronus.example"))));
 
     private static async Task<HttpResponseMessage> PostChangeAsync(HttpClient client, int memberId)
     {

@@ -482,12 +482,11 @@ public sealed class NewWorkspaceTests : IDisposable
     /// </summary>
     private async Task ConnectGitHubAsync()
     {
-        using var rsa = System.Security.Cryptography.RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(
             new ALDevToolbox.Services.Operations.GitHubAppInput(
                 AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
                 ClientSecret: "s3cr3t", ClearClientSecret: false,
-                PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+                PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new ALDevToolbox.Domain.Entities.OrganizationSettings

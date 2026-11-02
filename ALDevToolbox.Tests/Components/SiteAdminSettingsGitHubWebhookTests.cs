@@ -217,11 +217,10 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
 
     private async Task StoreWebhookSecretAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: null,
             ClientSecret: null, ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false,
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false,
             WebhookSecret: "swordfish", ClearWebhookSecret: false));
     }
 }

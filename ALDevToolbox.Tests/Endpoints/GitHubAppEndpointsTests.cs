@@ -119,12 +119,11 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
             try
             {
                 if (_configured) return;
-                using var rsa = RSA.Create(2048);
                 await using var scope = Factory.Services.CreateAsyncScope();
                 await scope.ServiceProvider.GetRequiredService<SystemSettingsService>().SaveGitHubAppAsync(new GitHubAppInput(
                     AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
                     ClientSecret: "s3cr3t", ClearClientSecret: false,
-                    PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+                    PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
                 _configured = true;
             }
             finally
