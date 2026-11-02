@@ -302,7 +302,7 @@ public sealed class OffsiteRestoreWorker : BackgroundService
         var released = counted ? 0 : 1;
         void ReleaseJob()
         {
-            if (Interlocked.Exchange(ref released, 1) == 0) _maintenance.EndJob();
+            if (Interlocked.Exchange(ref released, 1) == 0) _maintenance.EndJob(nameof(OffsiteRestoreWorker));
         }
         try
         {
@@ -324,7 +324,7 @@ public sealed class OffsiteRestoreWorker : BackgroundService
         var logged = false;
         while (true)
         {
-            if (_maintenance.TryBeginJob()) return true;
+            if (_maintenance.TryBeginJob(nameof(OffsiteRestoreWorker))) return true;
             if (_maintenance.IsHeldAfterFailedRestore) return false;
             if (!logged)
             {

@@ -100,7 +100,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         // endpoint had filled the queue meanwhile, after GitHub had been told 202
         // (#1599). Counting it before it runs also closes the gap where a refused restore
         // reopened the site between the base's check and this one.
-        if (!_maintenance.TryBeginJob())
+        if (!_maintenance.TryBeginJob(nameof(GitHubPullRequestBuildWorker)))
         {
             _logger.LogInformation(
                 "Holding a webhook delivery for {Job}: maintenance mode is active ({Reason}).",
@@ -112,7 +112,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
             {
                 await WaitUntilOpenAsync(ct).ConfigureAwait(false);
             }
-            while (!_maintenance.TryBeginJob());
+            while (!_maintenance.TryBeginJob(nameof(GitHubPullRequestBuildWorker)));
             Heartbeat.BeginActive();
         }
         try
@@ -124,7 +124,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         }
         finally
         {
-            _maintenance.EndJob();
+            _maintenance.EndJob(nameof(GitHubPullRequestBuildWorker));
         }
     }
 

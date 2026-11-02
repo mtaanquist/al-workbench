@@ -172,8 +172,9 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
     /// Claims the key's in-flight slot. False when one is already queued or running; on
     /// a re-running queue, a request for a running key is kept for after it.
     /// </summary>
-    private bool TryClaim(TJob job, TKey key)
+    private bool TryClaim(TJob job, TKey key, out Slot claimed)
     {
+        claimed = null!;
         lock (_gate)
         {
             // A slot left queued from before a restore is free: its job is dropped at
@@ -188,14 +189,23 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
                 }
                 return false;
             }
-            _inFlight[key] = new Slot { Epoch = CurrentEpoch };
+            claimed = new Slot { Epoch = CurrentEpoch };
+            _inFlight[key] = claimed;
             return true;
         }
     }
 
-    private void Release(TKey key)
+    /// <summary>
+    /// Gives up the slot <paramref name="claimed"/> when its write failed, but only that
+    /// one: a restore in between frees the key, and a newer request may have claimed it
+    /// since (#1579).
+    /// </summary>
+    private void Release(TKey key, Slot claimed)
     {
-        lock (_gate) _inFlight.Remove(key);
+        lock (_gate)
+        {
+            if (_inFlight.TryGetValue(key, out var slot) && ReferenceEquals(slot, claimed)) _inFlight.Remove(key);
+        }
     }
 
     /// <summary>
@@ -220,9 +230,9 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
     {
         ArgumentNullException.ThrowIfNull(job);
         var key = _keySelector(job);
-        if (!TryClaim(job, key)) return false;
+        if (!TryClaim(job, key, out var claimed)) return false;
         if (TryWrite(job)) return true;
-        Release(key);
+        Release(key, claimed);
         return false;
     }
 
@@ -238,7 +248,7 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
         // Claim the in-flight slot first so a concurrent enqueue for the same key loses
         // the race and coalesces. Released by Complete() (worker) or here if the write
         // itself fails.
-        if (!TryClaim(job, key)) return false;
+        if (!TryClaim(job, key, out var claimed)) return false;
         try
         {
             await base.EnqueueAsync(job, ct).ConfigureAwait(false);
@@ -246,7 +256,7 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
         }
         catch
         {
-            Release(key);
+            Release(key, claimed);
             throw;
         }
     }
@@ -276,6 +286,7 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
     public void Complete(TKey key)
     {
         TJob rerun;
+        Slot claimed;
         lock (_gate)
         {
             if (!_inFlight.TryGetValue(key, out var slot)) return;
@@ -285,10 +296,11 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
                 return;
             }
             rerun = slot.Rerun!;
-            _inFlight[key] = new Slot { Epoch = CurrentEpoch };
+            claimed = new Slot { Epoch = CurrentEpoch };
+            _inFlight[key] = claimed;
         }
         // Never waits: a full queue drops the re-run as it would any request that found
         // no room, and the gate reopens for the next one.
-        if (!TryWrite(rerun)) Release(key);
+        if (!TryWrite(rerun)) Release(key, claimed);
     }
 }

@@ -186,8 +186,9 @@ internal sealed class UpgradeActionTestFixture : IDisposable
             services.GetRequiredService<IOrganizationContext>());
     }
 
-    public UpgradeActionWorker Worker(WorkerHeartbeatRegistry? heartbeats = null) => new(
-        Provider(), Clock, NullLogger<UpgradeActionWorker>.Instance, heartbeats ?? new WorkerHeartbeatRegistry());
+    public UpgradeActionWorker Worker(
+        WorkerHeartbeatRegistry? heartbeats = null, ALDevToolbox.Services.Operations.MaintenanceModeState? maintenance = null) => new(
+        Provider(), Clock, NullLogger<UpgradeActionWorker>.Instance, heartbeats ?? new WorkerHeartbeatRegistry(), maintenance);
 
     /// <summary>A token service whose every request succeeds, for a page test that drives the real services.</summary>
     public BcTokenService TokenService() => TokenOk();

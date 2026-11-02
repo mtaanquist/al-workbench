@@ -117,7 +117,7 @@ public abstract class PolledScheduler : BackgroundService
     {
         // Counted on the flag while it runs, so a restore that starts mid-sweep waits
         // for the sweep to finish (or refuses) before it drops anything.
-        if (_maintenance is not null && !_maintenance.TryBeginJob())
+        if (_maintenance is not null && !_maintenance.TryBeginJob(_name))
         {
             _logger.LogDebug("{Scheduler} skipped a poll: maintenance mode is active.", _name);
             return false;
@@ -133,7 +133,7 @@ public abstract class PolledScheduler : BackgroundService
         }
         finally
         {
-            _maintenance?.EndJob();
+            _maintenance?.EndJob(_name);
         }
         return true;
     }

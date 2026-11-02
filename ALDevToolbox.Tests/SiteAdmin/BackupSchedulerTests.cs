@@ -229,6 +229,56 @@ public sealed class BackupSchedulerTests : IDisposable
         Runs(runs).Should().Be(1, "the full backup was already done for today");
     }
 
+    /// <summary>
+    /// Shutting down in the middle of an organisation's snapshot is not that
+    /// organisation's failure: the tick stops, and no retry pause is recorded, so the
+    /// next run takes the snapshot straight away (#1550).
+    /// </summary>
+    [Fact]
+    public async Task Cancelling_during_a_snapshot_stops_the_tick_and_records_no_retry_pause()
+    {
+        await SeedSettingsAsync(enabled: true, scheduledTimeUtc: new TimeOnly(2, 0));
+        _clock.Advance(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(5));
+        var options = _options with { PgDumpPath = StubPgDump(exitCode: 0, out _) };
+        var scheduler = NewScheduler();
+        using var shutdown = new CancellationTokenSource();
+
+        var act = () => TickOnceAsync(scheduler, options, new CancelInsideSnapshot(shutdown), shutdown.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        (await SnapshotCountAsync(TestDb.DefaultOrgId)).Should().Be(0);
+        (await SnapshotCountAsync(TestDb.OtherOrgId)).Should().Be(0, "the tick stopped rather than moving on to the next organisation");
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await TickOnceAsync(scheduler, options);
+        (await SnapshotCountAsync(TestDb.DefaultOrgId)).Should().Be(1, "no pause was recorded, so the next poll takes it");
+        (await SnapshotCountAsync(TestDb.OtherOrgId)).Should().Be(1);
+    }
+
+    /// <summary>
+    /// Cancels the tick's token once a snapshot is under way: the first organisations
+    /// read after the scheduler has looked for an organisation's last snapshot is the
+    /// snapshot's own.
+    /// </summary>
+    private sealed class CancelInsideSnapshot : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        private readonly CancellationTokenSource _shutdown;
+        private bool _lookedForLastSnapshot;
+
+        public CancelInsideSnapshot(CancellationTokenSource shutdown) => _shutdown = shutdown;
+
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("per_tenant_backups")) _lookedForLastSnapshot = true;
+            else if (_lookedForLastSnapshot && command.CommandText.Contains("organizations")) _shutdown.Cancel();
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
     private async Task<int> SnapshotCountAsync(int organizationId)
     {
         await using var read = _db.NewContext();
@@ -327,11 +377,12 @@ public sealed class BackupSchedulerTests : IDisposable
     private static int Runs(string counterPath) =>
         File.Exists(counterPath) ? File.ReadAllLines(counterPath).Length : 0;
 
-    private async Task TickOnceAsync(BackupScheduler? scheduler = null, BackupOptions? options = null)
+    private async Task TickOnceAsync(BackupScheduler? scheduler = null, BackupOptions? options = null,
+        Microsoft.EntityFrameworkCore.Diagnostics.IInterceptor? interceptor = null, CancellationToken ct = default)
     {
         scheduler ??= NewScheduler();
         options ??= _options;
-        await using var ctx = _db.NewContext();
+        await using var ctx = interceptor is null ? _db.NewContext() : _db.NewContext(interceptor);
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ConnectionStrings:DefaultConnection"] = ctx.Database.GetConnectionString(),
@@ -348,6 +399,6 @@ public sealed class BackupSchedulerTests : IDisposable
         var offsite = new OffsiteBackupService(
             ctx, systemSettings, backups, perTenant, providerFactory, NullLogger<OffsiteBackupService>.Instance, _clock,
             DeploymentIdentity.LoadOrCreate(Path.Combine(Path.GetTempPath(), "aldt-test-" + Guid.NewGuid().ToString("N")), NullLogger.Instance));
-        await scheduler.TickOnceAsync(ctx, backups, perTenant, offsite, CancellationToken.None);
+        await scheduler.TickOnceAsync(ctx, backups, perTenant, offsite, ct);
     }
 }

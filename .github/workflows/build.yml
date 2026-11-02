@@ -3,7 +3,8 @@ name: build
 on:
   # The workflow always triggers; the `changes` job below decides whether the
   # heavy jobs (build/test, compose-smoke, migration-forward-compat) run. A
-  # docs-only change still skips all the expensive work — but the final
+  # docs-only pull request still skips all the expensive work (a push always
+  # runs it, so the cache and the image are built from main) — but the final
   # `ci-gate` job *always* runs and reports a conclusion, so it can be the
   # single required status check on `protect-main` without deadlocking a
   # docs-only PR (the classic paths-ignore + required-check trap: a required
@@ -302,9 +303,12 @@ jobs:
           load: true
           tags: ${{ steps.image.outputs.name }}
           # Same default cache scope as release.yml, so main-branch runs warm
-          # the cache the release build reads and vice versa.
+          # the cache the release build reads and vice versa. Only pushes write
+          # it: a pull request's cache is readable by that pull request alone,
+          # yet counts against the repository's 10 GB and can evict the entries
+          # the release build reads (#1579).
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
 
       - name: Start the stack
         # Postgres is pulled first because `--pull never` applies to every
