@@ -453,9 +453,6 @@ public sealed class BackupService
                     + "Wait a few minutes, or until it has finished, then restore. Nothing was changed.",
             });
         }
-        // Commands the database guard is holding would only be refused after this,
-        // and each keeps a pooled connection open; let them go now (#1599).
-        _maintenance.MarkRestoreGoingAhead();
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
         var destructive = CancellationToken.None;
@@ -472,6 +469,11 @@ public sealed class BackupService
                 "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
                 destructive);
             dropped = true;
+            // Commands the database guard is holding can only be refused from here on,
+            // and each keeps a pooled connection open; let them go now. Not before the
+            // drop: a drop that fails reopens the site on the same database, and what
+            // they belong to must be able to finish (#1599).
+            _maintenance.MarkRestoreGoingAhead();
 
             var builder = new NpgsqlConnectionStringBuilder(_connectionString);
             await RunPgToolAsync(

@@ -51,7 +51,8 @@ namespace ALDevToolbox.Data;
 /// is the one it started on. It is refused if a restore replaced the database,
 /// and at once if the restore has already gone ahead; after that refusal the
 /// scope's later commands are refused too, so the work's failure handling does
-/// not write into the restored database. Two kinds
+/// not write into the restored database (for an open page that means until it
+/// is reloaded, which the circuit handler does after maintenance). Two kinds
 /// are still refused at once: a command inside an open transaction, whose locks
 /// would keep the restore from dropping the schema (it rolls back, and what
 /// the work does after that is held as usual), and a synchronous command,
