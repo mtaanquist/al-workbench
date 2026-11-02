@@ -1074,6 +1074,9 @@
     private async Task ReloadProceduresAsync()
     {
         var trimmedSearch = string.IsNullOrWhiteSpace(_search) ? null : _search;
+        // Back to loading first, so the first keystroke after the prompt does not
+        // flash "No procedures match" over the empty list the prompt left behind.
+        _procedureResults = null;
         // One past the cap, so the tab can say when it was cut (OEX2-6).
         var procedures = await Search.SearchProceduresInReleaseAsync(
             ReleaseId, trimmedSearch, CurrentModuleId, take: ProcedureCap + 1, includeInherited: _includeInherited);

@@ -1599,6 +1599,28 @@ public sealed class McpToolTests : IDisposable
         row.HasStoredSymbolReference.Should().BeTrue("the seed imported with storeSymbolReference: true");
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task SearchProcedures_refuses_a_blank_pattern_without_a_module(string pattern)
+    {
+        var releaseId = await SeedDkCoreReleaseAsync(label: "MCP procs blank " + pattern.Length);
+        await using var ctx = _db.NewContext();
+        var moduleId = await ctx.OeModules.AsNoTracking()
+            .Where(m => m.ReleaseId == releaseId)
+            .Select(m => m.Id)
+            .SingleAsync();
+        var tools = NewOeTools(ctx);
+
+        // A blank pattern over a whole release is refused with a reason, not an empty list.
+        await FluentActions.Awaiting(() => tools.SearchProceduresAsync(releaseId.ToString(), pattern))
+            .Should().ThrowAsync<McpException>().WithMessage("*namePattern*moduleId*");
+
+        // With a module it lists that module's procedures.
+        await FluentActions.Awaiting(() => tools.SearchProceduresAsync(releaseId.ToString(), pattern, moduleId))
+            .Should().NotThrowAsync();
+    }
+
     [Fact]
     public async Task ListReleaseModules_marks_modules_without_stored_symbol_reference()
     {
