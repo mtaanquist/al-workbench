@@ -70,9 +70,78 @@ public sealed class AccessTokenStepUpTests : IClassFixture<SharedEndpointHost>
         using var response = await CreateAsync(client, token);
 
         response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        // What was typed comes back with the person, so the form isn't empty (#1627).
         response.Headers.Location!.OriginalString.Should().Be(
-            StepUpEndpoints.Url(AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl));
+            StepUpEndpoints.Url(AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl + "&name=Cursor%20on%20laptop&ttl=0"));
         (await TokenCountAsync(userId)).Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("999999999")]
+    [InlineData("7")]
+    [InlineData("")]
+    public async Task An_expiry_the_form_does_not_offer_is_refused_without_an_error_page(string ttlDays)
+    {
+        // A hand-made post used to reach DateTime.AddDays and answer 500 (#1627).
+        var userId = await SeedUserAsync();
+        using var client = await SignInWithPasswordAsync();
+        var token = await PageTokenAsync(client);
+
+        using var response = await PostFormAsync(client, CreatePath, token, ("Name", "Script"), ("TtlDays", ttlDays));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.OriginalString.Should().StartWith("/account/ai?err=");
+        (await TokenCountAsync(userId)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Creating_a_token_emails_the_owner()
+    {
+        var userId = await SeedUserAsync();
+        using var client = await SignInWithPasswordAsync();
+        var token = await PageTokenAsync(client);
+
+        using (var response = await CreateAsync(client, token))
+        {
+            response.Headers.Location!.OriginalString.Should().Be("/account/access-tokens/created");
+        }
+
+        await using var read = _db.NewContext();
+        var notice = await read.EmailOutboxMessages.IgnoreQueryFilters().AsNoTracking()
+            .SingleAsync(m => m.ToEmail == _email && m.Purpose == EmailPurpose.AccessTokenCreated);
+        notice.Subject.Should().Be(ALDevToolbox.Components.Email.AccessTokenCreatedEmail.Subject);
+    }
+
+    [Fact]
+    public async Task After_a_step_up_the_tab_opens_the_form_filled_in_with_what_was_typed()
+    {
+        var userId = await SeedUserAsync();
+        var recoveryCodes = await EnrolTotpAsync(userId);
+        using var client = await SignInWithRecoveryCodeAsync(recoveryCodes[0]);
+        await MarkStepUpAsync(ToolKey.Releases);
+
+        using var page = await client.GetAsync(AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl + "&name=Cursor%20on%20laptop&ttl=365");
+
+        var html = WebUtility.HtmlDecode(await page.Content.ReadAsStringAsync());
+        html.Should().Contain("action=\"/auth/account/access-tokens/create\"", "a fresh session gets the form straight away");
+        html.Should().MatchRegex("name=\"Name\"[^>]*value=\"Cursor on laptop\"");
+        html.Should().MatchRegex("<option value=\"365\" selected");
+        html.Should().Contain("You're confirmed.");
+    }
+
+    [Fact]
+    public async Task Coming_back_still_stale_keeps_the_form_closed_and_says_nothing_about_being_confirmed()
+    {
+        await SeedUserAsync();
+        using var client = await SignInWithPasswordAsync();
+        await MarkStepUpAsync(ToolKey.Releases);
+
+        using var page = await client.GetAsync(AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl);
+
+        var html = WebUtility.HtmlDecode(await page.Content.ReadAsStringAsync());
+        html.Should().NotContain("action=\"/auth/account/access-tokens/create\"", "the backstop would only bounce it");
+        html.Should().NotContain("You're confirmed.");
+        html.Should().Contain("href=\"" + StepUpEndpoints.Url(AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl) + "\"");
     }
 
     [Fact]
@@ -103,6 +172,8 @@ public sealed class AccessTokenStepUpTests : IClassFixture<SharedEndpointHost>
         var html = await page.Content.ReadAsStringAsync();
         html.Should().Contain(
             "href=\"" + StepUpEndpoints.Url(AccountPasskeyEndpoints.CreateTokenAfterStepUpUrl) + "\"");
+        WebUtility.HtmlDecode(html).Should().Contain("We'll ask you to confirm it's you first.", "the detour is announced, as on Add a passkey (#1627)");
+        html.Should().NotContain("action=\"/auth/account/access-tokens/create\"");
     }
 
     [Fact]
