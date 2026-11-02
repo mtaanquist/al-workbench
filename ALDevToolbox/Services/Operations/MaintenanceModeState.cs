@@ -99,6 +99,16 @@ public sealed class MaintenanceModeState
         Interlocked.Increment(ref _epoch);
     }
 
+    private long _activeJobsWaitTicks;
+
+    /// <summary>
+    /// How long the last <see cref="WaitForActiveJobsAsync"/> was given: how long a
+    /// restore may wait, after turning the flag on, before it gives up and reopens the
+    /// site. The database guard holds a command for that long (plus a margin) rather
+    /// than refusing it (#1599).
+    /// </summary>
+    public TimeSpan ActiveJobsWait => TimeSpan.FromTicks(Interlocked.Read(ref _activeJobsWaitTicks));
+
     /// <summary>Background jobs that have started and not finished.</summary>
     public int ActiveJobs => Volatile.Read(ref _activeJobs);
 
@@ -223,6 +233,7 @@ public sealed class MaintenanceModeState
     /// </summary>
     public async Task<bool> WaitForActiveJobsAsync(TimeSpan timeout, CancellationToken ct)
     {
+        Interlocked.Exchange(ref _activeJobsWaitTicks, timeout.Ticks);
         var deadline = DateTime.UtcNow + timeout;
         while (ActiveJobs > 0)
         {

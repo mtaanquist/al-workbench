@@ -24,13 +24,101 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
 
     public void Dispose() => _db.Dispose();
 
-    private AppDbContext NewGuardedContext(bool siteAdmin = false, string? requestPath = null) =>
-        _db.NewContext(NewGuard(siteAdmin, requestPath));
+    // No hold by default: the restore in these tests never sets a wait, so a command
+    // with no allowance is refused as soon as it is held. The hold has tests of its own.
+    private AppDbContext NewGuardedContext(bool siteAdmin = false, string? requestPath = null, TimeSpan? hold = null) =>
+        _db.NewContext(NewGuard(siteAdmin, requestPath, hold));
 
-    private MaintenanceDatabaseGuard NewGuard(bool siteAdmin = false, string? requestPath = null) =>
+    private MaintenanceDatabaseGuard NewGuard(bool siteAdmin = false, string? requestPath = null, TimeSpan? hold = null) =>
         new(_maintenance,
             new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId, IsSiteAdmin = siteAdmin },
-            new TestDb.FixedHttpContextAccessor(requestPath is null ? null : new DefaultHttpContext { Request = { Path = requestPath } }));
+            new TestDb.FixedHttpContextAccessor(requestPath is null ? null : new DefaultHttpContext { Request = { Path = requestPath } }),
+            hold ?? TimeSpan.Zero);
+
+    // ---- Work already running when a restore begins is held, not refused (#1599) ----
+
+    /// <summary>
+    /// A restore that is refused reopens the site on the same database. Work that was
+    /// part-way through (an upload, Add modules, a Retry) must be able to finish, or the
+    /// rows it already committed stay "importing" with nothing behind them.
+    /// </summary>
+    [Fact]
+    public async Task A_write_held_during_a_restore_that_is_refused_runs_once_the_site_reopens()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        await ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+        var before = _maintenance.Capture();
+        _maintenance.Enter("Restoring backup test.dump");
+
+        var user = NewUser();
+        ctx.Users.Add(user);
+        var save = ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        save.IsCompleted.Should().BeFalse("the write waits for the restore rather than being refused");
+        _maintenance.ActiveJobs.Should().Be(0, "a held command is not counted, so the restore does not wait for it");
+
+        // The restore gives up and puts the site back as it was.
+        _maintenance.Restore(before);
+
+        await save.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        await using var check = _db.NewContext();
+        (await check.Users.AsNoTracking().AnyAsync(u => u.Email == user.Email, TestContext.Current.CancellationToken))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_write_held_while_a_restore_replaces_the_database_is_refused()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        _maintenance.Enter("Restoring backup test.dump");
+
+        var user = NewUser();
+        ctx.Users.Add(user);
+        var save = ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        _maintenance.AdvanceEpoch();
+        _maintenance.Exit();
+
+        var wait = () => save.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        (await wait.Should().ThrowAsync<DbUpdateException>())
+            .WithInnerException<DatabaseClosedForMaintenanceException>("what it was part of was in the database that was replaced");
+        await using var check = _db.NewContext();
+        (await check.Users.AsNoTracking().AnyAsync(u => u.Email == user.Email, TestContext.Current.CancellationToken))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_held_command_is_refused_once_the_restore_has_waited_its_time_and_the_margin()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromMilliseconds(300));
+        _maintenance.Enter("Restoring backup test.dump");
+        (await _maintenance.WaitForActiveJobsAsync(TimeSpan.FromMilliseconds(200), TestContext.Current.CancellationToken))
+            .Should().BeTrue();
+
+        var read = () => ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+
+        await read.Should().ThrowAsync<DatabaseClosedForMaintenanceException>("the restore went ahead, so the site stays closed");
+        _maintenance.ActiveJobs.Should().Be(0);
+    }
+
+    /// <summary>
+    /// A command in an open transaction is refused at once: holding it would keep the
+    /// transaction's locks, and the restore's drop would wait on them.
+    /// </summary>
+    [Fact]
+    public async Task A_command_inside_an_open_transaction_is_refused_at_once()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        await using var tx = await ctx.Database.BeginTransactionAsync(TestContext.Current.CancellationToken);
+        await ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+        _maintenance.Enter("Restoring backup test.dump");
+
+        var read = () => ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        await read.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5), "it is not held");
+    }
 
     [Fact]
     public async Task While_the_site_is_open_commands_run_and_release_their_count()

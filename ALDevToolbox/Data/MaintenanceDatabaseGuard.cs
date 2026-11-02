@@ -40,10 +40,20 @@ namespace ALDevToolbox.Data;
 /// uncounted when the restore began, and any write by a request that arrived
 /// during the restore are refused.</item>
 /// </list>
-/// A guarantee per command, not per operation: something that issued its
-/// first command before the restore began has its later ones refused. That is
-/// deliberate, since the restore replaces whatever it would have written.
-/// Commands sent on a raw connection outside EF are not seen.
+/// A guarantee per command, not per operation. Something that issued its first
+/// command before the restore began, and so has no allowance, has its later
+/// async commands held rather than refused (#1599): a restore that is refused,
+/// or fails before dropping anything, reopens the site on the same database,
+/// and work refused part-way would leave rows it had already committed (a
+/// release left "importing") with nothing to put them right. A held command
+/// waits for the flag to clear, for no longer than the restore waits for
+/// running jobs plus <see cref="HoldMargin"/>, and then runs if the database
+/// is the one it started on, or is refused if a restore replaced it. Two kinds
+/// are still refused at once: a command inside an open transaction, whose locks
+/// would keep the restore from dropping the schema (it rolls back, and what
+/// the work does after that is held as usual), and a synchronous command,
+/// which would block its thread. Commands sent on a raw connection outside EF
+/// are not seen.
 /// </summary>
 public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
 {
@@ -53,12 +63,16 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     private readonly IOrganizationContext _org;
     private readonly IHttpContextAccessor? _http;
     private readonly ConditionalWeakTable<DbCommand, object> _counted = new();
+    private readonly TimeSpan _holdMargin;
 
-    public MaintenanceDatabaseGuard(MaintenanceModeState maintenance, IOrganizationContext org, IHttpContextAccessor? http = null)
+    public MaintenanceDatabaseGuard(MaintenanceModeState maintenance, IOrganizationContext org, IHttpContextAccessor? http = null,
+        // Tests shorten it; production always uses HoldMargin.
+        TimeSpan? holdMargin = null)
     {
         _maintenance = maintenance;
         _org = org;
         _http = http;
+        _holdMargin = holdMargin ?? HoldMargin;
     }
 
     /// <summary>
@@ -78,17 +92,57 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     /// </summary>
     internal static readonly AsyncLocal<Func<bool>?> SiteAdminCircuitOnConsole = new();
 
+    /// <summary>How much longer than the restore's own wait a held command waits (#1599).</summary>
+    internal static readonly TimeSpan HoldMargin = TimeSpan.FromSeconds(30);
+
+    private static readonly TimeSpan HoldPoll = TimeSpan.FromMilliseconds(100);
+
     private void Begin(DbCommand command)
+    {
+        if (!TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+    }
+
+    private async ValueTask BeginAsync(DbCommand command, CommandEventData eventData, CancellationToken ct)
+    {
+        if (TryPass(command)) return;
+        // A request that arrived during maintenance (it has the read allowance) is on
+        // its way to the maintenance page: refuse it now. So is a command in an open
+        // transaction, which may hold locks the restore's drop would wait on.
+        if (_maintenance.DatabaseReadsAllowedHere || eventData.Context?.Database.CurrentTransaction is not null)
+        {
+            throw new DatabaseClosedForMaintenanceException();
+        }
+
+        // Work that was already running when the restore began: hold it until the
+        // site reopens, so a refused restore lets it carry on (#1599).
+        var epoch = _maintenance.Epoch;
+        while (_maintenance.IsActive)
+        {
+            // Read each time: the restore sets its wait just after turning the flag on.
+            if (DateTime.UtcNow >= _maintenance.StartedAtUtc + _maintenance.ActiveJobsWait + _holdMargin)
+            {
+                throw new DatabaseClosedForMaintenanceException();
+            }
+            await Task.Delay(HoldPoll, ct).ConfigureAwait(false);
+        }
+        // A restore replaced the database meanwhile: whatever this was part of is gone.
+        if (_maintenance.Epoch != epoch || !TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+    }
+
+    /// <summary>
+    /// True when the command may run now: counted while the site is open, or let
+    /// through by an allowance or the SiteAdmin console while it is closed.
+    /// </summary>
+    private bool TryPass(DbCommand command)
     {
         if (_maintenance.TryBeginJob())
         {
             _counted.AddOrUpdate(command, Counted);
-            return;
+            return true;
         }
-        if (_maintenance.DatabaseAllowedHere) return;
-        if (_maintenance.DatabaseReadsAllowedHere && IsRead(command.CommandText)) return;
-        if (OnSiteAdminConsole()) return;
-        throw new DatabaseClosedForMaintenanceException();
+        if (_maintenance.DatabaseAllowedHere) return true;
+        if (_maintenance.DatabaseReadsAllowedHere && IsRead(command.CommandText)) return true;
+        return OnSiteAdminConsole();
     }
 
     private bool OnSiteAdminConsole() =>
@@ -218,11 +272,11 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
         return result;
     }
 
-    public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+    public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
     {
-        Begin(command);
-        return ValueTask.FromResult(result);
+        await BeginAsync(command, eventData, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     public override InterceptionResult<int> NonQueryExecuting(
@@ -232,11 +286,11 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
         return result;
     }
 
-    public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+    public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
     {
-        Begin(command);
-        return ValueTask.FromResult(result);
+        await BeginAsync(command, eventData, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     public override InterceptionResult<object> ScalarExecuting(
@@ -246,11 +300,11 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
         return result;
     }
 
-    public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+    public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken cancellationToken = default)
     {
-        Begin(command);
-        return ValueTask.FromResult(result);
+        await BeginAsync(command, eventData, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     public override int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)

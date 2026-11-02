@@ -1100,7 +1100,7 @@ public sealed class BackupServiceTests : IDisposable
                         TestDb.NewAuditInterceptor(),
                         // Not a SiteAdmin and no request: only the restore's own
                         // allowance can get its commands past the guard.
-                        new ALDevToolbox.Data.MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext()))
+                        new ALDevToolbox.Data.MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext(), holdMargin: TimeSpan.Zero))
                     .Options,
                 _db.OrgContext)
             : _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
