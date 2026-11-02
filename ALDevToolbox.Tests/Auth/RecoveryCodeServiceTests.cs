@@ -104,11 +104,13 @@ public sealed class RecoveryCodeServiceTests : IDisposable
 
     /// <summary>
     /// The test run hashes codes cheaply (<c>CheapHashDefaults</c>); the app does
-    /// not. This pins the production factor and that the shortcut is in force,
-    /// so a run can't silently go back to paying for it.
+    /// not. This pins the production constant and that the shortcut is in force,
+    /// so a run can't silently go back to paying for it. It cannot observe the
+    /// app's runtime default: the test assembly overrides it before any test runs,
+    /// so that default rests on <c>WorkFactor</c>'s initialiser naming the constant.
     /// </summary>
     [Fact]
-    public async Task Codes_hash_at_cost_10_in_production_and_cheaply_in_tests()
+    public async Task The_production_constant_is_10_and_tests_hash_cheaply()
     {
         RecoveryCodeService.ProductionWorkFactor.Should().Be(10);
         RecoveryCodeService.WorkFactor.Should().Be(TestPasswords.WorkFactor);
