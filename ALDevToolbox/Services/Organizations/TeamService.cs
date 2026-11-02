@@ -307,24 +307,26 @@ public sealed class TeamService
     }
 
     /// <summary>
-    /// Takes the locks a team delete needs for the rest of the current transaction: every
-    /// solution the team is on, in id order, then the team row itself. Raw SQL, approved
-    /// for #1603 like ModuleService's lock: it skips the query filter, so each statement
-    /// names the organisation itself.
-    /// <para>The solutions are locked <c>FOR NO KEY UPDATE</c>, as the admin guard locks
-    /// its organisation (#1337): two writers still queue on each other, but a row that
-    /// only references the solution - a build, an audit entry - is not held up. The team
-    /// row is locked <c>FOR UPDATE</c>, which waits for an access save that is adding it
-    /// to a solution (that save holds it <c>FOR KEY SHARE</c>), so the check then sees the
-    /// solution the save gave it.</para>
+    /// Takes the locks a team delete needs for the rest of the current transaction: the
+    /// team row, then every solution the team is on, in id order. Raw SQL, approved for
+    /// #1603 like ModuleService's lock: it skips the query filter, so each statement names
+    /// the organisation itself.
+    /// <para>The team first, <c>FOR UPDATE</c>: it waits for any access save that is
+    /// adding the team to a solution (that save holds it <c>FOR KEY SHARE</c>), so the
+    /// solutions are read only after that link is committed and every one of them is
+    /// locked. Read the other way round, a link committed while the delete waited on the
+    /// team was never locked, and a second delete could empty that solution alongside it.
+    /// The solutions are locked <c>FOR NO KEY UPDATE</c>, as the admin guard locks its
+    /// organisation (#1337): two writers still queue on each other, but a row that only
+    /// references the solution - a build, an audit entry - is not held up.</para>
     /// </summary>
     private async Task LockTeamAndItsSolutionsAsync(int orgId, int teamId, CancellationToken ct)
     {
         await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM teams WHERE id = {teamId} AND organization_id = {orgId} FOR UPDATE", ct);
+        await _db.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT 1 FROM oe_projects WHERE organization_id = {orgId} AND id IN (SELECT project_id FROM oe_project_teams WHERE team_id = {teamId} AND organization_id = {orgId}) ORDER BY id FOR NO KEY UPDATE",
             ct);
-        await _db.Database.ExecuteSqlInterpolatedAsync(
-            $"SELECT 1 FROM teams WHERE id = {teamId} AND organization_id = {orgId} FOR UPDATE", ct);
     }
 
     /// <summary>Adds an org member to a team. Managers and admins.</summary>

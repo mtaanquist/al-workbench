@@ -424,6 +424,47 @@ public sealed class ProjectAccessTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_deletes_waiting_on_an_access_save_that_adds_a_team_leave_the_solution_one()
+    {
+        // Review of #1684: the save gives a Private solution a second team while both of its
+        // teams are being deleted. The delete of the added team could not see the solution
+        // until the save committed; it must still lock it then, or both deletes pass.
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var added = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        var kept = await SeedTeamAsync("Platform", OtherTeamUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, kept);
+        ActAs(AdminUserId);
+
+        await using var holder = _db.NewContext();
+        await using var tx = await holder.Database.BeginTransactionAsync();
+        await Svc(holder).SetAccessAsync(projectId, ProjectVisibility.Private, new[] { added, kept });
+
+        await using var first = _db.NewContext();
+        await using var second = _db.NewContext();
+        var deletes = new[]
+        {
+            Task.Run(() => Teams(first).DeleteTeamAsync(added)),
+            Task.Run(() => Teams(second).DeleteTeamAsync(kept)),
+        };
+        await Task.Delay(LockWait);
+        deletes.Should().OnlyContain(d => !d.IsCompleted, "both deletes wait for the save");
+
+        await tx.CommitAsync();
+        var outcomes = new List<Exception?>();
+        foreach (var delete in deletes)
+        {
+            try { await delete; outcomes.Add(null); }
+            catch (Exception ex) { outcomes.Add(ex); }
+        }
+
+        outcomes.Count(o => o is null).Should().Be(1, "the second delete checks what the first left");
+        outcomes.Single(o => o is not null).Should().BeOfType<PlanValidationException>()
+            .Which.Errors["Name"].Should().Contain("the only team on the solution CRONUS Denmark");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectTeams.AsNoTracking().CountAsync(t => t.ProjectId == projectId)).Should().Be(1);
+    }
+
+    [Fact]
     public async Task An_access_save_waits_for_a_team_delete_and_then_says_the_team_is_gone()
     {
         var projectId = await SeedProjectAsync("CRONUS Denmark");
