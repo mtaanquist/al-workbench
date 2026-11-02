@@ -137,6 +137,7 @@ Email change for a user is performed by another admin (not by the user themselve
 - The intermediate "password OK, 2FA pending" state lives in a short-lived signed cookie (`alwb_mfa`, 10 min, `IDataProtector` purpose `ALDevToolbox.MfaPending`). No server-side session table.
 - Magic-link login deliberately bypasses 2FA — the mailbox itself is treated as a second factor.
 - The emailed link opens a confirmation page (`/login/magic/confirm`); only its Sign in button's POST spends the token. Mail scanners (Outlook Safe Links, Defender) and chat link previews fetch links before the person clicks, so a GET that signed in let them use the link up and receive the session cookie (#1500). No GET in a sign-in flow may spend a single-use token.
+- An account page never shows a sentence taken from its address. An endpoint that refuses a post redirects with `reason=<code>`, and the page looks up its own copy in `FormErrorReasons` (`MagicLinkReasons` for `/login/magic`), so a link someone sends cannot make the real page show their text as an error. A sentence the table does not know travels as a generic code. This holds for the signed-out forms (signup, signup details, accept-invite, reset-password) and the signed-in Account page and authenticator setup (#1544).
 
 ## Step-up for sensitive tools
 

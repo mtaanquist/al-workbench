@@ -22,10 +22,10 @@
               Subtitle="Once this is on, signing in asks for a six-digit code from your phone as well as your password."
               Trail='@([new("Sign-in & security", "/account/security"), new("Authenticator app")])' />
 
-    @if (!string.IsNullOrEmpty(Error) && !string.IsNullOrEmpty(Message))
+    @if (!string.IsNullOrEmpty(Reason))
     {
         <Alert Tone="AlertTone.Danger">
-            <span><strong>@Error:</strong> @Message</span>
+            <span>@FormErrorReasons.MessageFor(Reason)</span>
         </Alert>
     }
 
@@ -82,8 +82,9 @@
 </div>
 
 @code {
-    [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
-    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    // A code, not the sentence: the copy lives in FormErrorReasons so a link
+    // can't put its own text on this page (#1544).
+    [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
 
     private TotpEnrollment? _enrollment;
 
@@ -96,7 +97,7 @@
         }
         catch (Exception)
         {
-            Nav.NavigateTo($"/account/security?err=Totp&msg={Uri.EscapeDataString("Your authenticator app is already set up. Disable it before setting up a new one.")}");
+            Nav.NavigateTo($"/account/security?err=Totp&reason={FormErrorReasons.TotpAlreadySetUp}");
         }
     }
 }

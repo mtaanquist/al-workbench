@@ -81,23 +81,25 @@ else
 
             @* --- page-wide flashes, above the sections ------------------- *@
 
-            @if (!string.IsNullOrEmpty(Error) && !string.IsNullOrEmpty(Message))
+            @if (!string.IsNullOrEmpty(Error) && !string.IsNullOrEmpty(Reason))
             {
-                @* Endpoints redirect with err=<field>&msg=<sentence>. The field
+                @* Endpoints redirect with err=<field>&reason=<code>. The field
                    key says it went wrong (danger, not warn) but is never shown:
                    it is a code name ("Totp"), and the sentence already says
-                   which setting it is about. *@
+                   which setting it is about. The sentence comes from
+                   FormErrorReasons, never the URL, so a link can't put its own
+                   text here (#1544). *@
                 <Alert Tone="AlertTone.Danger">
-                    <span>@Message</span>
+                    <span>@FormErrorReasons.MessageFor(Reason)</span>
                 </Alert>
             }
-            else if (!string.IsNullOrEmpty(Message))
+            else if (!string.IsNullOrEmpty(Reason))
             {
-                @* A message with no field to blame: something went nowhere rather
+                @* A code with no field to blame: something went nowhere rather
                    than went wrong. Prefixing it with a field name would invent a
                    form the reader never filled in. *@
                 <Alert Tone="AlertTone.Warn">
-                    <span>@Message</span>
+                    <span>@FormErrorReasons.MessageFor(Reason)</span>
                 </Alert>
             }
             @* The return banner below says "connected" and what to do next, so the
@@ -1179,7 +1181,7 @@ else
     /// </summary>
     [SupplyParameterFromQuery(Name = "section")] public string? SectionParam { get; set; }
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
-    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
     [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
     [SupplyParameterFromQuery(Name = "required")] public string? Required { get; set; }
     /// <summary>

@@ -95,14 +95,14 @@ internal static class AccountEndpoints
             // The page hid the password box because the session was fresh when
             // it loaded; the window has since closed. "Password is incorrect"
             // would blame a box the person never saw.
-            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString(ConfirmationExpiredMessage)}");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.ReasonQuery}={FormErrorReasons.ConfirmationExpired}");
             return null;
         }
         var check = await auth.CheckCurrentPasswordAsync(user.Email, user.PasswordHash, password, EndpointHelpers.ResolveIp(ctx), ct);
         if (check != CurrentPasswordCheck.Correct)
         {
-            var message = check == CurrentPasswordCheck.LockedOut ? AuthService.CurrentPasswordLockedOutMessage : "Password is incorrect.";
-            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString(message)}");
+            var reason = check == CurrentPasswordCheck.LockedOut ? FormErrorReasons.PasswordLocked : FormErrorReasons.PasswordWrong;
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.ReasonQuery}={reason}");
             return null;
         }
         return user;
@@ -134,8 +134,7 @@ internal static class AccountEndpoints
     }
 
     /// <summary>Shown when a Microsoft-linked account posts no password after its confirmation window closed.</summary>
-    internal const string ConfirmationExpiredMessage =
-        "Your confirmation has expired. Choose \"Confirm with Microsoft\" again, or enter your password.";
+    internal static string ConfirmationExpiredMessage => FormErrorReasons.MessageFor(FormErrorReasons.ConfirmationExpired);
 
     private static Task<bool> HasMicrosoftLinkAsync(AppDbContext db, int userId, CancellationToken ct) =>
         // Filtered: the signed-in user's own links, inside their org.

@@ -128,8 +128,7 @@ internal static class EntraAuthEndpoints
             var config = await entra.ResolveChallengeForCurrentOrgAsync(ct);
             if (config is null)
             {
-                ctx.Response.Redirect("/account/security?err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
-                    + Uri.EscapeDataString("Microsoft sign-in isn't set up for your organisation yet. An admin can turn it on under Administration."));
+                ctx.Response.Redirect("/account/security?err=EntraLink&reason=" + FormErrorReasons.EntraNotSetUp);
                 return;
             }
 
@@ -154,8 +153,7 @@ internal static class EntraAuthEndpoints
             }
             catch (PlanValidationException ex)
             {
-                ctx.Response.Redirect("/account/security?err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
-                    + Uri.EscapeDataString(ex.Errors.First().Value));
+                ctx.Response.Redirect("/account/security?err=EntraLink&reason=" + FormErrorReasons.CodeFor(ex.Errors.First().Value));
             }
         }).RequireAuthorization();
 
@@ -301,8 +299,7 @@ internal static class EntraAuthEndpoints
             }
             catch (PlanValidationException ex)
             {
-                ctx.Response.Redirect("/account/security?err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
-                    + Uri.EscapeDataString(ex.Errors.First().Value));
+                ctx.Response.Redirect("/account/security?err=EntraLink&reason=" + FormErrorReasons.CodeFor(ex.Errors.First().Value));
             }
             return;
         }
