@@ -337,6 +337,70 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
     }
 
     [Fact]
+    public async Task An_account_that_can_confirm_is_refused_even_with_the_right_password()
+    {
+        // Email codes are on, so the account has a proper way to confirm and
+        // the password alone is not enough, as when adding a passkey (#1614).
+        var (client, userId) = await SignInThenTurnOnEmailCodesAsync("app-step-up@cronus.example");
+        string secret;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            secret = (await scope.ServiceProvider.GetRequiredService<TotpService>().BeginEnrollmentAsync(userId)).SecretBase32;
+        }
+        using var security = await client.GetAsync("/account/security");
+
+        using var on = await PostAsync(client, "/auth/account/2fa/totp/confirm",
+            AntiforgeryToken(await security.Content.ReadAsStringAsync()),
+            ("Code", CurrentCode(secret)), ("Password", Password));
+
+        on.Headers.Location!.OriginalString.Should().Be(
+            "/account/2fa/totp/setup?err=Password&reason=" + FormErrorReasons.CodeFor(StepUpService.TotpStepUpFirstMessage));
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_setup_page_makes_no_secret_until_a_session_that_must_step_up_has_done_so()
+    {
+        var (client, userId) = await SignInThenTurnOnEmailCodesAsync("app-no-secret@cronus.example");
+
+        using var page = await client.GetAsync("/account/2fa/totp/setup");
+
+        page.StatusCode.Should().Be(HttpStatusCode.OK);
+        WebUtility.HtmlDecode(await page.Content.ReadAsStringAsync()).Should().Contain("Confirm it's you first");
+        await using var read = _db.NewContext();
+        (await read.UserTotpSecrets.IgnoreQueryFilters().AnyAsync(s => s.UserId == userId))
+            .Should().BeFalse("no QR code or secret before the person has confirmed");
+    }
+
+    /// <summary>
+    /// A password sign-in on an account that then turns email codes on: the
+    /// session is not recently confirmed, and the account now has a way to.
+    /// </summary>
+    private async Task<(HttpClient Client, int UserId)> SignInThenTurnOnEmailCodesAsync(string email)
+    {
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        using (var loginPage = await client.GetAsync("/login"))
+        using (var login = await PostAsync(client, "/auth/login",
+                   AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password)))
+        {
+            login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = true;
+            await ctx.SaveChangesAsync();
+        }
+        return (client, userId);
+    }
+
+    [Fact]
     public async Task A_day_long_step_up_window_still_asks_for_the_password_after_fifteen_minutes()
     {
         // Turning two-step off or minting recovery codes is as lasting as adding

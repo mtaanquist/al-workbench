@@ -58,8 +58,15 @@ public sealed class TotpService
     /// is for one-time display: the QR / Base32 lets the user scan; submitting
     /// a current code to <see cref="ConfirmEnrollmentAsync"/> flips the
     /// enrollment to active.
+    /// <para>
+    /// With <paramref name="keepRecent"/>, an unconfirmed secret made within
+    /// <see cref="PendingSecretReuse"/> is shown again instead of replaced. The
+    /// setup page asks for that: a refused confirm (wrong password, a
+    /// confirmation that ran out) sends the person back to it, and a new
+    /// secret would leave the entry they already scanned dead (#1614).
+    /// </para>
     /// </summary>
-    public async Task<TotpEnrollment> BeginEnrollmentAsync(int userId, CancellationToken ct = default)
+    public async Task<TotpEnrollment> BeginEnrollmentAsync(int userId, CancellationToken ct = default, bool keepRecent = false)
     {
         // Fence category 4 (explicitly scoped user-id lookup): both reads pinned to userId.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
@@ -71,7 +78,11 @@ public sealed class TotpService
         // Same category 4 read, pinned to s.UserId == userId.
         var existing = await _db.UserTotpSecrets.IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.UserId == userId, ct);
-        if (existing is null)
+        if (keepRecent && existing is { ConfirmedAt: null } && now - existing.CreatedAt < PendingSecretReuse)
+        {
+            secretBase32 = _protector.Unprotect(existing.SecretEncrypted);
+        }
+        else if (existing is null)
         {
             _db.UserTotpSecrets.Add(new UserTotpSecret
             {
@@ -97,7 +108,7 @@ public sealed class TotpService
                 ["Totp"] = "The authenticator app is already turned on. Turn it off first if you want to set it up again."
             });
         }
-        await _db.SaveChangesAsync(ct);
+        if (_db.ChangeTracker.HasChanges()) await _db.SaveChangesAsync(ct);
 
         var label = $"{Issuer}:{user.Email}";
         var uri = $"otpauth://totp/{Uri.EscapeDataString(label)}?secret={secretBase32}&issuer={Uri.EscapeDataString(Issuer)}";
@@ -111,6 +122,14 @@ public sealed class TotpService
     /// issues 10 fresh recovery codes (returned for one-time display). Refused
     /// once the enrollment is confirmed (issue #1422).
     /// </summary>
+    /// <summary>
+    /// How long the setup page shows the same unconfirmed secret again rather
+    /// than making a new one: long enough to come back from a refused confirm
+    /// or a step-up, short enough that a setup page left open overnight
+    /// starts afresh.
+    /// </summary>
+    public static readonly TimeSpan PendingSecretReuse = TimeSpan.FromMinutes(15);
+
     public async Task<IReadOnlyList<string>> ConfirmEnrollmentAsync(int userId, string code, CancellationToken ct = default)
     {
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId.

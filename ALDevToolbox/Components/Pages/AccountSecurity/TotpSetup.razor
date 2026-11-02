@@ -139,7 +139,9 @@
         }
         try
         {
-            _enrollment = await Totp.BeginEnrollmentAsync(Org.CurrentUserId.Value);
+            // Shows the same secret again when the person comes back from a
+            // refused confirm, so the entry they scanned still works.
+            _enrollment = await Totp.BeginEnrollmentAsync(Org.CurrentUserId.Value, keepRecent: true);
         }
         catch (Exception)
         {

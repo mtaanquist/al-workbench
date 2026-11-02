@@ -40,7 +40,14 @@ public sealed class StepUpService
     /// the confirmation ran out between opening the setup page and sending
     /// the code.
     /// </summary>
-    public const string TotpStepUpFirstMessage = "Your confirmation ran out. Confirm it's you again, then scan the new QR code.";
+    public const string TotpStepUpFirstMessage = "Your confirmation ran out. Confirm it's you again, then enter a code from your authenticator app.";
+
+    /// <summary>
+    /// The session was recently confirmed when the setup page opened, so it
+    /// asked for no password, and the confirmation ran out before the code
+    /// was sent. "Password is incorrect" would blame a box the person never saw.
+    /// </summary>
+    public const string TotpPasswordNowNeededMessage = "Your confirmation ran out. Enter your current password with the code to turn the app on.";
 
     public const string WrongPasswordMessage = "Password is incorrect.";
 
@@ -125,7 +132,7 @@ public sealed class StepUpService
     public Task<string?> TotpEnrollmentRefusalAsync(
         ClaimsPrincipal principal, int userId, string? password, string ip, CancellationToken ct) =>
         NewWayInRefusalAsync(principal, userId, password, ip,
-            TotpSignInAgainMessage, TotpStepUpFirstMessage, ct);
+            TotpSignInAgainMessage, TotpStepUpFirstMessage, ct, noPassword: TotpPasswordNowNeededMessage);
 
     /// <summary>
     /// Whether this session must step up before adding a sign-in method:
@@ -142,12 +149,15 @@ public sealed class StepUpService
 
     private async Task<string?> NewWayInRefusalAsync(
         ClaimsPrincipal principal, int userId, string? password, string ip,
-        string signInAgain, string stepUpFirst, CancellationToken ct)
+        string signInAgain, string stepUpFirst, CancellationToken ct, string? noPassword = null)
     {
         if (await IsFreshForPasskeyAsync(principal, ct)) return null;
         var methods = await AvailableMethodsAsync(userId, StepUpAuth.Method(principal), ct);
         if (methods is null) return signInAgain;
         if (methods.Any) return stepUpFirst;
+        // Nothing typed: the page hid the box because the session was fresh
+        // when it loaded. Not counted as a wrong password.
+        if (noPassword is not null && string.IsNullOrEmpty(password)) return noPassword;
 
         // Filtered: the signed-in user's own row, inside their org.
         var account = await _db.Users.AsNoTracking()

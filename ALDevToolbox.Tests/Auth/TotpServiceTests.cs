@@ -44,6 +44,30 @@ public sealed class TotpServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Coming_back_to_setup_shows_the_same_recent_secret_so_the_scanned_entry_still_works()
+    {
+        // A refused confirm sends the person back to the setup page; a new
+        // secret there would leave the entry they scanned dead (#1614).
+        var userId = await SeedUserAsync();
+        TotpEnrollment first, again, later;
+        await using (var ctx = _db.NewContext()) first = await NewTotp(ctx).BeginEnrollmentAsync(userId, keepRecent: true);
+        _clock.Advance(TimeSpan.FromMinutes(5));
+        await using (var ctx = _db.NewContext()) again = await NewTotp(ctx).BeginEnrollmentAsync(userId, keepRecent: true);
+        _clock.Advance(TotpService.PendingSecretReuse);
+        await using (var ctx = _db.NewContext()) later = await NewTotp(ctx).BeginEnrollmentAsync(userId, keepRecent: true);
+
+        again.SecretBase32.Should().Be(first.SecretBase32);
+        later.SecretBase32.Should().NotBe(first.SecretBase32, "a setup left open past the window starts afresh");
+        await using (var ctx = _db.NewContext())
+        {
+            var code = new OtpNet.Totp(OtpNet.Base32Encoding.ToBytes(later.SecretBase32)).ComputeTotp(_clock.GetUtcNow().UtcDateTime);
+            await NewTotp(ctx).ConfirmEnrollmentAsync(userId, code);
+        }
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Begin_enrollment_persists_encrypted_secret_but_does_not_enable_totp()
     {
         var userId = await SeedUserAsync();

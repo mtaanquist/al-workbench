@@ -77,6 +77,7 @@ public static class FormErrorReasons
         ("password-microsoft-only", "Your organisation signs in with Microsoft, so there is no password to change here. Use \"Sign in with Microsoft\" instead."),
         ("totp-step-up-first", StepUpService.TotpStepUpFirstMessage),
         ("totp-sign-in-again", StepUpService.TotpSignInAgainMessage),
+        ("totp-password-now-needed", StepUpService.TotpPasswordNowNeededMessage),
         (ConfirmationExpired, "Your confirmation has expired. Choose \"Confirm with Microsoft\" again, or enter your password."),
         ("passkey-name-length", "Name must be 1-80 characters."),
         ("passkey-not-found", "Passkey not found."),

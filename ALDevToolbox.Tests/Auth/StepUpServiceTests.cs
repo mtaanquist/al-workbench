@@ -114,6 +114,20 @@ public sealed class StepUpServiceTests : IDisposable
             .Should().Be(StepUpService.WrongPasswordMessage);
     }
 
+    [Fact]
+    public async Task A_password_box_the_page_never_showed_is_not_called_wrong()
+    {
+        // The setup page hid the box because the session was fresh when it
+        // loaded; the confirmation ran out before the code was sent (#1614).
+        var userId = await SeedUserAsync(totp: false, emailMfa: false);
+        await using var ctx = _db.NewContext();
+
+        (await NewService(ctx).TotpEnrollmentRefusalAsync(PasswordSession(), userId, "", "203.0.113.12", CancellationToken.None))
+            .Should().Be(StepUpService.TotpPasswordNowNeededMessage);
+        await using var read = _db.NewContext();
+        read.LoginAttempts.Count(a => a.Email == "ada@cronus.example").Should().Be(0, "nothing was typed, so nothing was guessed");
+    }
+
     private static System.Security.Claims.ClaimsPrincipal PasswordSession() =>
         new(new System.Security.Claims.ClaimsIdentity(
             [new System.Security.Claims.Claim(StepUpAuth.MethodClaim, SignInMethod.Password.ToString())], "Test"));
