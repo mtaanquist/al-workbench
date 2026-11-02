@@ -55,6 +55,7 @@ public sealed class PipelineBuildsReleaseTests : IAsyncDisposable
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         // The Build button's service. Nothing here builds, so only what it keeps

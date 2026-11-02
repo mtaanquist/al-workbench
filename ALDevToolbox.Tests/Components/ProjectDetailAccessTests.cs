@@ -53,6 +53,7 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ProjectFollowService>();
         // The follow confirmation reads the person's own Solutions choice.

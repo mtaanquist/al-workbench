@@ -67,6 +67,7 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
         _ctx.Services.AddScoped<GenerationService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>();
