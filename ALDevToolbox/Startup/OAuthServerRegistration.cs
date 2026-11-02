@@ -180,6 +180,14 @@ public static class OAuthServerRegistration
                     b.UseScopedHandler<ALDevToolbox.Services.OAuth.CimdClientResolver>()
                      .SetOrder(int.MinValue + 100_000));
 
+                // The same resolver on the token endpoint, ahead of OpenIddict's
+                // ValidateAuthentication (which validates the client assertion): a
+                // private_key_jwt client that rotated its key gets its stored key set
+                // re-read from its jwks_uri, so token refresh keeps working (#1576).
+                o.AddEventHandler<OpenIddict.Server.OpenIddictServerEvents.ValidateTokenRequestContext>(b =>
+                    b.UseScopedHandler<ALDevToolbox.Services.OAuth.CimdClientResolver>()
+                     .SetOrder(int.MinValue + 100_000));
+
                 // Registration (DCR and CIMD) only stores redirect URIs that
                 // OAuthRedirectUriPolicy accepts, but rows written before that
                 // rule existed may still hold a refused one. Checking the
