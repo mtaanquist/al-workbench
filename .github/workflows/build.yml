@@ -3,7 +3,8 @@ name: build
 on:
   # The workflow always triggers; the `changes` job below decides whether the
   # heavy jobs (build/test, compose-smoke, migration-forward-compat) run. A
-  # docs-only change still skips all the expensive work — but the final
+  # docs-only pull request still skips all the expensive work (a push always
+  # runs it, so the cache and the image are built from main) — but the final
   # `ci-gate` job *always* runs and reports a conclusion, so it can be the
   # single required status check on `protect-main` without deadlocking a
   # docs-only PR (the classic paths-ignore + required-check trap: a required

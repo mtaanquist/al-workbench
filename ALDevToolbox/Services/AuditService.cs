@@ -1,5 +1,6 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Services.ObjectExplorer.Explore;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services;
@@ -83,7 +84,7 @@ public sealed class AuditService
         {
             // Escaped, so "_" and "%" in an address match themselves rather than
             // any character (#1550). Same as the other search boxes.
-            var pattern = "%" + ALDevToolbox.Services.ObjectExplorer.Explore.ObjectSearchService.EscapeLike(filter.Actor.Trim()) + "%";
+            var pattern = "%" + ObjectSearchService.EscapeLike(filter.Actor.Trim()) + "%";
             q = q.Where(e => EF.Functions.ILike(e.ChangedBy, pattern, "\\"));
         }
         if (filter.From is { } from)
