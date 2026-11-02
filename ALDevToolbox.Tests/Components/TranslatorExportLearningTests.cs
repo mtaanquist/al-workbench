@@ -320,7 +320,7 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
         // newest few are deleted, and a tab's next open replaces its last.
         js.Should().Contain("now - r.savedAt <= maxAgeMs")
             .And.Contain("offerable.slice(0, MAX_KEPT)")
-            .And.Contain("if (previousId && previousId !== rec.openId) store.delete(previousId);");
+            .And.Contain("if (previousId && previousId !== rec.openId) {\n            store.delete(previousId);");
     }
 
     /// <summary>
@@ -379,6 +379,45 @@ public sealed class TranslatorExportLearningTests : IAsyncDisposable
             .And.Contain("const offerable = current")
             .And.Contain("if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));")
             .And.NotContain("superseded(r, free)", "a newer copy a live tab holds still makes an older free one out of date");
+    }
+
+    /// <summary>
+    /// OEX5-2: the restore prompt and the one-session-per-file sweep read a
+    /// small index entry per session, never the stored files themselves, which
+    /// can be tens of MB each. Every write of a record writes its entry in the
+    /// same transaction, and every delete removes both.
+    /// </summary>
+    [Fact]
+    public void The_restore_prompt_reads_only_the_index_entries()
+    {
+        var js = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Components", "Pages", "Translator.razor.js"));
+
+        // Nothing reads every stored record any more.
+        js.Should().NotContain("store.getAll()");
+        foreach (var name in new[] { "export async function peek(maxAgeMs) {", "async function dropOlderCopies(rec) {" })
+        {
+            var body = js[js.IndexOf(name, StringComparison.Ordinal)..];
+            body = body[..body.IndexOf("\n}\n", StringComparison.Ordinal)];
+            body.Should().Contain("const all = await readIndex();", name);
+        }
+        var index = js[js.IndexOf("async function readIndex() {", StringComparison.Ordinal)..];
+        index = index[..index.IndexOf("\n}\n", StringComparison.Ordinal)];
+        index.Should().Contain("store.getAllKeys()")
+            .And.Contain("store.getAll(IDBKeyRange.bound(META_PREFIX, META_PREFIX + \"\\uffff\"))");
+
+        // The entry carries what the prompt and the sweep use, and names its id
+        // `id`, so a tab on the older script never takes it for a session.
+        js.Should().Contain("return { id: rec.openId, fileName: rec.fileName || \"\", savedAt: rec.savedAt || 0, repo: rec.repo || null, handle: rec.handle || null };");
+
+        // Each record write is paired with its entry, and each delete with its entry's.
+        var puts = Regex.Matches(js, @"store\.put\((rec|moved), [^)]+\);").Count;
+        var metaPuts = Regex.Matches(js, @"store\.put\(metaOf\((rec|moved)\), META_PREFIX \+ [^)]+\);").Count;
+        metaPuts.Should().Be(puts).And.BeGreaterThanOrEqualTo(5);
+        foreach (Match delete in Regex.Matches(js, @"store\.delete\((openId|previousId|key)\);"))
+        {
+            js[delete.Index..].Should().Contain($"store.delete(META_PREFIX + {delete.Groups[1].Value});");
+        }
+        js.Should().Contain("store.delete(META_PREFIX + key);");
     }
 
     /// <summary>
