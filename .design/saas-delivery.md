@@ -705,8 +705,8 @@ that names the environment and says what the click does there:
   rows each sweep, so it survives a restart. A row counts as sent once the worker has
   tried to send it, whatever Business Central answered; a dependent settled as not tried
   after a failure, and a booking whose requester was disabled, get no install from
-  Business Central and no sent time, so they send neither their organisation nor their environment to the back
-  of the turn (#1603). It shares the one install out; it does not make the queue
+  Business Central and no sent time, so they send neither their organisation nor their
+  environment to the back of the turn (#1603). It shares the one install out; it does not make the queue
   shorter. Inside one organisation the turn rotates the same way between
   environments (#1596): the environment whose most recent install was sent longest ago
   goes first, one never served first of all. So an Install now, or an upload for now, on

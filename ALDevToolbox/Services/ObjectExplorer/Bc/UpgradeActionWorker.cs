@@ -271,7 +271,8 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// <see cref="ConfirmOneAsync"/>). Internal so a test can drive one sweep against a
     /// seeded database without the hosted-service loop. Returns how many rows were sent or
     /// asked about again; rows only settled on the way (a dependent skipped because the
-    /// app before it failed) do not count, so the sweep does not stop on one.
+    /// app before it failed, or a booking whose requester was disabled since) do not
+    /// count, so the sweep does not stop on one.
     /// </summary>
     internal async Task<int> RunDueActionsAsync(int orgId, bool isSystem, CancellationToken ct, SweepPass pass = SweepPass.Both)
     {

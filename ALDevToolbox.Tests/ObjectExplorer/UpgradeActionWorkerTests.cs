@@ -176,6 +176,35 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         after.Should().NotBeNull("the install let go of the environment");
     }
 
+    [Fact]
+    public async Task A_disabled_requesters_booked_install_settles_without_a_sent_time_even_while_a_deployment_holds_the_environment()
+    {
+        // #1603: nothing goes to Business Central, so the row needs neither the gate nor a
+        // sent time, and does not wait behind a running deployment to be settled.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 1, "Core.app");
+        var tenant = await TenantOfAsync(projectId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == UpgradeActionTestFixture.OwnerUserId)
+                .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, ALDevToolbox.Domain.Entities.UserStatus.Disabled));
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        using (var deployment = _f.Deliveries.TryEnterEnvironment(tenant, projectId, "Production"))
+        {
+            deployment.Should().NotBeNull();
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None))
+                .Should().Be(0, "a settle without a send is not counted as sent");
+        }
+
+        _f.Apps.InstalledFiles.Should().BeEmpty();
+        var stored = await _f.ReadActionAsync(ids[0]);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("no longer had permission");
+        stored.SentAt.Should().BeNull("nothing was sent, so it is no install for the turns");
+    }
+
     private async Task<Guid?> TenantOfAsync(int projectId)
     {
         await using var ctx = _f.Db.NewContext();

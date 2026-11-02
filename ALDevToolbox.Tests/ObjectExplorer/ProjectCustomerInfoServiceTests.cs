@@ -317,6 +317,42 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_colleague_disabled_since_can_still_have_their_entry_edited()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
+        var row = (await svc.ListPeopleAsync(id)).Single();
+        await ctx.Users.Where(u => u.Id == OtherUserId)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+
+        await svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Architect], "finance"));
+
+        await using var read = _db.NewContext();
+        var saved = (await Svc(read).ListPeopleAsync(id)).Single();
+        saved.Roles.Should().Equal(ProjectPersonRole.Architect);
+        saved.Areas.Should().Be("finance");
+    }
+
+    [Fact]
+    public async Task An_entry_cannot_be_switched_to_a_disabled_colleague()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OwnerUserId, [ProjectPersonRole.Consultant], null));
+        var row = (await svc.ListPeopleAsync(id)).Single();
+        await ctx.Users.Where(u => u.Id == OtherUserId)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+
+        var act = () => svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
+            .Should().Be("That account can't sign in right now. Choose someone with an active account.");
+    }
+
+    [Fact]
     public async Task A_colleague_needs_at_least_one_role()
     {
         var id = await SeedAsync();

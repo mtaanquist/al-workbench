@@ -425,13 +425,23 @@ public sealed class ProjectCustomerInfoService
 
         var project = await LoadManagedProjectAsync(projectId, ct);
 
+        // Who the row names today, when editing: the picker is locked then, so someone
+        // disabled since can still have their roles and areas changed.
+        var currentUserId = personId is { } editedId
+            ? await _db.OeProjectPeople.AsNoTracking()
+                .Where(p => p.Id == editedId && p.ProjectId == projectId)
+                .Select(p => (int?)p.UserId)
+                .FirstOrDefaultAsync(ct)
+            : null;
+
         // The query filter keeps this to the caller's own organisation.
         if (input.UserId is not { } userId || !await _db.Users.AnyAsync(u => u.Id == userId, ct))
             errors["UserId"] = "Choose one of your colleagues.";
         // The picker offers active accounts only; held here too, as the team service does,
-        // so the list never names someone who can't sign in (#1603) - disabled, or not yet
-        // approved.
-        else if (!await _db.Users.AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct))
+        // so nobody who can't sign in (#1603) - disabled, or not yet approved - is newly
+        // put on the list. An existing entry for them can still be edited.
+        else if (userId != currentUserId
+                 && !await _db.Users.AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct))
             errors["UserId"] = "That account can't sign in right now. Choose someone with an active account.";
         else if (await _db.OeProjectPeople.AnyAsync(p => p.ProjectId == projectId && p.UserId == userId && p.Id != personId, ct))
             errors["UserId"] = "They are already on the list. Change their roles or areas there.";
