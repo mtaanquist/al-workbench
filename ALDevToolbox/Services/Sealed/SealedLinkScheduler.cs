@@ -20,12 +20,16 @@ public sealed class SealedLinkScheduler : PolledScheduler
     public SealedLinkScheduler(
         IServiceProvider services,
         ILogger<SealedLinkScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(SealedLinkScheduler),
             pollInterval: TimeSpan.FromMinutes(1),
             maxActiveDuration: TimeSpan.FromMinutes(5),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_SEALED_LINK_SCHEDULER")
+            disableEnvVar: "DISABLE_SEALED_LINK_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _logger = logger;

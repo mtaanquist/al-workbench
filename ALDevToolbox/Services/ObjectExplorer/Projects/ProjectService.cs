@@ -5,6 +5,7 @@ using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol;
 
@@ -27,6 +28,7 @@ public sealed class ProjectService
     private readonly ProjectDiscoveryService _discovery;
     private readonly GitHubAccessService _gitHubAccess;
     private readonly RepositoryReadProbe _readProbe;
+    private readonly StorageQuotaGuard _quotaGuard;
     private readonly ILogger<ProjectService> _logger;
 
     public ProjectService(
@@ -36,6 +38,7 @@ public sealed class ProjectService
         ProjectDiscoveryService discovery,
         GitHubAccessService gitHubAccess,
         RepositoryReadProbe readProbe,
+        StorageQuotaGuard quotaGuard,
         ILogger<ProjectService> logger)
     {
         _db = db;
@@ -44,6 +47,7 @@ public sealed class ProjectService
         _discovery = discovery;
         _gitHubAccess = gitHubAccess;
         _readProbe = readProbe;
+        _quotaGuard = quotaGuard;
         _logger = logger;
     }
 
@@ -51,8 +55,8 @@ public sealed class ProjectService
         ?? throw new InvalidOperationException("No organization in scope; project mutation called outside an authenticated request.");
 
     /// <summary>
-    /// True when the current user may manage <paramref name="projectId"/> (owner or
-    /// org Admin / SiteAdmin) — for the UI to hide Build/Add/Delete affordances.
+    /// True when the current user may manage <paramref name="projectId"/> (owner,
+    /// org Admin / SiteAdmin, everyone on a Public one, or its teams) — for the UI to hide Build/Add/Delete affordances.
     /// Returns false when the project no longer exists.
     /// </summary>
     public async Task<bool> CanManageAsync(int projectId, CancellationToken ct = default)
@@ -1069,6 +1073,9 @@ public sealed class ProjectService
     {
         var orgId = RequireOrganizationId();
         ArgumentNullException.ThrowIfNull(uploads);
+        // Symbol packages are stored blobs like any upload, so an organisation over its
+        // quota can't add more (#1580).
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)

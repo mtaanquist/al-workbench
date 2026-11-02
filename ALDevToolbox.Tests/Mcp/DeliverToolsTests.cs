@@ -65,7 +65,7 @@ public sealed class DeliverToolsTests : IDisposable
         var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
             NullLogger<ProjectDiscoveryService>.Instance);
         return new DeliverTools(
-            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance),
+            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance),
             new ProjectCustomerInfoService(ctx, _db.OrgContext, access, NullLogger<ProjectCustomerInfoService>.Instance),
             connections,
             new UpgradeFleetService(ctx, _db.OrgContext, access, new EnvironmentRefreshQueue(),
@@ -246,12 +246,48 @@ public sealed class DeliverToolsTests : IDisposable
     public async Task List_environment_history_is_newest_first()
     {
         await using var ctx = _db.NewContext();
-        var history = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+        var answer = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+        var history = answer.Rows;
 
         history.Select(h => h.Action).Should().Equal("RunNow", "PushDateToLatest", "PushDateToLatest");
         history[0].RequestedBy.Should().Be("Viewer");
         history[2].Status.Should().Be("Pending");
         history[2].IsBooking.Should().BeTrue();
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task List_environment_history_cuts_long_failure_reasons_and_stays_within_the_answer_budget()
+    {
+        // #1576: a failed line carries Business Central's whole reason. Fifty of them
+        // used to run past what an assistant client accepts in one answer.
+        var now = DateTime.UtcNow;
+        await using (var seed = _db.NewContext())
+        {
+            for (var i = 0; i < 50; i++)
+            {
+                var failed = NewAction(_seed.Denmark, _seed.DenmarkProduction, UpgradeActionKind.RunNow,
+                    UpgradeActionStatus.Failed, now.AddMinutes(i), now.AddMinutes(i));
+                failed.Outcome = "The update wasn't started. Reason given at the time: " + new string('x', 3000);
+                seed.OeEnvironmentUpgradeActions.Add(failed);
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var answer = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+
+        answer.Rows.Should().NotBeEmpty();
+        answer.Rows.Should().OnlyContain(r => r.Outcome == null || r.Outcome.Length < 500);
+        answer.Rows[0].Outcome.Should().Contain("History page");
+        var json = System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions);
+        json.Length.Should().BeLessThan(25_000);
+        // Even cut, fifty failure lines overrun the budget, so the budget - not the
+        // fifty-line cap - stops the list, and the answer must say so.
+        answer.Rows.Count.Should().BeLessThan(50);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("History page");
     }
 
     [Fact]
@@ -544,17 +580,17 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        var catalogue = await tools.ListCustomerModulesAsync();
+        var catalogue = (await tools.ListCustomerModulesAsync()).Rows;
         catalogue.Should().ContainSingle(m => m.Module == "CRONUS Payroll" && m.SolutionId == null);
 
-        var holders = await tools.ListCustomerModulesAsync(module: "cronus payroll");
+        var holders = (await tools.ListCustomerModulesAsync(module: "cronus payroll")).Rows;
         holders.Should().ContainSingle();
         holders[0].SolutionName.Should().Be("CRONUS Denmark");
         holders[0].Version.Should().Be("3.1.0.0");
         holders[0].Source.Should().Be("business_central");
         holders[0].ReadAt.Should().NotBeNull();
 
-        var denmark = await tools.ListCustomerModulesAsync(solution: "CRONUS Denmark");
+        var denmark = (await tools.ListCustomerModulesAsync(solution: "CRONUS Denmark")).Rows;
         denmark.Should().ContainSingle(m => m.Module == "CRONUS Payroll" && m.EnvironmentName == "Production");
     }
 
@@ -582,7 +618,7 @@ public sealed class DeliverToolsTests : IDisposable
         }
 
         await using var ctx = _db.NewContext();
-        var holders = await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll");
+        var holders = (await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll")).Rows;
 
         holders.Should().HaveCount(2);
         var norwayRow = holders.Single(h => h.SolutionName == "CRONUS Norway");
@@ -593,6 +629,37 @@ public sealed class DeliverToolsTests : IDisposable
         var denmarkRow = holders.Single(h => h.SolutionName == "CRONUS Denmark");
         denmarkRow.Version.Should().Be("3.1.0.0");
         denmarkRow.EnvironmentName.Should().Be("Production");
+    }
+
+    [Fact]
+    public async Task List_customer_modules_by_module_is_capped_with_a_note_naming_solution()
+    {
+        // #1601: a common ISV module across a few hundred online solutions ran past
+        // what an assistant client accepts in one answer.
+        await using (var seed = _db.NewContext())
+        {
+            var payroll = await seed.CustomerModules.SingleAsync(m => m.Name == "CRONUS Payroll");
+            for (var i = 0; i < DeliverTools.ModuleHolderCap + 10; i++)
+            {
+                var customer = NewProject($"CRONUS Branch {i:000}", ProjectVisibility.Public, null, 2_000_000 + i);
+                customer.HostingType = ProjectHostingType.OurCloud;
+                seed.OeProjects.Add(customer);
+                await seed.SaveChangesAsync();
+                seed.OeProjectModules.Add(new OeProjectModule
+                {
+                    OrganizationId = TestDb.DefaultOrgId, ProjectId = customer.Id, ModuleId = payroll.Id,
+                    Version = "2.0", CreatedAt = DateTime.UtcNow,
+                });
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var answer = await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll");
+
+        answer.Rows.Count.Should().BeLessThanOrEqualTo(DeliverTools.ModuleHolderCap);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("Pass solution");
     }
 
     // ── The Private solution is absent everywhere ───────────────────────
@@ -607,7 +674,7 @@ public sealed class DeliverToolsTests : IDisposable
         (await tools.ListUpgradesAsync()).Solutions.Should().NotContain(g => g.SolutionId == _seed.Secret);
         (await tools.ListRecentDeliveriesAsync()).Rows.Should().NotContain(d => d.SolutionId == _seed.Secret);
         (await tools.ListCustomerKnowledgeAsync(person: "anne")).People.Should().NotContain(p => p.SolutionId == _seed.Secret);
-        (await tools.ListCustomerModulesAsync(module: "CRONUS Payroll")).Should().NotContain(m => m.SolutionId == _seed.Secret);
+        (await tools.ListCustomerModulesAsync(module: "CRONUS Payroll")).Rows.Should().NotContain(m => m.SolutionId == _seed.Secret);
 
         foreach (var read in new Func<Task>[]
                  {

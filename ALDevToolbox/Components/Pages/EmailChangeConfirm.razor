@@ -1,0 +1,46 @@
+@page "/account/email-change/confirm"
+@layout ALDevToolbox.Components.Layout.AuthLayout
+@using ALDevToolbox.Components.Shared
+
+<PageTitle>Confirm new email · AL Workbench</PageTitle>
+
+@* Opened from the link sent to the new address when an administrator changes
+   it. A button rather than a link that acts by itself, so a mail scanner that
+   opens every link can't make the change, and sign the person out everywhere,
+   before they get here (#1544). Same shape as EmailChangeCancel. *@
+@if (string.IsNullOrEmpty(Token))
+{
+    <AuthCard Title="That link is missing something">
+        <Sub>
+            This link looks incomplete - email apps sometimes cut long links in half.
+            Open it from the email again.
+        </Sub>
+        <Foot>
+            <a class="auth__link" href="/login">Back to sign in</a>
+        </Foot>
+    </AuthCard>
+}
+else
+{
+    <AuthCard Title="Use this email address?" FormAction="/auth/account/email-change/confirm">
+        <Sub>
+            An administrator changed the email address on your account to the one you
+            received this link at. Confirm it to start signing in with this address.
+        </Sub>
+        <ChildContent>
+            <input type="hidden" name="Token" value="@Token" />
+            <button type="submit" class="btn btn--primary" style="height: var(--control-h-lg)">
+                <Icon Name="check" Width="16" Height="16" />
+                <span>Confirm new email</span>
+            </button>
+        </ChildContent>
+        <Foot>
+            <a class="auth__link" href="/login">Back to sign in</a>
+        </Foot>
+        <Legal>You'll be signed out everywhere and can sign in again with this address. If you didn't expect this, close this page.</Legal>
+    </AuthCard>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "token")] public string? Token { get; set; }
+}

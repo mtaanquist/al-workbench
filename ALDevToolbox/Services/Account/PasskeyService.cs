@@ -325,12 +325,14 @@ public sealed class PasskeyService
             // an attacker can't recompute it to tell a synthetic entry from a real
             // credential; an assertion against it simply fails to match, exactly
             // like an empty list did. See #490.
-            if (allowCredentials.Count == 0)
+            //
+            // Padded to a constant length, not just filled when empty: a single
+            // stand-in still let a reply with two or more entries say "this
+            // address has that many passkeys" (#1614). Only an account with
+            // more passkeys than the pad length shows a longer list.
+            for (var i = allowCredentials.Count; i < SignInAllowListLength; i++)
             {
-                allowCredentials = new List<PublicKeyCredentialDescriptor>
-                {
-                    new(SyntheticCredentialId(normalised)),
-                };
+                allowCredentials.Add(new PublicKeyCredentialDescriptor(SyntheticCredentialId(normalised, i)));
             }
         }
 
@@ -353,13 +355,40 @@ public sealed class PasskeyService
     /// per-deployment secret via HMAC so it is deterministic (a repeated probe
     /// of the same email yields the same id — a per-request random id would
     /// itself distinguish synthetic from real) yet unguessable to an attacker
-    /// who doesn't know the secret. 32 bytes matches a typical credential id.
+    /// who doesn't know the secret. Its length is one of
+    /// <see cref="SyntheticCredentialIdLengths"/>; a real id of any other
+    /// length still shows as real.
     /// </summary>
-    private byte[] SyntheticCredentialId(string normalisedEmail)
+    private byte[] SyntheticCredentialId(string normalisedEmail, int index)
     {
-        using var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(_deployment.Id));
-        return hmac.ComputeHash(Encoding.UTF8.GetBytes("passkey-synthetic:" + normalisedEmail));
+        using var hmac = new System.Security.Cryptography.HMACSHA512(Encoding.UTF8.GetBytes(_deployment.Id));
+        var digest = hmac.ComputeHash(Encoding.UTF8.GetBytes($"passkey-synthetic:{index}:{normalisedEmail}"));
+        // Real credential ids differ in length by authenticator, so stand-ins
+        // that were all one length (32 bytes, as before #1649) showed which
+        // entries were real. Each stand-in takes a length from the common
+        // ones, deterministically so a repeated probe sees the same list. The
+        // length comes from a second HMAC, never from bytes the id carries: a
+        // byte picked from the output would tie its value to the length (every
+        // 64-byte stand-in would end in a byte with the same remainder).
+        var picker = hmac.ComputeHash(Encoding.UTF8.GetBytes($"passkey-synthetic-length:{index}:{normalisedEmail}"));
+        var length = SyntheticCredentialIdLengths[picker[0] % SyntheticCredentialIdLengths.Length];
+        return digest[..length];
     }
+
+    /// <summary>
+    /// The credential id lengths stand-ins are drawn from: the sizes common
+    /// authenticators produce (16 and 20 bytes from phone and platform
+    /// passkeys, 32 from Windows Hello, 64 from security keys). A digest of 64
+    /// bytes covers the longest.
+    /// </summary>
+    internal static readonly int[] SyntheticCredentialIdLengths = [16, 20, 32, 64];
+
+    /// <summary>
+    /// How many entries the sign-in allow-list for an email hint always has,
+    /// real credentials first and stand-ins after, so its length says nothing
+    /// about the address (#1614).
+    /// </summary>
+    internal const int SignInAllowListLength = 8;
 
     /// <summary>
     /// Validates the assertion response, bumps the credential's counter, and

@@ -25,6 +25,7 @@ public sealed class StrongAuthGateTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly ServiceProvider _services;
+    private readonly ALDevToolbox.Services.Operations.MaintenanceModeState _maintenance = new();
 
     public StrongAuthGateTests()
     {
@@ -32,6 +33,7 @@ public sealed class StrongAuthGateTests : IDisposable
         _services = new ServiceCollection()
             .AddScoped(_ => db.NewContext())
             .AddScoped<IOrganizationContext>(_ => new AmbientOrganizationContext())
+            .AddSingleton(_maintenance)
             .BuildServiceProvider();
     }
 
@@ -129,6 +131,41 @@ public sealed class StrongAuthGateTests : IDisposable
         ctx.Response.Headers.Location.ToString().Should().Be("/account/security?required=1");
     }
 
+    /// <summary>
+    /// While a restore runs the users table may not exist yet, so the gate must not
+    /// read it: it lets the request on to the maintenance gate, which answers
+    /// everyone but a SiteAdmin (#1599).
+    /// </summary>
+    [Fact]
+    public async Task During_a_restore_the_gate_steps_aside_for_the_maintenance_gate()
+    {
+        var user = await SeedUserAsync();
+        await SetRequireStrongAuthAsync(TestDb.DefaultOrgId, true);
+        _maintenance.Enter("Restoring backup test.dump");
+        try
+        {
+            await using (var ctx = _db.NewContext())
+            {
+                // As in the seconds after DROP SCHEMA: a read would throw.
+                await ctx.Database.ExecuteSqlRawAsync("ALTER TABLE users RENAME TO users_gone");
+            }
+
+            var (_, reached) = await RunAsync(user, "/site-admin/backups");
+
+            reached.Should().BeTrue("the gate does not read the users table during a restore");
+        }
+        finally
+        {
+            _maintenance.Exit();
+            await using var ctx = _db.NewContext();
+            await ctx.Database.ExecuteSqlRawAsync("ALTER TABLE IF EXISTS users_gone RENAME TO users");
+        }
+
+        var (after, reachedAfter) = await RunAsync(user, "/admin");
+        reachedAfter.Should().BeFalse("once the site reopens the rule applies again");
+        after.Response.StatusCode.Should().Be(StatusCodes.Status302Found);
+    }
+
     [Fact]
     public async Task User_without_a_strong_method_gets_403_on_a_post()
     {
@@ -168,7 +205,7 @@ public sealed class StrongAuthGateTests : IDisposable
         // so it should be a conscious edit reviewed alongside this list.
         StrongAuthGate.AllowedPathPrefixes.Should().Equal(
             "/account", "/auth", "/mcp", "/oauth", "/.well-known", "/login", "/signup",
-            "/_blazor", "/_framework", "/_content", "/healthz", "/readyz", "/not-found",
+            "/s", "/api/sealed", "/_blazor", "/_framework", "/_content", "/healthz", "/readyz", "/not-found",
             "/Error", "/favicon.ico");
     }
 
@@ -179,6 +216,11 @@ public sealed class StrongAuthGateTests : IDisposable
     [InlineData("/mcpx", false)]
     [InlineData("/admin", false)]
     [InlineData("/", false)]
+    // A Sealed link opens for an unenrolled member as it would for a stranger,
+    // while the tool that creates links stays behind the requirement (#1544).
+    [InlineData("/s/AbC123", true)]
+    [InlineData("/api/sealed/AbC123/reveal", true)]
+    [InlineData("/sealed", false)]
     public void Allow_list_matching_is_by_segment_not_by_string_prefix(string path, bool allowed) =>
         StrongAuthGate.IsAllowed(path).Should().Be(allowed);
 

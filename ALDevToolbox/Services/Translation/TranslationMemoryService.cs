@@ -80,7 +80,8 @@ public sealed class TranslationMemoryService
     /// tracking that repository (#1252): a pair learned without one is visible
     /// to the whole organisation, so a save to a Private solution's repository
     /// has to pass it (#1324). Null for an export or an upload, which belong
-    /// to no repository.
+    /// to no repository - which is why the Translator sends an export of a
+    /// file it opened from a repository nothing to learn (#1540).
     /// </param>
     /// <param name="sourcePath">The file's path in <paramref name="sourceRepository"/>.</param>
     /// <returns>How many pairs were new.</returns>
@@ -166,7 +167,7 @@ public sealed class TranslationMemoryService
 
             var srcHash = Hash(e.SourceText);
             var tgtHash = Hash(e.TargetText);
-            var key = $"{srcLang}{tgtLang}{srcHash}{tgtHash}";
+            var key = $"{srcLang}\u001F{tgtLang}\u001F{srcHash}\u001F{tgtHash}";
             // Last write wins on collision within the batch.
             byKey[key] = new PreparedEntry(
                 srcLang, tgtLang, e.SourceText, e.TargetText, srcHash, tgtHash, e.Kind,
@@ -195,12 +196,12 @@ public sealed class TranslationMemoryService
                     && tgtLangs.Contains(e.TargetLanguage))
                 .ToListAsync(ct).ConfigureAwait(false);
             var existingByKey = existing.ToDictionary(
-                e => $"{e.SourceLanguage}{e.TargetLanguage}{e.SourceHash}{e.TargetHash}",
+                e => $"{e.SourceLanguage}\u001F{e.TargetLanguage}\u001F{e.SourceHash}\u001F{e.TargetHash}",
                 StringComparer.Ordinal);
 
             foreach (var c in chunk)
             {
-                var key = $"{c.SourceLanguage}{c.TargetLanguage}{c.SourceHash}{c.TargetHash}";
+                var key = $"{c.SourceLanguage}\u001F{c.TargetLanguage}\u001F{c.SourceHash}\u001F{c.TargetHash}";
                 if (existingByKey.TryGetValue(key, out var row))
                 {
                     row.HitCount += 1;
@@ -446,9 +447,12 @@ public sealed class TranslationMemoryService
         const int maxAttempts = 3;
         for (var attempt = 1; ; attempt++)
         {
-            // Existence + tenant scope (the query filter). AsNoTracking: Score is
-            // never mutated through the tracked entity — the atomic UPDATE owns it.
-            var entryExists = await _db.TranslationMemory.AsNoTracking()
+            // Existence + tenant scope (the query filter) + solution visibility: an
+            // entry learned from a Private solution's repository is "not found" to
+            // anyone that solution is hidden from, the same as in search (#1547).
+            // AsNoTracking: Score is never mutated through the tracked entity — the
+            // atomic UPDATE owns it.
+            var entryExists = await VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false))
                 .AnyAsync(e => e.Id == entryId, ct).ConfigureAwait(false);
             if (!entryExists)
                 throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
@@ -529,8 +533,14 @@ public sealed class TranslationMemoryService
     public async Task DeleteAsync(long entryId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var entry = await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
+        // Hidden-solution pairs answer "not found", as in search and VoteAsync (#1547).
+        var visible = await VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false))
+            .AnyAsync(e => e.Id == entryId, ct).ConfigureAwait(false);
+        var entry = visible
+            ? await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct).ConfigureAwait(false)
+            : null;
+        if (entry is null)
+            throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
         if (entry.DeletedAt is null)
         {
             entry.DeletedAt = DateTime.UtcNow;

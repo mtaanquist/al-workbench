@@ -509,6 +509,9 @@ public sealed class AuditInterceptorTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = "signs-in@cronus.example",
                 DisplayName = "CRONUS User",
+                // The real hasher on purpose, not TestPasswords: this sign-in runs
+                // end to end through AuthService, so it starts from the hash
+                // AuthService itself makes.
                 PasswordHash = auth.HashPassword(password),
                 Role = UserRole.User,
                 Status = UserStatus.Active,

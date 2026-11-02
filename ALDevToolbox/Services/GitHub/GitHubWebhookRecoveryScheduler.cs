@@ -113,14 +113,18 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
         GitHubWebhookQueue queue,
         TimeProvider clock,
         ILogger<GitHubWebhookRecoveryScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(GitHubWebhookRecoveryScheduler),
             pollInterval: PollInterval,
             // Twenty log pages and a resend each for the failures: GitHub calls at
             // thirty seconds' deadline apiece, so ten minutes is a slow GitHub, not a hang.
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(20),
-            disableEnvVar: "DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER")
+            disableEnvVar: "DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _queue = queue;

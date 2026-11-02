@@ -60,11 +60,10 @@ public sealed class GitHubAccessServiceTests : IDisposable
     /// </summary>
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     /// <summary>Connects the organisation to a GitHub organisation without going through the guarded ConnectAsync.</summary>
@@ -319,11 +318,10 @@ public sealed class GitHubAccessServiceTests : IDisposable
         // App id and private key only - the #620 half. The link flow needs the
         // OAuth client id and secret on top, and the failure names the setup
         // rather than GitHub.
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: null,
             ClientSecret: null, ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
         var (service, ctx) = NewService(LinkableApi());
         await using var _ = ctx;
 

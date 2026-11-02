@@ -67,6 +67,7 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
         _ctx.Services.AddScoped<GenerationService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>();
@@ -277,13 +278,10 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
     /// <summary>Deployment configured, organisation connected, user linked, one template.</summary>
     private async Task ReadyAsync()
     {
-        using (var rsa = RSA.Create(2048))
-        {
-            await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
-                AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
-                ClientSecret: "s3cr3t", ClearClientSecret: false,
-                PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
-        }
+        await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
+            AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
+            ClientSecret: "s3cr3t", ClearClientSecret: false,
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using (var ctx = _db.NewContext())
         {

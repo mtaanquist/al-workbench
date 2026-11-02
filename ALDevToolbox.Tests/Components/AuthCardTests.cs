@@ -292,13 +292,44 @@ public sealed class AuthCardTests : IDisposable
     [Fact]
     public void A_rejected_password_keeps_the_form_so_it_can_be_retyped()
     {
-        Navigate("/reset-password?token=live&err=Password&msg=" + Uri.EscapeDataString("Password must be at least 12 characters."));
+        Navigate("/reset-password?token=live&err=Password&reason=password-short");
         var cut = _ctx.Render<ResetPassword>();
 
         cut.WaitForAssertion(() =>
         {
             cut.Find("form").GetAttribute("action").Should().Be("/auth/reset-password");
             cut.Markup.Should().Contain("Password must be at least 12 characters.");
+        });
+    }
+
+    [Fact]
+    public void The_reset_form_never_shows_a_message_from_the_address()
+    {
+        // The error copy is the page's own, looked up from a code (#1544).
+        Navigate("/reset-password?token=live&err=Password&reason=password-short&msg="
+                 + Uri.EscapeDataString("Call CRONUS support on +45 0000 0000"));
+        var cut = _ctx.Render<ResetPassword>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("Password must be at least 12 characters.");
+            cut.Markup.Should().NotContain("CRONUS support");
+        });
+    }
+
+    [Fact]
+    public void The_signup_form_shows_its_own_copy_for_an_unknown_code()
+    {
+        _email.Configured = false;
+        Navigate("/signup?err=invalid&field=Email&reason="
+                 + Uri.EscapeDataString("Your account is locked. Call CRONUS support")
+                 + "&msg=" + Uri.EscapeDataString("Call CRONUS support on +45 0000 0000"));
+        var cut = _ctx.Render<Signup>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain(FormErrorReasons.GenericMessage);
+            cut.Markup.Should().NotContain("CRONUS support");
         });
     }
 

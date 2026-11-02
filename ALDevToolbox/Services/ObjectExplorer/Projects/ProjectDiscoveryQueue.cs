@@ -28,7 +28,10 @@ public sealed class ProjectDiscoveryQueue : JobQueue<ProjectDiscoveryJob, int>
     // A request that lands while the solution's discovery is running is about a
     // repository list the running clone may already have read, so it runs again
     // afterwards rather than being folded in (#1263).
-    public ProjectDiscoveryQueue() : base(capacity: 64, keySelector: job => job.ProjectId, rerunIfRequestedWhileRunning: true) { }
+    // Given the maintenance flag (production DI always does), a discovery queued
+    // before a restore replaced the database is dropped rather than run (#1538).
+    public ProjectDiscoveryQueue(Operations.MaintenanceModeState? maintenance = null)
+        : base(capacity: 64, keySelector: job => job.ProjectId, rerunIfRequestedWhileRunning: true, maintenance: maintenance) { }
 }
 
 /// <summary>

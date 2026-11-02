@@ -59,6 +59,7 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
         _ctx.Services.AddSingleton<IMemoryCache>(new MemoryCache(Options.Create(new MemoryCacheOptions())));
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddScoped<RecipeService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddSingleton<MarkdownRenderer>();
         _ctx.Services.AddDataProtection();
@@ -201,13 +202,10 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
     /// </summary>
     private async Task<FakeGitHubApi> ReadyAsync()
     {
-        using (var rsa = RSA.Create(2048))
-        {
-            await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
-                AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
-                ClientSecret: "s3cr3t", ClearClientSecret: false,
-                PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
-        }
+        await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
+            AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
+            ClientSecret: "s3cr3t", ClearClientSecret: false,
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using (var ctx = _db.NewContext())
         {

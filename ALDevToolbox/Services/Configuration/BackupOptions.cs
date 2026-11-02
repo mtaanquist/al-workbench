@@ -27,6 +27,13 @@ public sealed record BackupOptions
     public string PgRestorePath { get; init; } = "pg_restore";
 
     /// <summary>
+    /// How long a full restore waits, with the site closed, for imports, builds and
+    /// background sweeps that are already running to finish before it refuses
+    /// (#1538). Not read from configuration; tests shorten it.
+    /// </summary>
+    public TimeSpan ActiveJobsWait { get; init; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
     /// Reads the deployment's values. ASP.NET's default configuration already
     /// includes environment variables, so the operator-facing names keep
     /// working and an <c>appsettings</c> entry now works too.

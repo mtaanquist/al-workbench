@@ -55,6 +55,7 @@ public sealed class BackupService
     private readonly string _backupsDirectory;
     private readonly string _pgDumpPath;
     private readonly string _pgRestorePath;
+    private readonly TimeSpan _activeJobsWait;
     private readonly SystemSettingsService? _systemSettings;
     private readonly RestoreInventoryHold? _restoreInventory;
     private readonly DeploymentIdentity? _deployment;
@@ -94,10 +95,18 @@ public sealed class BackupService
         _backupsDirectory = backupOptions.Directory;
         _pgDumpPath = backupOptions.PgDumpPath;
         _pgRestorePath = backupOptions.PgRestorePath;
+        _activeJobsWait = backupOptions.ActiveJobsWait;
     }
 
     /// <summary>Absolute path to the backups directory. Created on demand.</summary>
     public string BackupsDirectory => _backupsDirectory;
+
+    /// <summary>
+    /// Waits for the backup/restore lock (<see cref="BackupCoordination.WaitAsync"/>)
+    /// and holds it until the result is disposed.
+    /// </summary>
+    internal Task<IAsyncDisposable> WaitForBackupLockAsync(CancellationToken ct) =>
+        BackupCoordination.WaitAsync(_connectionString, ct);
 
     /// <summary>
     /// Cross-org listing of every backup row, newest first. The
@@ -159,6 +168,13 @@ public sealed class BackupService
         // mid-restore reads a schema being dropped. See issues #370 and #371.
         await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
 
+        // Checked under the lock, so no restore is running: maintenance mode on
+        // here means a failed restore is holding the site closed. Its database is
+        // empty or half-loaded and its retention setting is the seeded default, so
+        // a dump of it would be useless and the prune after it would delete real
+        // backups to make room (#1610).
+        RefuseWhileInMaintenance(_maintenance);
+
         var timestamp = _clock.GetUtcNow().UtcDateTime;
         var label = kind == BackupKind.Scheduled ? "scheduled" : "adhoc";
         // Millisecond precision so two runs in the same second don't collide on
@@ -209,6 +225,61 @@ public sealed class BackupService
     }
 
     /// <summary>
+    /// What is holding a restore up, in the SiteAdmin's words rather than worker
+    /// names (#1579): the named background jobs still counted, then the unnamed rest.
+    /// Those are the database guard's per-command counts, which come from pages and
+    /// from the named jobs' own queries alike, so they are described neutrally.
+    /// </summary>
+    internal static string DescribeRunning(IEnumerable<string> workerNames, int unnamed)
+    {
+        var parts = new List<string>();
+        foreach (var name in workerNames)
+        {
+            // A worker with several slots is named "ProjectBuildWorker 2".
+            var cut = name.IndexOf(' ');
+            var label = WorkerLabels.GetValueOrDefault(cut < 0 ? name : name[..cut], "background upkeep");
+            if (!parts.Contains(label)) parts.Add(label);
+        }
+        if (unnamed > 0) parts.Add("a database operation still finishing");
+        return parts.Count == 0 ? "background work" : string.Join(", ", parts);
+    }
+
+    private static readonly Dictionary<string, string> WorkerLabels = new(StringComparer.Ordinal)
+    {
+        ["ReleaseImportWorker"] = "an import",
+        ["ReleaseAutoImportScheduler"] = "an automatic release import",
+        ["ProjectBuildWorker"] = "a build",
+        ["DeliveryWorker"] = "a deployment",
+        ["DeliveryScheduler"] = "a deployment",
+        ["EnvironmentRefreshWorker"] = "an environment refresh",
+        ["EnvironmentRefreshScheduler"] = "an environment refresh",
+        ["UpgradeActionWorker"] = "an environment update step",
+        ["ObjectExplorerVacuumScheduler"] = "the nightly Object Explorer clean-up",
+        ["TranslationMemoryIngestScheduler"] = "a translation memory update",
+        ["BcQualityRefreshScheduler"] = "a BCQuality refresh",
+        ["OffsiteRestoreWorker"] = "an off-site download",
+        ["GitHubPullRequestBuildWorker"] = "a GitHub delivery",
+        ["GitHubWebhookRecoveryScheduler"] = "a GitHub delivery",
+        ["ProjectDiscoveryWorker"] = "a repository scan",
+        ["RepositoryDiscoveryScheduler"] = "a repository scan",
+    };
+
+    /// <summary>
+    /// Refuses a new backup while the site is closed for maintenance - in
+    /// practice, while a failed restore holds it closed (#1610). Shared with
+    /// <see cref="PerTenantBackupService"/>.
+    /// </summary>
+    internal static void RefuseWhileInMaintenance(MaintenanceModeState? maintenance)
+    {
+        if (maintenance?.IsActive != true) return;
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["BackupId"] = "Backups are paused while the site is closed for maintenance. "
+                + "If a restore failed, restore another backup to reopen the site. Nothing was deleted.",
+        });
+    }
+
+    /// <summary>
     /// Pins or unpins a backup so retention pruning skips (or stops skipping)
     /// it. Idempotent; an already-pinned row that's pinned again is a no-op.
     /// </summary>
@@ -234,6 +305,11 @@ public sealed class BackupService
     public async Task DeleteAsync(int id, CancellationToken ct = default)
     {
         RequireSiteAdmin();
+        // Under the backup lock, so a delete cannot unlink the file a restore has
+        // already checked and is about to load after dropping the schema (#1628).
+        // The lock refuses at once, so a delete during a backup or restore gets the
+        // usual "try again" message.
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
         var row = await _db.Backups.FirstOrDefaultAsync(b => b.Id == id, ct);
         if (row is null) return;
         if (row.IsPinned)
@@ -318,6 +394,14 @@ public sealed class BackupService
                 throw new PlanValidationException(new Dictionary<string, string> { ["BackupId"] = blocker });
             }
         }
+        // Same advisory lock the backup path takes, so a scheduled pg_dump (or
+        // off-site prune) can't run against the schema we're about to drop (#370).
+        // Taken before the file checks, not after them: the readability check
+        // reads the whole dump and can take minutes, and a scheduled backup's
+        // retention prune meanwhile could delete the file it has just passed,
+        // leaving the restore to drop the schema and then fail (#1610).
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
+
         var path = ResolveFilePath(row.FileName);
         if (!File.Exists(path))
         {
@@ -330,17 +414,45 @@ public sealed class BackupService
         // Read the whole dump before anything is dropped (#1321).
         await EnsureDumpIsReadableAsync(row, path, ct);
 
-        // Same advisory lock the backup path takes, so a scheduled pg_dump (or
-        // off-site prune) can't run against the schema we're about to drop. See
-        // issue #370.
-        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
-
         var inventory = await CaptureInventoryForRestoreAsync(ct);
 
         // A restore can start while an earlier failed one holds the site closed;
         // if this one fails before the drop, that hold has to come back as it was.
         var before = _maintenance.Capture();
+        // The restore's own reads and writes (migrate, the inventory, retention)
+        // must get past the database guard it is about to close (#1571).
+        using var allowDatabase = _maintenance.AllowDatabase();
         _maintenance.Enter($"Restoring backup {row.FileName}");
+        // With maintenance mode on, no scheduler tick or queued job starts. Wait,
+        // for a limited time, for those already running to finish: an import or
+        // build would keep writing into the dropped and half-loaded schema. If they
+        // do not finish, refuse rather than drop under them (#1538). Jobs still
+        // queued do not hold the restore up; they are dropped once it completes.
+        bool quiet;
+        try
+        {
+            quiet = await _maintenance.WaitForActiveJobsAsync(_activeJobsWait, ct);
+        }
+        catch
+        {
+            _maintenance.Restore(before);
+            throw;
+        }
+        if (!quiet)
+        {
+            var running = _maintenance.ActiveJobs;
+            var (named, unnamed) = _maintenance.RunningJobs();
+            _maintenance.Restore(before);
+            _logger.LogWarning(
+                "Refusing to restore {FileName}: {Running} job(s) or database command(s) were still running after {Wait} ({Workers}; {Commands} unnamed).",
+                row.FileName, running, _activeJobsWait, string.Join(", ", named), unnamed);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["BackupId"] = "Something is still running against the database, and a restore would replace the "
+                    + "database under it. Still running: " + DescribeRunning(named, unnamed) + ". "
+                    + "Wait a few minutes, or until it has finished, then restore. Nothing was changed.",
+            });
+        }
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
         var destructive = CancellationToken.None;
@@ -379,8 +491,12 @@ public sealed class BackupService
             _restoreInventory?.Clear();
 
             sw.Stop();
+            // Imports and builds the dump caught part-way have no job behind them in
+            // this process. The startup reconcile marks them, so the backups page
+            // asks the SiteAdmin to restart (#1538).
             _logger.LogInformation(
-                "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
+                "Restored backup {FileName} in {ElapsedMs} ms. Restart the application so imports and builds the backup caught part-way are marked as interrupted.",
+                row.FileName, sw.ElapsedMilliseconds);
         }
         catch (Exception ex) when (dropped)
         {
@@ -416,6 +532,10 @@ public sealed class BackupService
         }
         finally
         {
+            // Anything queued or held from before belongs to the database just
+            // replaced; moving the epoch on, before the site reopens, makes the
+            // queues and workers drop it (#1538).
+            if (dropped) _maintenance.AdvanceEpoch();
             if (restored) _maintenance.Exit();
             // Nothing was dropped, so put back whatever was there before: open, or
             // still held closed by an earlier failed restore.
@@ -509,8 +629,19 @@ public sealed class BackupService
     /// other place migrations run, so without this every query on a newer
     /// column fails until the next restart (#1255).
     /// </summary>
+    /// <remarks>
+    /// The command timeout is startup's half hour, which a large data migration may
+    /// need. Waiting for a lock is another matter: a session left holding one would
+    /// otherwise keep the restore, with the site closed, waiting the full half hour
+    /// before it failed. For the migrate only, the context connects with a one-minute
+    /// <c>lock_timeout</c> in its startup options, so that fails in a minute instead
+    /// (#1538). The connection string goes back as it was afterwards.
+    /// </remarks>
     private async Task MigrateAsync(CancellationToken ct)
     {
+        var original = _db.Database.GetConnectionString();
+        await _db.Database.CloseConnectionAsync();
+        _db.Database.SetConnectionString(WithRestoreMigrateLockTimeout(original!));
         _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
         try
         {
@@ -518,8 +649,26 @@ public sealed class BackupService
         }
         finally
         {
+            await _db.Database.CloseConnectionAsync();
+            _db.Database.SetConnectionString(original);
             _db.Database.SetCommandTimeout((int?)null);
         }
+    }
+
+    /// <summary>How long the restore's migrate waits for a lock before it fails.</summary>
+    internal static readonly TimeSpan RestoreMigrateLockTimeout = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// <paramref name="connectionString"/> with the restore migrate's lock timeout
+    /// added to its startup options. Appended, so options the operator set stay; a
+    /// later <c>-c</c> for the same setting wins.
+    /// </summary>
+    internal static string WithRestoreMigrateLockTimeout(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        var lockTimeout = "-c lock_timeout=" + (long)RestoreMigrateLockTimeout.TotalMilliseconds;
+        builder.Options = string.IsNullOrWhiteSpace(builder.Options) ? lockTimeout : builder.Options + " " + lockTimeout;
+        return builder.ConnectionString;
     }
 
     /// <summary>

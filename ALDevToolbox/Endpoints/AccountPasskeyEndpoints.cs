@@ -24,6 +24,47 @@ internal static class AccountPasskeyEndpoints
     /// <summary>Where the passkey card's script fetches the registration options from.</summary>
     public const string RegistrationOptionsPath = "/account/passkeys/registration-options";
 
+    /// <summary>The one body <c>/auth/passkey/login</c> answers every refusal with (#1614).</summary>
+    public const string PasskeyLoginFailedBody = "{\"error\":\"That passkey didn't work. Try again.\"}";
+
+    /// <summary>
+    /// Where a step-up before creating an access token comes back to: the AI
+    /// assistants tab, with the create form open and a line saying the
+    /// confirmation worked.
+    /// </summary>
+    public const string CreateTokenAfterStepUpUrl = "/account/ai?" + RouteConstants.OkQuery + "=confirmed-token";
+
+    /// <summary>
+    /// The expiry choices the create-token form offers, in days; 0 is no
+    /// expiry. The endpoint accepts these and nothing else, so a hand-made
+    /// post can't ask for an expiry past what a date can hold (#1627).
+    /// </summary>
+    public static readonly int[] AccessTokenTtlDays = [30, 90, 180, 365, 0];
+
+    /// <summary>The create form's <c>maxlength</c> on the token name.</summary>
+    public const int AccessTokenNameMaxLength = 80;
+
+    /// <summary>The expiry the form starts on.</summary>
+    public const int DefaultAccessTokenTtlDays = 90;
+
+    /// <summary>
+    /// <see cref="CreateTokenAfterStepUpUrl"/> carrying what the person had
+    /// typed, so a form sent after the step-up window closed comes back
+    /// filled in rather than empty (#1627).
+    /// </summary>
+    public static string CreateTokenAfterStepUpUrlWith(string? name, string? ttlDays)
+    {
+        var url = CreateTokenAfterStepUpUrl;
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            // The form's maxlength; a longer hand-made name can't be saved anyway.
+            var trimmed = name.Trim();
+            url += "&name=" + Uri.EscapeDataString(trimmed.Length > AccessTokenNameMaxLength ? trimmed[..AccessTokenNameMaxLength] : trimmed);
+        }
+        if (int.TryParse(ttlDays, out var ttl) && AccessTokenTtlDays.Contains(ttl)) url += "&ttl=" + ttl;
+        return url;
+    }
+
     /// <summary>
     /// The current password from the registration-options body
     /// (<c>{"password": "..."}</c>; JSON because the caller is a fetch), or
@@ -65,7 +106,7 @@ internal static class AccountPasskeyEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!passkeys.IsConfigured) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsync("Passkeys not configured."); return; }
             var userId = org.CurrentUserId.Value;
-            var refusal = await stepUp.PasskeyRegistrationRefusalAsync(ctx.User, userId, await ReadPasswordAsync(ctx, ct), ct);
+            var refusal = await stepUp.PasskeyRegistrationRefusalAsync(ctx.User, userId, await ReadPasswordAsync(ctx, ct), ResolveIp(ctx), ct);
             if (refusal is not null)
             {
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -207,9 +248,14 @@ internal static class AccountPasskeyEndpoints
             }
             catch (Exception ex)
             {
+                // One body for every failure: the exception text differed
+                // between an unknown or inactive account's credential and an
+                // active account's, which told a direct caller which addresses
+                // are live accounts with passkeys (#1614). The log keeps it.
                 logger.LogWarning(ex, "Passkey login failed.");
                 ctx.Response.StatusCode = 401;
-                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(PasskeyLoginFailedBody);
             }
         });
 
@@ -225,6 +271,8 @@ internal static class AccountPasskeyEndpoints
             IOrganizationContext org,
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
+            ALDevToolbox.Services.Tools.ToolEnablement tools,
+            PublicOrigin publicOrigin,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -235,18 +283,31 @@ internal static class AccountPasskeyEndpoints
                 ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return;
             }
+            // Step-up: a token hands an assistant the same tools an approved
+            // permission screen does, and outlives the session, so it asks for
+            // the same thing the consent does - a recent second factor whenever
+            // the organisation has marked any tool (#1611). The page sends a
+            // stale session to step up before showing the form; this is the
+            // backstop for a form left open past the window.
             var form = await ctx.Request.ReadFormAsync(ct);
             var name = form["Name"].ToString();
-            DateTime? expiresAt = null;
             var ttlDaysRaw = form["TtlDays"].ToString();
-            if (int.TryParse(ttlDaysRaw, out var ttlDays) && ttlDays > 0)
+            if (await tools.AnyStepUpAsync(ct) && !await tools.IsFreshAsync(ctx.User, ct))
             {
-                expiresAt = DateTime.UtcNow.AddDays(ttlDays);
+                ctx.Response.Redirect(StepUpEndpoints.Url(CreateTokenAfterStepUpUrlWith(name, ttlDaysRaw)));
+                return;
             }
+            if (!int.TryParse(ttlDaysRaw, out var ttlDays) || !AccessTokenTtlDays.Contains(ttlDays))
+            {
+                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString("Choose one of the expiry options offered.")}");
+                return;
+            }
+            DateTime? expiresAt = ttlDays > 0 ? DateTime.UtcNow.AddDays(ttlDays) : null;
 
             try
             {
-                var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct);
+                var issued = await tokens.IssueAsync(userId.Value, orgId.Value, name, expiresAt, ct,
+                    noticeUrl: $"{publicOrigin.For(ctx)}/account/ai");
                 SetOneShotPatCookie(ctx, protection, new OneShotPat(
                     issued.Id, issued.Plaintext, name.Trim(), issued.CreatedAt, issued.ExpiresAt));
                 ctx.Response.Redirect("/account/access-tokens/created");

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.GitHub;
@@ -30,7 +31,7 @@ namespace ALDevToolbox.Services.Mcp.Tools;
 /// <c>.design/github-integration-phase2.md</c>.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class GitHubTools
+public sealed partial class GitHubTools
 {
     private readonly GitHubRepositoryService _repositories;
     private readonly GitHubWorkspaceRepositoryService _workspaces;
@@ -57,6 +58,17 @@ public sealed class GitHubTools
 
     /// <summary>The suffix the AL compiler gives the generated source file.</summary>
     private const string SourceFileSuffix = ".g.xlf";
+
+    /// <summary>The most files <c>list_translation_files</c> returns in one answer.</summary>
+    internal const int TranslationFileCap = 100;
+
+    /// <summary>
+    /// A BCP-47-shaped language tag such as <c>da-DK</c>. It goes into the file name and
+    /// the XLIFF <c>target-language</c>, so "Danish" or "da_DK" would open a pull request
+    /// Business Central never loads, and a '/' or '..' would put the file elsewhere (#1576).
+    /// </summary>
+    [GeneratedRegex("^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")]
+    private static partial Regex LanguageTag();
 
     private const int DefaultRepositoryLimit = 50;
 
@@ -194,18 +206,32 @@ public sealed class GitHubTools
         "extension is covered as well as a single-app repository. The file marked isSource is the one the " +
         "AL compiler generates: it holds every string and no translations, so it is the file a new " +
         "language starts from. Only repositories in the GitHub organisation your organisation has " +
-        "connected, and that you can open on GitHub yourself, are accepted.")]
-    public async Task<IReadOnlyList<TranslationFileSummary>> ListTranslationFilesAsync(
+        "connected, and that you can open on GitHub yourself, are accepted. Returns at most 100 files, " +
+        "ordered by folder; Truncated and Note say when more were left out, and folder narrows the list " +
+        "to one extension.")]
+    public async Task<CappedRows<TranslationFileSummary>> ListTranslationFilesAsync(
         [Description("The repository as 'owner/name', from list_repositories.")]
         string repository,
+        [Description("Optional. Only the files of this extension folder, as the folder field names it (case-insensitive). Leave it out for every folder.")]
+        string? folder = null,
         CancellationToken ct = default)
     {
         try
         {
-            var files = await _translations.ListFilesAsync((repository ?? string.Empty).Trim(), ct);
-            return files
+            var (files, treeTruncated) = await _translations.ListFilesWithTreeStateAsync(
+                (repository ?? string.Empty).Trim(), ct);
+            var wanted = folder?.Trim().Trim('/');
+            var rows = files
+                .Where(f => string.IsNullOrEmpty(wanted) || string.Equals(f.Folder, wanted, StringComparison.OrdinalIgnoreCase))
                 .Select(f => new TranslationFileSummary(f.Path, f.Folder, f.Language, f.IsSource))
                 .ToList();
+            // A workspace of 20 extensions in 12 languages ran to ~45,000 characters,
+            // past what an assistant client accepts in one answer (#1601).
+            var answer = CappedRows<TranslationFileSummary>.From(
+                rows, TranslationFileCap, "files", "by folder", "Pass folder to narrow the list.");
+            if (!treeTruncated) return answer;
+            const string cut = "GitHub cut this repository's file tree short, so some translation files may be missing from the list.";
+            return answer with { Truncated = true, Note = answer.Note is null ? cut : $"{answer.Note} {cut}" };
         }
         catch (Exception ex) when (IsGitHubRefusal(ex))
         {
@@ -245,6 +271,11 @@ public sealed class GitHubTools
         var language = (targetLanguage ?? string.Empty).Trim();
 
         if (language.Length == 0) throw new McpException("Say which language you are translating into, e.g. da-DK.");
+        if (!LanguageTag().IsMatch(language))
+        {
+            throw new McpException(
+                $"'{language}' is not a language tag. Pass a language tag such as da-DK, the way Business Central names its translation files.");
+        }
         if (edits is null || edits.Count == 0)
         {
             throw new McpException(

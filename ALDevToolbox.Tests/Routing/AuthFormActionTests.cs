@@ -1,8 +1,6 @@
 using System.Text.RegularExpressions;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -20,9 +18,6 @@ namespace ALDevToolbox.Tests.Routing;
 /// because the point is the pairing of eight files against the route table
 /// rather than any one page's render.
 /// </summary>
-// Boots the app and sets ConnectionStrings__DefaultConnection, a process-wide
-// variable; serialise with every other app-booting class or two hosts race it.
-[Collection(EndpointFactoryCollection.Name)]
 public class AuthFormActionTests : IClassFixture<TestDb>
 {
     private readonly TestDb _db;
@@ -78,36 +73,16 @@ public class AuthFormActionTests : IClassFixture<TestDb>
 
     private HashSet<string> PostRoutes()
     {
-        // Same env-var dance as EndpointAmbiguityTests, and for the same reason:
-        // the connection string is read inside WebApplication.CreateBuilder,
-        // before any WithWebHostBuilder hook can inject configuration.
-        var previousConnection = Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection");
-        var previousScheduler = Environment.GetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER");
-        Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", _db.ConnectionString);
-        Environment.SetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER", "1");
-        try
-        {
-            using var factory = new WebApplicationFactory<Program>()
-                .WithWebHostBuilder(builder =>
-                {
-                    builder.UseContentRoot(LocateProjectFolder());
-                    builder.UseEnvironment("Test");
-                });
-            using var _ = factory.CreateClient();
+        using var factory = new EndpointFactory(_db);
+        using var _ = factory.CreateClient();
 
-            return factory.Services.GetRequiredService<EndpointDataSource>()
-                .Endpoints
-                .OfType<RouteEndpoint>()
-                .Where(e => e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods
-                    .Contains("POST", StringComparer.OrdinalIgnoreCase) == true)
-                .Select(e => e.RoutePattern.RawText!)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", previousConnection);
-            Environment.SetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER", previousScheduler);
-        }
+        return factory.Services.GetRequiredService<EndpointDataSource>()
+            .Endpoints
+            .OfType<RouteEndpoint>()
+            .Where(e => e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods
+                .Contains("POST", StringComparer.OrdinalIgnoreCase) == true)
+            .Select(e => e.RoutePattern.RawText!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     private static string LocateProjectFolder()

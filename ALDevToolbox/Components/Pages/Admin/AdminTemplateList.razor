@@ -288,19 +288,24 @@
                                 </a>
                                 @if (!t.IsDefault && t.DeletedAt is null && !t.Deprecated)
                                 {
-                                    <div class="menu__sep"></div>
-                                    @* Still a posted form inside the menu: this page is
-                                       static SSR and the kebab is plain markup driven by
-                                       one delegated document listener, so a submit button
-                                       works here exactly as it did in the cell. *@
-                                    <form method="post" action="@($"/admin/templates/{t.Id}/default")">
-                                        <AntiforgeryToken />
-                                        <button type="submit" class="menu__item" role="menuitem"
-                                                title="Use this template by default on New Workspace / New Extension">
-                                            <Icon Name="star" Width="15" Height="15" Css="menu__icon" />
-                                            <span>Set as default</span>
-                                        </button>
-                                    </form>
+                                    @* Admin only, like the endpoint behind it: choosing
+                                       the org's default is an Administration decision, so
+                                       an Editor is not offered a button that would 403. *@
+                                    <AuthorizeView Roles="Admin" Context="adminAuth">
+                                        <div class="menu__sep"></div>
+                                        @* A native posted form inside the menu: the kebab is
+                                           plain markup driven by one delegated document
+                                           listener, so a submit button works here exactly
+                                           as it did in the cell. *@
+                                        <form method="post" action="@($"/admin/templates/{t.Id}/default")">
+                                            <AntiforgeryToken />
+                                            <button type="submit" class="menu__item" role="menuitem"
+                                                    title="Use this template by default on New Workspace / New Extension">
+                                                <Icon Name="star" Width="15" Height="15" Css="menu__icon" />
+                                                <span>Set as default</span>
+                                            </button>
+                                        </form>
+                                    </AuthorizeView>
                                 }
                             </RowActions>
                         </td>

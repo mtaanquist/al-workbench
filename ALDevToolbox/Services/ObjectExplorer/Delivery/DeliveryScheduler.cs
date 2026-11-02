@@ -22,7 +22,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// reconciled to <c>failed</c> on the first sweep per org that gets through it. Only rows
 /// claimed before this process started count: <see cref="DeliveryWorker"/> is already
 /// draining by the first sweep, and a deployment it claimed since is running, not
-/// orphaned (#1114).
+/// orphaned (#1114). A restore does the same again: the restored database can hold
+/// deployments the backup caught mid-install, so when the restore epoch moves every org
+/// is checked once more, against the time the database was replaced (#1580).
 /// Opt out with <c>DISABLE_DELIVERY_SCHEDULER=1</c>. See <c>.design/saas-delivery.md</c>.
 /// </para>
 /// </summary>
@@ -34,8 +36,11 @@ public sealed class DeliveryScheduler : PolledScheduler
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveryScheduler> _logger;
 
-    // When this process started: a delivery claimed before then was orphaned by the restart.
-    private readonly DateTime _startedAtUtc;
+    // When this process started, or when a restore last replaced the database: a delivery
+    // claimed before then was orphaned by the restart or came back from the backup.
+    private DateTime _claimedBeforeUtc;
+    private bool _afterRestore;
+    private long _reconciledEpoch;
 
     // Orgs whose orphaned deliveries have been failed. An org whose check threw is tried
     // again on the next sweep rather than left with deliveries stuck in progress.
@@ -55,14 +60,16 @@ public sealed class DeliveryScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_DELIVERY_SCHEDULER")
+            disableEnvVar: "DISABLE_DELIVERY_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;
         _logger = logger;
         _maintenance = maintenance;
         // Constructed while the host is built, before any worker drains a job.
-        _startedAtUtc = clock.GetUtcNow().UtcDateTime;
+        _claimedBeforeUtc = clock.GetUtcNow().UtcDateTime;
+        _reconciledEpoch = maintenance?.Epoch ?? 0;
     }
 
     private readonly Operations.MaintenanceModeState? _maintenance;
@@ -85,6 +92,17 @@ public sealed class DeliveryScheduler : PolledScheduler
     internal async Task SweepAsync(CancellationToken ct)
     {
         var nowUtc = _clock.GetUtcNow().UtcDateTime;
+
+        // A restore since the last check: the restored rows were claimed under the database
+        // it replaced. The workers wait while the site is closed, so nothing running now was
+        // claimed before the epoch moved (#1580).
+        if (_maintenance is not null && _maintenance.Epoch != _reconciledEpoch)
+        {
+            _reconciledEpoch = _maintenance.Epoch;
+            _claimedBeforeUtc = _maintenance.EpochAdvancedAtUtc;
+            _afterRestore = true;
+            _reconciledOrgs.Clear();
+        }
 
         List<(int Id, bool IsSystem)> orgs;
         await using (var scope = _services.CreateAsyncScope())
@@ -112,9 +130,9 @@ public sealed class DeliveryScheduler : PolledScheduler
 
                 if (!_reconciledOrgs.Contains(orgId))
                 {
-                    var interrupted = await deliveries.FailInterruptedDeliveriesAsync(_startedAtUtc, ct).ConfigureAwait(false);
+                    var interrupted = await deliveries.FailInterruptedDeliveriesAsync(_claimedBeforeUtc, _afterRestore, ct).ConfigureAwait(false);
                     _reconciledOrgs.Add(orgId);
-                    // A deployment cut off by a restart failed, and the person behind it
+                    // A deployment cut off by a restart or a restore failed, and the person behind it
                     // needs to hear that as much as any other failure (#1036).
                     var notifier = scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>();
                     foreach (var id in interrupted)

@@ -472,6 +472,42 @@ public sealed class ReferenceQueryService
     }
 
     /// <summary>
+    /// The chain walk plus the <c>matched</c> CTE behind Find built-in calls:
+    /// every system-reference row on the target in the release's winning
+    /// modules, before any join or row limit. Shared by
+    /// <see cref="FindSystemReferencesAsync"/> and
+    /// <see cref="ListSystemReferenceMethodsAsync"/> so the method list counts
+    /// exactly the rows the list is cut from. Parameters: <c>{0}</c> seed
+    /// release, <c>{1}</c> app id, <c>{2}</c> kind, <c>{3}</c> object id,
+    /// <c>{4}</c> object name, <c>{5}</c> lower-cased method names or null.
+    /// </summary>
+    private const string SystemReferencesMatchedSql = ReleaseAncestrySql.WinningModules + "\n" + """
+        ,
+        matched AS (
+            SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
+                   sr.reference_kind, sr.line_number, sr.system_method_name
+            FROM oe_module_system_references sr
+            WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
+              AND {3}::int IS NOT NULL
+              AND sr.target_app_id      = {1}::uuid
+              AND sr.target_object_kind = {2}
+              AND sr.target_object_id   = {3}::int
+              AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
+            UNION ALL
+            SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
+                   sr.reference_kind, sr.line_number, sr.system_method_name
+            FROM oe_module_system_references sr
+            WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
+              AND {3}::int IS NULL
+              AND sr.target_app_id      = {1}::uuid
+              AND sr.target_object_kind = {2}
+              AND sr.target_object_id   IS NULL
+              AND sr.target_object_name = {4}
+              AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
+        )
+        """;
+
+    /// <summary>
     /// "Find System References": every call to a built-in / system method
     /// (<c>Insert</c>, <c>Modify</c>, <c>SetRange</c>, …) on the target object,
     /// read from the separate <c>oe_module_system_references</c> table. Same
@@ -492,30 +528,7 @@ public sealed class ReferenceQueryService
         // index (ix_oe_module_system_references_module_target /
         // ix_oe_module_system_references_module_target_name) instead of the
         // app-keyed indexes that match the receiver in every imported Release.
-        string sql = ReleaseAncestrySql.WinningModules + "\n" + $$"""
-            ,
-            matched AS (
-                SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
-                       sr.reference_kind, sr.line_number, sr.system_method_name
-                FROM oe_module_system_references sr
-                WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
-                  AND {3}::int IS NOT NULL
-                  AND sr.target_app_id      = {1}::uuid
-                  AND sr.target_object_kind = {2}
-                  AND sr.target_object_id   = {3}::int
-                  AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
-                UNION ALL
-                SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
-                       sr.reference_kind, sr.line_number, sr.system_method_name
-                FROM oe_module_system_references sr
-                WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
-                  AND {3}::int IS NULL
-                  AND sr.target_app_id      = {1}::uuid
-                  AND sr.target_object_kind = {2}
-                  AND sr.target_object_id   IS NULL
-                  AND sr.target_object_name = {4}
-                  AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
-            )
+        string sql = SystemReferencesMatchedSql + "\n" + $$"""
             SELECT
                 sr.id                    AS "Id",
                 sr.module_id             AS "SourceModuleId",
@@ -567,6 +580,50 @@ public sealed class ReferenceQueryService
             query.SystemMethodNames is null ? null : string.Join(",", query.SystemMethodNames), matches.Count);
 
         return matches;
+    }
+
+    /// <summary>
+    /// Every built-in method called on the target, with how often, counted over
+    /// the whole matched set rather than the rows <see cref="FindSystemReferencesAsync"/>
+    /// keeps. A list cut at the cap holds the alphabetically first objects only,
+    /// so a method called only from later ones would be missing from a picker
+    /// built from the rows in hand, with no way to reach it (#1543). One
+    /// grouped pass, no joins or snippets, so it stays cheap on Sales Line.
+    /// <see cref="FindSystemReferencesQuery.SystemMethodNames"/> is ignored:
+    /// this lists every method. Each method once, without regard to case, in
+    /// its most used spelling, most used first.
+    /// </summary>
+    public async Task<List<SystemMethodCount>> ListSystemReferenceMethodsAsync(
+        int releaseId, FindSystemReferencesQuery query, CancellationToken ct = default)
+    {
+        if (!await ReleaseVisibleAsync(releaseId, ct)) return new();
+
+        const string sql = SystemReferencesMatchedSql + "\n" + """
+            SELECT
+                mode() WITHIN GROUP (ORDER BY system_method_name) AS "Name",
+                count(*)::int                                     AS "Count"
+            FROM matched
+            WHERE system_method_name <> ''
+            GROUP BY lower(system_method_name)
+            ORDER BY 2 DESC, lower(system_method_name)
+            """;
+
+        var methods = await _db.Database
+            .SqlQueryRaw<SystemMethodCount>(
+                sql,
+                releaseId,
+                query.TargetAppId,
+                query.TargetObjectKind,
+                (object?)query.TargetObjectId ?? DBNull.Value,
+                query.TargetObjectName,
+                DBNull.Value)
+            .ToListAsync(ct);
+
+        _logger.LogInformation(
+            "ListSystemReferenceMethods ReleaseId={ReleaseId} TargetAppId={TargetAppId} Kind={Kind} Id={Id} Name={Name} Methods={Count}",
+            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName, methods.Count);
+
+        return methods;
     }
 
     /// <summary>
@@ -845,16 +902,19 @@ public sealed class ReferenceQueryService
                 SELECT f.id AS file_id,
                        -- Both alternatives of the pattern contain the word, so
                        -- the substring test is a safe and cheaper gate.
-                       fc.content ILIKE '%temporary%' AND fc.content ~* {4} AS rec_temporary,
+                       g.has_temporary AND fc.content ~* {4} AS rec_temporary,
                        -- The capture walks the whole file; most files declare
                        -- nothing temporary, and the plain substring test
                        -- skips them for the price of one scan.
-                       CASE WHEN fc.content ILIKE '%temporary%' THEN
+                       CASE WHEN g.has_temporary THEN
                            ARRAY(SELECT coalesce(x.m[1], x.m[2])
                                  FROM regexp_matches(fc.content, {3}, 'gi') AS x(m))
                        END AS names
                 FROM oe_module_files  f
                 JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+                -- The gate is computed once per file, not once per use; OFFSET 0
+                -- keeps the planner from folding it back into both columns.
+                CROSS JOIN LATERAL (SELECT fc.content ILIKE '%temporary%' AS has_temporary OFFSET 0) g
                 WHERE f.id = ANY({5}::bigint[]) AND f.organization_id = {2}::int
             ),
             split AS MATERIALIZED (
@@ -866,7 +926,10 @@ public sealed class ReferenceQueryService
             SELECT m.file_id                             AS "FileId",
                    m.line                                AS "LineNumber",
                    f.path                                AS "Path",
-                   split_part(fc.content, E'\n', m.line) AS "Text",
+                   -- A file already split takes its line from the array, so
+                   -- only the others decompress their content once per line.
+                   CASE WHEN s.file_id IS NOT NULL THEN coalesce(s.lines[m.line], '')
+                        ELSE split_part(fc.content, E'\n', m.line) END AS "Text",
                    t.rec_temporary                       AS "RecTemporary",
                    t.names                               AS "TemporaryNames",
                    greatest(m.line - {7}, 1)             AS "ContextStart",

@@ -390,6 +390,7 @@ public sealed class AccountServiceTests : IDisposable
             await seed.SaveChangesAsync();
         }
 
+        _db.OrgContext.CurrentUserId = 100;
         var ctx = _db.NewContext();
         var users = NewUserAdmin(ctx);
         Func<Task> demote = () => users.ChangeRoleAsync(100, UserRole.User, orgId);

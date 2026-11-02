@@ -145,7 +145,7 @@ public sealed class ResumedReleaseImportTests : IDisposable
     {
         public TestWorker(ResumedReleaseImportTests test)
             : base(Channel.CreateUnbounded<ReleaseImportJob>().Reader, BuildServices(test),
-                NullLogger<ReleaseImportWorker>.Instance, new WorkerHeartbeatRegistry(), nameof(TestWorker))
+                NullLogger<ReleaseImportWorker>.Instance, new WorkerHeartbeatRegistry(), nameof(TestWorker), maintenance: null)
         {
         }
 

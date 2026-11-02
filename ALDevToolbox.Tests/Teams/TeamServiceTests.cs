@@ -382,18 +382,68 @@ public sealed class TeamServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_team_manager_can_grant_the_update_flag()
+    public async Task A_team_manager_cannot_grant_the_update_flag_to_a_member()
     {
+        // #1547: the flag reaches the customer's production tenant, a narrower thing
+        // than the team roster a manager runs. Only an org Admin hands it out.
         var teamId = await SeedTeamAsync("Nordics", (ManagerUserId, true), (MemberUserId, false));
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx);
         var memberId = (await svc.GetTeamAsync(teamId))!.Members.Single(m => m.UserId == MemberUserId).MemberId;
 
         ActAs(ManagerUserId);
-        await svc.SetManagesUpdatesAsync(teamId, memberId, true);
+        var act = () => svc.SetManagesUpdatesAsync(teamId, memberId, true);
 
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await svc.GetTeamAsync(teamId))!.Members.Single(m => m.UserId == MemberUserId)
+            .ManagesUpdates.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_team_manager_cannot_grant_themselves_the_update_flag()
+    {
+        var teamId = await SeedTeamAsync("Nordics", (ManagerUserId, true));
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var ownRow = (await svc.GetTeamAsync(teamId))!.Members[0].MemberId;
+
+        ActAs(ManagerUserId);
+        var act = () => svc.SetManagesUpdatesAsync(teamId, ownRow, true);
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await svc.GetTeamAsync(teamId))!.Members[0].ManagesUpdates.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_team_manager_cannot_withdraw_the_update_flag_either()
+    {
+        var teamId = await SeedTeamAsync("Nordics", (ManagerUserId, true), (MemberUserId, false));
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var memberId = (await svc.GetTeamAsync(teamId))!.Members.Single(m => m.UserId == MemberUserId).MemberId;
+        await svc.SetManagesUpdatesAsync(teamId, memberId, true); // as the Admin
+
+        ActAs(ManagerUserId);
+        var act = () => svc.SetManagesUpdatesAsync(teamId, memberId, false);
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
         (await svc.GetTeamAsync(teamId))!.Members.Single(m => m.UserId == MemberUserId)
             .ManagesUpdates.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_site_admin_can_grant_the_update_flag()
+    {
+        var teamId = await SeedTeamAsync("Nordics", (MemberUserId, false));
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var memberId = (await svc.GetTeamAsync(teamId))!.Members[0].MemberId;
+
+        // A SiteAdmin whose own role in this org is plain User.
+        ActAs(OutsiderUserId, siteAdmin: true);
+        await svc.SetManagesUpdatesAsync(teamId, memberId, true);
+
+        (await svc.GetTeamAsync(teamId))!.Members[0].ManagesUpdates.Should().BeTrue();
     }
 
     [Fact]

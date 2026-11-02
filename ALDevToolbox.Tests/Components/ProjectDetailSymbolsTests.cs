@@ -36,6 +36,7 @@ public sealed class ProjectDetailSymbolsTests : IAsyncDisposable
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped(sp => _db.NewOfflineGitHubAccessService(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _ctx.Services.AddScoped<ProjectDiscoveryService>();

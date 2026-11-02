@@ -60,6 +60,12 @@ public enum EmailPurpose
 
     /// <summary>"A passkey was added to your account", to the account's own address. Queued, like every security notice.</summary>
     PasskeyAdded,
+
+    /// <summary>"An authenticator app was set up / turned off", to the account's own address (#1614). Queued, like every security notice.</summary>
+    AuthenticatorAppChanged,
+
+    /// <summary>"An access token was created for your account", to the account's own address. Queued, like every security notice.</summary>
+    AccessTokenCreated,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>

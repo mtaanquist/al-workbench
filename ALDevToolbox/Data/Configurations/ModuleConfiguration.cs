@@ -32,6 +32,7 @@ internal sealed class ModuleConfiguration : IEntityTypeConfiguration<Module>
         entity.Property(e => e.SourceError).HasColumnName("source_error");
         entity.Property(e => e.SourceSkippedJson).HasColumnName("source_skipped_json").HasColumnType("jsonb");
         entity.Property(e => e.SourceDependenciesJson).HasColumnName("source_dependencies_json").HasColumnType("jsonb");
+        entity.Property(e => e.SourceIdRangeSize).HasColumnName("source_id_range_size");
 
         entity.HasOne(e => e.Organization)
             .WithMany()

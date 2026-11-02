@@ -22,13 +22,17 @@ public sealed class NotificationDigestScheduler : PolledScheduler
     public NotificationDigestScheduler(
         IServiceProvider services,
         ILogger<NotificationDigestScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A digest is rendered and queued, not sent, so a sweep is quick.
         : base(logger, heartbeats, nameof(NotificationDigestScheduler),
             pollInterval: TimeSpan.FromMinutes(15),
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(45),
-            disableEnvVar: "DISABLE_NOTIFICATION_DIGEST_SCHEDULER")
+            disableEnvVar: "DISABLE_NOTIFICATION_DIGEST_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _logger = logger;

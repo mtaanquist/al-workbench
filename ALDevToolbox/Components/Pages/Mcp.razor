@@ -12,6 +12,7 @@
 @inject IHttpContextAccessor Http
 @inject IJSRuntime JS
 @inject NavigationManager Nav
+@inject ALDevToolbox.Endpoints.PublicOrigin Origin
 @inject ILogger<Mcp> Logger
 @inject IOrganizationContext OrgContext
 @inject PersonalAccessTokenService Pats
@@ -377,7 +378,8 @@
         {
             var user = (await AuthStateTask).User;
             _offered = McpToolCatalog.All
-                .Where(t => t.Tool is not { } key || Tools.IsEnabled(key, user))
+                .Where(t => t.Tool is { } key ? Tools.IsEnabled(key, user)
+                    : t.AnyOf is not { } anyOf || anyOf.Any(k => Tools.IsEnabled(k, user)))
                 .ToList();
         }
 
@@ -406,14 +408,17 @@
         var ctx = Http.HttpContext;
         if (ctx is not null)
         {
-            _serverUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}/mcp";
+            // PUBLIC_BASE_URL wins over the request host: behind a proxy that does
+            // not forward the public scheme or host, the request names an address
+            // the reader's assistant cannot reach (#1547).
+            _serverUrl = Origin.For(ctx) + "/mcp";
         }
         else
         {
             // OnInitialized after the SSR pass - fall back to the URL the
             // page itself is on so the snippet still has a sensible default.
             var uri = new Uri(Nav.Uri);
-            _serverUrl = $"{uri.Scheme}://{uri.Authority}/mcp";
+            _serverUrl = (Origin.Configured ?? $"{uri.Scheme}://{uri.Authority}") + "/mcp";
         }
     }
 

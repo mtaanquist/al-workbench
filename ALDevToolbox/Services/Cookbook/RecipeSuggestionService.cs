@@ -1,6 +1,10 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Cookbook;
@@ -17,12 +21,16 @@ public sealed class RecipeSuggestionService
     private readonly AppDbContext _db;
     private readonly ILogger<RecipeSuggestionService> _logger;
     private readonly IOrganizationContext _orgContext;
+    private readonly StorageQuotaGuard _quotaGuard;
 
-    public RecipeSuggestionService(AppDbContext db, ILogger<RecipeSuggestionService> logger, IOrganizationContext orgContext)
+    public RecipeSuggestionService(
+        AppDbContext db, ILogger<RecipeSuggestionService> logger, IOrganizationContext orgContext,
+        StorageQuotaGuard quotaGuard)
     {
         _db = db;
         _logger = logger;
         _orgContext = orgContext;
+        _quotaGuard = quotaGuard;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -34,6 +42,7 @@ public sealed class RecipeSuggestionService
     /// <summary>Submits a draft recipe for admin review. Returns the persisted row's id.</summary>
     public async Task<int> SubmitAsync(RecipeSuggestionInput input, CancellationToken ct = default)
     {
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         var orgId = RequireOrganizationId();
         var userId = RequireUserId();
 
@@ -159,14 +168,59 @@ public sealed class RecipeSuggestionService
     }
 
     /// <summary>
+    /// A fingerprint of everything approval copies into the recipe: the
+    /// metadata and the ordered files. The review page takes it from the
+    /// version it rendered and hands it back to <see cref="ApproveAsync"/>,
+    /// because the submitter may still edit a pending suggestion (agents
+    /// revising their own suggestion is the documented workflow) and the
+    /// suggestion has no version column a stale approval would trip over.
+    /// Each field is length-prefixed so moving text between fields still
+    /// changes the result.
+    /// </summary>
+    public static string ContentFingerprint(RecipeSuggestion suggestion)
+    {
+        var sb = new StringBuilder();
+        void Add(string? value) => sb.Append(value?.Length ?? -1).Append(':').Append(value).Append('|');
+
+        Add(suggestion.Title);
+        Add(suggestion.Description);
+        Add(suggestion.Keywords);
+        Add(suggestion.Type.ToString());
+        Add(suggestion.Instructions);
+        Add(suggestion.MinimumApplicationVersionId?.ToString(CultureInfo.InvariantCulture));
+        Add(suggestion.EstimatedValueHours?.ToString(CultureInfo.InvariantCulture));
+        foreach (var f in suggestion.Files.OrderBy(f => f.Ordering).ThenBy(f => f.Id))
+        {
+            Add(f.RelativePath);
+            Add(f.FileName);
+            Add(f.Content);
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+    }
+
+    /// <summary>
     /// Promotes a pending suggestion to a real <see cref="Recipe"/>. Runs
     /// inside a transaction so the recipe, its files, and the suggestion's
     /// decision columns either all land or none do.
+    /// <paramref name="reviewedFingerprint"/> is the
+    /// <see cref="ContentFingerprint"/> of the version the reviewer read;
+    /// approval is refused when the suggestion has changed since, so nothing
+    /// unreviewed reaches the Cookbook.
     /// </summary>
-    public async Task<Recipe> ApproveAsync(int suggestionId, CancellationToken ct = default)
+    public async Task<Recipe> ApproveAsync(int suggestionId, string reviewedFingerprint, CancellationToken ct = default)
     {
+        // Approving writes a recipe, which RecipeService.CreateAsync would refuse
+        // over the quota too (#1600).
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         var orgId = RequireOrganizationId();
         var deciderId = RequireUserId();
+
+        // The context is circuit-scoped in Blazor Server, and a tracking query
+        // does not refresh an entity it already holds: a copy left behind by an
+        // earlier refused approval would hide the submitter's later edits and
+        // fail the fingerprint check below. Start from what is stored now.
+        _db.ChangeTracker.Clear();
 
         var suggestion = await _db.RecipeSuggestions
             .Include(s => s.Files)
@@ -181,6 +235,17 @@ public sealed class RecipeSuggestionService
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Decision"] = $"Suggestion is already {suggestion.Decision.ToString().ToLowerInvariant()}.",
+            });
+        }
+
+        if (!string.Equals(ContentFingerprint(suggestion), reviewedFingerprint, StringComparison.Ordinal))
+        {
+            _logger.LogInformation(
+                "Refused to approve recipe suggestion {SuggestionId}: it changed after the reviewer opened it.",
+                suggestionId);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Suggestion"] = "This suggestion was changed after you opened it. Review the latest version, then approve again.",
             });
         }
 

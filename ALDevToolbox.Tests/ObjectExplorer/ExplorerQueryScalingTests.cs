@@ -38,11 +38,36 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// See <c>ExplorerTreeService.LoadPrimaryObjectsAsync</c> for the shape being
 /// guarded and why EF produces it.
 /// </summary>
-public sealed class ExplorerQueryScalingTests : IDisposable
+public sealed class ExplorerQueryScalingTests : IClassFixture<ExplorerQueryScalingTests.SkewedModule>
 {
-    private readonly TestDb _db = new();
+    private readonly TestDb _db;
+    private readonly long _moduleId;
 
-    public void Dispose() => _db.Dispose();
+    public ExplorerQueryScalingTests(SkewedModule fixture)
+    {
+        _db = fixture.Db;
+        _moduleId = fixture.ModuleId;
+    }
+
+    /// <summary>
+    /// The seeded catalogue, shared by every test in the class. Seeding it
+    /// writes about 8,000 rows and costs several seconds, and every test here
+    /// only reads (#1584), so a test must not write to it.
+    /// </summary>
+    public sealed class SkewedModule : IAsyncLifetime
+    {
+        public TestDb Db { get; } = new();
+
+        public long ModuleId { get; private set; }
+
+        public async ValueTask InitializeAsync() => ModuleId = await SeedSkewedModuleAsync(Db);
+
+        public ValueTask DisposeAsync()
+        {
+            Db.Dispose();
+            return ValueTask.CompletedTask;
+        }
+    }
 
     /// <summary>
     /// Files in the folder under test. The listing has to look at these.
@@ -82,10 +107,8 @@ public sealed class ExplorerQueryScalingTests : IDisposable
     [Fact]
     public async Task Listing_one_folder_does_not_examine_the_whole_object_table()
     {
-        var moduleId = await SeedSkewedModuleAsync();
-
         var (_, examined) = await MeasureAsync(
-            (_, tree) => tree.GetTreeChildrenAsync(moduleId, "src/Target/"));
+            (_, tree) => tree.GetTreeChildrenAsync(_moduleId, "src/Target/"));
 
         examined.Should().BeLessThan(ObjectRowBudget,
             because: "a ten-file folder listing must cost ten files' worth of object rows, "
@@ -95,12 +118,11 @@ public sealed class ExplorerQueryScalingTests : IDisposable
     [Fact]
     public async Task Searching_the_explorer_does_not_examine_the_whole_object_table()
     {
-        var moduleId = await SeedSkewedModuleAsync();
         int releaseId;
         await using (var ctx = _db.NewContext())
         {
             releaseId = await ctx.OeModules.AsNoTracking()
-                .Where(m => m.Id == moduleId).Select(m => m.ReleaseId).SingleAsync();
+                .Where(m => m.Id == _moduleId).Select(m => m.ReleaseId).SingleAsync();
         }
 
         // "Needle" is on the ten target objects only, so the answer is small
@@ -129,9 +151,7 @@ public sealed class ExplorerQueryScalingTests : IDisposable
     [InlineData(Listing.Search)]
     public async Task The_object_lookup_is_keyed_not_windowed_over_the_table(Listing listing)
     {
-        var moduleId = await SeedSkewedModuleAsync();
-
-        var (sql, _) = await MeasureAsync((_, tree) => Invoke(tree, listing, moduleId));
+        var (sql, _) = await MeasureAsync((_, tree) => Invoke(tree, listing, _moduleId));
 
         var objectQueries = sql.Where(s => s.Contains("oe_module_objects")).ToList();
         objectQueries.Should().NotBeEmpty(because: "the listing does read the object table");
@@ -151,8 +171,6 @@ public sealed class ExplorerQueryScalingTests : IDisposable
     [Fact]
     public async Task The_row_counter_counts_rows_read_and_discarded_not_just_returned()
     {
-        await SeedSkewedModuleAsync();
-
         // line_number carries no index and no row matches, so the database has
         // to read every object row to answer this and emits none of them.
         var examined = await ExplainRowsAsync(new RecordedCommand(
@@ -173,12 +191,11 @@ public sealed class ExplorerQueryScalingTests : IDisposable
     [Fact]
     public async Task One_page_load_resolves_visibility_and_reads_the_blob_once()
     {
-        var moduleId = await SeedSkewedModuleAsync();
         long fileId;
         await using (var ctx = _db.NewContext())
         {
             fileId = await ctx.OeModuleFiles.AsNoTracking()
-                .Where(f => f.ModuleId == moduleId && f.Path == "src/Target/Target0.al")
+                .Where(f => f.ModuleId == _moduleId && f.Path == "src/Target/Target0.al")
                 .Select(f => f.Id)
                 .SingleAsync();
         }
@@ -392,9 +409,9 @@ public sealed class ExplorerQueryScalingTests : IDisposable
     /// the shape that separates "cost tracks the page" from "cost tracks the
     /// catalogue". Every file carries one object, as AL files do.
     /// </summary>
-    private async Task<long> SeedSkewedModuleAsync()
+    private static async Task<long> SeedSkewedModuleAsync(TestDb db)
     {
-        await using var ctx = _db.NewContext();
+        await using var ctx = db.NewContext();
 
         var release = new OeRelease
         {

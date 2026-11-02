@@ -14,6 +14,20 @@
     See .design/design-migration.md.
 *@
 
+@if (NeedsSearch)
+{
+    <div class="card">
+        <div class="empty-state">
+            <span class="empty-state__icon"><Icon Name="search" Width="21" Height="21" /></span>
+            <span class="empty-state__title">Find a procedure by name</span>
+            <span class="empty-state__text">
+                Type part of a procedure name in the search box, or pick an
+                extension to list all of its procedures.
+            </span>
+        </div>
+    </div>
+    return;
+}
 @if (Results is { Count: 0 })
 {
     <div class="card">
@@ -30,7 +44,7 @@
 }
 @if (Results is not null)
 {
-    <p class="u-muted">Showing @Results.Count.ToString("N0") procedure@(Results.Count == 1 ? "" : "s").</p>
+    <p class="u-muted">Showing @Results.Count.ToString("N0") procedure@(Results.Count == 1 ? "" : "s")@(Capped ? " (capped at " + Results.Count.ToString("N0") + " - narrow the search to see more)" : "").</p>
 }
 <table class="data-table">
     <thead>
@@ -67,7 +81,7 @@
                 <td>
                     @if (r.SourceFileId is { } fid)
                     {
-                        <a href="@Links.SourceFile(fid, r.ObjectLineNumber, ViewReleaseSeed)">View source</a>
+                        <a href="@Links.SourceFile(fid, r.LineNumber, ViewReleaseSeed)">View source</a>
                     }
                     else
                     {
@@ -88,6 +102,13 @@
 @code {
     [Parameter] public List<ReleaseProcedureMatch>? Results { get; set; }
     [Parameter] public int? ViewReleaseSeed { get; set; }
+    /// <summary>
+    /// True when nothing is typed and no extension is picked: the tab asks for
+    /// a name rather than listing every procedure in the release.
+    /// </summary>
+    [Parameter] public bool NeedsSearch { get; set; }
+    /// <summary>True when the search found more procedures than it shows.</summary>
+    [Parameter] public bool Capped { get; set; }
 
     /// <summary>Object-detail link, carrying the view-Release seed (so Find
     /// references on an inherited base object stays seeded at this Release).</summary>

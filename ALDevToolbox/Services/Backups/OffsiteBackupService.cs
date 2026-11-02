@@ -472,12 +472,20 @@ public sealed class OffsiteBackupService
     /// since this runs on the download worker with no request to check against.
     /// </para>
     /// </summary>
+    /// <param name="beforeWaitingForBackupLock">
+    /// Called once the file is on disk, just before the insert waits for the
+    /// backup lock. The download worker releases its job count here: a restore
+    /// that began meanwhile waits for that count while holding the lock, so
+    /// keeping it would make the restore refuse; released, the restore goes
+    /// ahead and the row lands after it.
+    /// </param>
     /// <returns>The id of the inserted <c>backups</c> row.</returns>
     public async Task<int> DownloadAsync(
         string objectKey,
         IProgress<(long BytesDownloaded, long? TotalBytes)>? progress,
         bool recoverFromAnotherInstallation,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action? beforeWaitingForBackupLock = null)
     {
         var settings = await _systemSettings.ResolveOffsiteAsync(ct)
             ?? throw new InvalidOperationException("Off-site backup is not configured.");
@@ -583,7 +591,15 @@ public sealed class OffsiteBackupService
         _db.Backups.Add(row);
         try
         {
-            await _db.SaveChangesAsync(ct);
+            // Under the backup lock, so the row cannot land while a restore is
+            // between reading the backup list and putting it back, where it
+            // would be dropped with the old database or wiped from the new one
+            // (#1579). Waits out a backup or restore in progress.
+            beforeWaitingForBackupLock?.Invoke();
+            await using (await _backups.WaitForBackupLockAsync(ct))
+            {
+                await _db.SaveChangesAsync(ct);
+            }
         }
         catch
         {
@@ -616,8 +632,13 @@ public sealed class OffsiteBackupService
     /// crash mid-download can't register a corrupt row.
     /// </para>
     /// </summary>
+    /// <param name="beforeWaitingForBackupLock">As for <see cref="DownloadAsync"/>.</param>
     /// <returns>The id of the inserted <c>per_tenant_backups</c> row.</returns>
-    public async Task<int> DownloadPerTenantAsync(string objectKey, IProgress<(long BytesDownloaded, long? TotalBytes)>? progress, CancellationToken ct)
+    public async Task<int> DownloadPerTenantAsync(
+        string objectKey,
+        IProgress<(long BytesDownloaded, long? TotalBytes)>? progress,
+        CancellationToken ct,
+        Action? beforeWaitingForBackupLock = null)
     {
         var settings = await _systemSettings.ResolveOffsiteAsync(ct)
             ?? throw new InvalidOperationException("Off-site backup is not configured.");
@@ -738,7 +759,21 @@ public sealed class OffsiteBackupService
             OffsiteUploadedAt = _clock.GetUtcNow().UtcDateTime,
         };
         _db.PerTenantBackups.Add(row);
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            // Under the backup lock, as for a whole-database dump (#1579).
+            beforeWaitingForBackupLock?.Invoke();
+            await using (await _backups.WaitForBackupLockAsync(ct))
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+        }
+        catch
+        {
+            // As above: no snapshot on disk without its row.
+            TryDeleteFile(finalPath);
+            throw;
+        }
 
         _logger.LogInformation(
             "Downloaded off-site per-tenant snapshot {Bucket}/{Key} ({Bytes} bytes) for org {Slug} into local row {RowId}.",

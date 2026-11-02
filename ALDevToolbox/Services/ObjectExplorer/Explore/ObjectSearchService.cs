@@ -283,7 +283,8 @@ public sealed class ObjectSearchService
     /// <summary>
     /// Procedure-name search across every module in the Release. Matches the
     /// supplied substring (case-insensitive) against <c>oe_module_symbols</c>
-    /// where the symbol is a procedure / internal procedure / trigger; the
+    /// where the symbol is procedure-like (<see cref="ProcedureKinds.All"/>:
+    /// every procedure visibility, triggers, event publishers and subscribers); the
     /// owning object + module names join inline so the row can render
     /// "Module / Object / Procedure" in one query. Capped at <paramref name="take"/>.
     /// </summary>
@@ -292,6 +293,11 @@ public sealed class ObjectSearchService
         bool includeInherited = false, CancellationToken ct = default)
     {
         if (!await ReleaseVisibleAsync(releaseId, ct)) return new();
+        // Nothing typed and no extension picked would sort every procedure-like
+        // symbol of the release (a full DVD has hundreds of thousands) to show
+        // the first few hundred; the name index cannot help without a term. The
+        // tab asks for a name instead, as Source text does (OEX3-2).
+        if (string.IsNullOrWhiteSpace(search) && moduleId is null) return new();
         // Scope by an explicit module-id set (own modules, or the whole visible
         // chain when including inherited) rather than a `module.release_id` join.
         // `kind` isn't selective here (most symbols are procedures), so the join
@@ -304,7 +310,7 @@ public sealed class ObjectSearchService
             : await ResolveReleaseModuleIdsAsync(releaseId, ct);
         var q = _db.OeModuleSymbols.AsNoTracking()
             .Where(s => moduleIds.Contains(s.ModuleId))
-            .Where(s => s.Kind == "procedure" || s.Kind == "internal_procedure" || s.Kind == "trigger");
+            .Where(s => ProcedureKinds.All.Contains(s.Kind));
 
         if (moduleId is { } mid)
         {
@@ -334,7 +340,8 @@ public sealed class ObjectSearchService
                 s.Signature,
                 s.ReturnType,
                 s.Object.SourceFileId,
-                s.Object.LineNumber))
+                // The procedure's own line, so View source opens at it (OEX2-4).
+                s.LineNumber > 0 ? s.LineNumber : s.Object.LineNumber))
             .ToListAsync(ct);
     }
 

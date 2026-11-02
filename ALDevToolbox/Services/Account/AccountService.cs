@@ -442,7 +442,8 @@ public sealed class AccountService
     /// Self-service password change. Verifies the current password before applying the new one,
     /// and refuses members of a Microsoft-only organisation (SiteAdmins excepted).
     /// </summary>
-    public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default)
+    /// <param name="ip">The caller's address, recorded on a failed current-password attempt.</param>
+    public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, string ip, CancellationToken ct = default)
     {
         // Filtered: the signed-in user's own row is in their own organisation.
         var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
@@ -456,9 +457,12 @@ public sealed class AccountService
                 ["Password"] = "Your organisation signs in with Microsoft, so there is no password to change here. Use \"Sign in with Microsoft\" instead.",
             });
         }
-        if (!_auth.VerifyPassword(currentPassword, user.PasswordHash))
+        switch (await _auth.CheckCurrentPasswordAsync(user.Email, user.PasswordHash, currentPassword, ip, ct))
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
+            case CurrentPasswordCheck.LockedOut:
+                throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = AuthService.CurrentPasswordLockedOutMessage });
+            case CurrentPasswordCheck.Wrong:
+                throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
         }
         var errors = new Dictionary<string, string>();
         AuthService.ValidatePassword(newPassword, errors, fieldName: "NewPassword");

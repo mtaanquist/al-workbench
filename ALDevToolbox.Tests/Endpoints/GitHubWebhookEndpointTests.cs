@@ -25,34 +25,105 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// malformed". So each refusal is asserted for its own status, not merely for
 /// not-success.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class GitHubWebhookEndpointTests : IDisposable
+public sealed class GitHubWebhookEndpointTests : IClassFixture<GitHubWebhookEndpointTests.Host>
 {
     private const string Secret = "swordfish";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
     private readonly EndpointFactory _factory;
-
-    private readonly GitHubWebhookBodyGate _gate = new(
-        GitHubWebhookBodyGate.DefaultSlots,
-        waitTimeout: TimeSpan.FromMilliseconds(300),
-        readDeadline: TimeSpan.FromSeconds(3));
+    private readonly GitHubWebhookBodyGate _gate;
 
     /// <summary>
-    /// GitHub's webhook ranges, loaded as the daily refresh would (#1201), so every
-    /// test below runs with the address check in force. A test that needs the list
-    /// unloaded swaps the field before its first request.
+    /// The tests share one host (#1536), but not the state a delivery leaves behind:
+    /// each test gets its own queue, large-body gate and sender list, installed here
+    /// before its first request, and delivers from a GitHub address of its own, so the
+    /// webhook's per-address rate limit counts each test on its own. The webhook secret is the same in every test that
+    /// stores one, so storing it again is a no-op; the one test that needs no secret
+    /// at all boots a host of its own.
     /// </summary>
-    private GitHubHookAddressAllowList _senders = LoadedSenders();
-
-    public GitHubWebhookEndpointTests()
+    public GitHubWebhookEndpointTests(Host host)
     {
-        // The real worker would drain the queue as fast as the endpoint fills it,
-        // so "was this delivery queued?" would be a race. These tests are about the
-        // endpoint - what it accepts, what it refuses, and what it hands on - so
-        // the drain is taken out and the channel left to be read by the test.
-        _factory = new EndpointFactory(_db, services =>
+        _host = host;
+        _factory = host.Factory;
+        host.StartTest();
+        _gate = host.Gate;
+    }
+
+    /// <summary>
+    /// The shared host. The queue, the gate and the sender list are read through
+    /// <see cref="Holder"/> each time they are resolved, so the endpoint sees the
+    /// running test's own instances and nothing one test left behind - a queued
+    /// delivery, a held slot, a full channel, a remembered head - reaches the next.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
+    {
+        private readonly Holder _holder;
+
+        public Host()
+            : this(new Holder())
         {
+        }
+
+        private Host(Holder holder)
+            : base(services => Configure(services, holder))
+        {
+            _holder = holder;
+            StartTest();
+        }
+
+        public GitHubWebhookQueue Queue => _holder.Queue;
+
+        public GitHubWebhookBodyGate Gate => _holder.Gate;
+
+        /// <summary>
+        /// The address inside GitHub's 192.30.252.0/22 this test delivers from when it
+        /// names none. A test of its own, so one test's deliveries never count against
+        /// another's per-address rate limit.
+        /// </summary>
+        public string Sender => _holder.Sender;
+
+        /// <summary>
+        /// GitHub's webhook ranges, loaded as the daily refresh would (#1201), so every
+        /// test runs with the address check in force. A test that needs the list
+        /// unloaded replaces it before its first request.
+        /// </summary>
+        public GitHubHookAddressAllowList Senders
+        {
+            get => _holder.Senders;
+            set => _holder.Senders = value;
+        }
+
+        /// <summary>Fresh per-test state, as a new host would start with.</summary>
+        public void StartTest()
+        {
+            _holder.Queue = new GitHubWebhookQueue(TimeProvider.System);
+            _holder.Gate = new GitHubWebhookBodyGate(
+                GitHubWebhookBodyGate.DefaultSlots,
+                waitTimeout: TimeSpan.FromMilliseconds(300),
+                readDeadline: TimeSpan.FromSeconds(3));
+            _holder.Senders = LoadedSenders();
+            _holder.Sender = SenderFor(Interlocked.Increment(ref _lastSender));
+        }
+
+        /// <summary>
+        /// The <paramref name="n"/>th test's sender, inside 192.30.253.1-192.30.255.250.
+        /// Wraps after 750 so a long run never leaves GitHub's /22 (#1604); by then
+        /// the first tests' rate-limit windows have long passed.
+        /// </summary>
+        internal static string SenderFor(int n)
+        {
+            var slot = (int)((uint)n % 750);
+            return $"192.30.{253 + slot / 250}.{slot % 250 + 1}";
+        }
+
+        private static int _lastSender;
+
+        private static void Configure(IServiceCollection services, Holder holder)
+        {
+            // The real worker would drain the queue as fast as the endpoint fills it,
+            // so "was this delivery queued?" would be a race. These tests are about the
+            // endpoint - what it accepts, what it refuses, and what it hands on - so
+            // the drain is taken out and the channel left to be read by the test.
             var worker = services.FirstOrDefault(d =>
                 d.ServiceType == typeof(IHostedService)
                 && d.ImplementationType == typeof(GitHubPullRequestBuildWorker));
@@ -63,20 +134,25 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
                 d.ServiceType == typeof(IHostedService)
                 && d.ImplementationType == typeof(GitHubHookAddressRefreshScheduler));
             if (refresh is not null) services.Remove(refresh);
-            services.AddSingleton(_ => _senders);
-            services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, SenderAddressFilter>();
+            services.AddTransient(_ => holder.Senders);
+            services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter>(new SenderAddressFilter(holder));
+
+            // One queue per test, so a test reads only its own deliveries.
+            services.AddTransient(_ => holder.Queue);
 
             // The large-body slots with timings a test can wait out, and one gate
             // per test so holding its slots cannot leak into another test (#1174).
-            services.AddSingleton(_gate);
+            services.AddTransient(_ => holder.Gate);
             services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, SlowBodyFilter>();
-        });
-    }
+        }
 
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        internal sealed class Holder
+        {
+            public GitHubWebhookQueue Queue { get; set; } = null!;
+            public GitHubWebhookBodyGate Gate { get; set; } = null!;
+            public GitHubHookAddressAllowList Senders { get; set; } = null!;
+            public string Sender { get; set; } = string.Empty;
+        }
     }
 
     /// <param name="authorAssociation">
@@ -177,6 +253,22 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         return "sha256=" + Convert.ToHexString(hmac.ComputeHash(body)).ToLowerInvariant();
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(249)]
+    [InlineData(250)]
+    [InlineData(749)]
+    [InlineData(750)]
+    [InlineData(10_000)]
+    [InlineData(int.MaxValue)]
+    public void Every_test_sender_stays_inside_GitHubs_hook_range(int n)
+    {
+        var sender = IPAddress.Parse(Host.SenderFor(n));
+
+        IPNetwork.Parse("192.30.252.0/22").Contains(sender).Should().BeTrue(
+            $"test {n} must still deliver from an address the allow-list accepts");
+    }
+
     [Fact]
     public async Task A_delivery_with_a_valid_signature_is_accepted_and_queued()
     {
@@ -231,13 +323,33 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     public async Task Without_a_stored_secret_every_delivery_is_refused()
     {
         // Nothing is configured, so nothing can be verified - and an unverifiable
-        // delivery is refused rather than trusted.
-        using var client = _factory.CreateClient();
+        // delivery is refused rather than trusted. The shared host has a secret
+        // stored, so this one gets a host and database of its own.
+        using var host = new Host();
+        using var client = host.Factory.CreateClient();
 
         using var response = await client.SendAsync(Delivery(PullRequestPayload(), Secret));
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        _factory.Services.GetRequiredService<GitHubWebhookQueue>()
+        host.Factory.Services.GetRequiredService<GitHubWebhookQueue>()
+            .Reader.TryRead(out _).Should().BeFalse();
+
+        // During a restore the settings row may simply not be loaded yet, and GitHub
+        // never resends a 401: the delivery gets a 503, which it does resend (#1599).
+        var maintenance = host.Factory.Services.GetRequiredService<ALDevToolbox.Services.Operations.MaintenanceModeState>();
+        maintenance.Enter("Restoring a backup");
+        try
+        {
+            using var during = await client.SendAsync(Delivery(PullRequestPayload(), Secret));
+
+            during.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            during.Headers.RetryAfter.Should().NotBeNull();
+        }
+        finally
+        {
+            maintenance.Exit();
+        }
+        host.Factory.Services.GetRequiredService<GitHubWebhookQueue>()
             .Reader.TryRead(out _).Should().BeFalse();
     }
 
@@ -510,9 +622,6 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     /// <summary>The connection address a request arrives from, when a test names one.</summary>
     private const string SenderHeader = "X-Test-Connection-Address";
 
-    /// <summary>Inside GitHub's 192.30.252.0/22, and the address every other test delivers from.</summary>
-    private const string GitHubSender = "192.30.252.10";
-
     private static GitHubHookAddressAllowList LoadedSenders()
     {
         var list = new GitHubHookAddressAllowList(TimeProvider.System);
@@ -600,11 +709,11 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         using var client = _factory.CreateClient();
 
         using var spoofed = From(Delivery(PullRequestPayload(), Secret), "203.0.113.7");
-        spoofed.Headers.Add("X-Forwarded-For", GitHubSender);
+        spoofed.Headers.Add("X-Forwarded-For", _host.Sender);
         using var refused = await client.SendAsync(spoofed);
 
         using var proxied = From(Delivery(PullRequestPayload(number: 8), Secret), "127.0.0.1");
-        proxied.Headers.Add("X-Forwarded-For", GitHubSender);
+        proxied.Headers.Add("X-Forwarded-For", _host.Sender);
         using var accepted = await client.SendAsync(proxied);
 
         refused.StatusCode.Should().Be(HttpStatusCode.Forbidden);
@@ -616,7 +725,7 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     {
         // Fail open: refusing before GitHub's list could be read would lose deliveries
         // to a GitHub outage or a host with no way out.
-        _senders = new GitHubHookAddressAllowList(TimeProvider.System);
+        _host.Senders = new GitHubHookAddressAllowList(TimeProvider.System);
         await StoreSecretAsync();
         using var client = _factory.CreateClient();
 
@@ -627,18 +736,23 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
 
     /// <summary>
     /// Gives each request a connection address, which the test server leaves empty:
-    /// the one named in <see cref="SenderHeader"/>, else <see cref="GitHubSender"/>.
+    /// the one named in <see cref="SenderHeader"/>, else the running test's own
+    /// GitHub address (<see cref="Host.Sender"/>).
     /// Runs ahead of the app's own pipeline, so forwarded headers still apply after it.
     /// </summary>
     private sealed class SenderAddressFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
     {
+        private readonly Host.Holder _holder;
+
+        public SenderAddressFilter(Host.Holder holder) => _holder = holder;
+
         public Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(
             Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> next) => app =>
         {
             app.Use(nextMiddleware => ctx =>
             {
                 var named = ctx.Request.Headers[SenderHeader].ToString();
-                ctx.Connection.RemoteIpAddress = IPAddress.Parse(named.Length > 0 ? named : GitHubSender);
+                ctx.Connection.RemoteIpAddress = IPAddress.Parse(named.Length > 0 ? named : _holder.Sender);
                 return nextMiddleware(ctx);
             });
             next(app);

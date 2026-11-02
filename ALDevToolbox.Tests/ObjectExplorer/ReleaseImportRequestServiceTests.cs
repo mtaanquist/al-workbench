@@ -224,10 +224,474 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         (await StatusAsync(release.Id)).Should().Be("failed");
     }
 
+    // ── A retry cut short after the reopen fails the release again (#1612) ──
+
+    [Fact]
+    public async Task A_retry_whose_request_ends_during_the_wipe_fails_the_release_again_and_it_can_be_retried()
+    {
+        // The page looks frozen while a large release's earlier attempt is wiped, so
+        // the person leaves it and the request is cancelled mid-DELETE.
+        using var request = new CancellationTokenSource();
+        var interceptor = new OnModuleWipe(token => { request.Cancel(); token.ThrowIfCancellationRequested(); });
+        int releaseId;
+        await using (var setup = _db.NewContext())
+        {
+            releaseId = await SeedFailedArtifactImportAsync(setup);
+        }
+        var ingests = new ReleaseIngests();
+        var queue = new ReleaseImportQueue();
+
+        await using (var ctx = _db.NewContext(interceptor))
+        {
+            var act = () => NewService(ctx, queue, ingests: ingests).RetryAsync(releaseId, new ReleaseRetrySubmission(
+                DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null), request.Token);
+
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        interceptor.Calls.Should().Be(1, "the request was cancelled during the wipe");
+        await using (var read = _db.NewContext())
+        {
+            var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+            release.Status.Should().Be("failed", "nothing will import it, so it must not read as importing");
+            release.StatusMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+        }
+        ingests.IsRunning(releaseId).Should().BeFalse();
+        queue.Reader.TryRead(out _).Should().BeFalse();
+
+        // Failed, not stuck: the next Retry is accepted and queued.
+        await using (var again = _db.NewContext())
+        {
+            var outcome = await NewService(again, queue).RetryAsync(releaseId, new ReleaseRetrySubmission(
+                DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+            outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        }
+        (await StatusAsync(releaseId)).Should().Be("ingesting");
+        queue.Reader.TryRead(out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_retry_whose_wipe_fails_fails_the_release_again_and_rethrows()
+    {
+        // The wipe's ten-minute command timeout, or any other database error.
+        var interceptor = new OnModuleWipe(_ => throw new TimeoutException("The DELETE timed out."));
+        int releaseId;
+        await using (var setup = _db.NewContext())
+        {
+            releaseId = await SeedFailedArtifactImportAsync(setup);
+        }
+        var queue = new ReleaseImportQueue();
+
+        await using (var ctx = _db.NewContext(interceptor))
+        {
+            var act = () => NewService(ctx, queue).RetryAsync(releaseId, new ReleaseRetrySubmission(
+                DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+
+            await act.Should().ThrowAsync<TimeoutException>();
+        }
+
+        (await StatusAsync(releaseId)).Should().Be("failed");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_retry_with_a_re_uploaded_zip_cut_short_at_the_enqueue_fails_the_release_and_removes_the_staged_file()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 26.0 (DK)", Kind = "first_party", Status = "failed",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        // A full queue holds the retry at the enqueue, after the upload is staged.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var retry = NewService(ctx, queue).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false,
+            FolderZip: EmptyZip("applications.zip"), CalTxtFile: null), request.Token);
+        string? stagedPath = null;
+        while (!retry.IsCompleted && (stagedPath = await StagedPathAsync(release.Id)) is null)
+        {
+            await Task.Delay(20);
+        }
+        stagedPath.Should().NotBeNull("the retry stages the upload and writes its job row before the enqueue");
+        Track(stagedPath!);
+        File.Exists(stagedPath).Should().BeTrue();
+        await request.CancelAsync();
+
+        await retry.Awaiting(r => r.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        (await StatusAsync(release.Id)).Should().Be("failed");
+        File.Exists(stagedPath).Should().BeFalse("no job will open the staged upload");
+        await using var read = _db.NewContext();
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == release.Id);
+        row.Status.Should().Be("failed", "a queued row with no job behind it would be resumed at the next start");
+        row.ErrorMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+    }
+
+    [Fact]
+    public async Task A_re_upload_that_breaks_off_while_staging_leaves_no_partial_file_behind()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 26.1 (DK)", Kind = "first_party", Status = "failed",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        // The upload yields a marker, then the read fails (the disk filled, the body broke off).
+        var marker = Encoding.ASCII.GetBytes("partial-" + Guid.NewGuid().ToString("N"));
+        var upload = new UploadedFile("applications.zip", 1_000_000, () => new BreaksOffStream(marker));
+
+        var outcome = await NewService(ctx, new ReleaseImportQueue()).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: upload, CalTxtFile: null));
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.StagingFailed>();
+        (await StatusAsync(release.Id)).Should().Be("failed");
+        foreach (var path in Directory.GetFiles(Path.GetTempPath(), ReleaseImportRequestService.FolderZipTempPrefix + "*.zip"))
+        {
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(path); }
+            catch (IOException) { continue; } // another test's file, gone or still being written
+            bytes.AsSpan().IndexOf(marker).Should().BeNegative($"the partial copy {path} should have been deleted");
+        }
+    }
+
+    // ── A new import cut short before its job is queued fails the release (#1632) ──
+
+    [Fact]
+    public async Task A_folder_zip_import_cut_off_while_staging_fails_the_release()
+    {
+        // The person closes the tab while the buffered upload is copied to disk:
+        // the copy throws OperationCanceledException, not IOException.
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS 27.0 (DK) " + Guid.NewGuid().ToString("N");
+        var marker = Encoding.ASCII.GetBytes("partial-" + Guid.NewGuid().ToString("N"));
+        var upload = new UploadedFile("applications.zip", 1_000_000,
+            () => new BreaksOffStream(marker, new OperationCanceledException("The request was aborted.")));
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).SubmitAsync(Submission(label: label, folderZip: upload));
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Label == label);
+        release.Status.Should().Be("failed", "nothing will import it, so it must not read as importing");
+        release.StatusMessage.Should().Be(ReleaseImportService.ImportNotQueuedMessage);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_folder_zip_import_cut_off_at_the_enqueue_fails_the_release_its_job_row_and_removes_the_staged_file()
+    {
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS 27.1 (DK) " + Guid.NewGuid().ToString("N");
+        // A full queue holds the import at the enqueue, after the upload is staged.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var submit = NewService(ctx, queue).SubmitAsync(Submission(label: label, folderZip: EmptyZip("applications.zip")), request.Token);
+        int? releaseId = null;
+        string? stagedPath = null;
+        while (!submit.IsCompleted)
+        {
+            await using (var probe = _db.NewContext())
+            {
+                releaseId ??= await probe.OeReleases.AsNoTracking()
+                    .Where(r => r.Label == label).Select(r => (int?)r.Id).FirstOrDefaultAsync();
+            }
+            if (releaseId is int id && (stagedPath = await StagedPathAsync(id)) is not null) break;
+            await Task.Delay(20);
+        }
+        stagedPath.Should().NotBeNull("the import stages the upload and writes its job row before the enqueue");
+        Track(stagedPath!);
+        await request.CancelAsync();
+
+        await submit.Awaiting(s => s.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        File.Exists(stagedPath).Should().BeFalse("no job will open the staged upload");
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.Status.Should().Be("failed");
+        release.StatusMessage.Should().Be(ReleaseImportService.ImportNotQueuedRetryMessage,
+            "the job row was written, so it keeps the origin Retry needs");
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId);
+        row.Status.Should().Be("failed", "a queued row with no job behind it would be resumed at the next start");
+        row.ErrorMessage.Should().Be(ReleaseImportService.ImportNotQueuedRetryMessage);
+    }
+
+    [Fact]
+    public async Task A_url_import_cut_off_at_a_full_queue_fails_the_release_and_its_job_row()
+    {
+        await SetAllowlistAsync("cronus.example");
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS 27.2 (DK) " + Guid.NewGuid().ToString("N");
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var submit = NewService(ctx, queue).SubmitAsync(
+            Submission(label: label, dvdUrl: "https://cronus.example/bc.zip"), request.Token);
+        int? releaseId = null;
+        while (!submit.IsCompleted)
+        {
+            await using (var probe = _db.NewContext())
+            {
+                var id = await probe.OeReleases.AsNoTracking()
+                    .Where(r => r.Label == label).Select(r => (int?)r.Id).FirstOrDefaultAsync();
+                if (id is not null && await probe.OeImportJobs.AsNoTracking().AnyAsync(j => j.ReleaseId == id)) releaseId = id;
+            }
+            if (releaseId is not null) break;
+            await Task.Delay(20);
+        }
+        releaseId.Should().NotBeNull("the import writes its job row before the enqueue");
+        await request.CancelAsync();
+
+        await submit.Awaiting(s => s.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.Status.Should().Be("failed");
+        release.StatusMessage.Should().Be(ReleaseImportService.ImportNotQueuedRetryMessage);
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId))
+            .Status.Should().Be("failed");
+    }
+
+    /// <summary>Returns <c>marker</c> on the first read and fails the next one with <c>error</c> (an <see cref="IOException"/> by default).</summary>
+    private sealed class BreaksOffStream(byte[] marker, Exception? error = null) : Stream
+    {
+        private bool _served;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_served) throw error ?? new IOException("The upload broke off.");
+            _served = true;
+            marker.CopyTo(buffer, offset);
+            return marker.Length;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private async Task<string?> StagedPathAsync(int releaseId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeImportJobs.AsNoTracking()
+            .Where(j => j.ReleaseId == releaseId)
+            .Select(j => j.StagedZipPath)
+            .FirstOrDefaultAsync();
+    }
+
+    private static async Task<int> SeedFailedArtifactImportAsync(Data.AppDbContext ctx)
+    {
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "Business Central 27.2 (DK)", Kind = "first_party", Status = "failed",
+            StatusMessage = "The download was cut off.", DedupKey = "bc-onprem:27.2:dk", ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.BcArtifact("https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.2.0.0/dk"),
+            storeSymbolReference: false);
+        return release.Id;
+    }
+
+    /// <summary>Runs <paramref name="onWipe"/> when the retry's module wipe is sent, before it reaches the database.</summary>
+    internal sealed class OnModuleWipe(Action<CancellationToken> onWipe) : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        public int Calls { get; private set; }
+
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.StartsWith("DELETE FROM oe_modules", StringComparison.Ordinal))
+            {
+                Calls++;
+                onWipe(cancellationToken);
+            }
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
     private async Task<string?> StatusAsync(int releaseId)
     {
         await using var read = _db.NewContext();
         return await read.OeReleases.AsNoTracking().Where(r => r.Id == releaseId).Select(r => r.Status).SingleAsync();
+    }
+
+    // ── Backfilling every release never waits on the queue (#1542) ───────
+
+    [Fact]
+    public async Task Backfilling_every_release_returns_at_once_on_a_full_queue_and_feeds_the_jobs_in_the_background()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseIds = await SeedReadyReleasesAsync(ctx, 20);
+        // Sixteen jobs fill the queue; the request used to wait here for a
+        // worker to finish a whole backfill before it could write the next.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+            NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
+        try
+        {
+            using var request = new CancellationTokenSource();
+
+            var result = await NewService(ctx, queue, lifetime: lifetime)
+                .QueueBackfillAllAsync(releaseIds, request.Token)
+                .WaitAsync(TimeSpan.FromSeconds(30));
+
+            result.Should().Be(new BackfillQueueResult(Queued: 20, Skipped: 0));
+            await using (var read = _db.NewContext())
+            {
+                var rows = await read.OeImportJobs.AsNoTracking()
+                    .Where(j => j.Kind == "backfill_system_references").ToListAsync();
+                rows.Select(j => j.ReleaseId).Should().BeEquivalentTo(releaseIds);
+                rows.Should().OnlyContain(j => j.Status == "queued");
+            }
+
+            // The tab closing does not stop the feed: it runs until shutdown.
+            await request.CancelAsync();
+            var drained = new List<ReleaseImportJob>();
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (drained.Count(j => j.ReleaseId != int.MaxValue) < 20 && DateTime.UtcNow < deadline)
+            {
+                if (queue.Reader.TryRead(out var job))
+                {
+                    queue.MarkPickedUp(job); // what the worker does as it starts a job
+                    drained.Add(job);
+                }
+                else await Task.Delay(10);
+            }
+            drained.Where(j => j.ReleaseId != int.MaxValue).Select(j => j.ReleaseId)
+                .Should().Equal(releaseIds, "every backfill reaches the queue once room frees up, in order");
+            drained.Where(j => j.ReleaseId != int.MaxValue)
+                .Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill && j.JobRowId > 0);
+        }
+        finally
+        {
+            lifetime.StopApplication();
+        }
+    }
+
+    [Fact]
+    public async Task An_import_submitted_during_a_long_backfill_waits_behind_at_most_one_backfill()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseIds = await SeedReadyReleasesAsync(ctx, 20);
+        var queue = new ReleaseImportQueue();
+        var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+            NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
+        try
+        {
+            await NewService(ctx, queue, lifetime: lifetime).QueueBackfillAllAsync(releaseIds);
+
+            // The worker starts the first backfill; the feed tops the queue up to
+            // its limit and no further, however long the run.
+            var first = await ReadNextAsync(queue);
+            first.Source.Should().BeOfType<ReleaseImportSource.Backfill>();
+            queue.MarkPickedUp(first);
+            await WaitUntilAsync(() => queue.Reader.Count == ReleaseImportQueue.PacedJobLimit);
+            await Task.Delay(200);
+            queue.Reader.Count.Should().Be(ReleaseImportQueue.PacedJobLimit,
+                "a bulk backfill must leave the rest of the shared queue free");
+
+            // Someone imports a DVD meanwhile: it gets on the queue at once.
+            var userImport = new ReleaseImportJob(int.MaxValue,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.Url("https://download.example.com/cronus.zip"));
+            await queue.EnqueueAsync(userImport).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+            var backfillsAhead = 0;
+            while (true)
+            {
+                var job = await ReadNextAsync(queue);
+                queue.MarkPickedUp(job);
+                if (ReferenceEquals(job, userImport)) break;
+                backfillsAhead++;
+            }
+            backfillsAhead.Should().BeLessThanOrEqualTo(ReleaseImportQueue.PacedJobLimit);
+        }
+        finally
+        {
+            lifetime.StopApplication();
+        }
+    }
+
+    private static async Task<ReleaseImportJob> ReadNextAsync(ReleaseImportQueue queue) =>
+        await queue.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The condition never held.");
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
+    public async Task Backfilling_every_release_again_skips_the_releases_whose_backfill_is_still_pending()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseIds = await SeedReadyReleasesAsync(ctx, 3);
+        var queue = new ReleaseImportQueue();
+        var lifetime = new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+            NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance);
+        try
+        {
+            var service = NewService(ctx, queue, lifetime: lifetime);
+            (await service.QueueBackfillAllAsync(releaseIds.Take(2).ToList())).Queued.Should().Be(2);
+
+            var result = await service.QueueBackfillAllAsync(releaseIds);
+
+            result.Should().Be(new BackfillQueueResult(Queued: 1, Skipped: 2), "the first two are still queued");
+            await using var read = _db.NewContext();
+            (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
+                .Should().Be(3);
+        }
+        finally
+        {
+            lifetime.StopApplication();
+        }
+    }
+
+    private static async Task<List<int>> SeedReadyReleasesAsync(Data.AppDbContext ctx, int count)
+    {
+        var now = DateTime.UtcNow;
+        var releases = Enumerable.Range(1, count).Select(i => new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = $"BC 2{i}.0 (DK)", Kind = "first_party", Status = "ready",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        }).ToList();
+        ctx.OeReleases.AddRange(releases);
+        await ctx.SaveChangesAsync();
+        return releases.Select(r => r.Id).OrderBy(id => id).ToList();
     }
 
     // ── C/AL TXT wins, and decides the kind server-side ──────────────────
@@ -287,6 +751,30 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         queue.Reader.TryRead(out var job).Should().BeTrue();
         var source = job!.Source.Should().BeOfType<ReleaseImportSource.CalTxt>().Subject;
         Track(source.TempPath);
+    }
+
+    /// <summary>
+    /// #1549: two source ZIPs that pair with the same .app are a field error, not a
+    /// crash, and nothing is created.
+    /// </summary>
+    [Theory]
+    [InlineData("CRONUS App.Source.zip", "CRONUS App.zip")]
+    [InlineData("CRONUS App.Source.zip", "cronus app.source.zip")]
+    public async Task Two_source_zips_for_the_same_app_are_refused_by_the_field(string first, string second)
+    {
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS " + Guid.NewGuid().ToString("N");
+
+        var act = () => NewService(ctx, new ReleaseImportQueue()).SubmitAsync(Submission(
+            label: label,
+            appFiles: [Text("CRONUS App.app", "not really an app")],
+            sourceZips: [EmptyZip(first), EmptyZip(second)]));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("SourceZips")
+            .WhoseValue.Should().Contain(first).And.Contain(second);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Label == label)).Should().BeFalse();
     }
 
     // ── URL, then folder ZIP, then individual files ──────────────────────
@@ -441,7 +929,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
     private void Track(string tempPath) => _tempPaths.Add(tempPath);
 
     private ReleaseImportRequestService NewService(
-        Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null, ReleaseIngests? ingests = null)
+        Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null, ReleaseIngests? ingests = null,
+        Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
         var translations = new TranslationImportService(
             ctx, _db.OrgContext,
@@ -468,7 +957,10 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
         return new ReleaseImportRequestService(
             importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds,
-            new ProjectAccess(ctx, _db.OrgContext));
+            new ProjectAccess(ctx, _db.OrgContext),
+            lifetime ?? new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
+                NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance),
+            NullLogger<ReleaseImportRequestService>.Instance);
     }
 
     private async Task SetAllowlistAsync(string hosts)

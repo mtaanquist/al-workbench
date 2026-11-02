@@ -149,7 +149,11 @@ public sealed class TemplateImportService
             // Fence category 5 (system-org fork read): pinned to t.OrganizationId == systemOrgId.
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value)
+            // Live, non-deprecated only, like ListSystemTemplatesAsync: a stale
+            // Import click on a template the catalogue has since retired is
+            // refused rather than forking a live copy of it.
+            .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value
+                && t.DeletedAt == null && !t.Deprecated)
             .Include(t => t.WorkspaceExtensions.OrderBy(e => e.Ordering))
                 .ThenInclude(e => e.Dependencies.OrderBy(d => d.Ordering))
             .Include(t => t.DefaultModules.OrderBy(d => d.Ordering))
@@ -444,7 +448,14 @@ public sealed class TemplateImportService
         return p;
     }
 
-    private async Task<ApplicationVersion> EnsureApplicationVersionAsync(
+    /// <summary>
+    /// The acting org's application version for <paramref name="sourceVersion"/>'s
+    /// key, cloning it in when the org has none. Null when the org has one but
+    /// deleted it: the imported template then has no default version, rather
+    /// than one the end-user picker hides, the way a deleted module is left out
+    /// of its defaults (#1327, #1545).
+    /// </summary>
+    private async Task<ApplicationVersion?> EnsureApplicationVersionAsync(
         ApplicationVersion sourceVersion, int actingOrgId, DateTime now, CancellationToken ct)
     {
         var existing = await _db.ApplicationVersions
@@ -452,7 +463,14 @@ public sealed class TemplateImportService
             // OrganizationId == actingOrgId; the clone is written into the acting org only.
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(v => v.OrganizationId == actingOrgId && v.Key == sourceVersion.Key, ct);
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            if (existing.DeletedAt == null) return existing;
+            _logger.LogInformation(
+                "Importing into org {OrgId}: left the default application version '{VersionKey}' out because the organisation deleted its copy.",
+                actingOrgId, sourceVersion.Key);
+            return null;
+        }
 
         var maxOrdering = await _db.ApplicationVersions
             // Same category 4 read, pinned to v.OrganizationId == actingOrgId.
@@ -516,6 +534,7 @@ public sealed class TemplateImportService
             SourceCheckedAt = sourceModule.SourceCheckedAt,
             SourceSkippedJson = sourceModule.SourceSkippedJson,
             SourceDependenciesJson = sourceModule.SourceDependenciesJson,
+            SourceIdRangeSize = sourceModule.SourceIdRangeSize,
             Dependencies = sourceModule.Dependencies.Select((d, i) => new ModuleDependency
             {
                 OrganizationId = actingOrgId,

@@ -825,7 +825,7 @@ else
         var procs = new List<ProcedureRange>(outline.Count);
         foreach (var item in outline)
         {
-            if (!IsProcedureLikeKind(item.Kind)) continue;
+            if (!ProcedureKinds.IsProcedureLike(item.Kind)) continue;
             procs.Add(new ProcedureRange(item.LineNumber, item.EndLine, item.Name, item.Kind));
         }
         if (procs.Count == 0) return "[]";
@@ -841,17 +841,10 @@ else
     {
         if (outline is null || outline.Count == 0) return [];
         return outline
-            .Where(i => IsProcedureLikeKind(i.Kind))
+            .Where(i => ProcedureKinds.IsProcedureLike(i.Kind))
             .Select(i => new UnifiedDiffSerializer.Declaration(i.LineNumber, i.EndLine, i.Name))
             .ToList();
     }
-
-    private static bool IsProcedureLikeKind(string kind) => kind switch
-    {
-        "procedure" or "internal_procedure" or "protected_procedure" or "local_procedure"
-            or "trigger" or "event_publisher" or "event_subscriber" => true,
-        _ => false,
-    };
 
     private sealed record ProcedureRange(int StartLine, int? EndLine, string Name, string Kind);
 

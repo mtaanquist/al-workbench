@@ -17,7 +17,8 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// the services: the whole-database restore's confirmation tick, and the filter that
 /// turns the per-tenant backup and storage routes off in single-tenant mode.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
+// Sets SINGLE_TENANT_MODE, which startup reads off the environment.
+[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class SiteAdminBackupEndpointTests : IDisposable
 {
     private const string AdminEmail = "siteadmin@cronus.example";
@@ -143,8 +144,7 @@ public sealed class SiteAdminBackupEndpointTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = AdminEmail,
                 DisplayName = "Site Admin",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                    .HashPassword(AdminPassword),
+                PasswordHash = TestPasswords.Hash(AdminPassword),
                 Role = UserRole.Admin,
                 IsSiteAdmin = true,
                 Status = UserStatus.Active,

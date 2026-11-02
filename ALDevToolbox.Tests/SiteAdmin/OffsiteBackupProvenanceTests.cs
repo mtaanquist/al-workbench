@@ -695,7 +695,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
 
     private PerTenantBackupService NewPerTenant(AppDbContext ctx, DeploymentIdentity deployment) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), Config(),
-            NullLogger<PerTenantBackupService>.Instance, _clock, _options, deployment);
+            NullLogger<PerTenantBackupService>.Instance, _clock, new MaintenanceModeState(), _options, deployment);
 
     private OffsiteBackupService NewOffsite(DeploymentIdentity deployment, AppDbContext? ctx = null)
     {

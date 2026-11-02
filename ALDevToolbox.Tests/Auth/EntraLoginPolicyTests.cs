@@ -280,7 +280,7 @@ public sealed class EntraLoginPolicyTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            Func<Task> act = () => NewAccounts(ctx).ChangePasswordAsync(userId, Password, "a-brand-new-password-1");
+            Func<Task> act = () => NewAccounts(ctx).ChangePasswordAsync(userId, Password, "a-brand-new-password-1", "198.51.100.1");
             var ex = await act.Should().ThrowAsync<PlanValidationException>();
             ex.Which.Errors["Password"].Should().Contain("Microsoft");
         }
@@ -317,7 +317,7 @@ public sealed class EntraLoginPolicyTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewAccounts(ctx).ChangePasswordAsync(userId, Password, newPassword);
+            await NewAccounts(ctx).ChangePasswordAsync(userId, Password, newPassword, "198.51.100.1");
         }
 
         await using var login = _db.NewContext();

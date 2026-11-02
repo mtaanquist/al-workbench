@@ -25,6 +25,7 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
     private readonly TestDb _db = new();
     private readonly FakeTimeProvider _clock = new(Start);
     private readonly ServiceProvider _services;
+    private readonly VacuumWatcher _watcher = new();
     private int _runs;
 
     public ObjectExplorerVacuumSchedulerTests()
@@ -33,7 +34,7 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
             .AddScoped(_ =>
             {
                 Interlocked.Increment(ref _runs);
-                return _db.NewContext();
+                return _db.NewContext(_watcher);
             })
             .BuildServiceProvider();
     }
@@ -45,14 +46,35 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
     }
 
     [Fact]
-    public async Task The_first_tick_after_a_start_vacuums_every_table_it_names()
+    public async Task A_fresh_process_waits_for_the_next_slot_and_then_vacuums_every_table_it_names()
     {
         var scheduler = NewScheduler(hour: null);
+        var ct = TestContext.Current.CancellationToken;
 
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(0, "a restart does not vacuum at once (#1549)");
+
+        _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
         // Throws if any table the scheduler names is missing from the migrated schema.
-        await scheduler.TickOnceAsync(TestContext.Current.CancellationToken);
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(1);
+    }
 
-        _runs.Should().Be(1, "a fresh process has not run yesterday's slot, so it catches up at once");
+    [Fact]
+    public async Task A_process_started_after_the_slot_waits_for_tomorrows()
+    {
+        _clock.Advance(TimeSpan.FromHours(9)); // 10:00, a deploy in working hours.
+        var scheduler = NewScheduler(hour: null);
+        var ct = TestContext.Current.CancellationToken;
+
+        await scheduler.TickOnceAsync(ct);
+        _clock.Advance(TimeSpan.FromHours(16)); // 02:00 the next day
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(0, "today's slot counts as run for a process started after it");
+
+        _clock.Advance(TimeSpan.FromHours(1)); // 03:00
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(1);
     }
 
     [Theory]
@@ -65,19 +87,19 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
         var scheduler = NewScheduler(configured);
         var ct = TestContext.Current.CancellationToken;
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(1);
+        _runs.Should().Be(0);
 
         _clock.Advance(Start.Date.AddHours(expectedHour).AddMinutes(-1) - Start.UtcDateTime);
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(1, "a minute before the slot is still yesterday's");
+        _runs.Should().Be(0, "a minute before the slot is still yesterday's");
 
         _clock.Advance(TimeSpan.FromMinutes(1));
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(2, "the slot has come");
+        _runs.Should().Be(1, "the slot has come");
 
         _clock.Advance(TimeSpan.FromMinutes(1));
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(2, "one run per slot");
+        _runs.Should().Be(1, "one run per slot");
     }
 
     [Fact]
@@ -95,6 +117,74 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
         await scheduler.TickOnceAsync(ct);
 
         _runs.Should().Be(2, "the missed slots are made up for with a single run");
+    }
+
+    /// <summary>
+    /// #1632: each VACUUM gets the scheduler's own long timeout, not Npgsql's
+    /// 30-second default, which a large table's index cleanup can outlast.
+    /// </summary>
+    [Fact]
+    public async Task Each_vacuum_runs_under_the_long_command_timeout()
+    {
+        var scheduler = NewScheduler(hour: null); // started at 01:00
+        _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
+        await scheduler.TickOnceAsync(TestContext.Current.CancellationToken);
+
+        _watcher.Timeouts.Should().NotBeEmpty()
+            .And.AllSatisfy(t => t.Should().Be((int)ObjectExplorerVacuumScheduler.VacuumCommandTimeout.TotalSeconds));
+    }
+
+    /// <summary>
+    /// #1632: a sweep that fails (a timeout, say) waits for tomorrow's slot
+    /// rather than starting the same long VACUUM again a minute later.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_sweep_waits_for_the_next_slot_instead_of_retrying_every_minute()
+    {
+        var scheduler = NewScheduler(hour: null);
+        var ct = TestContext.Current.CancellationToken;
+        _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
+        _watcher.Fail = true;
+
+        await scheduler.TickOnceAsync(ct); // swallowed and logged, not thrown
+        _runs.Should().Be(1);
+
+        _watcher.Fail = false;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(1, "the failed sweep counts as the day's run");
+
+        _clock.Advance(TimeSpan.FromDays(1)); // tomorrow's slot
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(2, "the next slot runs it again");
+    }
+
+    [Fact]
+    public void Four_vacuums_at_their_full_timeout_fit_under_the_hour_ceiling()
+    {
+        // The worker health check reports a stall past the one-hour active ceiling.
+        (ObjectExplorerVacuumScheduler.VacuumCommandTimeout * 4).Should().BeLessThan(TimeSpan.FromHours(1));
+    }
+
+    /// <summary>Records each VACUUM's command timeout, and can make it fail.</summary>
+    private sealed class VacuumWatcher : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        public List<int> Timeouts { get; } = new();
+        public bool Fail { get; set; }
+
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.StartsWith("VACUUM", StringComparison.Ordinal))
+            {
+                lock (Timeouts) Timeouts.Add(command.CommandTimeout);
+                if (Fail) throw new TimeoutException("The VACUUM timed out.");
+            }
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
     }
 
     private ObjectExplorerVacuumScheduler NewScheduler(string? hour)

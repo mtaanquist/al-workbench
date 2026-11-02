@@ -17,6 +17,7 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Backups;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
 
@@ -191,6 +192,58 @@ public sealed class PerTenantBackupServiceTests : IDisposable
 
         await RestoreAsync(backup.Id);
         (await FingerprintAsync(OrgA)).Should().NotBe(before, "with the lock free the restore goes through");
+    }
+
+    /// <summary>
+    /// A snapshot reads on a connection of its own, which a full restore's wait
+    /// for running work cannot see; so it takes the backup lock, and a restore that
+    /// is running refuses it before it writes anything (#1628).
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        await SeedOrgAsync(OrgA, "a");
+
+        await using (await BackupLockHolder.AcquireAsync(_db.ConnectionString))
+        {
+            var act = () => CreateAsync(OrgA);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+            Directory.Exists(Path.Combine(_backupsDir, "tenants", TestDb.DefaultOrgSlug)).Should().BeFalse();
+        }
+
+        var row = await CreateAsync(OrgA);
+        File.Exists(PathFor(row)).Should().BeTrue("the lock is free again");
+    }
+
+    /// <summary>
+    /// Deleting a snapshot while a restore holds the lock would unlink the file the
+    /// restore is reading (#1628). The delete is refused and the file and row stay.
+    /// </summary>
+    [Fact]
+    public async Task Delete_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        await SeedOrgAsync(OrgA, "a");
+        var backup = await CreateAsync(OrgA);
+
+        await using (await BackupLockHolder.AcquireAsync(_db.ConnectionString))
+        {
+            await using var ctx = _db.NewContext();
+            var act = () => NewService(ctx).DeleteAsync(backup.Id);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+        }
+        File.Exists(PathFor(backup)).Should().BeTrue("a refused delete leaves the file");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).DeleteAsync(backup.Id);
+        }
+        File.Exists(PathFor(backup)).Should().BeFalse("with the lock free the delete goes through");
+        await using var read = _db.NewContext();
+        (await read.PerTenantBackups.AsNoTracking().AnyAsync(b => b.Id == backup.Id)).Should().BeFalse();
     }
 
     [Fact]
@@ -379,6 +432,48 @@ public sealed class PerTenantBackupServiceTests : IDisposable
             .Should().BeEquivalentTo([aNewest, aPinned, bOld, bOldest]);
     }
 
+    /// <summary>
+    /// While a failed full restore holds the site closed, the organisation's rows
+    /// are gone or half-loaded: a snapshot of them is useless and its retention
+    /// prune would delete good snapshots. So it is refused, and nothing is written
+    /// or pruned (#1610).
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_is_refused_while_a_failed_restore_holds_the_site_closed()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.SystemSettings.SingleAsync(s => s.Id == 1);
+            settings.PerTenantBackupRetentionCount = 1;
+            await ctx.SaveChangesAsync();
+        }
+        var existing = await SeedSnapshotRowAsync(OrgA, "a-existing", _clock.GetUtcNow().UtcDateTime.AddDays(-1));
+        var maintenance = new MaintenanceModeState();
+        maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewService(ctx, maintenance).CreateAsync(OrgA, BackupKind.AdHoc, CancellationToken.None);
+
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors["BackupId"].Should().Contain("paused").And.Contain("Nothing was deleted");
+        }
+        Directory.Exists(Path.Combine(_backupsDir, "tenants", TestDb.DefaultOrgSlug)).Should().BeFalse();
+        await using (var read = _db.NewContext())
+        {
+            (await read.PerTenantBackups.AsNoTracking().Select(b => b.Id).ToListAsync())
+                .Should().Equal([existing]);
+        }
+
+        // Once the site reopens, snapshots run again.
+        maintenance.Exit();
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await NewService(ctx, maintenance).CreateAsync(OrgA, BackupKind.AdHoc, CancellationToken.None);
+            File.Exists(PathFor(row)).Should().BeTrue();
+        }
+    }
+
     private async Task<int> SeedSnapshotRowAsync(int organizationId, string name, DateTime createdAt, bool pinned = false)
     {
         await using var ctx = _db.NewContext();
@@ -411,7 +506,7 @@ public sealed class PerTenantBackupServiceTests : IDisposable
 
     // ===== Fixture helpers =====
 
-    private PerTenantBackupService NewService(AppDbContext ctx)
+    private PerTenantBackupService NewService(AppDbContext ctx, MaintenanceModeState? maintenance = null)
     {
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -419,7 +514,7 @@ public sealed class PerTenantBackupServiceTests : IDisposable
         }).Build();
         return new PerTenantBackupService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
-            NullLogger<PerTenantBackupService>.Instance, _clock, _options);
+            NullLogger<PerTenantBackupService>.Instance, _clock, maintenance ?? new MaintenanceModeState(), _options);
     }
 
     private async Task<PerTenantBackup> CreateAsync(int organizationId)

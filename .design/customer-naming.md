@@ -154,13 +154,15 @@ Validation (`GenerationService.ValidateWorkspacePlan`):
 | --- | --- | --- |
 | `WorkspaceName` | required; 1 to 100 characters; must contain at least one letter or digit; no control characters | "Required. Give the customer's name, for example CRONUS A/S." |
 | `ShortName` | optional; at most 50 characters; no control characters | "At most 50 characters." |
+| `ExtensionPrefix` | when the mode is `PerWorkspace` and a prefix was typed (anything other than the value an empty field resolves to): at most 50 characters; no control characters | "At most 50 characters." |
 | rendered extension name | at most 200 characters | "The extension name would be longer than 200 characters, which Business Central refuses. Use a shorter short name." |
 
 The 200-character rule is AppSourceCop AS0047; the platform itself stores the
 name as `Text[250]`, so 200 is the safe ceiling for both cases. The old
 `WorkspaceNameRegex` and its HTML `pattern=` go away. The standalone New
 Extension form keeps its own extension-name regex for now; it names an
-extension, not a customer.
+extension, not a customer. It does share the 200-character ceiling: the server
+refuses a longer standalone extension name and the field's `maxlength` matches.
 
 ## Mustache variables
 

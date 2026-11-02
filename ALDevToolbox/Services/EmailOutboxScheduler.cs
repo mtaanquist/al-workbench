@@ -52,14 +52,18 @@ public sealed class EmailOutboxScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<EmailOutboxScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(EmailOutboxScheduler),
             pollInterval: PollInterval,
             // The active bound clears SweepDeadline plus a poll, so a sweep cut
             // off at its deadline is never reported as wedged.
             maxActiveDuration: TimeSpan.FromMinutes(6),
             maxIdleSilence: TimeSpan.FromMinutes(10),
-            disableEnvVar: "DISABLE_EMAIL_OUTBOX_SCHEDULER")
+            disableEnvVar: "DISABLE_EMAIL_OUTBOX_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

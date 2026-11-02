@@ -48,6 +48,7 @@ public sealed class RouteAuthorizationTests
             ["/forgot-password"] = "password-reset request form",
             ["/reset-password"] = "password-reset completion form (token in the URL)",
             ["/account/email-change/cancel"] = "stops an admin-made email change from the notice sent to the current address (token in the URL)",
+            ["/account/email-change/confirm"] = "confirms an admin-made email change from the link sent to the new address (token in the URL; only the button spends it)",
             ["/accept-invite"] = "invited user sets a password before they have an account",
             ["/s/{Token}"] = "a Sealed link's recipient has no account; shows only the sending organisation's name and spends nothing (.design/sealed.md)",
             // Public, data-free pages.

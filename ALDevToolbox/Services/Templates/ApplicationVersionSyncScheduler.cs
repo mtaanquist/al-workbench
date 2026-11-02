@@ -37,14 +37,18 @@ public sealed class ApplicationVersionSyncScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<ApplicationVersionSyncScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // One small JSON fetch and a few inserts per org. Ten minutes is a
         // wedged-job ceiling; three hours of silence covers the hourly poll.
         : base(logger, heartbeats, nameof(ApplicationVersionSyncScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromHours(3),
-            disableEnvVar: "DISABLE_APPLICATION_VERSION_SYNC")
+            disableEnvVar: "DISABLE_APPLICATION_VERSION_SYNC",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

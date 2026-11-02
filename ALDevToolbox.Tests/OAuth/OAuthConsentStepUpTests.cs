@@ -13,6 +13,7 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.OAuth;
@@ -24,25 +25,30 @@ namespace ALDevToolbox.Tests.OAuth;
 /// step up before it shows the form, and the approval POST checks again for a
 /// form left open past the window. Declining needs no confirmation. See
 /// ".design/auth-and-audit.md", "Step-up for sensitive tools".
+///
+/// <para>The cases share one host (#1536, #1582). The tools marked for step-up
+/// are organisation-wide, so each test works in an organisation of its own, with
+/// a user of its own.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class OAuthConsentStepUpTests : IDisposable
+public sealed class OAuthConsentStepUpTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
     private const string RedirectUri = "http://127.0.0.1:41999/callback";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _email = SharedEndpointHost.UniqueEmail("consent");
 
-    public OAuthConsentStepUpTests()
-    {
-        _factory = new EndpointFactory(_db);
-    }
+    /// <summary>This test's own organisation.</summary>
+    private readonly int _orgId;
 
-    public void Dispose()
+    public OAuthConsentStepUpTests(SharedEndpointHost host)
     {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+        _orgId = host.SeedOrganization();
     }
 
     [Fact]
@@ -100,12 +106,83 @@ public sealed class OAuthConsentStepUpTests : IDisposable
         (await read.OAuthConsents.IgnoreQueryFilters().AnyAsync(c => c.UserId == userId)).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task A_strong_re_approval_revokes_the_tokens_issued_under_the_weak_one()
+    {
+        // One client_id can stand for several installations (Claude's is the
+        // same URL for everyone), and the MCP filter reads the stamp per (user,
+        // client). Without the revoke, an older installation's token approved
+        // without a second step would ride on the new approval (#1627).
+        var (weakClient, userId, authorize) = await StartAsync();
+        using (var weak = await PostDecisionAsync(weakClient, authorize, "allow", await ConsentFormTokenAsync(weakClient, authorize)))
+        {
+            weak.Headers.Location!.OriginalString.Should().StartWith(RedirectUri).And.Contain("code=");
+        }
+        await using (var read = _db.NewContext())
+        {
+            (await read.OAuthConsents.IgnoreQueryFilters().SingleAsync(c => c.UserId == userId)).StrongAuthAt.Should().BeNull();
+        }
+
+        var applications = _factory.Services.GetRequiredService<OpenIddict.Abstractions.IOpenIddictApplicationManager>();
+        var tokens = _factory.Services.GetRequiredService<OpenIddict.Abstractions.IOpenIddictTokenManager>();
+        var app = await applications.FindByClientIdAsync(authorize["client_id"]!);
+        var oldToken = await tokens.CreateAsync(new OpenIddict.Abstractions.OpenIddictTokenDescriptor
+        {
+            ApplicationId = await applications.GetIdAsync(app!),
+            Subject = userId.ToString(),
+            Type = OpenIddict.Abstractions.OpenIddictConstants.TokenTypeHints.RefreshToken,
+            Status = OpenIddict.Abstractions.OpenIddictConstants.Statuses.Valid,
+            CreationDate = DateTimeOffset.UtcNow,
+            ExpirationDate = DateTimeOffset.UtcNow.AddDays(14),
+        });
+        var oldTokenId = await tokens.GetIdAsync(oldToken);
+
+        var strongClient = await SignInStrongAsync(userId);
+        using (var strong = await PostDecisionAsync(strongClient, authorize, "allow", await ConsentFormTokenAsync(strongClient, authorize)))
+        {
+            strong.Headers.Location!.OriginalString.Should().StartWith(RedirectUri).And.Contain("code=");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OAuthConsents.IgnoreQueryFilters().SingleAsync(c => c.UserId == userId)).StrongAuthAt.Should().NotBeNull();
+        (await after.Set<OpenIddict.EntityFrameworkCore.Models.OpenIddictEntityFrameworkCoreToken>().AsNoTracking()
+                .SingleAsync(t => t.Id == oldTokenId)).Status
+            .Should().Be(OpenIddict.Abstractions.OpenIddictConstants.Statuses.Revoked);
+    }
+
+    /// <summary>Enrols an authenticator app and signs in with a recovery code, which makes the session fresh.</summary>
+    private async Task<HttpClient> SignInStrongAsync(int userId)
+    {
+        IReadOnlyList<string> codes;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var totp = scope.ServiceProvider.GetRequiredService<TotpService>();
+            var enrollment = await totp.BeginEnrollmentAsync(userId);
+            var code = new OtpNet.Totp(OtpNet.Base32Encoding.ToBytes(enrollment.SecretBase32)).ComputeTotp(DateTime.UtcNow);
+            codes = await totp.ConfirmEnrollmentAsync(userId, code);
+        }
+        var client = _factory.CreateClient();
+        using var loginPage = await client.GetAsync("/login");
+        var token = FormToken(await loginPage.Content.ReadAsStringAsync());
+        using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["Email"] = _email, ["Password"] = Password, ["__RequestVerificationToken"] = token,
+        }));
+        login.Headers.Location!.OriginalString.Should().StartWith("/login/challenge");
+        using var done = await client.PostAsync("/auth/login/challenge/recovery", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["Code"] = codes[0], ["__RequestVerificationToken"] = token,
+        }));
+        done.Headers.Location!.OriginalString.Should().NotContain("err=");
+        return client;
+    }
+
     /// <summary>A user signed in with a password only (never strong), and a registered client's authorize request.</summary>
     private async Task<(HttpClient Client, int UserId, Dictionary<string, string?> Authorize)> StartAsync()
     {
         await EnableMcpAsync();
-        var userId = await SeedUserAsync("consent@cronus.example");
-        var client = await SignInAsync("consent@cronus.example");
+        var userId = await SeedUserAsync(_email);
+        var client = await SignInAsync(_email);
 
         var registration = JsonSerializer.Serialize(new { redirect_uris = new[] { RedirectUri }, client_name = "CRONUS assistant" });
         using var registered = await client.PostAsync("/oauth/register",
@@ -147,7 +224,7 @@ public sealed class OAuthConsentStepUpTests : IDisposable
     private async Task MarkStepUpAsync(params ToolKey[] tools)
     {
         await using var ctx = _db.NewContext();
-        var org = await ctx.Organizations.FirstAsync(o => o.Id == TestDb.DefaultOrgId);
+        var org = await ctx.Organizations.FirstAsync(o => o.Id == _orgId);
         org.StepUpTools = ToolCatalog.Format(tools);
         await ctx.SaveChangesAsync();
     }
@@ -177,10 +254,10 @@ public sealed class OAuthConsentStepUpTests : IDisposable
         await using var seed = _db.NewContext();
         var user = new User
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = DateTime.UtcNow,
@@ -192,7 +269,7 @@ public sealed class OAuthConsentStepUpTests : IDisposable
 
     private async Task<HttpClient> SignInAsync(string email)
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().From(TestCallerAddress.Next());
         using var loginPage = await client.GetAsync("/login");
         var token = FormToken(await loginPage.Content.ReadAsStringAsync());
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>

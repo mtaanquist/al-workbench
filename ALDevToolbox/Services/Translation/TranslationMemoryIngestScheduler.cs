@@ -43,7 +43,10 @@ public sealed class TranslationMemoryIngestScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<TranslationMemoryIngestScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A sweep does the GitHub reads itself rather than enqueuing them, so it
         // is allowed to take a while: a large organisation is one tree read per
         // repository plus the files that moved.
@@ -51,7 +54,8 @@ public sealed class TranslationMemoryIngestScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromHours(1),
             maxIdleSilence: TimeSpan.FromMinutes(30),
-            disableEnvVar: "DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER")
+            disableEnvVar: "DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

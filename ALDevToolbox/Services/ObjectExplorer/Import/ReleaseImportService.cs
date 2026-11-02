@@ -333,6 +333,62 @@ public class ReleaseImportService
         await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
+    /// <summary>The status message a release gets when a Retry reopened it but could not queue its import (#1612).</summary>
+    public const string RetryNotQueuedMessage =
+        "The retry stopped before its import was queued, so nothing was imported. Retry the import again.";
+
+    /// <summary>
+    /// Fails a release that a Retry reopened (<see cref="ReopenForRetryAsync(int, bool, CancellationToken)"/>)
+    /// but never queued a job for. The reopen commits the release as <c>ingesting</c>
+    /// before the long wipe of the earlier attempt and the enqueue, so a failure in
+    /// between (the request cut off when the page was left, the wipe's command timeout,
+    /// a failed insert) would otherwise leave it importing with nothing working on it,
+    /// refusing Retry and Add modules until the next restart (#1612, the Retry half of
+    /// #1331). Never cancelled, on a cleared tracker so a half-saved entity from the
+    /// failure is not saved along with it, and only while the release is still
+    /// <c>ingesting</c>. A failure to write the status is logged rather than thrown,
+    /// so the caller rethrows the error that got it here.
+    /// </summary>
+    public Task FailUnqueuedRetryAsync(int releaseId) => FailUnqueuedAsync(releaseId, RetryNotQueuedMessage);
+
+    /// <summary>
+    /// The status message a new release gets when its import stopped before its job
+    /// row was written (#1632). With no row there is no saved origin for Retry to
+    /// re-run, so it says to import again.
+    /// </summary>
+    public const string ImportNotQueuedMessage =
+        "The import stopped before it was queued, so nothing was imported. Soft delete this release and import it again.";
+
+    /// <summary>
+    /// <see cref="ImportNotQueuedMessage"/> for an import that had written its job row
+    /// (it stopped waiting on a full queue): the row keeps the origin, so Retry works.
+    /// </summary>
+    public const string ImportNotQueuedRetryMessage =
+        "The import stopped before it was queued, so nothing was imported. Retry the import.";
+
+    /// <summary>
+    /// <see cref="FailUnqueuedRetryAsync"/> for a new import: the submit commits the
+    /// release as <c>ingesting</c> before it stages the upload and queues the job, so
+    /// a request cut off in between (the tab closed during the copy, a full queue)
+    /// would otherwise leave it importing until the next restart (#1632). The message
+    /// says to retry only when <paramref name="retryable"/>: a release whose job row
+    /// was never written has no saved origin for Retry to re-run.
+    /// </summary>
+    public Task FailUnqueuedImportAsync(int releaseId, bool retryable) =>
+        FailUnqueuedAsync(releaseId, retryable ? ImportNotQueuedRetryMessage : ImportNotQueuedMessage);
+
+    private async Task FailUnqueuedAsync(int releaseId, string message)
+    {
+        try
+        {
+            await StampFailedAsync(releaseId, message, onlyWhileIngesting: true).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not fail release {ReleaseId} after it stopped before its import was queued.", releaseId);
+        }
+    }
+
     /// <summary>
     /// Adds more <c>.app</c> uploads to an existing <c>ready</c> Release.
     /// Used when partner / project modules trickle in after the first-party
@@ -757,7 +813,8 @@ public class ReleaseImportService
     /// in-progress while the re-queued job runs. The caller wipes any partial
     /// data from the previous attempt
     /// (<see cref="ReleaseManagementService.ClearIngestedDataAsync"/>) and
-    /// re-enqueues the import job — this method only owns the Release-row state
+    /// re-enqueues the import job, and calls <see cref="FailUnqueuedRetryAsync"/>
+    /// if it cannot — this method only owns the Release-row state
     /// flip and its validation. Refuses anything that isn't a failed,
     /// non-deleted Release in this org with a field-keyed (<c>Retry</c>) error
     /// so the manage page renders it inline. See the <c>/retry</c> endpoint.

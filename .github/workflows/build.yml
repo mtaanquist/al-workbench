@@ -3,7 +3,8 @@ name: build
 on:
   # The workflow always triggers; the `changes` job below decides whether the
   # heavy jobs (build/test, compose-smoke, migration-forward-compat) run. A
-  # docs-only change still skips all the expensive work — but the final
+  # docs-only pull request still skips all the expensive work (a push always
+  # runs it, so the cache and the image are built from main) — but the final
   # `ci-gate` job *always* runs and reports a conclusion, so it can be the
   # single required status check on `protect-main` without deadlocking a
   # docs-only PR (the classic paths-ignore + required-check trap: a required
@@ -51,7 +52,7 @@ permissions:
 
 jobs:
   # Decides whether the change touches anything that can affect compilation,
-  # tests, or the image. Docs-only diffs (**.md, .design/**, docs/**, LICENSE)
+  # tests, or the image. Docs-only pull requests (**.md, .design/**, docs/**, LICENSE)
   # set code=false and the heavy jobs below skip. Uses a plain `git diff` rather
   # than a third-party filter action to avoid a new dependency (#416).
   changes:
@@ -67,13 +68,12 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
             files=$(git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}")
-          elif [ -n "${{ github.event.before }}" ] \
-               && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
-               && git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
-            files=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
           else
-            # First push to a branch (or manual dispatch): no reliable base, so
-            # treat it as a code change and run the full pipeline.
+            # A push (or manual dispatch) always runs the full pipeline. Diffing
+            # against the previous push would let a docs-only commit on top of a
+            # red one report green, and release.yml releases any SHA whose run
+            # succeeded, untested code included (#1550). Path-skipping only
+            # pays off on pull requests anyway.
             files=""
           fi
           echo "Changed files:"
@@ -88,13 +88,41 @@ jobs:
   build:
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    # The suite keeps all four cores of one runner busy for the whole Test
+    # step, so it runs as two shards side by side, each on its own runner with
+    # its own Postgres (#1581). Each shard builds for itself: the build is
+    # about two minutes and happens in parallel, which beats a build job
+    # followed by an artifact round trip that both shards would wait on.
+    #
+    # Shard a runs the namespaces in SHARD_A_NAMESPACES, shard b runs
+    # everything else. Both are built from that one list (include versus
+    # exclude), so together they always cover the whole suite exactly once and
+    # a new namespace lands in shard b on its own. Move a namespace across only
+    # to rebalance the two by duration.
+    name: build (shard ${{ matrix.shard }})
+    strategy:
+      # Let the other shard finish when one fails, so a run reports every
+      # failing test rather than half of them. ci-gate fails either way.
+      fail-fast: false
+      matrix:
+        shard: [a, b]
     runs-on: ubuntu-latest
+    # Without a limit a hung test holds the runner for GitHub's six-hour
+    # default. The job took about 28 minutes before #1535.
+    timeout-minutes: 45
 
     services:
       # Service container for the test suite. TestDb reads
       # ALDT_TEST_POSTGRES_CONNECTION when set and skips spinning up its own
       # Testcontainers container — faster than booting Docker-inside-Docker on
       # a runner that already provides Postgres.
+      #
+      # The data directory sits on tmpfs: TestDb clones a template database
+      # per test class, and on a disk-backed directory each clone took
+      # 340-560 ms against 35-40 ms in memory. Measured locally on 4 cores,
+      # that alone cut the suite from about 29 to 22 minutes (#1535). The
+      # data is thrown away anyway, and dropped clones free their space, so
+      # the mount stays small.
       postgres:
         image: postgres:18-alpine
         env:
@@ -104,6 +132,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
+          --tmpfs /var/lib/postgresql:rw
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
@@ -111,6 +140,9 @@ jobs:
 
     env:
       ALDT_TEST_POSTGRES_CONNECTION: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
+      # Top-level test namespaces (under ALDevToolbox.Tests) that shard a runs.
+      # About half the suite's time as measured in #1581.
+      SHARD_A_NAMESPACES: "ObjectExplorer Components Mcp Palette"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,6 +152,9 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Install PostgreSQL 18 client tools
+        # Only shard b runs the tests that need it (SiteAdmin and
+        # Infrastructure), so shard a skips the apt round trip.
+        if: matrix.shard == 'b'
         # BackupServiceTests / BackupSchedulerTests shell out to pg_dump and
         # pg_restore, and PgToolAvailability requires v18 to match the dump
         # format the postgres:18 service container emits. Ubuntu 24.04 runners
@@ -138,6 +173,7 @@ jobs:
           echo "/usr/lib/postgresql/18/bin" >> $GITHUB_PATH
 
       - name: Verify pg_dump version
+        if: matrix.shard == 'b'
         run: pg_dump --version
 
       - name: Restore
@@ -157,6 +193,8 @@ jobs:
         run: dotnet build --configuration Release --no-restore
 
       - name: Check the model matches the snapshot
+        # Once per run is enough; shard b has the shorter test list.
+        if: matrix.shard == 'b'
         # Catches editing an entity or a configuration without generating a
         # migration. It needs no database: the check compares the model EF
         # builds against AppDbContextModelSnapshot.cs, and --no-build reuses
@@ -177,19 +215,65 @@ jobs:
             --project ALDevToolbox --startup-project ALDevToolbox \
             --no-build --configuration Release
 
+      - name: Show the runner's CPU
+        # Hosted runners differ: the same suite took 11 to 18 minutes across
+        # runs (#1584). Printing the CPU lets a slow run be put down to its
+        # runner. Judge a perf change on several runs, not one step time.
+        run: |
+          echo "nproc: $(nproc)"
+          lscpu | grep 'Model name' || true
+
       - name: Test
         # xUnit v3 runs on Microsoft.Testing.Platform (see global.json's `test`
         # section). VSTest options like --logger are not recognised there: the
         # run exits 5 with zero tests, so this has to stay MTP syntax.
         # --output Detailed is the per-test console output --logger used to give.
-        run: dotnet test --configuration Release --no-build --output Detailed
+        # --timeout is the testing platform's built-in whole-run limit (no extra
+        # package), so a hung run ends inside this step, ahead of the job's
+        # timeout-minutes.
+        #
+        # --filter-namespace / --filter-not-namespace are xUnit's own testing
+        # platform options. Repeating one ORs its values, so shard a runs any
+        # listed namespace and shard b runs every test outside all of them.
+        # A name is not a string prefix (Mcp would not pull in a McpFoo).
+        # Whatever the matching rule, both shards use the same names, so a
+        # test outside shard a is always inside shard b.
+        #
+        # That also means a renamed or misspelt name fails nothing: shard a
+        # quietly runs less and shard b picks it up, and the first sign is the
+        # job hitting its time limit (#1604). So each name must still be a
+        # namespace the test project declares, or both shards stop here.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          for ns in $SHARD_A_NAMESPACES; do
+            if ! grep -rqE --include='*.cs' "^namespace ALDevToolbox\.Tests\.${ns}(\.[A-Za-z0-9_.]+)?;" ALDevToolbox.Tests; then
+              echo "::error::SHARD_A_NAMESPACES lists '$ns', but no test file declares namespace ALDevToolbox.Tests.$ns. Fix the list in build.yml."
+              exit 1
+            fi
+          done
+          if [ "$SHARD" = "a" ]; then flag=--filter-namespace; else flag=--filter-not-namespace; fi
+          args=()
+          for ns in $SHARD_A_NAMESPACES; do
+            args+=("$flag" "ALDevToolbox.Tests.$ns")
+          done
+          echo "Shard $SHARD: ${args[*]}"
+          dotnet test --configuration Release --no-build --output Detailed --timeout 40m "${args[@]}"
 
   compose-smoke:
-    # Boots the published image against a real `db` container to lock in the
-    # M16 done-when criterion: `docker compose up` brings up Postgres + app
-    # cleanly against an empty volume. Catches Dockerfile / compose / startup
-    # regressions the dotnet-test job can't see (those run against a service
-    # container, not the published app image).
+    # Builds the image from this checkout and boots it against a real `db`
+    # container, to lock in the M16 done-when criterion: `docker compose up`
+    # brings up Postgres + app cleanly against an empty volume. Catches
+    # Dockerfile / compose / startup regressions the dotnet-test job can't see
+    # (those run against a service container, not the app image).
+    #
+    # compose.yaml has no `build:` for the app (operators pull the published
+    # image), so `up --build` alone used to pull `latest` and boot the previous
+    # release instead of the commit under test (#1537). The image is built here
+    # under the exact name compose resolves, and `up --pull never` refuses to
+    # fall back to the registry if that local image is somehow missing.
+    # release.yml's `require-green-build` waits for this job on the tagged SHA,
+    # so the Dockerfile a release publishes has booted here first.
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -201,14 +285,50 @@ jobs:
       POSTGRES_PASSWORD: ci-${{ github.run_id }}
       BOOTSTRAP_ADMIN_EMAIL: admin@example.com
       BOOTSTRAP_ADMIN_PASSWORD: ci-bootstrap-${{ github.run_id }}
+      # A tag no registry holds, so a pull can never satisfy it by accident.
+      ALWORKBENCH_TAG: ci-${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build and start the stack
+      - name: Resolve the app image name compose expects
+        id: image
+        # Read back from compose itself rather than spelled out here, so the
+        # build below can never drift from the `image:` line in compose.yaml.
+        run: |
+          image=$(docker compose config --format json | jq -r '.services.aldevtoolbox.image')
+          echo "Building ${image}"
+          echo "name=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the image from this checkout
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          # Into the local Docker image store, where compose looks for it.
+          load: true
+          tags: ${{ steps.image.outputs.name }}
+          # Same default cache scope as release.yml, so main-branch runs warm
+          # the cache the release build reads and vice versa. Only pushes write
+          # it: a pull request's cache is readable by that pull request alone,
+          # yet counts against the repository's 10 GB and can evict the entries
+          # the release build reads (#1579).
+          cache-from: type=gha
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
+
+      - name: Start the stack
+        # Postgres is pulled first because `--pull never` applies to every
+        # service, and only the app image is built locally.
         # --wait blocks until every container reports healthy or the timeout
         # expires; without it, compose only waits ~30s on depends_on before
-        # giving up. The 180s budget covers postgres init + image build.
-        run: docker compose up -d --build --wait --wait-timeout 180
+        # giving up. The 180s budget covers postgres init + app first boot
+        # (the image is already built by the step above).
+        run: |
+          docker compose pull db
+          docker compose up -d --pull never --wait --wait-timeout 180
+          docker compose images
 
       - name: Dump container logs if start-up failed
         if: failure()
@@ -369,6 +489,11 @@ jobs:
     # when every heavy job succeeded or was skipped; fails if any failed or was
     # cancelled. This is what makes "the build must be green" enforceable
     # without the paths-ignore deadlock. See #416.
+    #
+    # `build` is a matrix of two test shards (#1581). needs.build.result folds
+    # the legs into one: failure or cancelled if either leg was, success only
+    # when both succeeded, skipped when the changes filter skipped the job. So
+    # this gate requires both shards without naming them.
     needs: [changes, build, compose-smoke, migration-forward-compat]
     if: always()
     runs-on: ubuntu-latest

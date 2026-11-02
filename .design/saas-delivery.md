@@ -306,7 +306,8 @@ environment, so one booked for the window's opening can come up after the window
 its turn comes, a deployment the window chose (`scheduled_by_delivery_window`, not
 `scheduled_outside_window`) is judged at that moment against the environment's window as it is
 now; outside it, the deployment moves to the next opening and a log line says so. One a person
-placed outside the window on purpose runs when they said.
+placed outside the window on purpose runs when they said. Booked app installs and AppSource
+updates follow the same rule (#1539, "Uploading apps" below).
 
 **The organisation can set the window a new environment starts with** (#962). Administration →
 Business Central holds one default for Production and one for Sandbox, each start-and-end or "any
@@ -695,7 +696,88 @@ that names the environment and says what the click does there:
   **one** upload across all organisations, so a batch spreads over as many sweeps as it
   has apps, no customer's agreed update slot waits behind another's install, and a sweep
   costs at most one install (the worker's heartbeat is ticked on every poll of it). "Now"
-  therefore means "shortly", not "within a minute", when another install is running. An
+  therefore means "shortly", not "within a minute", when another install is running. That
+  one turn rotates (#1539): among the organisations with an install due (or one owed a
+  second look), it goes to the one whose most recent install was sent longest ago - one
+  never served first - then to the longest-waiting due install, and on a tie to the one booked first (a row moved to a window's next opening ties with everything booked for it). So a twenty-app batch
+  booked for one organisation's opening alternates with another organisation's install
+  in the same window instead of running to the end first. The order is read from the
+  rows each sweep, so it survives a restart. A row counts as sent once the worker has
+  tried to send it, whatever Business Central answered; a dependent settled as not tried
+  after a failure, and a booking whose requester was disabled, get no install from
+  Business Central and no sent time, so they send neither their organisation nor their
+  environment to the back of the turn (#1603). It shares the one install out; it does not make the queue
+  shorter. Inside one organisation the turn rotates the same way between
+  environments (#1596): the environment whose most recent install was sent longest ago
+  goes first, one never served first of all. So an Install now, or an upload for now, on
+  one customer's environment waits for at most the install already running, not for the
+  rest of a batch that came due earlier on another customer's environment - which in
+  single-tenant hosting, where every customer is in one organisation, is the case the
+  rotation between organisations never reached. The environment is the one in Business
+  Central, not a solution's row for it (#1608): two solutions connected to one tenant
+  share their "Production", matched ignoring case, as deliveries share it (a solution
+  with no tenant yet counts as its own). Bookings on one environment do not rotate,
+  whichever solution made them: there the installs go by due time, then first booked,
+  first served (`requested_at`), then batch order, a single booking counting as a batch's
+  first app (#1568), because a later upload may need an app an earlier one brings - an
+  add-on solution's upload booked after the base solution's it depends on goes after it,
+  unless a window moves the base: when the base's batch comes up after its window has
+  closed and moves to the next opening, a later booking on the same environment is not
+  held back with it if nothing holds that booking to the same window - its own window is
+  still open (a different window on the other solution's row, or Microsoft's update
+  window rather than the delivery window), or a person picked its time - and Business
+  Central refuses it if it needs the base (#1629). So an Install now on an environment where an earlier booking is still waiting waits
+  for that booking too, the whole batch if it is one; it only goes ahead of other
+  environments' bookings. Which environment gets the turn is decided by the best of its
+  due installs (#1608): first the environments with any due booking whose time a person
+  picked - an Install now, an upload for now, or a time they set - then those holding
+  either a batch a window chose the time for that has started (any of its apps sent, on
+  this night or an earlier one) or a single window booking (one app, not a batch;
+  #1625), then those with only window batches not yet started. The rotation above
+  decides within the first and last groups. The middle group goes first booked, first
+  served (`requested_at`), across environments just as on one, and of two started
+  batches booked at the same moment the one served most recently carries on. Once an
+  environment has the turn its installs still go in the order above, so an Install now
+  there can give its environment the turn but still goes after the bookings ahead of it;
+  for the same reason a single window booking only counts in the middle group while no
+  batch that has not started sits ahead of it on its environment, because the turn would
+  send that batch's first app, and an environment's place in the middle group is the
+  booking time of the first such row in its order, not of an older row queued behind it. So a started window batch keeps the turn until it is done,
+  ahead of other customers' window batches that have not started: when the window closes
+  the rest of every batch not yet started moves whole to the next opening, and within one
+  organisation at most the customer whose batch was running is left with part of it
+  installed, rather than every customer with a batch booked for that window. If a single
+  window booking that has the turn is skipped (its window closed, or a cancel won), the
+  turn does not pass to a batch not yet started behind it while another batch is
+  part-installed; that batch waits for a later sweep. A single window booking is not held behind
+  another customer's batch, because one app can never be left part-installed: if it was
+  booked before that batch, it goes between two of the batch's apps on the next sweep,
+  whichever night the batch started, and the batch takes one install longer; if the
+  batch was booked before it and has started, it waits for the batch, as it would on one
+  environment; and it goes ahead of a batch that has not started, whenever that was booked.
+  Bookings whose time a person picked still go ahead of all of these on the next sweep and
+  rotate with each other, because no window holds them back and none is ever moved
+  part-way. The rotation looks back 30 days for an environment's last install; one not
+  served in that time counts as never served. A row moved to a window's next opening ties
+  on time with everything booked for that opening, so its booking time is what keeps its
+  place, on its own environment and against other environments' started batches alike: a
+  single booking moved past a closed window goes ahead of the leftovers of a batch booked
+  after it and of a batch booked for the new night.
+
+  **A time a window chose stays inside the window** - the deployments rule (#1124),
+  extended to booked installs (#1539). The row records which window applied
+  (`scheduled_by_window`: `DeliveryWindow` or `BcUpdateWindow`, null for a picked time or
+  now). One install at a time means a batch, or a queue of other bookings for the same
+  opening, can outlast a two-hour window. So before sending a window-chosen upload or
+  AppSource update, the worker judges the moment against the window the booking applied,
+  as it is now on the environment: the delivery window for a `DeliveryWindow` row (or
+  Microsoft's, if the delivery window has since been removed), Microsoft's for a
+  `BcUpdateWindow` row. Outside it, the worker moves that row and the
+  rest of its batch still waiting to the next opening, with a log line and one
+  notification to the person who booked it saying how many apps were moved and when they
+  now run (#1575), rather than installing into the customer's working day. A picked time runs when the person said,
+  late or not, and Install now clears the mark because the person has then chosen the
+  time. When no window is configured any more, the row runs. An
   install the workbench could not see finish - a run of failed polls, the wait ran out,
   or a restart while it was installing - is recorded as **sent, unconfirmed** and marked
   to be asked about again (`package_confirmation_due`, #1002). A later sweep re-polls it
@@ -902,7 +984,13 @@ whole. The page reads the log line back through the same parser, so a deployment
   solutions on one tenant share it), and within a solution to one environment in the order they fell
   due: a run that finds its environment busy, or an earlier deployment to it still waiting, leaves the row
   `scheduled` for the next sweep. Nothing waits on a full queue;
-  a due row that doesn't fit is picked up by the next sweep too (#1139).
+  a due row that doesn't fit is picked up by the next sweep too (#1139). A booked install
+  (`UpgradeActionWorker`) takes the same per-environment gate before it sends, so a
+  deployment and a booked install never install into one environment at once either:
+  whichever finds the environment busy waits for a later sweep (#1629), and a started
+  window batch that waits this way keeps its turn, as when a single booking is skipped. The
+  second look at an install nobody saw finish sends nothing, so it takes no gate. They are
+  not otherwise ordered against each other.
 
 ## UI surfaces
 
@@ -1258,7 +1346,9 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   next-update filters `list_environments` has, `get_upgrade` filters its lines by state and
   solution (its counts still cover the whole upgrade), and `list_recent_deployments` takes a
   solution and cuts long failure messages. `list_deployments` cuts them too (#1525), and
-  with a `deploymentId` returns that one deployment with every message whole. Long
+  with a `deploymentId` returns that one deployment with its own failure message whole;
+  its per-app messages are whole too unless together they would exceed the answer budget,
+  when each long one is cut to share what is left and `truncated` / `note` say so (#1601). Long
   histories page back instead of growing the limit: `list_deployments` takes a
   `beforeDeploymentId`, and `list_pipeline_builds` / `list_solution_builds` a
   `beforeBuildId`, each returning the rows older than that one (#1526).
@@ -1266,7 +1356,10 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   says how many it left out. The solution filter narrows the fleet query itself; the other
   filters run over the visible fleet in memory, which is one row per environment. Each of
   these lists also stops at the shared character budget (#1524, see `object-explorer.md`,
-  "Bounded MCP answers"), so a page of long rows still fits one answer.
+  "Bounded MCP answers"), so a page of long rows still fits one answer. `list_deployments`,
+  `list_solution_builds` and `list_pipeline_builds` stop at it too (#1572), each deployment's
+  per-app rows being what makes a row long, and their `note` points at the `before...Id`
+  that reads on.
 
 ## Suggested phasing
 
@@ -1306,6 +1399,9 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
     whose check fails is tried again next sweep). Only deliveries claimed before the process started
     count, because the worker is already draining by then and one it claimed since is running, not
     orphaned (#1114) — folded into the scheduler to avoid a second cross-org startup site.
+    A restore runs the same check again: the restored database can hold deliveries the backup caught
+    mid-publish, so when the restore epoch moves every org is checked once more, against the time the
+    database was replaced, and the failure says the site was restored rather than restarted (#1580).
   - Times are entered/displayed in the project's `bc_time_zone` (customer's local time). The window
     may wrap past midnight.
 

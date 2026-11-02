@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using ALDevToolbox.Services.Email;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -26,20 +28,34 @@ namespace ALDevToolbox.Tests.Mcp;
 /// step-up, an assistant connected through the permission screen gets through
 /// only when that approval was made with a second factor, and a tool nobody
 /// marked still reaches the tool.
+///
+/// <para>The cases share one host (#1536, #1582). What they switch off and mark for
+/// step-up is organisation-wide, so each test works in an organisation of its own,
+/// with users of its own. MCP is switched on site-wide the same way in every test.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class McpRequestFilterTests : IDisposable
+public sealed class McpRequestFilterTests : IClassFixture<SharedEndpointHost>
 {
-    private readonly TestDb _db = new();
-    public void Dispose() => _db.Dispose();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
+    private readonly EndpointFactory _factory;
+
+    /// <summary>This test's own organisation.</summary>
+    private readonly int _orgId;
+
+    public McpRequestFilterTests(SharedEndpointHost host)
+    {
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
+        _orgId = host.SeedOrganization();
+    }
 
     [Fact]
     public async Task Tools_list_leaves_out_a_tool_switched_off_for_the_organisation()
     {
         await EnableMcpAsync();
         await SetOrganisationAsync(disabled: [ToolKey.Releases]);
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         var pat = await IssuePatAsync();
 
         using var doc = await RpcAsync(client, pat, "tools/list", null);
@@ -57,8 +73,7 @@ public sealed class McpRequestFilterTests : IDisposable
     {
         await EnableMcpAsync();
         await SetOrganisationAsync(disabled: [ToolKey.Releases]);
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         var pat = await IssuePatAsync();
 
         using var doc = await RpcAsync(client, pat, "tools/call",
@@ -72,8 +87,7 @@ public sealed class McpRequestFilterTests : IDisposable
     {
         await EnableMcpAsync();
         await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         var pat = await IssuePatAsync();
 
         using var doc = await RpcAsync(client, pat, "tools/call",
@@ -92,8 +106,7 @@ public sealed class McpRequestFilterTests : IDisposable
         // reaches the question of whether Deployment pipelines is marked. It is not:
         // either another area is, or none is.
         await SetOrganisationAsync(stepUp: anotherAreaMarked ? [ToolKey.Cookbook] : []);
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         var pat = await IssuePatAsync();
 
         using var doc = await RpcAsync(client, pat, "tools/call",
@@ -110,8 +123,7 @@ public sealed class McpRequestFilterTests : IDisposable
         await EnableMcpAsync();
         // Releases is marked, but list_solutions only reads, and reads are never gated.
         await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
-        using var factory = new EndpointFactory(_db);
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         var pat = await IssuePatAsync();
 
         using var doc = await RpcAsync(client, pat, "tools/call",
@@ -126,12 +138,11 @@ public sealed class McpRequestFilterTests : IDisposable
     public async Task An_assistant_approved_without_a_second_factor_is_refused_for_a_writing_tool_marked_for_step_up()
     {
         await EnableMcpAsync();
-        using var factory = new EndpointFactory(_db);
-        var (_, accessToken) = await ConnectAssistantAsync(factory);
+        var (_, accessToken) = await ConnectAssistantAsync();
         // Marked after the approval, the case the check exists for: the assistant
         // was approved before the organisation asked for a second factor.
         await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
-        using var assistant = factory.CreateClient();
+        using var assistant = _factory.CreateClient();
 
         using var doc = await RpcAsync(assistant, accessToken, "tools/call",
             new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
@@ -145,11 +156,10 @@ public sealed class McpRequestFilterTests : IDisposable
     public async Task An_assistant_approved_with_a_second_factor_reaches_a_writing_tool_marked_for_step_up()
     {
         await EnableMcpAsync();
-        using var factory = new EndpointFactory(_db);
-        var (clientId, accessToken) = await ConnectAssistantAsync(factory);
+        var (clientId, accessToken) = await ConnectAssistantAsync();
         await StampConsentAsync(clientId, revoked: false);
         await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
-        using var assistant = factory.CreateClient();
+        using var assistant = _factory.CreateClient();
 
         using var doc = await RpcAsync(assistant, accessToken, "tools/call",
             new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
@@ -163,14 +173,13 @@ public sealed class McpRequestFilterTests : IDisposable
     public async Task A_revoked_consent_is_refused_for_a_writing_tool_marked_for_step_up_even_with_a_second_factor()
     {
         await EnableMcpAsync();
-        using var factory = new EndpointFactory(_db);
-        var (clientId, accessToken) = await ConnectAssistantAsync(factory);
+        var (clientId, accessToken) = await ConnectAssistantAsync();
         // Revoking through the app also revokes the token, so /mcp would answer
         // 401 before the filter runs. Stamping the row alone reaches the filter
         // and pins that it ignores a revoked approval, second factor or not.
         await StampConsentAsync(clientId, revoked: true);
         await SetOrganisationAsync(stepUp: [ToolKey.Releases]);
-        using var assistant = factory.CreateClient();
+        using var assistant = _factory.CreateClient();
 
         using var doc = await RpcAsync(assistant, accessToken, "tools/call",
             new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
@@ -189,13 +198,15 @@ public sealed class McpRequestFilterTests : IDisposable
     /// <summary>
     /// Marks the assistant's consent as approved from a session with a recent
     /// second factor, which is what the authorize endpoint stamps, and optionally
-    /// as revoked. The test context is scoped to the default organisation that
-    /// owns the consent.
+    /// as revoked. The consent belongs to this test's own organisation, which the
+    /// test context is not scoped to, so the read names the organisation and the
+    /// client itself.
     /// </summary>
     private async Task StampConsentAsync(string clientId, bool revoked)
     {
         await using var ctx = _db.NewContext();
-        var consent = await ctx.OAuthConsents.SingleAsync(c => c.ClientId == clientId);
+        var consent = await ctx.OAuthConsents.IgnoreQueryFilters()
+            .SingleAsync(c => c.OrganizationId == _orgId && c.ClientId == clientId);
         consent.StrongAuthAt = DateTime.UtcNow;
         if (revoked) consent.RevokedAt = DateTime.UtcNow;
         await ctx.SaveChangesAsync();
@@ -260,7 +271,7 @@ public sealed class McpRequestFilterTests : IDisposable
     private async Task SetOrganisationAsync(ToolKey[]? disabled = null, ToolKey[]? stepUp = null)
     {
         await using var ctx = _db.NewContext();
-        var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+        var org = await ctx.Organizations.SingleAsync(o => o.Id == _orgId);
         org.McpEnabled = true;
         org.DisabledTools = ToolCatalog.Format(disabled ?? []);
         org.StepUpTools = ToolCatalog.Format(stepUp ?? []);
@@ -292,7 +303,7 @@ public sealed class McpRequestFilterTests : IDisposable
         await using var ctx = _db.NewContext();
         var user = new Domain.Entities.User
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Email = $"mcp-filter-{Guid.NewGuid():N}@cronus.example",
             DisplayName = "MCP Filter Tester",
             PasswordHash = "ignored",
@@ -303,7 +314,7 @@ public sealed class McpRequestFilterTests : IDisposable
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
 
-        var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, NullLogger<PersonalAccessTokenService>.Instance);
+        var svc = new PersonalAccessTokenService(ctx, TimeProvider.System, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
         return (await svc.IssueAsync(user.Id, user.OrganizationId, "test", expiresAt: null)).Plaintext;
     }
 
@@ -316,7 +327,7 @@ public sealed class McpRequestFilterTests : IDisposable
     /// and the access token. Run before anything is marked for step-up, or the
     /// permission screen itself asks for a second factor.
     /// </summary>
-    private async Task<(string ClientId, string AccessToken)> ConnectAssistantAsync(EndpointFactory factory)
+    private async Task<(string ClientId, string AccessToken)> ConnectAssistantAsync()
     {
         const string password = "correct horse battery staple";
         var email = $"mcp-oauth-{Guid.NewGuid():N}@cronus.example";
@@ -324,10 +335,10 @@ public sealed class McpRequestFilterTests : IDisposable
         {
             seed.Users.Add(new Domain.Entities.User
             {
-                OrganizationId = TestDb.DefaultOrgId,
+                OrganizationId = _orgId,
                 Email = email,
                 DisplayName = "MCP OAuth Tester",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(password),
+                PasswordHash = _host.HashPassword(password),
                 Role = Domain.Entities.UserRole.Admin,
                 Status = Domain.Entities.UserStatus.Active,
                 CreatedAt = DateTime.UtcNow,
@@ -335,7 +346,7 @@ public sealed class McpRequestFilterTests : IDisposable
             await seed.SaveChangesAsync();
         }
 
-        using var browser = factory.CreateClient();
+        using var browser = _factory.CreateClient().From(TestCallerAddress.Next());
         using var loginPage = await browser.GetAsync("/login");
         using var login = await browser.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
         {

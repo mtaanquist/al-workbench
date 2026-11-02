@@ -43,6 +43,132 @@ public sealed class PersistedImportJobsTests : IDisposable
         return release;
     }
 
+    // ── Bulk backfill rows (#1542) ───────────────────────────────────────
+
+    [Fact]
+    public async Task CreateBackfillsAsync_writes_no_row_at_all_when_one_of_them_fails()
+    {
+        await using var ctx = _db.NewContext();
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+
+        // The second id names no release, so its row breaks the foreign key on save.
+        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id, int.MaxValue - 7], Identity);
+
+        await act.Should().ThrowAsync<DbUpdateException>();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().CountAsync(j => j.Kind == "backfill_system_references"))
+            .Should().Be(0, "a half-written bulk run would leave rows nothing ever feeds to the queue");
+    }
+
+    [Fact]
+    public async Task CreateBackfillsAsync_writes_no_row_when_the_request_is_cancelled()
+    {
+        await using var ctx = _db.NewContext();
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id], Identity, cancelled.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().CountAsync()).Should().Be(0);
+    }
+
+    /// <summary>
+    /// A deploy in the middle of a bulk run: the backfills that never started
+    /// run again, and so does the one the restart cut off (OEI2-2). That one
+    /// had deleted its release's system references and emitted only some, so
+    /// failing it would leave the release quietly incomplete; a backfill
+    /// deletes before it emits, so running it again is safe.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_queues_both_a_backfill_that_never_started_and_one_cut_off_while_running()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var waiting = await SeedReleaseAsync(ctx, status: "ready");
+        var interrupted = await SeedReleaseAsync(ctx, status: "ready");
+        var rows = await svc.CreateBackfillsAsync([waiting.Id, interrupted.Id], Identity);
+        var waitingRow = rows.Single(r => r.ReleaseId == waiting.Id).JobRowId;
+        var interruptedRow = rows.Single(r => r.ReleaseId == interrupted.Id).JobRowId;
+        await svc.MarkRunningAsync(interruptedRow);
+
+        var resumable = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        resumable.Select(j => j.JobRowId).Should().BeEquivalentTo([waitingRow, interruptedRow]);
+        resumable.Should().OnlyContain(j => j.Source is ReleaseImportSource.Backfill);
+        resumable.Should().OnlyContain(j => !j.Resumed,
+            "a resumed job wipes the release's ingested rows, and a backfill must never do that");
+        await using var read = _db.NewContext();
+        var after = await read.OeImportJobs.AsNoTracking()
+            .Where(j => j.Id == waitingRow || j.Id == interruptedRow).ToListAsync();
+        after.Should().OnlyContain(j => j.Status == "queued" && j.StartedAt == null);
+        after.Single(j => j.Id == waitingRow).ErrorMessage.Should().BeNull();
+        after.Single(j => j.Id == interruptedRow).ErrorMessage.Should().Be(PersistedImportJobs.CutOffBackfillNote);
+    }
+
+    /// <summary>
+    /// The cut-off backfill goes after the ones that never started, so a run
+    /// is not stuck behind it; and if it is cut off again - perhaps because
+    /// it is what takes the process down - it is failed, not queued a third
+    /// time, so the container does not restart in a loop.
+    /// </summary>
+    [Fact]
+    public async Task A_backfill_cut_off_twice_is_failed_and_one_cut_off_once_runs_last()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var interrupted = await SeedReleaseAsync(ctx, status: "ready");
+        var waiting = await SeedReleaseAsync(ctx, status: "ready");
+        var rows = await svc.CreateBackfillsAsync([interrupted.Id, waiting.Id], Identity);
+        var interruptedRow = rows.Single(r => r.ReleaseId == interrupted.Id).JobRowId;
+        var waitingRow = rows.Single(r => r.ReleaseId == waiting.Id).JobRowId;
+        await svc.MarkRunningAsync(interruptedRow);
+
+        var first = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        first.Select(j => j.JobRowId).Should().Equal(waitingRow, interruptedRow);
+
+        // The second start: the re-run was cut off as well.
+        await NewService(_db.NewContext()).MarkRunningAsync(interruptedRow);
+        var second = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        second.Select(j => j.JobRowId).Should().Equal(waitingRow);
+        await using var read = _db.NewContext();
+        var failed = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == interruptedRow);
+        failed.Status.Should().Be("failed");
+        failed.ErrorMessage.Should().Contain("cut off by a restart twice");
+        failed.CompletedAt.Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// #1549: an import that had saved its release ready, but died before its row was
+    /// closed, is closed on start rather than resumed, which would wipe the finished
+    /// release and download it again.
+    /// </summary>
+    [Theory]
+    [InlineData("url")]
+    [InlineData("bc_artifact")]
+    public async Task Reconcile_closes_a_url_or_artifact_job_whose_release_is_already_ready(string kind)
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        ReleaseImportSource source = kind == "url"
+            ? new ReleaseImportSource.Url("https://download.microsoft.com/x.zip")
+            : new ReleaseImportSource.BcArtifact("https://bcartifacts.example/onprem/26.0.1/dk");
+        var id = await svc.CreateAsync(release.Id, Identity, source, storeSymbolReference: false);
+        await svc.MarkRunningAsync(id); // killed after the ingest, during the drift scan
+
+        var resumable = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        resumable.Should().BeEmpty();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == id)).Status.Should().Be("completed");
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == release.Id)).Status.Should().Be("ready");
+    }
+
     [Fact]
     public async Task CreateAsync_writes_a_queued_row_with_url_source_fields()
     {

@@ -198,7 +198,7 @@ Two levels, deliberately different:
 
 | Capability | Who |
 |---|---|
-| Create a team, delete a team | Org Admin, SiteAdmin |
+| Create a team, delete a team, set a member's "Can schedule updates" flag | Org Admin, SiteAdmin |
 | Rename, add / remove members, promote or demote a manager | The above, plus a member of that team with `IsManager` |
 
 - `CanManageTeamAsync(teamId)` / `EnsureCanManageTeamAsync(teamId)` resolve in that
@@ -280,10 +280,13 @@ to.
   `ProjectAccess` against the database. That keeps a grant change effective on the
   next page load rather than the next sign-in, and keeps the claims pipeline out of
   the blast radius.
-- Granted from the team roster (`/teams/{id}`) by whoever passes
-  `CanManageTeamAsync` — the same gate as the manager toggle. Unlike that toggle, a
-  membership row that isn't there is a validation error rather than a silent no-op: a
-  grant aimed at the wrong row should not look like it landed.
+- Granted from the team roster (`/teams/{id}`) by an org Admin or SiteAdmin only —
+  `CanAdministerTeamsAsync`, the create/delete gate, not `CanManageTeamAsync`. A team
+  manager sees the column read-only: since managing the team does not grant the flag,
+  a manager must not be able to hand it out either, least of all to themselves
+  ([#1547](https://github.com/mtaanquist/al-workbench/issues/1547)). Unlike the
+  manager toggle, a membership row that isn't there is a validation error rather than
+  a silent no-op: a grant aimed at the wrong row should not look like it landed.
 - Audited with the rest of the membership row; `team_members` has no column gate.
 
 `ProjectAccess` carries it: the snapshot gains `UpdateOpsTeamIds` (the teams where

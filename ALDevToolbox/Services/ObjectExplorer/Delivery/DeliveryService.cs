@@ -1815,7 +1815,14 @@ public sealed class DeliveryService
     /// uploads to BC), so these are failed, not retried. Returns the ids it failed, so the
     /// people behind them can be told (#1036).
     /// </summary>
-    public async Task<List<int>> FailInterruptedDeliveriesAsync(DateTime claimedBeforeUtc, CancellationToken ct = default)
+    public async Task<List<int>> FailInterruptedDeliveriesAsync(DateTime claimedBeforeUtc, CancellationToken ct = default) =>
+        await FailInterruptedDeliveriesAsync(claimedBeforeUtc, afterRestore: false, ct);
+
+    /// <summary>
+    /// As above; with <paramref name="afterRestore"/> true the rows came back from a backup
+    /// the SiteAdmin restored, rather than being left by a restart, and the failure says so (#1580).
+    /// </summary>
+    public async Task<List<int>> FailInterruptedDeliveriesAsync(DateTime claimedBeforeUtc, bool afterRestore, CancellationToken ct = default)
     {
         var orphans = await _db.OeProjectDeliveries
             .Where(d => (d.Status == ProjectDeliveryStatus.Claimed
@@ -1830,13 +1837,15 @@ public sealed class DeliveryService
         foreach (var d in orphans)
         {
             d.Status = ProjectDeliveryStatus.Failed;
-            d.FailureMessage = "The deployment was interrupted by a restart. Deploy the build again.";
+            d.FailureMessage = afterRestore
+                ? "The deployment was interrupted when the site was restored from a backup. Deploy the build again."
+                : "The deployment was interrupted by a restart. Deploy the build again.";
             d.FinishedAt = now;
             d.UpdatedAt = now;
             SettleUnfinishedApps(d.Results, now);
         }
         await _db.SaveChangesAsync(ct);
-        _logger.LogWarning("Failed {Count} delivery(ies) interrupted by a restart.", orphans.Count);
+        _logger.LogWarning("Failed {Count} delivery(ies) interrupted by a {Cause}.", orphans.Count, afterRestore ? "restore" : "restart");
         return orphans.Select(d => d.Id).ToList();
     }
 
@@ -1891,7 +1900,7 @@ public sealed class DeliveryService
         using var environment = _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, target.EnvironmentName);
         if (environment is null)
         {
-            _logger.LogDebug("Delivery {DeliveryId} waits: another deployment to {Env} is running.", deliveryId, target.EnvironmentName);
+            _logger.LogDebug("Delivery {DeliveryId} waits: another deployment or a booked install to {Env} is running.", deliveryId, target.EnvironmentName);
             return false;
         }
         if (await EarlierOneWaitsAsync())

@@ -16,7 +16,6 @@ namespace ALDevToolbox.Tests.Mcp;
 /// the endpoint takes the user and organisation from the signed-in principal, not from
 /// anything in the request.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GeneratedDownloadEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
@@ -70,7 +69,7 @@ public sealed class GeneratedDownloadEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = email,
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = TestPasswords.Hash(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),

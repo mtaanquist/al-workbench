@@ -219,7 +219,7 @@
             ? $"The apps installed in {_modules.EnvironmentName} are read overnight. To fetch them now, open the environment's Apps tab."
             : $"The apps installed in {_modules.EnvironmentName} are read overnight.",
         { ReadFromEnvironment: true } => $"Business Central reports other apps in {_modules.EnvironmentName}.",
-        _ => CanManage ? "Pick the add-ons they run from the catalogue and note the version of each." : "The solution's owner or an administrator can add them.",
+        _ => CanManage ? "Pick the add-ons they run from the catalogue and note the version of each." : "The solution's owner, someone on its team, or an administrator can add them.",
     };
 
     private async Task StartEditingAsync(SolutionModule? row)

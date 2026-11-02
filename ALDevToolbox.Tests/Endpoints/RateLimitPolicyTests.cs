@@ -20,7 +20,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// something - client registration and the Sealed reveal - get a burst here, and every
 /// limited route gets its policy name checked on the endpoint itself.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class RateLimitPolicyTests : IDisposable
 {
     private readonly TestDb _db = new();

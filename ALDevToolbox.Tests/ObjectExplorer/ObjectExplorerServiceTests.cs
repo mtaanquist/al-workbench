@@ -21,9 +21,12 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class ObjectExplorerServiceTests : IDisposable
 {
-    private readonly TestDb _db = new();
+    // Created on first use, so a test that starts by seeding gets a clone of
+    // the seeded template instead of an empty database (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
 
-    public void Dispose() => _db.Dispose();
+    public void Dispose() => _database?.Dispose();
 
     private static readonly string FixtureRoot =
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
@@ -64,23 +67,15 @@ public sealed class ObjectExplorerServiceTests : IDisposable
 
     /// <summary>
     /// Imports the two fixtures into one Release. Returns the Release id so
-    /// follow-up assertions can navigate it without re-seeding.
+    /// follow-up assertions can navigate it without re-seeding. A test that
+    /// seeds first gets a clone of a template that already holds the release;
+    /// one that has written rows already pays for a real import.
     /// </summary>
-    private async Task<int> SeedSingleReleaseAsync()
+    private Task<int> SeedSingleReleaseAsync()
     {
-        await using var ctx = _db.NewContext();
-        var svc = NewImporter(ctx);
-        await using var s1 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
-        await using var s2 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
-        var summary = await svc.ImportReleaseAsync(new ReleaseImportRequest(
-            Label: "BC 25.18 DK", Kind: "first_party",
-            ParentReleaseId: null, ApplicationVersionId: null,
-            Uploads: new[]
-            {
-                new AppFileUpload("Microsoft_DK_Core.app", s1, null),
-                new AppFileUpload("Microsoft_OIOUBL.app", s2, null),
-            }));
-        return summary.ReleaseId;
+        if (_database is not null) return DkReleaseSeed.ImportAsync(_database);
+        _database = DkReleaseSeed.NewDatabase(out var releaseId);
+        return Task.FromResult(releaseId);
     }
 
     // ── List Releases / Module / Object surfaces ────────────────────────
@@ -1004,19 +999,99 @@ public sealed class ObjectExplorerServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchProceduresInReleaseAsync_finds_procedures_across_modules()
+    public async Task SearchProceduresInReleaseAsync_lists_an_extensions_procedures_without_a_term()
     {
         var releaseId = await SeedSingleReleaseAsync();
         await using var read = _db.NewContext();
+        var moduleId = await AnyModuleWithProceduresAsync(read, releaseId);
         var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
-            releaseId, search: null, moduleId: null, take: 500);
+            releaseId, search: null, moduleId: moduleId, take: 500);
 
         hits.Should().NotBeEmpty();
-        // Every hit's procedure kind is one of the procedure-shaped symbols.
-        hits.Should().OnlyContain(h =>
-            h.ProcedureKind == "procedure"
-            || h.ProcedureKind == "internal_procedure"
-            || h.ProcedureKind == "trigger");
+        // Fields, variables, keys and the like are never procedure hits.
+        hits.Should().OnlyContain(h => ProcedureKinds.IsProcedureLike(h.ProcedureKind));
+    }
+
+    /// <summary>
+    /// OEX3-2: with nothing typed and no extension picked the search would
+    /// sort every procedure in the release to show a few hundred, so it
+    /// returns nothing and the tab asks for a name.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public async Task SearchProceduresInReleaseAsync_needs_a_term_or_an_extension(string? search)
+    {
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+
+        var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
+            releaseId, search: search, moduleId: null, take: 500);
+
+        hits.Should().BeEmpty();
+    }
+
+    private static Task<long> AnyModuleWithProceduresAsync(Data.AppDbContext ctx, int releaseId) =>
+        ctx.OeModuleSymbols.AsNoTracking()
+            .Where(s => s.Module!.ReleaseId == releaseId && ProcedureKinds.All.Contains(s.Kind))
+            .GroupBy(s => s.ModuleId)
+            .OrderByDescending(g => g.Count())
+            .Select(g => g.Key)
+            .FirstAsync();
+
+    [Theory]
+    [InlineData("local_procedure")]
+    [InlineData("event_publisher")]
+    [InlineData("event_subscriber")]
+    public async Task SearchProceduresInReleaseAsync_finds_every_procedure_kind_the_importer_stores(string kind)
+    {
+        // #1569: the search used to match procedure / internal_procedure /
+        // trigger only, so a local procedure, an event publisher or an event
+        // subscriber typed by name answered "No procedures match". The DK Core
+        // and OIOUBL fixtures carry all three, so pick a real imported row of
+        // the kind and search for it by name.
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+        var target = await read.OeModuleSymbols.AsNoTracking()
+            .Where(s => s.Kind == kind && s.Module!.ReleaseId == releaseId)
+            .OrderBy(s => s.Id)
+            .Select(s => new { s.Id, s.Name })
+            .FirstOrDefaultAsync();
+        target.Should().NotBeNull(because: $"the fixtures carry at least one {kind}");
+
+        var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
+            releaseId, search: target!.Name, moduleId: null, take: 500);
+
+        hits.Should().Contain(h => h.Id == target.Id && h.ProcedureKind == kind);
+    }
+
+    /// <summary>
+    /// OEX2-4: "View source" on a procedure hit opens the file at the
+    /// procedure, not at the first line of its object; a procedure with no
+    /// line of its own (symbols only) falls back to the object's.
+    /// </summary>
+    [Fact]
+    public async Task SearchProceduresInReleaseAsync_links_to_the_procedures_own_line()
+    {
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+        var moduleId = await AnyModuleWithProceduresAsync(read, releaseId);
+        var expected = await read.OeModuleSymbols.AsNoTracking()
+            .Where(s => s.ModuleId == moduleId && ProcedureKinds.All.Contains(s.Kind))
+            .Select(s => new { s.Id, s.LineNumber, ObjectLine = s.Object!.LineNumber })
+            .ToDictionaryAsync(s => s.Id);
+        expected.Values.Should().Contain(s => s.LineNumber > 0 && s.LineNumber != s.ObjectLine,
+            because: "the fixtures must hold a procedure below its object's first line for this to prove anything");
+
+        var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
+            releaseId, search: null, moduleId: moduleId, take: 500);
+
+        hits.Should().NotBeEmpty();
+        foreach (var hit in hits)
+        {
+            var e = expected[hit.Id];
+            hit.LineNumber.Should().Be(e.LineNumber > 0 ? e.LineNumber : e.ObjectLine);
+        }
     }
 
     [Fact]

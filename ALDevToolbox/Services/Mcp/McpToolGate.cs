@@ -29,16 +29,32 @@ public sealed class McpToolGate
 
     /// <summary>True when the MCP tool named <paramref name="mcpToolName"/> may be offered and called.</summary>
     public async Task<bool> IsAvailableAsync(string mcpToolName, CancellationToken ct = default) =>
-        McpToolCatalog.ToolFor(mcpToolName) is not { } key || await _tools.IsEnabledAsync(key, ct);
+        McpToolCatalog.Find(mcpToolName) is not { } tool || await IsAvailableAsync(tool, ct);
 
     /// <summary>Refuses the call when the tool it belongs to is switched off, saying which tool and who can change it.</summary>
     /// <exception cref="McpException">The tool is switched off for the acting organisation or the whole site.</exception>
     public async Task EnsureAvailableAsync(string mcpToolName, CancellationToken ct = default)
     {
-        if (McpToolCatalog.ToolFor(mcpToolName) is not { } key) return;
-        if (await _tools.IsEnabledAsync(key, ct)) return;
+        if (McpToolCatalog.Find(mcpToolName) is not { } tool) return;
+        if (await IsAvailableAsync(tool, ct)) return;
+
+        var off = tool.Tool is { } key
+            ? $"{ToolCatalog.Describe(key).Name} is switched off"
+            : $"{string.Join(", ", tool.AnyOf!.Select(k => ToolCatalog.Describe(k).Name))} are all switched off";
         throw new McpException(
-            $"{mcpToolName} cannot be used because {ToolCatalog.Describe(key).Name} is switched off. "
+            $"{mcpToolName} cannot be used because {off}. "
             + "Ask an administrator to switch it back on if you need it.");
+    }
+
+    private async Task<bool> IsAvailableAsync(McpToolDescriptor tool, CancellationToken ct)
+    {
+        if (tool.Tool is { } key) return await _tools.IsEnabledAsync(key, ct);
+        if (tool.AnyOf is not { } anyOf) return true;
+        // A helper of several tools (#1547, MCP-5): offered while any of them is on.
+        foreach (var other in anyOf)
+        {
+            if (await _tools.IsEnabledAsync(other, ct)) return true;
+        }
+        return false;
     }
 }

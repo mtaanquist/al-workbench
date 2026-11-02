@@ -285,6 +285,12 @@ public sealed record FindReferencesQuery(
     string? TargetMemberKind = null);
 
 /// <summary>
+/// One built-in method called on a Find built-in calls target and how many
+/// calls it has, counted over every match, not just the rows a cut list keeps.
+/// </summary>
+public sealed record SystemMethodCount(string Name, int Count);
+
+/// <summary>
 /// Query envelope for <c>FindSystemReferencesAsync</c> — the receiver object
 /// triplet (same matching as <see cref="FindReferencesQuery"/>), optionally
 /// narrowed to some built-in methods (<c>Insert</c>, <c>Modify</c>, …),
@@ -404,7 +410,9 @@ public sealed record SourceFileHeader(
 
 /// <summary>
 /// One procedure-search hit on the Release search page. Carries the source
-/// file pointer so the row can deep-link straight to the declaration line.
+/// file pointer so the row can deep-link straight to the declaration line:
+/// <c>LineNumber</c> is the procedure's own line, or the owning object's when
+/// the procedure has none (an app imported from symbols only).
 /// </summary>
 public sealed record ReleaseProcedureMatch(
     long Id,
@@ -417,7 +425,7 @@ public sealed record ReleaseProcedureMatch(
     string? Signature,
     string? ReturnType,
     long? SourceFileId,
-    int ObjectLineNumber);
+    int LineNumber);
 
 /// <summary>
 /// One content-search hit on the Release search page. The snippet is the
@@ -556,7 +564,10 @@ public sealed record ReferenceSession(
     // method's calls rather than filtering the rows in hand.
     IReadOnlyList<string>? MethodNames = null,
     // The method this list was narrowed to on the server, null for all.
-    string? Method = null);
+    string? Method = null,
+    // How many calls each of MethodNames has, in the same order, counted over
+    // every match rather than the rows kept (#1543). Null when unknown.
+    IReadOnlyList<int>? MethodCounts = null);
 
 /// <summary>
 /// One row in the source-viewer outline's "Using" or "Used by" sections (#148).

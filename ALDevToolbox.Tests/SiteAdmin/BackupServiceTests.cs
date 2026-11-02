@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Backups;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
 
@@ -113,6 +114,35 @@ public sealed class BackupServiceTests : IDisposable
                 .Should().BeFalse("post-backup writes are discarded on restore");
         }
         _maintenance.IsActive.Should().BeFalse("maintenance mode is lifted after a successful restore");
+    }
+
+    /// <summary>
+    /// The restore closes the database to ordinary work (#1571) and then does
+    /// its own: the inventory, the migration, the retention sweep. With the
+    /// guard installed and nothing else exempting it, it still round-trips.
+    /// </summary>
+    [PgToolFact]
+    public async Task Restore_gets_its_own_work_past_the_maintenance_database_guard()
+    {
+        var svc = NewService(guarded: true);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Organizations.Add(new Organization
+            {
+                Name = "Marker", Slug = "marker-guarded",
+                IsPending = false, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+
+        await svc.RestoreAsync(backup.Id);
+
+        _maintenance.IsActive.Should().BeFalse();
+        _maintenance.ActiveJobs.Should().Be(0);
+        await using var check = _db.NewContext();
+        (await check.Organizations.IgnoreQueryFilters().AnyAsync(o => o.Slug == "marker-guarded")).Should().BeTrue();
+        (await check.Backups.AsNoTracking().AnyAsync(b => b.Id == backup.Id)).Should().BeTrue("the inventory was put back");
     }
 
     [PgToolFact]
@@ -661,6 +691,36 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     /// <summary>
+    /// A delete while a restore holds the lock would unlink the file the restore
+    /// has checked and is about to load after dropping the schema, and the site
+    /// would stay closed (#1628). So the delete is refused and the file stays.
+    /// </summary>
+    [Fact]
+    public async Task DeleteAsync_is_refused_while_another_backup_or_restore_holds_the_lock()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_dump.");
+        var tool = WriteFakeTool("fake-pg-dump", """
+            for a; do last="$a"; done
+            echo dump > "$last"
+            """);
+        var svc = NewService(_options with { PgDumpPath = tool });
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+        var path = Path.Combine(_backupsDir, backup.FileName);
+
+        await using (await HoldBackupLockAsync())
+        {
+            Func<Task> act = () => svc.DeleteAsync(backup.Id);
+
+            await act.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+            File.Exists(path).Should().BeTrue("a refused delete leaves the file");
+        }
+
+        await svc.DeleteAsync(backup.Id);
+        File.Exists(path).Should().BeFalse("with the lock free the delete goes through");
+    }
+
+    /// <summary>
     /// A restore that finds the lock taken must refuse before it closes the site
     /// or drops anything: the holder may be a backup reading the schema, or
     /// another restore that has already dropped it.
@@ -688,6 +748,93 @@ public sealed class BackupServiceTests : IDisposable
             .Should().BeTrue("nothing was dropped");
     }
 
+    /// <summary>
+    /// While a failed restore holds the site closed, the database is empty or
+    /// half-loaded. A backup of it would be useless, and the retention prune that
+    /// follows would delete real backups to make room for it. So it is refused,
+    /// and nothing is written or pruned (#1610).
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_is_refused_while_a_failed_restore_holds_the_site_closed()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_dump.");
+        var tool = WriteFakeTool("fake-pg-dump", """
+            for a; do last="$a"; done
+            echo dump > "$last"
+            """);
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.SystemSettings.FirstAsync(s => s.Id == 1, TestContext.Current.CancellationToken);
+            settings.BackupRetentionCount = 1;
+            await ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+        var existingId = await AddBackupRowWithFileAsync();
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        var svc = NewService(_options with { PgDumpPath = tool });
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+
+        Func<Task> act = () => svc.CreateAsync(BackupKind.AdHoc);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("paused").And.Contain("Nothing was deleted");
+        Directory.GetFiles(_backupsDir, "*-adhoc" + BackupService.BackupFileSuffix)
+            .Should().ContainSingle("no dump was written and the existing one was not pruned");
+        await using (var read = _db.NewContext())
+        {
+            (await read.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+                .Should().Equal([existingId]);
+        }
+        _maintenance.IsHeldAfterFailedRestore.Should().BeTrue("a refused backup leaves the hold alone");
+
+        // Once the site reopens, backups run again, and retention with them.
+        _maintenance.Exit();
+        var backup = await svc.CreateAsync(BackupKind.AdHoc);
+        await using var after = _db.NewContext();
+        (await after.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+            .Should().Equal([backup.Id]);
+    }
+
+    /// <summary>
+    /// The readability check reads the whole dump and can take minutes. The restore
+    /// holds the backup lock through it, so a scheduled backup cannot run its
+    /// retention prune meanwhile and delete the file the check has just passed,
+    /// which would leave the restore to drop the schema and then fail (#1610).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_holds_the_backup_lock_while_it_checks_the_file()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var checking = Path.Combine(_backupsDir, "checking");
+        var release = Path.Combine(_backupsDir, "release");
+        // Stand-in pg_restore: the read-through check signals it has started and
+        // waits to be released; the restore itself succeeds.
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            if [ "$1" = "-f" ]; then
+              touch '{checking}'
+              while [ ! -f '{release}' ]; do sleep 0.05; done
+            fi
+            exit 0
+            """);
+        var backupId = await AddBackupRowWithFileAsync();
+
+        var restore = NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+        try
+        {
+            await WaitForFileAsync(checking);
+
+            Func<Task> backup = () => NewService().CreateAsync(BackupKind.Scheduled);
+            await backup.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Another backup or restore is already in progress*");
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(release, "", TestContext.Current.CancellationToken);
+        }
+
+        await restore;
+        _maintenance.IsActive.Should().BeFalse();
+    }
+
     private Task<BackupLockHolder> HoldBackupLockAsync() => BackupLockHolder.AcquireAsync(_db.ConnectionString);
 
     private string WriteFakeTool(string name, string body)
@@ -697,6 +844,218 @@ public sealed class BackupServiceTests : IDisposable
         File.SetUnixFileMode(path,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return path;
+    }
+
+    private static ReleaseImportJob ImportJob(int releaseId) => new(
+        releaseId,
+        AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false),
+        new ReleaseImportSource.Url("https://example.invalid/dvd.zip"));
+
+    /// <summary>
+    /// A stand-in pg_restore. The read-through check always passes, and the restore
+    /// itself leaves a marker file so a test can tell whether the drop and load ran.
+    /// </summary>
+    private (string Tool, string Restored) MarkingRestoreTool()
+    {
+        var restored = Path.Combine(_backupsDir, "restored");
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            [ "$1" = "-f" ] && exit 0
+            touch '{restored}'
+            exit 0
+            """);
+        return (tool, restored);
+    }
+
+    /// <summary>
+    /// An import, build or sweep that keeps running past the wait would write into
+    /// the schema the restore drops and reloads. So the restore is refused before
+    /// the drop, with a message on the backup field that says what to wait for, and
+    /// the site reopens (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_is_refused_when_a_running_job_does_not_finish_in_time()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.BeginJobRegardless("ReleaseImportWorker"); // An import that is mid-ingest.
+        _maintenance.BeginJobRegardless("ObjectExplorerVacuumScheduler"); // The nightly clean-up.
+        _maintenance.BeginJobRegardless(); // A page query in flight.
+        try
+        {
+            Func<Task> act = () => NewService(_options with
+            {
+                PgRestorePath = tool,
+                ActiveJobsWait = TimeSpan.FromMilliseconds(200),
+            }).RestoreAsync(backupId);
+
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            // It says what is still running, in words rather than worker names (#1579).
+            ex.Which.Errors["BackupId"].Should().Contain("still running")
+                .And.Contain("Still running: the nightly Object Explorer clean-up, an import, a database operation still finishing.")
+                .And.NotContain("Worker").And.NotContain("Scheduler");
+        }
+        finally
+        {
+            _maintenance.EndJob("ReleaseImportWorker");
+            _maintenance.EndJob("ObjectExplorerVacuumScheduler");
+            _maintenance.EndJob();
+        }
+        _maintenance.RunningJobs().Named.Should().BeEmpty();
+        _maintenance.IsActive.Should().BeFalse("nothing was changed, so the site reopens");
+        _maintenance.Epoch.Should().Be(0, "nothing was replaced, so queued jobs stay valid");
+        File.Exists(restored).Should().BeFalse("nothing was dropped or restored");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync(TestContext.Current.CancellationToken))
+            .Should().Equal([backupId], "the database was not dropped");
+    }
+
+    /// <summary>
+    /// A job that finishes within the wait does not stop the restore: with maintenance
+    /// on nothing new starts, so once it is done the restore goes ahead (#1538).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_waits_for_a_running_job_to_finish_and_then_restores()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.BeginJobRegardless();
+        // The job finishes as soon as the restore has closed the site.
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _maintenance.Entered += () => closed.TrySetResult();
+        var finisher = Task.Run(async () =>
+        {
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            File.Exists(restored).Should().BeFalse("the restore waits for the job before it drops anything");
+            _maintenance.EndJob();
+        }, TestContext.Current.CancellationToken);
+
+        await NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+        await finisher;
+
+        File.Exists(restored).Should().BeTrue();
+        _maintenance.IsActive.Should().BeFalse("a restore that completes reopens the site");
+    }
+
+    /// <summary>
+    /// A webhook delivery that arrives while a failed restore holds the site closed is
+    /// put back on the queue by its worker again and again until the site reopens.
+    /// That deferral touches no database and must not count as running work, or no
+    /// restore could ever start, including the one that would reopen the site (#1538,
+    /// #1321).
+    /// </summary>
+    [Fact]
+    public async Task A_webhook_deferred_during_maintenance_does_not_stop_the_restore()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, restored) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+        var queue = new ALDevToolbox.Services.GitHub.GitHubWebhookQueue();
+        using var services = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(new Microsoft.Extensions.DependencyInjection.ServiceCollection());
+        var worker = new ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker(
+            queue, services, _maintenance,
+            NullLogger<ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker>.Instance,
+            new ALDevToolbox.Services.Workers.WorkerHeartbeatRegistry());
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.Deferring += _ => deferred.TrySetResult();
+        queue.TryEnqueue(new ALDevToolbox.Services.GitHub.GitHubPushJob(
+            1, "cronus/app", "https://github.com/cronus/app.git", "delivery-1", "main", "abc", "000", "main",
+            "sam", Forced: false, Deleted: false, DateTime.UtcNow, 0, [], DocumentationOnly: false)).Should().BeTrue();
+
+        await worker.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await deferred.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            await NewService(_options with { PgRestorePath = tool, ActiveJobsWait = TimeSpan.FromSeconds(5) })
+                .RestoreAsync(backupId);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        File.Exists(restored).Should().BeTrue("the deferring webhook did not hold the restore up");
+        _maintenance.IsActive.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Jobs still queued do not hold the restore up, and they are not run against the
+    /// restored database afterwards: they were queued for releases, builds and
+    /// solutions of the database that was replaced. A job queued after the restore runs
+    /// as normal (#1538).
+    /// </summary>
+    [Fact]
+    public async Task Jobs_queued_before_a_restore_are_dropped_once_it_completes()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var (tool, _) = MarkingRestoreTool();
+        var backupId = await AddBackupRowWithFileAsync();
+        var imports = new ReleaseImportQueue(_maintenance);
+        var builds = new ProjectBuildQueue(ProjectBuildQueue.MaxConcurrency, _maintenance);
+        var discovery = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(_maintenance);
+        var identity = AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false);
+        await imports.EnqueuePacedAsync(ImportJob(41) with { JobRowId = 41 }, TestContext.Current.CancellationToken);
+        builds.Enqueue(ImportJob(42) with { BuildOrder = ProjectBuildOrder.Unordered });
+        discovery.TryEnqueue(new(43, identity)).Should().BeTrue();
+
+        await NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+
+        imports.Reader.TryRead(out _).Should().BeFalse("the import was queued against the old database");
+        builds.Reader.TryRead(out _).Should().BeFalse("so was the build");
+        builds.WaitingCount.Should().Be(0);
+        discovery.Reader.TryRead(out _).Should().BeFalse("and the discovery");
+        discovery.IsInFlight(43).Should().BeFalse("a dropped discovery frees its solution for the next request");
+
+        // The paced slot the dropped import held is free again, and new work runs.
+        await imports.EnqueuePacedAsync(ImportJob(44) with { JobRowId = 44 }, TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        imports.Reader.TryRead(out var fresh).Should().BeTrue();
+        fresh!.ReleaseId.Should().Be(44);
+        discovery.TryEnqueue(new(43, identity)).Should().BeTrue();
+        discovery.Reader.TryRead(out _).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The lock timeout for the restore's migrate is added to the startup options the
+    /// operator may already have in the connection string, not put in their place.
+    /// </summary>
+    [Fact]
+    public void The_restore_migrate_keeps_the_operators_connection_options()
+    {
+        var plain = new Npgsql.NpgsqlConnectionStringBuilder(
+            BackupService.WithRestoreMigrateLockTimeout("Host=db;Database=app"));
+        plain.Options.Should().Be("-c lock_timeout=60000");
+
+        var withOptions = new Npgsql.NpgsqlConnectionStringBuilder(
+            BackupService.WithRestoreMigrateLockTimeout("Host=db;Database=app;Options=-c statement_timeout=0"));
+        withOptions.Options.Should().Be("-c statement_timeout=0 -c lock_timeout=60000");
+    }
+
+    /// <summary>
+    /// A restore that fails after the drop has replaced the database just as much, so
+    /// the epoch moves on and what was queued before is dropped too (#1538).
+    /// </summary>
+    [Fact]
+    public async Task A_restore_that_fails_after_the_drop_still_drops_jobs_queued_before_it()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", """
+            [ "$1" = "-f" ] && exit 0
+            exit 1
+            """);
+        var backupId = await AddBackupRowWithFileAsync();
+        var imports = new ReleaseImportQueue(_maintenance);
+        await imports.EnqueueAsync(ImportJob(45), TestContext.Current.CancellationToken);
+
+        Func<Task> act = () => NewService(_options with { PgRestorePath = tool }).RestoreAsync(backupId);
+
+        await act.Should().ThrowAsync<BackupRestoreFailedException>();
+        _maintenance.IsHeldAfterFailedRestore.Should().BeTrue();
+        _maintenance.Epoch.Should().Be(1);
+        imports.Reader.TryRead(out _).Should().BeFalse();
     }
 
     private async Task<int> AddBackupRowWithFileAsync()
@@ -729,9 +1088,22 @@ public sealed class BackupServiceTests : IDisposable
     private BackupService NewService(
         BackupOptions? options = null,
         ALDevToolbox.Services.Mcp.McpAvailabilityState? mcp = null,
-        ALDevToolbox.Services.Tools.ToolAvailabilityState? tools = null)
+        ALDevToolbox.Services.Tools.ToolAvailabilityState? tools = null,
+        bool guarded = false)
     {
-        var ctx = _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
+        var ctx = guarded
+            ? new ALDevToolbox.Data.AppDbContext(
+                new DbContextOptionsBuilder<ALDevToolbox.Data.AppDbContext>()
+                    .UseNpgsql(_db.ConnectionString)
+                    .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning))
+                    .AddInterceptors(
+                        TestDb.NewAuditInterceptor(),
+                        // Not a SiteAdmin and no request: only the restore's own
+                        // allowance can get its commands past the guard.
+                        new ALDevToolbox.Data.MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext()))
+                    .Options,
+                _db.OrgContext)
+            : _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {

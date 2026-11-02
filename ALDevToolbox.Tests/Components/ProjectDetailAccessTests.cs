@@ -53,6 +53,7 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ProjectFollowService>();
         // The follow confirmation reads the person's own Solutions choice.
@@ -328,6 +329,29 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// Someone who can see the solution but not change it is told who can: its owner,
+    /// anyone on its team, or an admin - not the owner alone (#1551).
+    /// </summary>
+    [Fact]
+    public async Task Someone_who_cannot_change_the_solution_is_told_who_can()
+    {
+        var (projectId, _) = await SeedAsync();
+        // On a Public solution everyone may change it, so the note only shows on a
+        // Read-only (or Private) one to someone outside its team.
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        }
+        _db.OrgContext.CurrentUserId = OutsiderUserId;
+
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+
+        cut.WaitForAssertion(() => cut.FindAll("p.u-muted").Should().Contain(p => p.TextContent.Contains(
+            "Only its owner (owner@example.com), someone on its team, or an admin can change or build it")));
+    }
+
+    /// <summary>
     /// A link to a tab this person does not get - here Access, for someone who can only
     /// look - opens Customer at its own address instead of an empty page.
     /// </summary>
@@ -485,7 +509,7 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
@@ -633,7 +657,7 @@ public sealed class ProjectDetailAccessTests : IAsyncDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 

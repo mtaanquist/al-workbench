@@ -1,0 +1,407 @@
+using System.Security.Claims;
+using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Endpoints;
+using ALDevToolbox.Services;
+using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Tests.Infrastructure;
+using AwesomeAssertions;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace ALDevToolbox.Tests.Auth;
+
+/// <summary>
+/// An open interactive page keeps the principal its circuit connected with,
+/// so the circuit handler re-checks it against the user's row before each
+/// event and sends a stale page to the refresh endpoint instead of running
+/// the event (#1534).
+/// </summary>
+public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
+{
+    private readonly TestDb _db = new();
+    private readonly FakeTimeProvider _clock = new(new DateTimeOffset(2026, 10, 30, 12, 0, 0, TimeSpan.Zero));
+    private readonly RecordingNavigationManager _navigation = new();
+
+    public void Dispose() => _db.Dispose();
+
+    [Fact]
+    public async Task A_current_admin_event_runs()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin));
+
+        (await DispatchAsync(handler)).Should().BeTrue();
+        _navigation.Navigations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_demoted_admin_event_is_dropped_and_the_page_reloads_through_the_refresh()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin));
+        await UpdateAsync(adminId, u => u.Role = UserRole.User);
+
+        (await DispatchAsync(handler)).Should().BeFalse("the promote-myself-back click must not run");
+        _navigation.Navigations.Should().ContainSingle().Which.Should().Be(
+            ("https://workbench.cronus.example/auth/session/refresh?return=%2Fadmin%2Fadministration%2Fusers", true));
+
+        (await DispatchAsync(handler)).Should().BeFalse("a stale circuit stays stale");
+        _navigation.Navigations.Should().ContainSingle("the browser is sent once");
+    }
+
+    [Fact]
+    public async Task A_disabled_user_event_is_dropped()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User));
+        await UpdateAsync(userId, u => u.Status = UserStatus.Disabled);
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_site_admin_flag_taken_away_is_caught()
+    {
+        var operatorId = await SeedAsync(UserRole.Admin, siteAdmin: true);
+        var handler = NewHandler(PrincipalFor(operatorId, UserRole.Admin, siteAdmin: true));
+        await UpdateAsync(operatorId, u => u.IsSiteAdmin = false);
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_credential_change_after_the_page_opened_is_caught()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User));
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime);
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_page_opened_after_a_reset_by_a_session_from_before_it_is_caught()
+    {
+        // The session signed in at T-1h, the owner reset the password at T,
+        // and the throttled cookie check let a page load through at T+1min.
+        var userId = await SeedAsync(UserRole.User);
+        var signedInAt = _clock.GetUtcNow().UtcDateTime.AddHours(-1);
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User, signedInAt: signedInAt));
+
+        (await DispatchAsync(handler)).Should().BeFalse("the session predates the reset, however late the page opened");
+        _navigation.Navigations.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_session_signed_in_after_the_credential_change_runs()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User, signedInAt: _clock.GetUtcNow().UtcDateTime));
+
+        (await DispatchAsync(handler)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_cookie_without_the_sign_in_claim_goes_through_the_refresh_once_a_credential_has_changed()
+    {
+        var userId = await SeedAsync(UserRole.User);
+        await UpdateAsync(userId, u => u.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime.AddDays(-10));
+        var handler = NewHandler(PrincipalFor(userId, UserRole.User, signedInAt: null));
+
+        (await DispatchAsync(handler)).Should().BeFalse("without the claim the session's age is unknown, so the refresh reads the cookie's own stamp");
+        _navigation.Navigations.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task The_row_is_read_at_most_once_per_interval()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin));
+        (await DispatchAsync(handler)).Should().BeTrue();
+        await UpdateAsync(adminId, u => u.Role = UserRole.User);
+
+        (await DispatchAsync(handler)).Should().BeTrue("inside the interval the last check stands");
+
+        _clock.Advance(SessionRevalidationCircuitHandler.CheckInterval);
+        (await DispatchAsync(handler)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Maintenance_mode_does_not_mistake_the_emptied_users_table_for_a_deleted_account()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var maintenance = new MaintenanceModeState();
+        maintenance.Enter("Restoring a backup");
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin), maintenance);
+        await UpdateAsync(adminId, u => u.Status = UserStatus.Disabled);
+
+        (await DispatchAsync(handler)).Should().BeFalse("the page goes to the maintenance page instead of running the event");
+        _navigation.Navigations.Should().ContainSingle().Which.Uri.Should().NotContain(
+            "auth/session/refresh", "a restore empties the users table; that is not a deleted account");
+    }
+
+    [Fact]
+    public async Task During_maintenance_a_non_site_admin_event_is_dropped_and_the_page_reloads()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin), maintenance);
+        maintenance.Enter("Restoring a backup");
+
+        (await DispatchAsync(handler)).Should().BeFalse("a Build click must not write into the database being restored");
+        _navigation.Navigations.Should().ContainSingle().Which.Should().Be(
+            ("https://workbench.cronus.example/admin/administration/users", true));
+    }
+
+    [Fact]
+    public async Task During_maintenance_a_site_admin_page_keeps_working()
+    {
+        var operatorId = await SeedAsync(UserRole.Admin, siteAdmin: true);
+        var maintenance = new MaintenanceModeState();
+        var handler = NewHandler(PrincipalFor(operatorId, UserRole.Admin, siteAdmin: true), maintenance);
+        maintenance.Enter("Restoring a backup");
+
+        (await DispatchAsync(handler)).Should().BeTrue("the SiteAdmin watches the restore from their own page");
+        _navigation.Navigations.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// A console page's event can do its database work in a DI scope of its own (a
+    /// cache miss that opens one), whose guard the circuit never configured. During a
+    /// restore that work is still let through for a SiteAdmin on the console, and
+    /// only for them, and only inside the event (#1599).
+    /// </summary>
+    [Theory]
+    [InlineData(true, "site-admin/backups", true)]
+    [InlineData(true, "admin/administration/users", false)]
+    [InlineData(false, "site-admin/backups", false)]
+    public async Task During_maintenance_a_site_admin_console_event_reaches_the_database_from_a_scope_of_its_own(
+        bool siteAdmin, string page, bool allowed)
+    {
+        var userId = await SeedAsync(UserRole.Admin, siteAdmin);
+        var maintenance = new MaintenanceModeState();
+        var navigation = new RecordingNavigationManager("https://workbench.cronus.example/" + page);
+        var handler = new SessionRevalidationCircuitHandler(
+            new FixedAuthState(PrincipalFor(userId, UserRole.Admin, siteAdmin)), new FixtureContextFactory(_db), _db.OrgContext,
+            navigation, _clock, maintenance, NullLogger<SessionRevalidationCircuitHandler>.Instance);
+        // Warm the throttled row check before the restore, as an open page would have.
+        (await DispatchAsync(handler)).Should().BeTrue();
+        maintenance.Enter("Restoring a backup");
+
+        Exception? refused = null;
+        var ran = false;
+        var pipeline = handler.CreateInboundActivityHandler(async _ =>
+        {
+            ran = true;
+            // A guard from a fresh scope: no SiteAdmin context, no request, no circuit hook.
+            await using var ctx = _db.NewContext(new MaintenanceDatabaseGuard(
+                maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null)));
+            try { await ctx.SystemSettings.AsNoTracking().CountAsync(); }
+            catch (DatabaseClosedForMaintenanceException ex) { refused = ex; }
+        });
+        await pipeline(null!);
+
+        if (!siteAdmin)
+        {
+            ran.Should().BeFalse("a non-SiteAdmin's event is dropped during a restore");
+            return;
+        }
+        ran.Should().BeTrue();
+        if (allowed) refused.Should().BeNull("the console's own work gets through in any scope");
+        else refused.Should().NotBeNull("a SiteAdmin away from the console is refused like anyone else");
+
+        // Outside the event the allowance is gone.
+        await using var outside = _db.NewContext(new MaintenanceDatabaseGuard(
+            maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null)));
+        var act = () => outside.SystemSettings.AsNoTracking().CountAsync();
+        await act.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+    }
+
+    [Fact]
+    public async Task A_failed_send_is_tried_again_on_the_next_event()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = NewHandler(PrincipalFor(adminId, UserRole.Admin));
+        await UpdateAsync(adminId, u => u.Role = UserRole.User);
+        _navigation.FailNext = true;
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+        _navigation.Navigations.Should().BeEmpty();
+
+        (await DispatchAsync(handler)).Should().BeFalse();
+        _navigation.Navigations.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task An_anonymous_page_is_left_alone()
+    {
+        var handler = NewHandler(new ClaimsPrincipal(new ClaimsIdentity()));
+
+        (await DispatchAsync(handler)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_promotion_while_the_page_is_open_leaves_the_page_alone()
+    {
+        // The person still has every right the page is using; reloading would
+        // drop the Save click and the unsaved edits with it (#1573).
+        var editorId = await SeedAsync(UserRole.Editor);
+        var handler = NewHandler(PrincipalFor(editorId, UserRole.Editor));
+        await UpdateAsync(editorId, u => { u.Role = UserRole.Admin; u.IsSiteAdmin = true; });
+
+        (await DispatchAsync(handler)).Should().BeTrue();
+        _navigation.Navigations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_failed_read_lets_events_through_for_a_while_then_drops_them()
+    {
+        var adminId = await SeedAsync(UserRole.Admin);
+        var handler = new SessionRevalidationCircuitHandler(
+            new FixedAuthState(PrincipalFor(adminId, UserRole.Admin)), new ThrowingContextFactory(), _db.OrgContext,
+            _navigation, _clock, new MaintenanceModeState(), NullLogger<SessionRevalidationCircuitHandler>.Instance);
+
+        (await DispatchAsync(handler)).Should().BeTrue("a brief hiccup should not take the page down");
+
+        _clock.Advance(SessionRevalidationCircuitHandler.FailClosedAfter);
+        (await DispatchAsync(handler)).Should().BeFalse("nobody has re-read this principal for too long (#1573)");
+        _navigation.Navigations.Should().BeEmpty("the refresh would need the same database that just failed");
+    }
+
+    [Fact]
+    public void A_principal_with_no_more_than_the_row_grants_still_matches()
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var admin = new SessionRevalidationCircuitHandler.UserSnapshot(UserStatus.Active, UserRole.Admin, true, null);
+
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.User), admin).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), admin).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin, siteAdmin: true), admin).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), admin with { Role = UserRole.Editor })
+            .Should().BeFalse("a demotion is still caught");
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin, siteAdmin: true), admin with { IsSiteAdmin = false })
+            .Should().BeFalse("a lost SiteAdmin flag is still caught");
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), admin with { CredentialsChangedAt = now.AddMinutes(1) })
+            .Should().BeFalse("a credential change after sign-in is still caught");
+    }
+
+    [Fact]
+    public void A_matching_principal_matches_and_an_extra_org_role_does_not()
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var row = new SessionRevalidationCircuitHandler.UserSnapshot(UserStatus.Active, UserRole.Editor, false, now.AddDays(-1));
+
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), row).Should().BeTrue();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Admin), row).Should().BeFalse();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor, siteAdmin: true), row).Should().BeFalse();
+        SessionRevalidationCircuitHandler.StillMatches(PrincipalFor(7, UserRole.Editor), null).Should().BeFalse();
+    }
+
+    private async Task<bool> DispatchAsync(SessionRevalidationCircuitHandler handler)
+    {
+        var ran = false;
+        var pipeline = handler.CreateInboundActivityHandler(_ => { ran = true; return Task.CompletedTask; });
+        await pipeline(null!);
+        return ran;
+    }
+
+    private SessionRevalidationCircuitHandler NewHandler(ClaimsPrincipal principal, MaintenanceModeState? maintenance = null) =>
+        new(new FixedAuthState(principal), new FixtureContextFactory(_db), _db.OrgContext, _navigation, _clock,
+            maintenance ?? new MaintenanceModeState(), NullLogger<SessionRevalidationCircuitHandler>.Instance);
+
+    private ClaimsPrincipal PrincipalFor(int userId, UserRole role, bool siteAdmin = false) =>
+        PrincipalFor(userId, role, _clock.GetUtcNow().UtcDateTime, siteAdmin);
+
+    /// <param name="signedInAt">The session's sign-in claim; null leaves it off, as on a cookie issued before it existed.</param>
+    private static ClaimsPrincipal PrincipalFor(int userId, UserRole role, DateTime? signedInAt, bool siteAdmin = false)
+    {
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.Role, role.ToString()),
+            new(HttpOrganizationContext.UserIdClaim, userId.ToString()),
+            new(HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString()),
+        };
+        if (signedInAt is { } at)
+        {
+            claims.Add(new Claim(EndpointHelpers.SignedInAtClaim, at.ToString("o", System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        if (siteAdmin)
+        {
+            claims.Add(new Claim(HttpOrganizationContext.SiteAdminClaim, "true"));
+            claims.Add(new Claim(ClaimTypes.Role, HttpOrganizationContext.SiteAdminRole));
+        }
+        return new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+    }
+
+    private async Task<int> SeedAsync(UserRole role, bool siteAdmin = false)
+    {
+        await using var ctx = _db.NewContext();
+        var user = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = $"{Guid.NewGuid():N}@cronus.example",
+            DisplayName = "Sam Berg",
+            PasswordHash = "x",
+            Role = role,
+            IsSiteAdmin = siteAdmin,
+            Status = UserStatus.Active,
+            CreatedAt = _clock.GetUtcNow().UtcDateTime.AddDays(-30),
+        };
+        ctx.Users.Add(user);
+        await ctx.SaveChangesAsync();
+        _db.OrgContext.CurrentUserId = user.Id;
+        return user.Id;
+    }
+
+    private async Task UpdateAsync(int userId, Action<User> change)
+    {
+        await using var ctx = _db.NewContext();
+        change(await ctx.Users.SingleAsync(u => u.Id == userId));
+        await ctx.SaveChangesAsync();
+    }
+
+    private sealed class FixedAuthState(ClaimsPrincipal principal) : AuthenticationStateProvider
+    {
+        public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
+            Task.FromResult(new AuthenticationState(principal));
+    }
+
+    private sealed class ThrowingContextFactory : IDbContextFactory<AppDbContext>
+    {
+        public AppDbContext CreateDbContext() => throw new InvalidOperationException("The database is unreachable.");
+    }
+
+    private sealed class FixtureContextFactory(TestDb db) : IDbContextFactory<AppDbContext>
+    {
+        public AppDbContext CreateDbContext() => db.NewContext();
+    }
+
+    private sealed class RecordingNavigationManager : NavigationManager
+    {
+        public List<(string Uri, bool ForceLoad)> Navigations { get; } = new();
+
+        public RecordingNavigationManager(string uri = "https://workbench.cronus.example/admin/administration/users") =>
+            Initialize("https://workbench.cronus.example/", uri);
+
+        public bool FailNext { get; set; }
+
+        protected override void NavigateToCore(string uri, NavigationOptions options)
+        {
+            if (FailNext)
+            {
+                FailNext = false;
+                throw new InvalidOperationException("The circuit went away.");
+            }
+            Navigations.Add((ToAbsoluteUri(uri).ToString(), options.ForceLoad));
+        }
+    }
+}

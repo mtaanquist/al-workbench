@@ -134,8 +134,8 @@ public sealed class GenerateExtensionRepositoryToolTests : IDisposable
         var client = _db.NewGitHubAppClient(ctx, api);
         var access = _db.NewGitHubAccessService(ctx, client);
         var tools = new WorkspaceTools(
-            new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx)),
-            new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx)),
+            new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
             new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext),
             _db.NewGenerationService(ctx),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),
@@ -178,11 +178,10 @@ public sealed class GenerateExtensionRepositoryToolTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()

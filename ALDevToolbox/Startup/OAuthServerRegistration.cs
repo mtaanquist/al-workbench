@@ -251,6 +251,9 @@ public static class OAuthServerRegistration
             {
                 AllowAutoRedirect = false,
                 ConnectCallback = ALDevToolbox.Services.OAuth.SsrfGuard.ConnectAsync,
+                // Through an HTTPS_PROXY the guard would vet only the proxy's address:
+                // a private proxy fails every fetch, a public one hides the target (#1576).
+                UseProxy = false,
             });
         services.AddSingleton<ALDevToolbox.Services.OAuth.CimdFetchLimiter>();
         services.AddScoped<ALDevToolbox.Services.OAuth.CimdClientResolver>();

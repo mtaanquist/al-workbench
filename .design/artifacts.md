@@ -147,7 +147,9 @@ Build **trigger** (the **New build** action with its extension picker) is a Pipe
   push and the nightly preview check. Whether the pipeline is disabled or deleted is checked again
   every time the worker picks a build up - a first run, a Retry or Recover symbols waiting in the
   queue, and a build put back in the queue after a server restart - and such a build fails with
-  the reason before it clones (#1335). Retry and Recover symbols also refuse up front. A build that
+  the reason before it clones (#1335). A build by hand, a Retry or Recover symbols is also refused
+  at pickup when the person it runs as is no longer active or can no longer manage the solution,
+  as an automatic build is, since it clones with their access (#1551). Retry and Recover symbols also refuse up front. A build that
   had already started compiling is left to finish and stays ready, but it is checked once more at
   the end: it publishes no GitHub release (the reason is recorded on the build as its release
   outcome) and is neither deployed without approval nor prepared for approval: a stopped pipeline
@@ -304,6 +306,8 @@ app). The **New build** action lets the user pick which to build:
   ready builds of that project, its own pipeline's first, newest first, each named "Build #N of
   {pipeline}" because every build of a project shares one release label (#1075). Builds of a
   deleted pipeline are left out, and the list stops at the 50 most recent.
+  The "Compare with release..." picker on a file in a build offers the same list, narrowed to the
+  builds that still carry the file (#1570).
 - The only path into a build's objects is: open the artifact → deep-link to
   `/object-explorer/release/{ReleaseId}` (or the project-scoped compare view). `OeReleaseDetail`
   stays reachable by id and gains a "back to artifact" affordance so a deep-linked user isn't

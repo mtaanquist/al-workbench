@@ -184,6 +184,7 @@
     [Parameter] public int Id { get; set; }
 
     private RecipeSuggestion? _suggestion;
+    private string? _reviewedFingerprint;
     private bool _loaded;
     private bool _busy;
     private string? _lastError;
@@ -205,6 +206,9 @@
         // A decided suggestion still renders, read-only and with its outcome
         // in the notices; only a pending one offers Approve and Reject.
         _suggestion = await Suggestions.GetAsync(Id);
+        // Taken from exactly what this page renders, so approval publishes
+        // that and refuses if the submitter has edited it since.
+        _reviewedFingerprint = _suggestion is null ? null : RecipeSuggestionService.ContentFingerprint(_suggestion);
         _keywords = _suggestion?.Keywords
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [];
         _files = _suggestion?.Files
@@ -222,7 +226,7 @@
         _lastError = null;
         try
         {
-            var recipe = await Suggestions.ApproveAsync(_suggestion!.Id);
+            var recipe = await Suggestions.ApproveAsync(_suggestion!.Id, _reviewedFingerprint!);
             // Replace, not push: once decided, this page is a dead end, so Back
             // from the new recipe should land on the review list instead.
             Nav.NavigateTo($"/admin/cookbook/{recipe.Id}", replace: true);
@@ -230,8 +234,9 @@
         catch (PlanValidationException ex)
         {
             _lastError = ex.Errors.FirstOrDefault().Value ?? "Validation failed.";
-            // Most often someone else decided it first: reload so the page
-            // shows that outcome instead of still offering the decision.
+            // Someone else decided it first, or the submitter changed it after
+            // this page loaded: reload so the page shows the outcome, or the
+            // new version to review, instead of the stale one.
             await LoadAsync();
         }
         catch (Exception ex)

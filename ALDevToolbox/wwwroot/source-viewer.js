@@ -2394,9 +2394,13 @@ function buildMethodFilter(session) {
 }
 
 /// The method picker over a list cut at the cap: counting the rows in hand
-/// would undercount, so it lists the methods without counts and each pick
-/// asks the server for that method's calls (see wireRefsFilter).
+/// would undercount, so the counts come from the server, taken over every
+/// call, and each pick asks the server for that method's calls (see
+/// wireRefsFilter). Without counts it lists the names alone.
 function buildServerMethodFilter(session) {
+    const counts = session.methodCounts?.length === session.methodNames.length
+        ? session.methodCounts
+        : null;
     const wrap = document.createElement("span");
     wrap.className = "select-wrap sv-method-filter";
     const select = document.createElement("select");
@@ -2406,18 +2410,22 @@ function buildServerMethodFilter(session) {
     select.setAttribute("aria-label", "Show calls to");
     const all = document.createElement("option");
     all.value = "";
-    all.textContent = "All methods";
+    all.textContent = counts
+        ? `All methods (${counts.reduce((sum, n) => sum + n, 0).toLocaleString()})`
+        : "All methods";
     select.appendChild(all);
     const current = (session.method ?? "").toLowerCase();
-    for (const name of session.methodNames) {
+    session.methodNames.forEach((name, i) => {
         const option = document.createElement("option");
         option.value = name;
-        option.textContent = name.toLowerCase() === current
-            ? `${name} (${session.results.length.toLocaleString()}${session.truncated ? "+" : ""})`
-            : name;
+        option.textContent = counts
+            ? `${name} (${counts[i].toLocaleString()})`
+            : name.toLowerCase() === current
+                ? `${name} (${session.results.length.toLocaleString()}${session.truncated ? "+" : ""})`
+                : name;
         option.selected = name.toLowerCase() === current;
         select.appendChild(option);
-    }
+    });
     wrap.appendChild(select);
     wrap.insertAdjacentHTML("beforeend", SELECT_CARET_ICON_SVG);
     return wrap;

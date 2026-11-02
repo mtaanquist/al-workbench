@@ -16,7 +16,6 @@ namespace ALDevToolbox.Tests.Auth;
 /// need the real routing (which endpoint a path resolves to) and the real
 /// token-create form.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class StrongAuthGateEndToEndTests : IDisposable
 {
     private const string Email = "consultant@cronus.example";

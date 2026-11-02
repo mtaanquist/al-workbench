@@ -8,7 +8,6 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Auth;
 
@@ -18,30 +17,37 @@ namespace ALDevToolbox.Tests.Auth;
 /// step up with, the current password). And what a password reset does and
 /// does not do to passkeys: they stay, and the person is asked to look them
 /// over. See ".design/auth-and-audit.md", "Passkeys (WebAuthn)".
+///
+/// <para>The cases share one host (#1536), each with a user of its own.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class PasskeyRegistrationEndpointTests : IDisposable
+public sealed class PasskeyRegistrationEndpointTests : IClassFixture<PasskeyRegistrationEndpointTests.Host>
 {
     private const string Password = "correct horse battery staple";
     private const string NewPassword = "another horse battery staple";
     private const string ReviewPrompt = "Look at when each passkey above was added";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public PasskeyRegistrationEndpointTests()
+    public PasskeyRegistrationEndpointTests(Host host)
     {
-        _factory = new EndpointFactory(_db, environment: new Dictionary<string, string?>
-        {
-            ["Auth__WebAuthn__RpId"] = "localhost",
-            ["Auth__WebAuthn__OriginsCsv"] = "https://localhost",
-        });
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
-    public void Dispose()
+    /// <summary>The shared host, with WebAuthn pointed at the test client's origin.</summary>
+    public sealed class Host : SharedEndpointHost
     {
-        _factory.Dispose();
-        _db.Dispose();
+        public Host()
+            : base(configureServices: null, settings: new Dictionary<string, string?>
+            {
+                ["Auth:WebAuthn:RpId"] = "localhost",
+                ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
+            })
+        {
+        }
     }
 
     [Fact]
@@ -238,6 +244,41 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
         (await page.Content.ReadAsStringAsync()).Should().Contain("Now choose Add a passkey below to finish.");
     }
 
+    [Fact]
+    public async Task A_refused_passkey_sign_in_answers_the_same_for_a_live_account_and_an_unknown_credential()
+    {
+        // A direct caller used to see the exception text, which differed between
+        // an active account's credential and anything else, and so learned which
+        // addresses are live accounts with passkeys (#1614).
+        var userId = await SeedUserAsync("live-passkey@cronus.example", withPasskey: true);
+        byte[] realId;
+        await using (var read = _db.NewContext())
+        {
+            realId = await read.UserPasskeys.IgnoreQueryFilters().Where(p => p.UserId == userId)
+                .Select(p => p.CredentialId).SingleAsync();
+        }
+
+        var bodies = new List<string>();
+        foreach (var id in new[] { realId, System.Security.Cryptography.RandomNumberGenerator.GetBytes(16) })
+        {
+            using var client = _factory.CreateClient();
+            using (var options = await client.PostAsync("/auth/passkey/login/options",
+                       Json("""{"email":"live-passkey@cronus.example"}""")))
+            {
+                options.StatusCode.Should().Be(HttpStatusCode.OK);
+            }
+            var rawId = Convert.ToBase64String(id).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            using var login = await client.PostAsync("/auth/passkey/login", Json($$$"""
+                {"id":"{{{rawId}}}","rawId":"{{{rawId}}}","type":"public-key",
+                 "response":{"clientDataJSON":"AA","authenticatorData":"AA","signature":"AA"}}
+                """));
+            login.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+            bodies.Add(await login.Content.ReadAsStringAsync());
+        }
+
+        bodies.Should().AllBe(AccountPasskeyEndpoints.PasskeyLoginFailedBody);
+    }
+
     private async Task<int> SeedUserAsync(string email, bool withPasskey = false)
     {
         await using var seed = _db.NewContext();
@@ -246,7 +287,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = DateTime.UtcNow,

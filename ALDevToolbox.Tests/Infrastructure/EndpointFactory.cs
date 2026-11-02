@@ -1,24 +1,29 @@
+using ALDevToolbox.Services.Workers;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace ALDevToolbox.Tests.Infrastructure;
 
 /// <summary>
-/// xUnit collection that serialises every test class which uses
-/// <see cref="EndpointFactory"/>. The factory swaps the process-wide
-/// <c>ConnectionStrings__DefaultConnection</c> env var so the booted
-/// <c>Program.cs</c> binds to the per-fixture Postgres database. xUnit
-/// runs test classes in parallel by default, so two factory-using classes
-/// racing on that env var can pick up the wrong connection string and
-/// blow up with a stream error when the other fixture disposes its
-/// database. Sharing one collection makes their execution sequential.
+/// xUnit collection for the few test classes that boot the app with a
+/// process-wide environment variable set (<see cref="EndpointFactory"/>'s
+/// <c>environment</c> argument). Startup reads some knobs, such as
+/// <c>SINGLE_TENANT_MODE</c>, straight off the environment, so a host booting
+/// in parallel would pick the value up too. With parallelisation disabled,
+/// xUnit runs this collection on its own, after the parallel ones.
+///
+/// Every other app-booting class runs in parallel: the factory hands the
+/// connection string to its host through configuration, not the environment
+/// (#1535). Configuration keys belong in the <c>settings</c> argument, which
+/// needs no collection.
 /// </summary>
-[CollectionDefinition(Name)]
-public sealed class EndpointFactoryCollection
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class ProcessEnvironmentCollection
 {
-    public const string Name = "EndpointFactory";
+    public const string Name = "ProcessEnvironment";
 }
 
 /// <summary>
@@ -31,13 +36,14 @@ public sealed class EndpointFactoryCollection
 /// scratch database, one host, and disposes both together. CI's service
 /// container is the same one used by <c>TestDb</c>; we don't fork a second
 /// host (Issue #69 §"shared fixture").
+///
+/// The factory touches no process-wide state unless a test passes
+/// <c>environment</c>, so factories in different test classes can boot at
+/// the same time.
 /// </summary>
 public sealed class EndpointFactory : IDisposable
 {
-    private readonly TestDb _db;
     private readonly WebApplicationFactory<Program> _factory;
-    private readonly string? _previousConnection;
-    private readonly string? _previousScheduler;
     private readonly Dictionary<string, string?> _previousExtraEnvironment = [];
 
     /// <param name="configureServices">
@@ -46,26 +52,31 @@ public sealed class EndpointFactory : IDisposable
     /// dependency (SMTP, say) for a fake.
     /// </param>
     /// <param name="environment">
-    /// Extra environment variables to set for the lifetime of the factory.
-    /// Startup reads several knobs straight off the environment before any
-    /// host-builder hook runs, so a test that needs one has to set it here.
-    /// The previous values are restored on dispose.
+    /// Extra environment variables to set for the lifetime of the factory, for
+    /// the knobs startup reads straight off the environment rather than through
+    /// configuration. The previous values are restored on dispose. The variable
+    /// is process-wide, so a class that passes this must be in
+    /// <see cref="ProcessEnvironmentCollection"/>.
+    /// </param>
+    /// <param name="settings">
+    /// Extra configuration values (<c>Auth:WebAuthn:RpId</c>, say), handed to
+    /// this host alone. Prefer this to <paramref name="environment"/> for
+    /// anything the app reads through <c>IConfiguration</c>.
+    /// </param>
+    /// <param name="keepSchedulers">
+    /// The polled schedulers (backups, the BCQuality mirror, the Microsoft feed
+    /// sync and the rest) are taken out of the host by default: they would clone
+    /// repositories and call Microsoft and GitHub from any host that outlives
+    /// their startup delay, and no endpoint test is about them. Scheduler tests
+    /// drive the scheduler directly. Pass true to keep the registrations.
     /// </param>
     public EndpointFactory(
         TestDb db,
         Action<IServiceCollection>? configureServices = null,
-        IReadOnlyDictionary<string, string?>? environment = null)
+        IReadOnlyDictionary<string, string?>? environment = null,
+        IReadOnlyDictionary<string, string?>? settings = null,
+        bool keepSchedulers = false)
     {
-        _db = db;
-
-        // ConnectionStrings:DefaultConnection is read inside
-        // WebApplication.CreateBuilder(args), before any WithWebHostBuilder
-        // hook can inject configuration. Setting the env var up front is
-        // the supported workaround — same shape as EndpointAmbiguityTests.
-        _previousConnection = Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection");
-        _previousScheduler = Environment.GetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER");
-        Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", _db.ConnectionString);
-        Environment.SetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER", "1");
         foreach (var (key, value) in environment ?? new Dictionary<string, string?>())
         {
             _previousExtraEnvironment[key] = Environment.GetEnvironmentVariable(key);
@@ -77,6 +88,21 @@ public sealed class EndpointFactory : IDisposable
             {
                 builder.UseContentRoot(LocateProjectFolder());
                 builder.UseEnvironment("Test");
+                // UseSetting values reach WebApplication.CreateBuilder's
+                // configuration before Program.cs reads it, so AddAppDatabase
+                // binds to this fixture's database. Setting the
+                // ConnectionStrings__DefaultConnection env var instead (as this
+                // factory once did) forced every app-booting class into one
+                // serial collection.
+                builder.UseSetting("ConnectionStrings:DefaultConnection", db.ConnectionString);
+                foreach (var (key, value) in settings ?? new Dictionary<string, string?>())
+                {
+                    builder.UseSetting(key, value);
+                }
+                if (!keepSchedulers)
+                {
+                    builder.ConfigureTestServices(RemoveSchedulers);
+                }
                 if (configureServices is not null)
                 {
                     builder.ConfigureTestServices(configureServices);
@@ -104,11 +130,22 @@ public sealed class EndpointFactory : IDisposable
     public void Dispose()
     {
         _factory.Dispose();
-        Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", _previousConnection);
-        Environment.SetEnvironmentVariable("DISABLE_BACKUP_SCHEDULER", _previousScheduler);
         foreach (var (key, value) in _previousExtraEnvironment)
         {
             Environment.SetEnvironmentVariable(key, value);
+        }
+    }
+
+    private static void RemoveSchedulers(IServiceCollection services)
+    {
+        var schedulers = services
+            .Where(d => d.ServiceType == typeof(IHostedService)
+                && d.ImplementationType is { } type
+                && typeof(PolledScheduler).IsAssignableFrom(type))
+            .ToList();
+        foreach (var descriptor in schedulers)
+        {
+            services.Remove(descriptor);
         }
     }
 

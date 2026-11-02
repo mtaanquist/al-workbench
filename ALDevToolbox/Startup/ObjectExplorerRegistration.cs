@@ -57,9 +57,10 @@ public static class ObjectExplorerRegistration
         // Builds have their own line (#1137). Every possible worker is registered, and the
         // queue's limit decides how many build at once: the site setting, else
         // OE_BUILD_CONCURRENCY, changed at runtime without a restart (#1164).
-        services.AddSingleton(_ => new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(
+        services.AddSingleton(sp => new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(
             ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue
-                .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY"))));
+                .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY")),
+            sp.GetRequiredService<ALDevToolbox.Services.Operations.MaintenanceModeState>()));
         // What the container reports about processor and memory, and the latest warning
         // that builds were short of either (#1169).
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ContainerResources>();
@@ -185,6 +186,9 @@ public static class ObjectExplorerRegistration
             {
                 AllowAutoRedirect = true,
                 ConnectCallback = ALDevToolbox.Services.OAuth.SsrfGuard.ConnectAsync,
+                // The guard can only vet the address it dials; through a proxy that is
+                // the proxy's, never the target's (#1576).
+                UseProxy = false,
                 // SocketsHttpHandler defaults PooledConnectionLifetime to infinite, so
                 // a cached TCP connection that's silently gone half-dead (CDN edge
                 // dropped state, NAT timeout, …) gets reused for the next request and

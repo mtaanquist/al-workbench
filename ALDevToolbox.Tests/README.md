@@ -63,7 +63,7 @@ should copy rather than reinvent.
 | `Validation/`     | `PlanValidationException` field-key surface tests.                 |
 | `Dashboard/`      | `DashboardService` — the counts and queues behind `/admin` and `/`. |
 | `Routing/`        | End-to-end endpoint inspection — boots the app via                  |
-|                   | `WebApplicationFactory<Program>` and asserts the endpoint map is    |
+|                   | `EndpointFactory` and asserts the endpoint map is                   |
 |                   | unambiguous (catches `MapPost` / `@page` collisions at build time). |
 | `Endpoints/`      | HTTP-layer behaviour for the minimal-API handlers in `Program.cs`   |
 |                   | (antiforgery enforcement, anonymous → redirect, /site-admin 404).   |
@@ -121,6 +121,36 @@ public sealed class MyServiceTests : IDisposable
 
 For audit-interceptor tests use `TestDb.NewContextWithAudit(interceptor)`
 so the same write path the application uses runs in the test.
+
+**Seeded templates.** When most tests in a class start from the same costly
+seed (the Object Explorer `.app` imports are the example), build it once with
+`TestDb.FromSeed(key, seed, out value)`. The seed runs once per test process
+on a fresh clone; every later call gets its own clone of the result, and
+`value` is what the seed returned (ids survive the clone). The same key must
+always mean the same seed, and the seed runs as the default organisation. A
+test that writes anything before it seeds can't use the clone, so create the
+`TestDb` lazily and fall back to seeding the slow way when it already exists
+(`ObjectExplorer/DkReleaseSeed` and `ExplorerTreeTests`):
+
+```csharp
+private TestDb? _database;
+private TestDb _db => _database ??= new TestDb();
+public void Dispose() => _database?.Dispose();
+
+private Task<int> SeedAsync()
+{
+    if (_database is not null) return DkReleaseSeed.ImportAsync(_database);
+    _database = DkReleaseSeed.NewDatabase(out var releaseId);
+    return Task.FromResult(releaseId);
+}
+```
+
+**Seeded users.** Give a user you seed to sign in with
+`PasswordHash = TestPasswords.Hash(password)`. It hashes at bcrypt's minimum
+work factor and caches per password, and since bcrypt reads the factor back
+from the hash, the sign-in is cheap too. Call `AuthService.HashPassword` only
+in a test about hashing itself, or one that should start from the hash the app
+makes.
 
 Every fixture database holds three organisations, and `TestDb.OrgContext`
 acts as an ordinary tenant unless a test says otherwise (#1441):
@@ -242,6 +272,93 @@ that renders it joins that collection.
 **Culture.** `CultureDefaults` is a module initializer that applies the app's
 own culture before any test runs, so numbers and dates format the way the app
 formats them whatever the machine's locale. Don't set a culture in a test.
+
+### Endpoint tests
+
+Boot the app with `EndpointFactory`, never with a hand-built
+`WebApplicationFactory<Program>`. The factory gives its host the fixture's
+connection string through configuration, so endpoint test classes run in
+parallel with each other and with everything else. Don't put them in a
+collection to serialise them.
+
+- **Configuration.** Anything the app reads through `IConfiguration`
+  (`Auth:WebAuthn:RpId`, say) goes in the `settings:` argument. It reaches
+  that host only.
+- **Environment.** A knob startup reads straight off the environment
+  (`SINGLE_TENANT_MODE`) goes in `environment:`. That sets
+  a process-wide variable, so the class must carry
+  `[Collection(ProcessEnvironmentCollection.Name)]`, which runs it on its own
+  after the parallel collections. Keep that list short: if a knob can move to
+  `settings:`, move it, and if startup only parses it into a singleton,
+  register that singleton in `configureServices` instead. `PUBLIC_BASE_URL`
+  is one: register `new PublicOrigin(PublicOrigin.Parse(url))`
+  (`CredentialEmailLinkTests`).
+- **Schedulers.** The factory takes the polled schedulers out of the host
+  (backups, the BCQuality mirror, the Microsoft feed sync and the rest), so a
+  host that lives past their startup delay doesn't clone repositories or call
+  out to Microsoft and GitHub. Test a scheduler by driving it directly.
+  `keepSchedulers: true` keeps them for the one test that checks they are
+  registered. Those are the real schedulers: a host built that way that
+  lives past their 20-second startup delay starts ticking them, network calls
+  included. Keep such a host short-lived.
+- **One host per class.** Booting a host costs about a second and its first
+  page render most of another; every request after that takes milliseconds
+  (#1536). So a class whose tests can share a host takes
+  `IClassFixture<SharedEndpointHost>` and gets one `TestDb` and one
+  `EndpointFactory` for all its tests, through the constructor. The tests of
+  one class run one after another, so sharing costs isolation only between
+  them, and these rules keep that safe:
+  - Don't rely on an empty database. Seed what the test needs and assert only
+    on what it seeded: a user from `SharedEndpointHost.UniqueEmail(...)`, rows
+    looked up by the id the test got back. Sign-in is rate limited per email
+    address, so a constant address signed in from every test locks the class
+    out part way through. `HashPassword` returns `TestPasswords.Hash` (see
+    "Seeded users" below).
+  - Keep a host per test (an `EndpointFactory` in the test, or in the class
+    constructor as before) when a test changes state the host or the whole
+    database shares: a `system_settings` value the tests set differently
+    (every webhook test stores the same secret, so that class shares; its
+    one test without a secret boots a host of its own), maintenance mode, an
+    organisation-wide setting another test asserts on, a singleton the test
+    configures, or a rate limiter or slot gate it drains on purpose. When only
+    one or two tests in a class do, give just those a host of their own
+    (`CompareEndpointTests` does).
+  - State an organisation shares (the tools it switched off or marked for
+    step-up, a connected GitHub installation, its translation memory) does
+    not need a host per test: give each test an organisation of its own with
+    `SharedEndpointHost.SeedOrganization()`, seed its users there, and assert
+    on that organisation only (`McpRequestFilterTests`,
+    `GitHubAppEndpointsTests`). Site-wide state (`system_settings`, the
+    site-wide tool switches read at startup) still takes a host per test
+    (`ToolAccessGateTests`, `McpEnabledToggleTests`).
+  - Don't leave background work running in a shared host. A test that queues
+    a job (an import, a backfill, a build) runs on a fixture that takes that
+    queue's worker out of the host, the way
+    `ObjectExplorerLowsEndpointTests.Host` removes the release import worker,
+    or gives that test a host of its own. Otherwise the job keeps writing to
+    the shared database while later tests run.
+  - Per-test state that lives in a singleton (a queue, a slot gate, an
+    allow-list) can still be shared safely. Register it as a transient that
+    reads the running test's instance off the fixture, and install fresh ones
+    in the test class constructor (`GitHubWebhookEndpointTests.Host`). A
+    per-caller rate limiter gets a caller address per test instead of a host
+    per test: every shared host honours `TestCallerAddress`, so send from
+    `_factory.CreateClient().From(TestCallerAddress.Next())` when a class
+    makes more limited calls than one caller may (ten `/oauth/register`
+    calls in ten minutes, say) - `OAuthRedirectUriTests`,
+    `McpRequestFilterTests`. The webhook tests pick their own sender inside
+    GitHub's range instead (`GitHubWebhookEndpointTests.Host`). A pooled HTTP handler outlives a
+    test, so a fake behind one is reached through a forwarding handler that
+    reads the running test's fake (`GitHubAppEndpointsTests.Host`).
+  - Fakes a class swaps in go through a fixture that derives from
+    `SharedEndpointHost` and passes `configureServices` or `settings` to its
+    protected constructor. Fakes with per-test state are read through the
+    fixture at resolve time, so each test can install fresh ones
+    (`PaletteEndpointTests.Host`).
+- **Key files.** `KeyDirectoryDefaults` points every host at a key folder of
+  the test process's own and creates the OAuth keys there before any host
+  boots, so parallel first boots only read them. Don't set
+  `DATA_PROTECTION_KEY_DIR` or `OAUTH_KEY_DIR` in a test.
 
 ### Builders
 

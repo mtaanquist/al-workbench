@@ -112,7 +112,7 @@ internal static class McpEndpoints
                     return Results.Unauthorized();
                 }
                 var db = ctx.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
-                var enabled = await db.Organizations
+                var enabled = await db.Organizations.AsNoTracking()
                     .Where(o => o.Id == orgId.Value)
                     .Select(o => (bool?)o.McpEnabled)
                     .FirstOrDefaultAsync(ctx.HttpContext.RequestAborted);

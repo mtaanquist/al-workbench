@@ -97,6 +97,7 @@ public sealed class RawSqlBaselineTests
                 ["FindReferencesAsync"] = 1,
                 ["FindReferencesForSymbolAsync"] = 1,
                 ["FindSystemReferencesAsync"] = 1,
+                ["ListSystemReferenceMethodsAsync"] = 1,
             }),
         ["ALDevToolbox/Services/ObjectExplorer/Import/CalImportService.cs"] = new(
             "Import work scoped by the module or release id the job owns, read through the filter in the job's organisation.",

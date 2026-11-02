@@ -634,9 +634,9 @@ public sealed class McpToolTests : IDisposable
         var client = _db.NewGitHubAppClient(ctx, new UnreachableGitHub());
         var access = _db.NewGitHubAccessService(ctx, client);
         return new CookbookTools(
-            new RecipeService(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx)),
+            new RecipeService(ctx, NullLogger<RecipeService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             ctx,
-            new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext),
+            new RecipeSuggestionService(ctx, NullLogger<RecipeSuggestionService>.Instance, _db.OrgContext, _db.NewQuotaGuard(ctx)),
             _db.OrgContext,
             _db.DataProtectionProvider,
             _clock,
@@ -729,6 +729,296 @@ public sealed class McpToolTests : IDisposable
         row.Files.Should().ContainSingle().Which.FileName.Should().Be("B.al");
     }
 
+    // #1626: get_recipe returns the minimum version as a string, never its id,
+    // and lists files that did not fit with a null body. A round-trip through
+    // update_recipe must not drop either.
+
+    private async Task<(int RecipeId, int VersionId)> SeedVersionGatedRecipeAsync(int userId)
+    {
+        var editorId = await SeedSubmitterAsync(userId);
+        await using var ctx = _db.NewContext();
+        var user = await ctx.Users.SingleAsync(u => u.Id == editorId);
+        user.Role = UserRole.Editor;
+        var version = NewApplicationVersion("bc-24", "Business Central 24", "24.0.0.0");
+        ctx.ApplicationVersions.Add(version);
+        ctx.ApplicationVersions.Add(NewApplicationVersion("bc-25", "Business Central 25", "25.0.0.0"));
+        await ctx.SaveChangesAsync();
+
+        var recipe = RecipeBuilder.Default("Gated")
+            .WithFile("A.al", "// a")
+            .WithFile("B.al", "// b body", "src");
+        recipe.MinimumApplicationVersionId = version.Id;
+        recipe.EstimatedValueHours = 4m;
+        ctx.Recipes.Add(recipe);
+        await ctx.SaveChangesAsync();
+        return (recipe.Id, version.Id);
+    }
+
+    private static ApplicationVersion NewApplicationVersion(string key, string name, string application) => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId,
+        Key = key,
+        Name = name,
+        Application = application,
+        Runtime = application[..4],
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow,
+    };
+
+    private static UpdateRecipeInput GatedEdit(int recipeId, string token, IReadOnlyList<RecipeFileInputDto>? files = null) => new(
+        RecipeId: recipeId,
+        GuidanceToken: token,
+        Title: "Gated",
+        Description: "Typo fixed.",
+        Keywords: "",
+        Type: "Snippet",
+        Files: files ?? new[] { new RecipeFileInputDto("A.al", "// a edited"), new RecipeFileInputDto("B.al", "// b body", "src") });
+
+    // #1547: suggest_recipe and update_recipe_suggestion took only the version id,
+    // which no tool returns. They now take the same MinimumApplication string.
+
+    private async Task SeedVersionsAsync()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.ApplicationVersions.Add(NewApplicationVersion("bc-24", "Business Central 24", "24.0.0.0"));
+        ctx.ApplicationVersions.Add(NewApplicationVersion("bc-25", "Business Central 25", "25.0.0.0"));
+        await ctx.SaveChangesAsync();
+    }
+
+    private static SuggestRecipeInput VersionedSuggestion(string token, string? minimumApplication) => new(
+        GuidanceToken: token,
+        Title: "Versioned",
+        Description: "Needs a recent base app.",
+        Keywords: "",
+        Type: "Snippet",
+        Files: new[] { new RecipeFileInputDto("a.al", "// a") },
+        MinimumApplication: minimumApplication);
+
+    [Fact]
+    public async Task SuggestRecipe_takes_the_minimum_version_as_an_application_version_string()
+    {
+        await SeedSubmitterAsync(userId: 842);
+        await SeedVersionsAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var id = (await tools.SuggestAsync(VersionedSuggestion(token, "24.0.0.0"))).SuggestionId;
+
+        await using var verify = _db.NewContext();
+        var row = await verify.RecipeSuggestions.Include(s => s.MinimumApplicationVersion).SingleAsync(s => s.Id == id);
+        row.MinimumApplicationVersion!.Key.Should().Be("bc-24");
+    }
+
+    [Fact]
+    public async Task SuggestRecipe_refuses_a_version_the_organisation_does_not_have_and_stores_nothing()
+    {
+        await SeedSubmitterAsync(userId: 843);
+        await SeedVersionsAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.SuggestAsync(VersionedSuggestion(token, "99.0.0.0")))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("99.0.0.0");
+
+        await using var verify = _db.NewContext();
+        (await verify.RecipeSuggestions.AnyAsync(s => s.Title == "Versioned")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task UpdateRecipeSuggestion_sets_and_clears_the_minimum_version_by_name()
+    {
+        await SeedSubmitterAsync(userId: 844);
+        await SeedVersionsAsync();
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+        var id = (await tools.SuggestAsync(VersionedSuggestion(token, null))).SuggestionId;
+
+        UpdateRecipeSuggestionInput Edit(string? minimum) => new(
+            SuggestionId: id, GuidanceToken: token, Title: "Versioned", Description: "Needs a recent base app.",
+            Keywords: "", Type: "Snippet", Files: new[] { new RecipeFileInputDto("a.al", "// a") },
+            MinimumApplication: minimum);
+
+        await tools.UpdateSuggestionAsync(Edit("business central 25"));
+        await using (var verify = _db.NewContext())
+        {
+            var row = await verify.RecipeSuggestions.Include(s => s.MinimumApplicationVersion).SingleAsync(s => s.Id == id);
+            row.MinimumApplicationVersion!.Application.Should().Be("25.0.0.0");
+        }
+
+        await tools.UpdateSuggestionAsync(Edit(""));
+        await using (var verify = _db.NewContext())
+        {
+            (await verify.RecipeSuggestions.SingleAsync(s => s.Id == id)).MinimumApplicationVersionId.Should().BeNull();
+        }
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_keeps_minimum_version_and_hours_when_omitted()
+    {
+        var (recipeId, versionId) = await SeedVersionGatedRecipeAsync(userId: 834);
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token));
+
+        await using var verify = _db.NewContext();
+        var row = await verify.Recipes.SingleAsync(r => r.Id == recipeId);
+        row.Description.Should().Be("Typo fixed.");
+        row.MinimumApplicationVersionId.Should().Be(versionId, "an omitted minimum version must keep the stored one");
+        row.EstimatedValueHours.Should().Be(4m, "an omitted EstimatedValueHours must keep the stored value");
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_round_trips_what_get_recipe_returns()
+    {
+        var (recipeId, versionId) = await SeedVersionGatedRecipeAsync(userId: 835);
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+        var detail = await tools.GetAsync(recipeId);
+
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with
+        {
+            MinimumApplication = detail.MinimumApplication,
+            EstimatedValueHours = detail.EstimatedValueHours,
+        });
+
+        await using var verify = _db.NewContext();
+        var row = await verify.Recipes.SingleAsync(r => r.Id == recipeId);
+        row.MinimumApplicationVersionId.Should().Be(versionId);
+        row.EstimatedValueHours.Should().Be(4m);
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_changes_and_clears_minimum_version_and_hours_explicitly()
+    {
+        var (recipeId, _) = await SeedVersionGatedRecipeAsync(userId: 836);
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "Business Central 25", EstimatedValueHours = 6m });
+        await using (var verify = _db.NewContext())
+        {
+            var row = await verify.Recipes.Include(r => r.MinimumApplicationVersion).SingleAsync(r => r.Id == recipeId);
+            row.MinimumApplicationVersion!.Application.Should().Be("25.0.0.0");
+            row.EstimatedValueHours.Should().Be(6m);
+        }
+
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "", ClearEstimatedValueHours = true });
+        await using (var verify = _db.NewContext())
+        {
+            var row = await verify.Recipes.SingleAsync(r => r.Id == recipeId);
+            row.MinimumApplicationVersionId.Should().BeNull("an empty MinimumApplication removes the requirement");
+            row.EstimatedValueHours.Should().BeNull("ClearEstimatedValueHours removes the value");
+        }
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_refuses_an_unknown_minimum_version_and_keeps_the_recipe()
+    {
+        var (recipeId, versionId) = await SeedVersionGatedRecipeAsync(userId: 837);
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "99.0.0.0" }))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("99.0.0.0");
+
+        await using var verify = _db.NewContext();
+        var row = await verify.Recipes.SingleAsync(r => r.Id == recipeId);
+        row.MinimumApplicationVersionId.Should().Be(versionId);
+        row.Description.Should().NotBe("Typo fixed.");
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_names_MinimumApplication_when_the_stored_version_was_removed()
+    {
+        var (recipeId, versionId) = await SeedVersionGatedRecipeAsync(userId: 840);
+        await using (var seed = _db.NewContext())
+        {
+            var version = await seed.ApplicationVersions.SingleAsync(a => a.Id == versionId);
+            version.DeletedAt = DateTime.UtcNow;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.UpdateRecipeAsync(GatedEdit(recipeId, token)))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("MinimumApplication").And.Contain("Business Central 24");
+
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "" });
+        await using var verify = _db.NewContext();
+        var row = await verify.Recipes.SingleAsync(r => r.Id == recipeId);
+        row.MinimumApplicationVersionId.Should().BeNull();
+        row.Description.Should().Be("Typo fixed.");
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_offers_the_keys_when_a_minimum_version_is_ambiguous()
+    {
+        var (recipeId, _) = await SeedVersionGatedRecipeAsync(userId: 841);
+        await using (var seed = _db.NewContext())
+        {
+            seed.ApplicationVersions.Add(NewApplicationVersion("bc-25-alt", "Business Central 25 (alt)", "25.0.0.0"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.UpdateRecipeAsync(GatedEdit(recipeId, token) with { MinimumApplication = "25.0.0.0" }))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("'bc-25'").And.Contain("'bc-25-alt'").And.Contain("key");
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_keeps_the_stored_body_of_a_file_sent_with_null_content()
+    {
+        var (recipeId, _) = await SeedVersionGatedRecipeAsync(userId: 838);
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        // As get_recipe lists a file it left out of its answer: path known, body null.
+        await tools.UpdateRecipeAsync(GatedEdit(recipeId, token, new[]
+        {
+            new RecipeFileInputDto("A.al", "// a edited"),
+            new RecipeFileInputDto("b.al", null, "SRC/"),
+        }));
+
+        await using var verify = _db.NewContext();
+        var files = await verify.RecipeFiles.Where(f => f.RecipeId == recipeId).OrderBy(f => f.Ordering).ToListAsync();
+        files.Select(f => f.Content).Should().Equal("// a edited", "// b body");
+    }
+
+    [Fact]
+    public async Task UpdateRecipe_refuses_null_content_for_a_file_the_recipe_does_not_have()
+    {
+        var (recipeId, _) = await SeedVersionGatedRecipeAsync(userId: 839);
+        await using var ctx = _db.NewContext();
+        var tools = NewCookbookTools(ctx);
+        var token = (await tools.GetCookbookGuidanceAsync()).GuidanceToken;
+
+        var ex = await FluentActions.Awaiting(() => tools.UpdateRecipeAsync(GatedEdit(recipeId, token, new[]
+            {
+                new RecipeFileInputDto("A.al", "// a"),
+                new RecipeFileInputDto("New.al", null),
+            })))
+            .Should().ThrowAsync<McpException>();
+        ex.Which.Message.Should().Contain("New.al");
+    }
+
     [Fact]
     public async Task UpdateRecipe_rejects_when_guidance_token_is_missing()
     {
@@ -787,8 +1077,8 @@ public sealed class McpToolTests : IDisposable
         }
 
         await using var ctx2 = _db.NewContext();
-        var templates = new TemplateService(ctx2, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2));
-        var modules = new ModuleService(ctx2, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2));
+        var templates = new TemplateService(ctx2, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2), _db.NewQuotaGuard(ctx2));
+        var modules = new ModuleService(ctx2, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx2), _db.NewQuotaGuard(ctx2));
         var catalog = new CatalogService(ctx2, NullLogger<CatalogService>.Instance, _db.OrgContext);
         var tools = new WorkspaceTools(templates, modules, catalog, generation: null!, delivery: null!, repositories: null!, _downloads, _db.OrgContext, Options);
 
@@ -1309,6 +1599,28 @@ public sealed class McpToolTests : IDisposable
         row.HasStoredSymbolReference.Should().BeTrue("the seed imported with storeSymbolReference: true");
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task SearchProcedures_refuses_a_blank_pattern_without_a_module(string pattern)
+    {
+        var releaseId = await SeedDkCoreReleaseAsync(label: "MCP procs blank " + pattern.Length);
+        await using var ctx = _db.NewContext();
+        var moduleId = await ctx.OeModules.AsNoTracking()
+            .Where(m => m.ReleaseId == releaseId)
+            .Select(m => m.Id)
+            .SingleAsync();
+        var tools = NewOeTools(ctx);
+
+        // A blank pattern over a whole release is refused with a reason, not an empty list.
+        await FluentActions.Awaiting(() => tools.SearchProceduresAsync(releaseId.ToString(), pattern))
+            .Should().ThrowAsync<McpException>().WithMessage("*namePattern*moduleId*");
+
+        // With a module it lists that module's procedures.
+        await FluentActions.Awaiting(() => tools.SearchProceduresAsync(releaseId.ToString(), pattern, moduleId))
+            .Should().NotThrowAsync();
+    }
+
     [Fact]
     public async Task ListReleaseModules_marks_modules_without_stored_symbol_reference()
     {
@@ -1725,8 +2037,8 @@ public sealed class McpToolTests : IDisposable
     private WorkspaceTools NewWorkspaceTools(
         Data.AppDbContext ctx, IOptions<McpOptions>? options = null, GeneratedDownloadStore? downloads = null)
     {
-        var templates = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
-        var modules = new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+        var templates = new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
+        var modules = new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
         var catalog = new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext);
         var mustache = new ALDevToolbox.Services.Generation.MustacheRenderer(
             NullLogger<ALDevToolbox.Services.Generation.MustacheRenderer>.Instance);

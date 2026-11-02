@@ -294,13 +294,66 @@ public sealed class GitHubToolsTests : IDisposable
         var (tools, ctx) = NewTools(api);
         await using var _ = ctx;
 
-        var files = await tools.ListTranslationFilesAsync(Repo);
+        var answer = await tools.ListTranslationFilesAsync(Repo);
+        var files = answer.Rows;
 
         files.Select(f => f.Path).Should().Equal(
             "Translations/App.nb-NO.xlf", SourcePath, FilePath);
         files[0].Folder.Should().BeEmpty("a single-app repository has no extension folder to name");
         files[1].IsSource.Should().BeTrue();
         files[2].Language.Should().Be("da-DK");
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Folder_narrows_the_translation_files_to_one_extension()
+    {
+        await ReadyAsync();
+        var (tools, ctx) = NewTools(ReadableApi(TreeJson(
+            (FilePath, "blob"),
+            (SourcePath, "blob"),
+            ("Translations/App.nb-NO.xlf", "blob"))));
+        await using var _ = ctx;
+
+        var answer = await tools.ListTranslationFilesAsync(Repo, folder: "paymentimport");
+
+        answer.Rows.Select(f => f.Path).Should().Equal(SourcePath, FilePath);
+    }
+
+    [Fact]
+    public async Task A_workspace_with_many_translation_files_is_capped_with_a_note_naming_folder()
+    {
+        // #1601: 20 extensions in 12 languages ran past the answer budget.
+        await ReadyAsync();
+        var entries = Enumerable.Range(1, 20)
+            .SelectMany(e => new[] { "da-DK", "de-DE", "fr-FR", "nl-NL", "sv-SE", "nb-NO", "fi-FI", "es-ES", "it-IT", "pl-PL", "cs-CZ", "en-GB" }
+                .Select(l => ($"CronusExtension{e:00}/Translations/CronusExtension{e:00}.{l}.xlf", "blob")))
+            .ToArray();
+        var (tools, ctx) = NewTools(ReadableApi(TreeJson(entries)));
+        await using var _ = ctx;
+
+        var answer = await tools.ListTranslationFilesAsync(Repo);
+
+        answer.Rows.Count.Should().BeLessThanOrEqualTo(GitHubTools.TranslationFileCap);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("Pass folder");
+        System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions)
+            .Length.Should().BeLessThan(25_000);
+    }
+
+    [Fact]
+    public async Task A_tree_github_cut_short_says_the_list_may_be_incomplete()
+    {
+        await ReadyAsync();
+        var (tools, ctx) = NewTools(ReadableApi(TreeJson((FilePath, "blob")).Replace("\"truncated\":false", "\"truncated\":true")));
+        await using var _ = ctx;
+
+        var answer = await tools.ListTranslationFilesAsync(Repo);
+
+        answer.Rows.Should().ContainSingle();
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("may be missing");
     }
 
     [Fact]
@@ -423,6 +476,28 @@ public sealed class GitHubToolsTests : IDisposable
         (await act.Should().ThrowAsync<McpException>())
             .Which.Message.Should().Contain(AmountId).And.Contain("more than once");
         api.Calls.Should().NotContain(c => c.StartsWith("PUT", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Danish")]
+    [InlineData("da_DK")]
+    [InlineData("../da-DK")]
+    [InlineData("da-DK/../../x")]
+    [InlineData("da DK")]
+    public async Task A_target_language_that_is_not_a_language_tag_is_refused_before_github_is_asked_anything(string language)
+    {
+        // #1576: the language goes into the file name and the XLIFF target-language.
+        await ReadyAsync();
+        var api = WritableApi();
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var act = () => tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, language, [new TranslationUnitEditInput(AmountId, "Beloeb")]);
+
+        (await act.Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("language tag such as da-DK");
+        api.Calls.Should().BeEmpty();
     }
 
     [Fact]
@@ -600,7 +675,7 @@ public sealed class GitHubToolsTests : IDisposable
             _db.NewGitHubTranslationService(ctx, client, access),
             new ALDevToolbox.Services.Templates.TemplateService(
                 ctx, NullLogger<ALDevToolbox.Services.Templates.TemplateService>.Instance, _db.OrgContext,
-                new ALDevToolbox.Services.Templates.FolderTreeHydrator(ctx)),
+                new ALDevToolbox.Services.Templates.FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
             NullLogger<GitHubTools>.Instance);
         return (tools, ctx);
     }
@@ -725,11 +800,10 @@ public sealed class GitHubToolsTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()

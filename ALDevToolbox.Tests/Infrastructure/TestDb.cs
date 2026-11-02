@@ -100,17 +100,30 @@ public sealed class TestDb : IDisposable
 
     /// <summary>
     /// Waits for component-initiated queries to finish before teardown pulls
-    /// the DbContext out from under them. Bounded; returns whether it settled
-    /// so a caller could assert on it, though none needs to today.
+    /// the DbContext out from under them. Bounded; returns whether it settled.
+    /// A wait that runs out is written to the test's output, since it means a
+    /// query never finished and the test spent ten seconds waiting on it (#1552).
     /// </summary>
-    public bool WaitForQueriesToSettle() =>
-        CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10));
+    public bool WaitForQueriesToSettle()
+    {
+        if (CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10))) return true;
 
-    public TestDb()
+        var message = $"TestDb: {CommandTracker.InFlight} database command(s) still running after 10 s at teardown. "
+            + "A component query never finished; find the page or teardown step that leaves it open.";
+        TestContext.Current.TestOutputHelper?.WriteLine(message);
+        TestContext.Current.SendDiagnosticMessage(message);
+        return false;
+    }
+
+    public TestDb() : this(SharedTemplate.Value)
+    {
+    }
+
+    private TestDb(string template)
     {
         var host = SharedHost.Value;
         _databaseName = "aldt_test_" + Guid.NewGuid().ToString("N");
-        host.CloneDatabase(_databaseName, SharedTemplate.Value);
+        host.CloneDatabase(_databaseName, template);
         _connectionString = host.ConnectionStringFor(_databaseName);
 
         _options = BuildOptions(_connectionString);
@@ -129,6 +142,71 @@ public sealed class TestDb : IDisposable
     }
 
     private readonly Lazy<ServiceProvider> _openIddict;
+
+    /// <summary>
+    /// Seeded templates built so far, by key. Each is built once per process
+    /// on first use, like <see cref="SharedTemplate"/>.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<(string Template, object? Value)>> SeededTemplates = new();
+
+    /// <summary>
+    /// Returns a fixture cloned from a template that already holds the rows
+    /// <paramref name="seed"/> writes. The seed runs once per process for each
+    /// <paramref name="key"/>, on a clone of the shared template, and every
+    /// later call clones its result: a clone costs tens of milliseconds where
+    /// importing the Object Explorer <c>.app</c> fixtures costs over a second
+    /// (#1552). <paramref name="value"/> is what the seed returned, typically
+    /// the ids of the rows it wrote; ids and sequences survive the clone.
+    ///
+    /// <para>The same key must always mean the same seed. The seed runs with
+    /// the default <see cref="OrgContext"/>.</para>
+    /// </summary>
+    public static TestDb FromSeed<T>(string key, Func<TestDb, Task<T>> seed, out T value)
+    {
+        var lazy = SeededTemplates.GetOrAdd(key, _ => new Lazy<(string, object?)>(
+            () => BuildSeededTemplate(seed), isThreadSafe: true));
+        (string Template, object? Value) built;
+        try
+        {
+            built = lazy.Value;
+        }
+        catch
+        {
+            // A Lazy caches its exception. Forget the failed build so the next
+            // test tries again instead of failing on this one's error.
+            SeededTemplates.TryRemove(new KeyValuePair<string, Lazy<(string, object?)>>(key, lazy));
+            throw;
+        }
+        value = (T)built.Value!;
+        return new TestDb(built.Template);
+    }
+
+    private static (string Template, object? Value) BuildSeededTemplate<T>(Func<TestDb, Task<T>> seed)
+    {
+        var db = new TestDb(SharedTemplate.Value);
+        T value;
+        try
+        {
+            // Off the caller's synchronization context: the seed is async and
+            // this blocks inside a test.
+            value = Task.Run(() => seed(db)).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            db.Dispose();
+            throw;
+        }
+        db.ReleaseConnections();
+
+        var name = db._databaseName;
+        var host = SharedHost.Value;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { host.DropDatabase(name); }
+            catch (Exception) { /* best effort: the run is already over */ }
+        };
+        return (name, value);
+    }
 
     /// <summary>
     /// An OpenIddict token manager over this fixture's database, for services
@@ -263,16 +341,32 @@ public sealed class TestDb : IDisposable
 
     public void Dispose()
     {
+        ReleaseConnections();
+        SharedHost.Value.DropDatabase(_databaseName);
+    }
+
+    /// <summary>
+    /// Disposes what holds a connection to this fixture's database and closes
+    /// its idle pooled connections, so the database can be dropped or cloned.
+    /// </summary>
+    private void ReleaseConnections()
+    {
         _memoryCache.Dispose();
-        // Before ClearAllPools: this provider owns scoped AppDbContexts, and a
-        // live one would hand a connection straight back to the pool after the
-        // clear and block the drop.
+        // Before clearing the pool: this provider owns scoped AppDbContexts, and
+        // a live one would hand a connection straight back to the pool after the
+        // clear.
         if (_scopeProvider.IsValueCreated) _scopeProvider.Value.Dispose();
         if (_openIddict.IsValueCreated) _openIddict.Value.Dispose();
-        // Idle pool connections hold open the per-fixture database and would
-        // block DROP DATABASE; clear them before issuing the drop.
-        NpgsqlConnection.ClearAllPools();
-        SharedHost.Value.DropDatabase(_databaseName);
+        // Close this fixture's idle pooled connections, so the drop has no
+        // sessions of ours to end. Only this database's pool: ClearAllPools()
+        // also threw away the idle connections of every fixture running beside
+        // this one, and each paid a new physical connection and Npgsql's type
+        // load on its next query (#1583). A connection opened under another
+        // connection string is ended by the drop's WITH (FORCE).
+        using (var connection = new NpgsqlConnection(_connectionString))
+        {
+            NpgsqlConnection.ClearPool(connection);
+        }
     }
 
     private readonly MemoryCache _memoryCache = new(Options.Create(new MemoryCacheOptions()));
@@ -464,7 +558,7 @@ public sealed class TestDb : IDisposable
         var access = NewGitHubAccessService(ctx, client);
         return new ALDevToolbox.Services.Templates.ModuleSourceService(
             ctx,
-            new ModuleService(ctx, NullLogger<ModuleService>.Instance, OrgContext, new FolderTreeHydrator(ctx)),
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, OrgContext, new FolderTreeHydrator(ctx), NewQuotaGuard(ctx)),
             client,
             NewGitHubConnectionService(ctx, access),
             access,
@@ -610,7 +704,7 @@ public sealed class TestDb : IDisposable
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var github = gitHubAccess ?? NewOfflineGitHubAccessService(ctx);
         return new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github),
+            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github), NewQuotaGuard(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
     }
 
@@ -659,7 +753,7 @@ public sealed class TestDb : IDisposable
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var projects = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access),
+            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access), NewQuotaGuard(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
         return new ALDevToolbox.Services.GitHub.RepositoryDiscoveryService(
             ctx, client, access, NewGitHubConnectionService(ctx, access), NewOrganizationConfigService(ctx),
@@ -709,7 +803,7 @@ public sealed class TestDb : IDisposable
 
     /// <summary>The Cookbook's recipe service, wired to this fixture's database.</summary>
     public RecipeService NewRecipeService(AppDbContext ctx) =>
-        new(ctx, NullLogger<RecipeService>.Instance, OrgContext, NewQuotaGuard(ctx));
+        new(ctx, NullLogger<RecipeService>.Instance, OrgContext, NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext));
 
     /// <summary>"Apply a recipe to a repository": the access gate, the commit, and the attribution row.</summary>
     public ALDevToolbox.Services.GitHub.GitHubRecipeDeliveryService NewGitHubRecipeDeliveryService(
@@ -808,6 +902,30 @@ public sealed class TestDb : IDisposable
     }
 
     /// <summary>
+    /// Puts every organisation at or over its storage quota (a 0 MB default:
+    /// billable bytes are always at least 0), the cheapest way to force a
+    /// service's quota refusal without staging real bytes. Clears the guard's
+    /// cached decision for both test organisations.
+    /// </summary>
+    public async Task SetZeroStorageQuotaAsync()
+    {
+        await using var ctx = NewContext();
+        var row = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        if (row is null)
+        {
+            row = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(row);
+        }
+        row.DefaultStorageQuotaMb = 0;
+        await ctx.SaveChangesAsync();
+        // The guard caches its decision per organisation, so a write made before
+        // this call would otherwise keep answering "under quota".
+        var guard = NewQuotaGuard(ctx);
+        guard.Invalidate(DefaultOrgId);
+        guard.Invalidate(OtherOrgId);
+    }
+
+    /// <summary>
     /// Returns a <see cref="StorageQuotaGuard"/> wired to the per-fixture
     /// context. With no system-settings row and no per-org quota override
     /// the guard treats every operation as unlimited, so tests that don't
@@ -891,7 +1009,10 @@ internal sealed class PostgresHost
             return new PostgresHost(fromEnv, container: null);
         }
 
+        // Data directory on tmpfs, as in CI: the per-class template clone is
+        // about ten times faster in memory than on disk (#1535).
         var container = new PostgreSqlBuilder("postgres:18-alpine")
+            .WithTmpfsMount("/var/lib/postgresql")
             .Build();
         container.StartAsync().GetAwaiter().GetResult();
         return new PostgresHost(container.GetConnectionString(), container);

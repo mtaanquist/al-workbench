@@ -74,6 +74,40 @@ public sealed class InviteServiceTests : IDisposable
         row.ExpiresAt.Should().Be(_clock.GetUtcNow().UtcDateTime + InviteService.InviteLifetime);
     }
 
+    [Theory]
+    [InlineData(UserRole.User, UserStatus.Active)]
+    [InlineData(UserRole.Editor, UserStatus.Active)]
+    [InlineData(UserRole.Admin, UserStatus.Disabled)]
+    public async Task A_demoted_or_disabled_admin_can_neither_invite_nor_revoke(UserRole role, UserStatus status)
+    {
+        // The cookie still says Admin for up to the revalidation interval; the
+        // row is what counts (#1614).
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        int inviteId;
+        await using (var ctx = _db.NewContext())
+        {
+            (_, inviteId) = await NewService(ctx, admin.Id, TestDb.DefaultOrgId).CreateAsync("pending@example.com", UserRole.User, null);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == admin.Id);
+            row.Role = role;
+            row.Status = status;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var act = _db.NewContext();
+        var svc = NewService(act, admin.Id, TestDb.DefaultOrgId);
+        (await FluentActions.Awaiting(() => svc.CreateAsync("backdoor@elsewhere.example", UserRole.Admin, null))
+            .Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+        (await FluentActions.Awaiting(() => svc.RevokeAsync(inviteId))
+            .Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+
+        await using var read = _db.NewContext();
+        (await read.Invites.IgnoreQueryFilters().AnyAsync(i => i.Email == "backdoor@elsewhere.example")).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync(i => i.Id == inviteId)).RevokedAt.Should().BeNull();
+    }
+
     [Fact]
     public async Task Invite_rejects_email_already_in_organisation()
     {
@@ -322,6 +356,9 @@ public sealed class InviteServiceTests : IDisposable
             (_, inviteId) = await svc.CreateAsync("victim@example.com", UserRole.User, null);
         }
 
+        // Admin B's request filters to OrgB, as it would in production; the
+        // acting-admin re-read (#1614) reads B's row inside that filter.
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
         await using var ctx2 = _db.NewContext();
         var svcB = NewService(ctx2, adminB.Id, TestDb.OtherOrgId);
         Func<Task> act = () => svcB.RevokeAsync(inviteId);

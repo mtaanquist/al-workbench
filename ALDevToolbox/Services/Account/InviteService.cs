@@ -60,6 +60,7 @@ public sealed class InviteService
             ?? throw new InvalidOperationException("InviteService.CreateAsync requires a signed-in admin.");
         var invitedByUserId = _orgContext.CurrentUserId
             ?? throw new InvalidOperationException("InviteService.CreateAsync requires a signed-in admin.");
+        await RequireActingAdminAsync(invitedByUserId, actingOrgId, ct);
 
         var errors = new Dictionary<string, string>();
         var normalised = (email ?? string.Empty).Trim().ToLowerInvariant();
@@ -124,6 +125,9 @@ public sealed class InviteService
     {
         var actingOrgId = _orgContext.CurrentOrganizationId
             ?? throw new InvalidOperationException("InviteService.RevokeAsync requires a signed-in admin.");
+        var actingUserId = _orgContext.CurrentUserId
+            ?? throw new InvalidOperationException("InviteService.RevokeAsync requires a signed-in admin.");
+        await RequireActingAdminAsync(actingUserId, actingOrgId, ct);
         // Fence category 4 (explicitly scoped org-id lookup): the row is re-checked against
         // actingOrgId immediately below, so a foreign invite id is refused.
         var invite = await _db.Invites.IgnoreQueryFilters()
@@ -257,6 +261,30 @@ public sealed class InviteService
             });
         }
         return invite;
+    }
+
+    /// <summary>
+    /// Re-reads the acting admin's row and refuses unless they are still an
+    /// active Admin of the organisation. The invite form is a plain post, so
+    /// the open-page re-check never sees it, and the cookie's Admin role can
+    /// be up to the revalidation interval old: a demoted or disabled Admin
+    /// could otherwise mint an Admin invite for themselves (#1614). Same rule,
+    /// and same message, as <c>UserAdministrationService.RequireActingAdminAsync</c>.
+    /// </summary>
+    private async Task RequireActingAdminAsync(int actorId, int actingOrgId, CancellationToken ct)
+    {
+        // Filtered: the actor's own row, inside the organisation their claims name.
+        var actor = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == actorId && u.OrganizationId == actingOrgId)
+            .Select(u => new { u.Status, u.Role })
+            .FirstOrDefaultAsync(ct);
+        if (actor is null || actor.Status != UserStatus.Active || actor.Role != UserRole.Admin)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Actor"] = "Your account no longer has admin rights in this organisation. Reload the page to see what you can do."
+            });
+        }
     }
 
     private static void ValidateDisplayName(string trimmedName, Dictionary<string, string> errors)

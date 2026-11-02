@@ -46,10 +46,14 @@ public sealed class TranslatorTools
         [Description("Optional target-language filter (BCP-47, e.g. 'da-DK').")] string? targetLanguage = null,
         [Description("Optional kind filter: caption, tooltip, label, option, instructional, other.")] string? kind = null,
         [Description("Optional substring match on the provenance/origin (e.g. 'Base Application').")] string? origin = null,
-        [Description("Include soft-removed entries (default false).")] bool includeRemoved = false,
+        [Description("Include soft-removed entries (default false). Only honoured for the Editor or Admin role; ignored otherwise.")] bool includeRemoved = false,
         [Description("Max results (1-50, default 25). Raise it only when the entry you need is not in the first 25.")] int maxResults = 25,
         CancellationToken ct = default)
     {
+        // Removed entries are the curation page's view, which is Editor-only on the
+        // web; a plain User's assistant must not see what an Editor took out (#1547).
+        if (includeRemoved && !await IsEditorAsync(ct)) includeRemoved = false;
+
         var res = await _memory.SearchAsync(new MemorySearchQuery(
             query, sourceLanguage, targetLanguage,
             string.IsNullOrWhiteSpace(kind) ? null : kind,
@@ -60,13 +64,19 @@ public sealed class TranslatorTools
             e.SourceRepository, e.SourcePath)).ToList();
     }
 
+    /// <summary>The longest <c>sourceText</c> <c>machine_translate</c> sends to the paid provider.</summary>
+    internal const int MaxMachineTranslateSource = 5_000;
+
+    /// <summary>The longest <c>context</c> hint <c>machine_translate</c> passes along.</summary>
+    internal const int MaxMachineTranslateContext = 1_000;
+
     [McpServerTool(Name = "machine_translate", ReadOnly = true)]
     [Description("Translates a string with the organisation's configured third-party machine-translation provider (e.g. DeepL), if one is set up. Use it to draft a target for a source string that has no good translation-memory match. Pass the developer note or field context to improve domain accuracy. Returns the translated text, the provider name, and the detected source language. Errors if the org hasn't configured machine translation, or if the provider refuses or fails the request.")]
     public async Task<MachineTranslationResult> MachineTranslateAsync(
-        [Description("The source text to translate.")] string sourceText,
+        [Description("The source text to translate: one string, at most 5,000 characters.")] string sourceText,
         [Description("Target language (BCP-47, e.g. 'da-DK').")] string targetLanguage,
         [Description("Optional source language (BCP-47, e.g. 'en-US'). Omit to let the provider auto-detect.")] string? sourceLanguage = null,
-        [Description("Optional context hint (developer note / field caption) to disambiguate domain terms.")] string? context = null,
+        [Description("Optional context hint (developer note / field caption) to disambiguate domain terms, at most 1,000 characters.")] string? context = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(sourceText))
@@ -76,6 +86,21 @@ public sealed class TranslatorTools
         if (string.IsNullOrWhiteSpace(targetLanguage))
         {
             throw new McpException("targetLanguage is required.");
+        }
+        // The provider bills the organisation per character, and the Translator page
+        // only ever sends one string. Without a ceiling, an assistant told to "translate
+        // this document" spends the quota by the megabyte (#1576).
+        if (sourceText.Length > MaxMachineTranslateSource)
+        {
+            throw new McpException(
+                $"sourceText is {sourceText.Length} characters; the limit is {MaxMachineTranslateSource}. "
+                + "Send one string at a time, as the Translator does.");
+        }
+        if (context is { Length: > MaxMachineTranslateContext })
+        {
+            throw new McpException(
+                $"context is {context.Length} characters; the limit is {MaxMachineTranslateContext}. "
+                + "Pass a short developer note or field caption.");
         }
 
         // The service answers null both when nothing is set up and when the provider
@@ -142,16 +167,25 @@ public sealed class TranslatorTools
     /// </summary>
     private async Task RequireEditorAsync(CancellationToken ct)
     {
-        var userId = _orgContext.CurrentUserId
-            ?? throw new McpException("No user in scope; call this from an authenticated MCP session.");
+        if (_orgContext.CurrentUserId is null)
+            throw new McpException("No user in scope; call this from an authenticated MCP session.");
+        if (!await IsEditorAsync(ct))
+        {
+            throw new McpException("Removing translation memory entries requires the Editor or Admin role.");
+        }
+    }
+
+    /// <summary>True for an Editor / Admin (or a SiteAdmin) — the web curation page's audience.</summary>
+    private async Task<bool> IsEditorAsync(CancellationToken ct)
+    {
+        if (_orgContext.IsSiteAdmin) return true;
+        var userId = _orgContext.CurrentUserId;
+        if (userId is null) return false;
         var role = await _db.Users.AsNoTracking()
             .Where(u => u.Id == userId)
             .Select(u => (UserRole?)u.Role)
             .FirstOrDefaultAsync(ct);
-        if (!_orgContext.IsSiteAdmin && role is not (UserRole.Editor or UserRole.Admin))
-        {
-            throw new McpException("Removing translation memory entries requires the Editor or Admin role.");
-        }
+        return role is UserRole.Editor or UserRole.Admin;
     }
 }
 

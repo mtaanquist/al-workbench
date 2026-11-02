@@ -283,6 +283,7 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
+            ILoggerFactory loggers,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -317,6 +318,17 @@ internal static class ObjectExplorerEndpoints
             catch (ProjectAccessDeniedException)
             {
                 RedirectManage(ctx, id, "Retry", CannotRebuild);
+            }
+            // Anything else (the wipe's command timeout, a failed insert) lands on the
+            // manage page rather than the generic error page. An error after the reopen
+            // has normally failed the release again inside RetryAsync; one before it
+            // leaves the release as it was. A request the browser abandoned has nobody
+            // to redirect, so that one is left to propagate (#1632).
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                loggers.CreateLogger("ALDevToolbox.Endpoints.ObjectExplorerEndpoints")
+                    .LogError(ex, "Retry of release {ReleaseId} could not be queued.", id);
+                RedirectManage(ctx, id, "Retry", RetryNotQueued);
             }
         })
         .RequireObjectExplorerAuthoring()
@@ -445,8 +457,10 @@ internal static class ObjectExplorerEndpoints
             ctx.Response.Redirect($"/admin/object-explorer/release/{id}/manage?ok=backfill-queued");
         }).RequireObjectExplorerAuthoring();
 
-        // Bulk variant: enqueue a backfill for every ready, non-deleted release
+        // Bulk variant: queue a backfill for every ready, non-deleted release
         // in the org — the "I don't want to reimport my whole catalogue" path.
+        // The jobs are fed to the queue in the background, never awaited here:
+        // a catalogue is hours of work for the one import worker (#1542).
         app.MapPost("/admin/object-explorer/backfill-system-references-all", async (
             HttpContext ctx,
             ReleaseManagementService management,
@@ -456,12 +470,8 @@ internal static class ObjectExplorerEndpoints
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var releaseIds = await management.ListBackfillableReleaseIdsAsync(ct);
-            foreach (var rid in releaseIds)
-            {
-                var source = new ReleaseImportSource.Backfill();
-                await imports.EnqueueImportAsync(rid, source, storeSymbolReference: false, ct);
-            }
-            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={releaseIds.Count}");
+            var result = await imports.QueueBackfillAllAsync(releaseIds, ct);
+            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={result.Queued}&skipped={result.Skipped}");
         }).RequireObjectExplorerAuthoring();
 
         app.MapPost("/admin/object-explorer/{id:int}/restore", async (
@@ -566,6 +576,8 @@ internal static class ObjectExplorerEndpoints
 
     private const string CannotRebuild =
         "Only someone who can manage this solution can build it again.";
+
+    private const string RetryNotQueued = "The retry could not be queued. Try again.";
 
     private static void RedirectManage(HttpContext ctx, int releaseId, string errKey, string message)
     {

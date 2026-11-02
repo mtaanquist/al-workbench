@@ -113,7 +113,8 @@ public sealed class ArtifactReleaseImporter
     /// Re-runs a failed artifact import into its own release row: back to
     /// <c>ingesting</c>, the previous attempt's partial data wiped, and a fresh job
     /// queued from <paramref name="resolved"/>'s download URL. The same steps the
-    /// manage page's Retry takes.
+    /// manage page's Retry takes, and like it, a failure after the reopen fails the
+    /// release again rather than leave it importing with no job behind it (#1612).
     /// </summary>
     private async Task RequeueFailedAsync(int releaseId, ResolvedArtifact resolved, CancellationToken ct)
     {
@@ -121,11 +122,34 @@ public sealed class ArtifactReleaseImporter
         // take it for abandoned while the wipe runs (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
-        await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
-        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
-        var jobRowId = await _persistedJobs.CreateAsync(
-            releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
-        await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
+        long? jobRowId = null;
+        try
+        {
+            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
+            jobRowId = await _persistedJobs.CreateAsync(
+                releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
+            await EnqueueAsync(releaseId, jobRowId.Value, resolved, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Re-run of failed artifact import {ReleaseId} stopped before its job was queued; failing it again.", releaseId);
+            // Left queued, the row would be resumed at the next start and wipe the
+            // release first, even after a later re-run has imported it.
+            if (jobRowId is long rowId)
+            {
+                try
+                {
+                    await _persistedJobs.FailUnqueuedAsync(rowId, ReleaseImportService.RetryNotQueuedMessage).ConfigureAwait(false);
+                }
+                catch (Exception rowEx)
+                {
+                    _logger.LogError(rowEx, "Could not fail import job row {JobRowId} of release {ReleaseId}.", rowId, releaseId);
+                }
+            }
+            await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
@@ -156,12 +180,22 @@ public sealed class ArtifactReleaseImporter
                 .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
+            if (existing is { Status: "failed" })
+            {
+                // A failed preview is re-run in place the next night, as a failed
+                // shipped version is (#1222), instead of waiting out the 14-day
+                // refresh age with no usable preview (#1549).
+                await RequeueFailedAsync(existing.Id, preview, ct).ConfigureAwait(false);
+                outcomes.Add(new ArtifactImportOutcome(ArtifactImportStatus.Queued, existing.Id, preview.Label));
+                continue;
+            }
+
             if (existing is not null)
             {
                 // BcVersion is stamped from the Base Application manifest at ingest
                 // and matches the insider build number, so "same build" is a direct
                 // compare; a null (failed before the manifest was read) counts as
-                // different so the retry happens once the row is old enough.
+                // a different build. A failed row never gets here: it is re-run above.
                 var sameBuild = string.Equals(existing.BcVersion, preview.Version, StringComparison.OrdinalIgnoreCase);
                 var stale = now - existing.ImportedAt >= PreviewRefreshAge;
                 if (existing.Status == "ingesting" || sameBuild || !stale)

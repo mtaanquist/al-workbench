@@ -175,6 +175,40 @@ internal static class EndpointHelpers
     public const string SignedInAtKey = "signed_in_at";
 
     /// <summary>
+    /// Claim type mirroring <see cref="SignedInAtKey"/> onto the principal
+    /// (<see cref="Services.Account.StepUpAuth.ApplyClaims"/>), for the
+    /// interactive-page re-check that only sees claims (#1567).
+    /// </summary>
+    public const string SignedInAtClaim = "signed_in_at";
+
+    /// <summary>
+    /// The session's sign-in moment mirrored on the principal. Returns
+    /// <see cref="DateTime.MinValue"/> when the claim is missing or
+    /// unparsable (a cookie issued before the claim existed), so the session
+    /// counts as older than any credential change and gets re-checked.
+    /// </summary>
+    public static DateTime SignedInAt(ClaimsPrincipal? principal) =>
+        DateTime.TryParse(principal?.FindFirst(SignedInAtClaim)?.Value, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var at)
+            ? at
+            : DateTime.MinValue;
+
+    /// <summary>
+    /// A copy of <paramref name="user"/> whose mirrored stamps (sign-in
+    /// method, strong moment, sign-in time) are rewritten from
+    /// <paramref name="properties"/>. For re-issuing a cookie from the
+    /// principal it already carries: signing in with <c>ctx.User</c> and fresh
+    /// properties as they are would leave the old stamps on the claims, and
+    /// the interactive-page re-check reads the claims (#1567).
+    /// </summary>
+    public static ClaimsPrincipal WithStampsFrom(ClaimsPrincipal user, Microsoft.AspNetCore.Authentication.AuthenticationProperties properties)
+    {
+        var identity = (user.Identity as ClaimsIdentity)?.Clone() ?? new ClaimsIdentity();
+        Services.Account.StepUpAuth.ApplyClaims(identity, properties);
+        return new ClaimsPrincipal(identity);
+    }
+
+    /// <summary>
     /// Marks the auth cookie persistent so it survives browser restarts for
     /// the full <c>ExpireTimeSpan</c> window (see Program.cs). Without this the
     /// cookie is a session cookie and the browser drops it on close, defeating

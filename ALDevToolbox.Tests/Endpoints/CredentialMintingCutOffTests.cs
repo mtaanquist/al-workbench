@@ -26,31 +26,40 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// runs at most every five minutes, so without this a cookie validated just
 /// before the owner's reset could still create an access token, and the token
 /// would be dated after the reset, so nothing would refuse it later.
+///
+/// <para>The cases share one host (#1536, #1582). Each signs in a user of its own
+/// and asserts only on that user's credentials.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class CredentialMintingCutOffTests : IDisposable
+public sealed class CredentialMintingCutOffTests : IClassFixture<CredentialMintingCutOffTests.Host>
 {
     private const string Password = "correct horse battery staple";
     private const string RedirectUri = "http://127.0.0.1:41999/callback";
 
-    private readonly TestDb _db = new();
+    private readonly Host _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public CredentialMintingCutOffTests()
+    public CredentialMintingCutOffTests(Host host)
     {
-        // Passkeys configured, so the passkey leg reaches its filter rather
-        // than failing to bind.
-        _factory = new EndpointFactory(_db, environment: new Dictionary<string, string?>
-        {
-            ["Auth__WebAuthn__RpId"] = "localhost",
-            ["Auth__WebAuthn__OriginsCsv"] = "https://localhost",
-        });
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
-    public void Dispose()
+    /// <summary>
+    /// The shared host, with passkeys configured so the passkey leg reaches its
+    /// filter rather than failing to bind.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
     {
-        _factory.Dispose();
-        _db.Dispose();
+        public Host()
+            : base(configureServices: null, settings: new Dictionary<string, string?>
+            {
+                ["Auth:WebAuthn:RpId"] = "localhost",
+                ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
+            })
+        {
+        }
     }
 
     [Fact]
@@ -270,7 +279,7 @@ public sealed class CredentialMintingCutOffTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = "Nils Consultant",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = _host.HashPassword(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = DateTime.UtcNow,
@@ -282,7 +291,7 @@ public sealed class CredentialMintingCutOffTests : IDisposable
 
     private async Task<HttpClient> SignInAsync(string email)
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().From(TestCallerAddress.Next());
         using var loginPage = await client.GetAsync("/login");
         var token = FormToken(await loginPage.Content.ReadAsStringAsync());
         using var login = await PostFormAsync(client, "/auth/login", token, ("Email", email), ("Password", Password));

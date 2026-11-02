@@ -44,12 +44,6 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
     private readonly MaintenanceModeState _maintenance;
     private readonly ILogger<GitHubPullRequestBuildWorker> _logger;
 
-    /// <summary>
-    /// How long a delivery waits before being offered again while a restore is in
-    /// flight. Settable for tests, which cannot afford to wait half a minute.
-    /// </summary>
-    internal TimeSpan MaintenanceRetryDelay { get; set; } = TimeSpan.FromSeconds(30);
-
     public GitHubPullRequestBuildWorker(
         GitHubWebhookQueue queue,
         IServiceProvider services,
@@ -59,7 +53,7 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         // Routing only - the build itself is the release-import worker's active
         // duration, not this one's. Five minutes is generous for "ask a few orgs
         // what they connected, then open a check run".
-        : base(queue.Reader, logger, heartbeats, nameof(GitHubPullRequestBuildWorker), TimeSpan.FromMinutes(5))
+        : base(queue.Reader, logger, heartbeats, nameof(GitHubPullRequestBuildWorker), TimeSpan.FromMinutes(5), maintenance)
     {
         _queue = queue;
         _services = services;
@@ -78,28 +72,64 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         _ => job.RepositoryFullName,
     };
 
+    /// <summary>
+    /// This worker applies its own maintenance policy in <see cref="RunJobAsync"/>
+    /// (#1321) without touching the database, so the base does not hold its jobs. A
+    /// job it started while the site was open is counted, so a restore waits for it
+    /// to finish; one it picks up during maintenance only defers and is not (#1538).
+    /// </summary>
+    protected override bool HoldsJobsDuringMaintenance => false;
+
     protected override async Task RunJobAsync(GitHubWebhookJob job, CancellationToken ct)
     {
-        // A restore is rewriting the database underneath us. The delivery was
-        // accepted (the webhook route stays open through maintenance on purpose,
-        // because GitHub disables a hook whose deliveries keep failing), but the
-        // build behind it reads and writes tables that are being replaced. So the
-        // job goes back on the queue rather than into the database.
-        if (_maintenance.IsActive)
+        // The base gives the database to a job it counted, one it started while the
+        // site was open; the restore waits for that job, so it runs now.
+        if (_maintenance.DatabaseAllowedHere)
+        {
+            await RunDeliveryAsync(job, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Otherwise the base picked it up during maintenance and left it uncounted. A
+        // restore is rewriting the database underneath us: the delivery was accepted
+        // (the webhook route stays open through maintenance on purpose, because GitHub
+        // disables a hook whose deliveries keep failing), but the build behind it reads
+        // and writes tables that are being replaced. So the job waits here, uncounted so
+        // the restore need not wait for it, until the site reopens, and is then counted
+        // like any other. It used to go back on the queue, where it was lost once the
+        // endpoint had filled the queue meanwhile, after GitHub had been told 202
+        // (#1599). Counting it before it runs also closes the gap where a refused restore
+        // reopened the site between the base's check and this one.
+        if (!_maintenance.TryBeginJob(nameof(GitHubPullRequestBuildWorker)))
         {
             _logger.LogInformation(
                 "Holding a webhook delivery for {Job}: maintenance mode is active ({Reason}).",
                 Describe(job), _maintenance.Reason);
-            await Task.Delay(MaintenanceRetryDelay, ct).ConfigureAwait(false);
-            if (!_queue.TryEnqueue(job))
+            // Waiting is not working: a restore can take longer than this worker's
+            // longest job, and the hold must not read as a stalled worker.
+            Heartbeat.EndActive();
+            do
             {
-                _logger.LogWarning(
-                    "Dropped a webhook delivery for {Job}: the queue was full while maintenance mode was active.",
-                    Describe(job));
+                await WaitUntilOpenAsync(ct).ConfigureAwait(false);
             }
-            return;
+            while (!_maintenance.TryBeginJob(nameof(GitHubPullRequestBuildWorker)));
+            Heartbeat.BeginActive();
         }
+        try
+        {
+            using (_maintenance.AllowDatabase())
+            {
+                await RunDeliveryAsync(job, ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _maintenance.EndJob(nameof(GitHubPullRequestBuildWorker));
+        }
+    }
 
+    private async Task RunDeliveryAsync(GitHubWebhookJob job, CancellationToken ct)
+    {
         if (job is not GitHubPullRequestJob pullRequest)
         {
             await RecordBranchActivityAsync(job, ct).ConfigureAwait(false);

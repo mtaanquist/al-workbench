@@ -18,7 +18,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// repository" path does: rewrite the settings with the new extension listed,
 /// and refuse an ID range one of the saved extensions already uses.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GenerateExtensionEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";
@@ -91,7 +90,7 @@ public sealed class GenerateExtensionEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = AlexEmail,
             DisplayName = "Alex Hansen",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = TestPasswords.Hash(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),

@@ -38,6 +38,15 @@ public class Module
     public int? IdRangeSize { get; set; }
 
     /// <summary>
+    /// The ID range size the copied repository's own <c>app.json</c> declares,
+    /// refreshed with every copy the way its dependencies are, or null for a
+    /// typed module or a repository whose <c>app.json</c> declares no range. Read
+    /// only when <see cref="IdRangeSize"/> is blank, so a size the Editor typed
+    /// always wins and a blank one follows the repository (#1631).
+    /// </summary>
+    public int? SourceIdRangeSize { get; set; }
+
+    /// <summary>
     /// <c>owner/name</c> of the github.com repository this module's files are
     /// copied from, or null for a module whose files are typed in the editor.
     /// The copy lives in <see cref="ExtensionFolders"/> like any other module's,

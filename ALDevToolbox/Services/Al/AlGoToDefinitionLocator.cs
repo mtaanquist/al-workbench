@@ -137,14 +137,20 @@ public static class AlGoToDefinitionLocator
     /// page that share a name cannot be confused, and it never sends the type
     /// name back through a resolver that would find the variable again when
     /// the two are spelled alike (<c>Customer: Record Customer</c>).
+    /// The name may be quoted (<c>"Temp Sales Line": Record ...</c>), and a
+    /// declaration inside a comment or string is skipped, as in
+    /// <see cref="ResolveVariableDeclarationLine"/> (#386).
     /// </summary>
     public static (string Kind, string Name)? ResolveVariableObjectType(string fileContent, string variableName)
     {
+        variableName = variableName?.Trim('"') ?? string.Empty;
         if (string.IsNullOrEmpty(fileContent) || string.IsNullOrEmpty(variableName)) return null;
         var escaped = Regex.Escape(variableName);
-        foreach (Match decl in Regex.Matches(fileContent, $@"(?<![A-Za-z0-9_""]){escaped}(?=\s*:)", RegexOptions.IgnoreCase))
+        // Position-preserving, so indices into it are indices into the file.
+        var masked = AlResolvableTokenScanner.MaskCommentsAndStrings(fileContent);
+        foreach (Match decl in Regex.Matches(masked, $@"(?<![A-Za-z0-9_""])(?:""{escaped}""|{escaped}(?![A-Za-z0-9_""]))(?=\s*:)", RegexOptions.IgnoreCase))
         {
-            var match = VariableObjectTypeRegex.Match(fileContent[(decl.Index + decl.Length)..Math.Min(fileContent.Length, decl.Index + decl.Length + 300)]);
+            var match = VariableObjectTypeRegex.Match(masked[(decl.Index + decl.Length)..Math.Min(masked.Length, decl.Index + decl.Length + 300)]);
             if (!match.Success) continue;
             var full = match.Groups["n"].Value;
             var last = Regex.Match(full, @"(?:""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)$").Value.Trim('"');
@@ -164,7 +170,8 @@ public static class AlGoToDefinitionLocator
     // var of type `Codeunit "HttpClient"` (real object reference) from a
     // var of type `HttpClient` (runtime / system type sharing the name).
     private static readonly Regex AllObjectVarDeclsRegex = new(
-        @"\b(?<var>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*" +
+        // The variable may be quoted ("Temp Sales Line": Record ...).
+        @"(?:""(?<var>[^""\r\n]+)""|\b(?<var>[A-Za-z_][A-Za-z0-9_]*))\s*:\s*" +
         @"(?:(?<kw>Record|Codeunit|Page|Report|Query|XmlPort|Interface|Enum|RequestPage|TestPage|TestPart|TestRequestPage|ControlAddIn|PermissionSet|Profile)\s+)?" +
         @"(""(?<q>[^""]+)""|(?<u>[A-Za-z_][A-Za-z0-9_]*))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -193,6 +200,7 @@ public static class AlGoToDefinitionLocator
         // text keeps identical indices, so newline-counting below is unaffected.
         // See issue #386.
         var masked = AlResolvableTokenScanner.MaskCommentsAndStrings(fileContent);
+        variableName = variableName.Trim('"');
         foreach (Match m in AllObjectVarDeclsRegex.Matches(masked))
         {
             if (!string.Equals(m.Groups["var"].Value, variableName, StringComparison.OrdinalIgnoreCase)) continue;

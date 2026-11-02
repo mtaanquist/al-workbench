@@ -18,7 +18,12 @@
 
 const DB_NAME = "aldt-translator";
 const STORE = "session";
-const KEY = "current";
+// Before #1609 the whole site shared one record under this key. One left over
+// from then is moved to a key of its own the first time the page looks.
+const LEGACY_KEY = "current";
+// Sessions nobody has open are kept for the restore prompt, newest first, up
+// to this many; older ones and ones past the page's age limit are deleted.
+const MAX_KEPT = 5;
 
 let keyHandler = null;
 let dotNetRef = null;
@@ -35,105 +40,471 @@ function openDb() {
     });
 }
 
-async function getRec() {
+// Runs `fn(store, setResult)` in one transaction and resolves with what it set
+// once the transaction has committed.
+async function withStore(mode, fn) {
+    const db = await openDb();
     try {
-        const db = await openDb();
         return await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, "readonly");
-            const req = tx.objectStore(STORE).get(KEY);
-            req.onsuccess = () => resolve(req.result || null);
-            req.onerror = () => reject(req.error);
+            const tx = db.transaction(STORE, mode);
+            let result;
+            fn(tx.objectStore(STORE), (v) => { result = v; });
+            tx.oncomplete = () => resolve(result);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+    } finally {
+        db.close();
+    }
+}
+
+// ── One record per open (#1595, #1609) ───────────────────────────────────
+//
+// Every open - an upload, a file from disk, a file from a repository, or a
+// restore - gets a random id, and its record is stored under that id. The tab
+// passes the id back on every later call, so one tab only ever reads or writes
+// its own record: a second tab opening a file, saving or closing touches
+// nothing of the first tab's.
+//
+// The restore prompt is the one place a tab looks at records it did not open.
+// It must never offer, discard or take over a record a live tab still holds,
+// so each tab holds a Web Lock named for its open while it has the file, and
+// the prompt skips records whose lock is held. The browser drops a tab's locks
+// when the tab closes or reloads, which is exactly when its record becomes a
+// session worth offering. Continue moves the record to a new id, so the tab
+// that restores it never shares an id with anyone.
+//
+// Where Web Locks are missing (a page served over plain http), a heartbeat in
+// localStorage stands in: a record whose heartbeat is recent counts as held.
+
+const LOCK_PREFIX = "aldt-translator-open:";
+const ALIVE_PREFIX = "aldt-translator-alive:";
+const ALIVE_EVERY_MS = 20_000;
+// Hidden tabs may run timers only once a minute, so allow a few missed beats.
+const ALIVE_FOR_MS = 3 * 60_000;
+
+// The open this tab holds: { openId, release }.
+let held = null;
+
+function newOpenId() {
+    return (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+        ? crypto.randomUUID()
+        : Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+function hasLocks() {
+    return typeof navigator !== "undefined" && !!navigator.locks
+        && typeof navigator.locks.request === "function" && typeof navigator.locks.query === "function";
+}
+
+// Takes the lock (or starts the heartbeat) for `openId` and returns the hold.
+// Does not touch `held`; callers swap it in once the record is written.
+async function hold(openId) {
+    const h = { openId, release: () => {} };
+    if (hasLocks()) {
+        await new Promise((granted) => {
+            navigator.locks.request(LOCK_PREFIX + openId, () => new Promise((done) => {
+                h.release = done;
+                granted();
+            })).catch(() => {
+                // The lock could not be taken at all: hold it the other way
+                // rather than not at all.
+                heartbeat(h);
+                granted();
+            });
+        });
+    } else {
+        heartbeat(h);
+    }
+    return h;
+}
+
+// The stand-in for a lock: a timestamp in localStorage, refreshed while the
+// tab holds the open and removed when it lets go - or when the page goes
+// away, so a reload does not hide the tab's own session from itself.
+function heartbeat(h) {
+    const key = ALIVE_PREFIX + h.openId;
+    const beat = () => { try { localStorage.setItem(key, String(Date.now())); } catch { /* ignore */ } };
+    const gone = () => { try { localStorage.removeItem(key); } catch { /* ignore */ } };
+    beat();
+    const timer = setInterval(beat, ALIVE_EVERY_MS);
+    // A page restored from the back-forward cache holds the open again.
+    const back = (e) => { if (e.persisted) beat(); };
+    window.addEventListener("pagehide", gone);
+    window.addEventListener("pageshow", back);
+    h.release = () => {
+        clearInterval(timer);
+        window.removeEventListener("pagehide", gone);
+        window.removeEventListener("pageshow", back);
+        gone();
+    };
+}
+
+// The ids with a recent heartbeat; stale ones are removed on the way.
+function heartbeatIds() {
+    const ids = new Set();
+    try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+            const key = localStorage.key(i);
+            if (!key || !key.startsWith(ALIVE_PREFIX)) continue;
+            if (Date.now() - Number(localStorage.getItem(key)) < ALIVE_FOR_MS) ids.add(key.slice(ALIVE_PREFIX.length));
+            else localStorage.removeItem(key);
+        }
+    } catch { /* ignore */ }
+    return ids;
+}
+
+// The ids some tab (this one included) holds right now, by lock or heartbeat.
+async function heldIds() {
+    const ids = heartbeatIds();
+    if (held) ids.add(held.openId);
+    if (hasLocks()) {
+        try {
+            const state = await navigator.locks.query();
+            for (const l of state.held || []) {
+                if (l.name && l.name.startsWith(LOCK_PREFIX)) ids.add(l.name.slice(LOCK_PREFIX.length));
+            }
+        } catch { /* ignore */ }
+    }
+    return ids;
+}
+
+// Runs `fn` only while no live tab holds `openId`, and keeps others from
+// taking it until `fn` is done. Returns null without running it otherwise.
+async function whileUnheld(openId, fn) {
+    if (!openId || (held && held.openId === openId)) return null;
+    if (hasLocks()) {
+        return await navigator.locks.request(LOCK_PREFIX + openId, { ifAvailable: true },
+            (lock) => (lock && !heartbeatIds().has(openId) ? fn() : null));
+    }
+    return (await heldIds()).has(openId) ? null : await fn();
+}
+
+// Starts a new open: takes its lock first, so no other tab ever sees the new
+// record unheld, then runs `write(previousId)` - which stores the record and
+// deletes the tab's previous one, if any - and lets go of the previous lock
+// only after that. Returns false (holding nothing new) when the write failed.
+async function startOpen(openId, write) {
+    const previous = held;
+    const next = await hold(openId);
+    try {
+        await write(previous ? previous.openId : null);
+    } catch {
+        next.release();
+        return false;
+    }
+    held = next;
+    if (previous) previous.release();
+    return true;
+}
+
+// Lets go of this tab's open without deleting its record. Called when the page
+// goes away inside the app: whatever was left unsaved becomes a session the
+// restore prompt can offer. Also called by a page that starts with no file
+// before it looks for sessions: the module outlives the component (a resumed
+// connection renders a fresh one in the same tab), so it may still hold the
+// open the previous component had, which would hide that session from it.
+export function release() {
+    if (held) { held.release(); held = null; }
+}
+
+// This open's record, or null (also when `openId` is missing).
+async function getOwnRec(openId) {
+    if (!openId) return null;
+    try {
+        return await withStore("readonly", (store, done) => {
+            const req = store.get(openId);
+            req.onsuccess = () => {
+                const rec = req.result;
+                done(rec && rec.openId === openId ? rec : null);
+            };
         });
     } catch {
         return null;
     }
 }
 
-async function putRec(rec) {
+// Reads, changes and writes this open's record in one transaction. `change`
+// returns false to leave the record as it is. True when it was written.
+async function updateRec(openId, change) {
+    if (!openId) return false;
     try {
-        rec.savedAt = Date.now();
-        const db = await openDb();
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, "readwrite");
-            tx.objectStore(STORE).put(rec, KEY);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
+        return await withStore("readwrite", (store, done) => {
+            const req = store.get(openId);
+            req.onsuccess = () => {
+                const rec = req.result;
+                if (!rec || rec.openId !== openId || change(rec) === false) { done(false); return; }
+                rec.savedAt = Date.now();
+                store.put(rec, openId);
+                done(true);
+            };
         });
-        return true;
     } catch {
         return false;
     }
 }
 
+// For export and save: "missing" when this tab holds an id but its record is
+// gone (the browser's storage was cleared, say), "empty" when it holds none,
+// and null when the record is there.
+function notOwned(rec, openId) {
+    if (rec && openId && rec.openId === openId) return null;
+    return openId ? "missing" : "empty";
+}
+
+// Stores a new open's record and deletes the tab's previous one in the same
+// transaction: the tab has moved on from that file. Then drops the older
+// copies of the same file nobody holds (#1624).
+async function openRecord(rec, dropOlder = true) {
+    rec.savedAt = Date.now();
+    const ok = await startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
+        store.put(rec, rec.openId);
+        if (previousId && previousId !== rec.openId) store.delete(previousId);
+    }));
+    if (ok && dropOlder) await dropOlderCopies(rec);
+    return ok;
+}
+
+// ── One session per file (#1624) ─────────────────────────────────────────
+//
+// A stored session carries the base the file had when it was opened. Once the
+// same file has been opened again - picked from disk, uploaded, fetched from
+// its repository, or restored - an older session of it is out of date: its
+// base predates whatever was saved since, so Continue followed by Save would
+// write that old base back over the file and lose the newer work. Before
+// #1609 the single record was simply replaced; with one record per open, the
+// older copies have to be dropped by file. A copy a live tab holds is never
+// touched (whileUnheld), as everywhere else.
+
+// Which file a record is of, by name - and for a repository file also by
+// repository and path. The name is part of it because a translation started
+// from the generated file is named for its language, while the path it was
+// opened under is not updated when the language changes: a da-DK and a de-DE
+// translation of one App.g.xlf are different files.
+function fileKey(r) {
+    const name = "\n" + (r.fileName || "");
+    if (r.repo && r.repo.repository && r.repo.path) return "repo\n" + r.repo.repository + "\n" + r.repo.path + name;
+    return "file" + name;
+}
+
+// True when two records are of the same file. Two files picked from disk can
+// share a name and still be different files (the same app in two folders), so
+// when both have a handle the handle decides; an upload has only its name.
+async function sameFile(a, b) {
+    if (fileKey(a) !== fileKey(b)) return false;
+    if (a.handle && b.handle) {
+        if (typeof a.handle.isSameEntry !== "function") return false;
+        try { return await a.handle.isSameEntry(b.handle); } catch { return false; }
+    }
+    return true;
+}
+
+// True when another record of `r`'s file in `all` was saved after it.
+async function superseded(r, all) {
+    for (const o of all) {
+        if (!o || !o.openId || o.openId === r.openId) continue;
+        if ((o.savedAt || 0) > (r.savedAt || 0) && await sameFile(o, r)) return true;
+    }
+    return false;
+}
+
+// Deletes the other sessions of `rec`'s file saved before it that no live tab
+// holds. A newer one is left alone: Continue on an older session must not
+// delete newer work.
+async function dropOlderCopies(rec) {
+    try {
+        const live = await heldIds();
+        const all = await withStore("readonly", (store, done) => {
+            const req = store.getAll();
+            req.onsuccess = () => done(req.result || []);
+        });
+        for (const r of all) {
+            if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;
+            if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;
+            if (await sameFile(r, rec)) await whileUnheld(r.openId, () => deleteKey(r.openId));
+        }
+    } catch { /* best effort: the prompt also offers only the newest of each file */ }
+}
+
+// For a file picked or dropped from disk, which is stored before anything
+// parses it: drops the older copies of its file only once the page has
+// opened it, so a file that fails to open touches no other session.
+export async function opened(openId) {
+    const rec = await getOwnRec(openId);
+    if (rec) await dropOlderCopies(rec);
+}
+
 // Called once when a file is opened. The original XML arrives as a
 // DotNetStreamReference so multi-MB files don't hit the interop arg limit.
-// Resets the edit overlay.
-export async function putBaseStream(fileName, sourceLang, targetLang, streamRef) {
+// Resets the edit overlay. `repo` ({ repository, path }) is where a file opened
+// from a repository came from, null otherwise: a restored session has to know,
+// so its export still teaches the translation memory nothing (#1540).
+// Returns the open's id, which the tab passes back on every later call, or
+// null when nothing could be stored.
+// `replaceOpenId`, when passed, rebases the tab's own record rather than opening
+// a file: it keeps the id, and writes only for the open this tab holds (or
+// whose record is still there), returning null and writing nothing otherwise.
+// A repository save so also puts back a record the browser lost.
+export async function putBaseStream(fileName, sourceLang, targetLang, streamRef, repo, replaceOpenId) {
+    const rebase = arguments.length > 5;
+    if (rebase && !(held && held.openId === replaceOpenId) && !(await getOwnRec(replaceOpenId))) return null;
     const buf = await streamRef.arrayBuffer();
     const originalXml = new TextDecoder("utf-8").decode(buf);
-    await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {} });
+    if (rebase) {
+        const rec = { openId: replaceOpenId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null, savedAt: Date.now() };
+        try {
+            await withStore("readwrite", (store) => { store.put(rec, replaceOpenId); });
+            return replaceOpenId;
+        } catch {
+            return null;
+        }
+    }
+    const openId = newOpenId();
+    return await openRecord({ openId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null })
+        ? openId : null;
 }
 
 // Debounced incremental edit save (for resume). `editsJson` is the full overlay;
 // `learnedJson` is what each unit last taught the translation memory, kept
 // beside it so a reload does not teach the same units again (#1343).
-export async function putEdits(editsJson, learnedJson) {
-    const rec = await getRec();
-    if (!rec) return;
+// `openId` is the open this tab holds; the record is read and written in one
+// transaction, so nothing can slip in between.
+export async function putEdits(openId, editsJson, learnedJson) {
+    let edits, learned;
     try {
-        rec.edits = JSON.parse(editsJson);
-        if (learnedJson) rec.learned = JSON.parse(learnedJson);
+        edits = JSON.parse(editsJson);
+        learned = learnedJson ? JSON.parse(learnedJson) : null;
     } catch { return; }
-    await putRec(rec);
+    await updateRec(openId, (rec) => {
+        rec.edits = edits;
+        if (learned) rec.learned = learned;
+    });
 }
 
-export async function putMeta(fileName, targetLang) {
-    const rec = await getRec();
-    if (!rec) return;
-    rec.fileName = fileName;
-    rec.targetLang = targetLang;
-    await putRec(rec);
+export async function putMeta(openId, fileName, targetLang) {
+    await updateRec(openId, (rec) => {
+        rec.fileName = fileName;
+        rec.targetLang = targetLang;
+    });
 }
 
-// Lightweight check for the restore prompt — the file name + when it was last
-// saved (epoch ms, 0 for sessions written before timestamps existed).
-export async function peek() {
-    const rec = await getRec();
-    if (!rec) return null;
-    return { fileName: rec.fileName, savedAt: rec.savedAt || 0 };
+// Moves a record from before #1609 to a key of its own, once, in one
+// transaction, so two tabs loading at the same moment cannot both move it.
+// It keeps its savedAt, so the prompt says how old it really is.
+async function migrateLegacy() {
+    await withStore("readwrite", (store) => {
+        const req = store.get(LEGACY_KEY);
+        req.onsuccess = () => {
+            const rec = req.result;
+            if (!rec) return;
+            store.delete(LEGACY_KEY);
+            if (!rec.fileName || !rec.originalXml) return;
+            rec.openId = newOpenId();
+            store.put(rec, rec.openId);
+        };
+    });
 }
 
-// Small metadata for an explicit restore (no original XML — that streams).
-export async function loadMeta() {
-    const rec = await getRec();
-    if (!rec) return null;
-    return {
-        fileName: rec.fileName,
-        sourceLang: rec.sourceLang || null,
-        targetLang: rec.targetLang || null,
-        edits: rec.edits || {},
-        learned: rec.learned || null,
-    };
+function deleteKey(key) {
+    return withStore("readwrite", (store) => { store.delete(key); }).catch(() => {});
+}
+
+// For the restore prompt: the newest session no live tab holds, as its id,
+// file name and when it was last saved (epoch ms). `maxAgeMs` is how old a
+// session may be and still be offered. Sessions nobody holds that are past
+// it, or beyond the newest MAX_KEPT, or older than another record of the same
+// file, are deleted here, so the store does not grow with every file ever
+// opened and an out-of-date copy is never offered.
+export async function peek(maxAgeMs) {
+    try {
+        await migrateLegacy();
+        const live = await heldIds();
+        const all = await withStore("readonly", (store, done) => {
+            const req = store.getAll();
+            req.onsuccess = () => done(req.result || []);
+        });
+        const now = Date.now();
+        const free = all.filter((r) => r && r.openId && !live.has(r.openId));
+        // A session with a newer record of its file, held or not, is out of
+        // date, so it is never offered and goes with the rest (#1624).
+        const current = [];
+        for (const r of free) {
+            if (!(await superseded(r, all))) current.push(r);
+        }
+        const offerable = current
+            .filter((r) => r.fileName && r.savedAt > 0 && now - r.savedAt <= maxAgeMs)
+            .sort((a, b) => b.savedAt - a.savedAt);
+        const keep = new Set(offerable.slice(0, MAX_KEPT).map((r) => r.openId));
+        for (const r of free) {
+            if (!keep.has(r.openId)) await whileUnheld(r.openId, () => deleteKey(r.openId));
+        }
+        const top = offerable[0];
+        return top ? { openId: top.openId, fileName: top.fileName, savedAt: top.savedAt } : null;
+    } catch {
+        return null;
+    }
+}
+
+// Continue on the restore prompt: takes over the session `openId` names, as
+// long as no live tab holds it, by moving its record to a fresh id this tab
+// then holds. Returns the small metadata (the original XML streams separately)
+// with the new id, or { refused } saying why nothing was taken over: "held"
+// when another tab has it, "gone" when it was deleted since the prompt
+// appeared, "error" when the browser's storage failed.
+export async function loadMeta(openId) {
+    try {
+        const result = await whileUnheld(openId, async () => {
+            const rec = await getOwnRec(openId);
+            if (!rec) return { refused: "gone" };
+            const newId = newOpenId();
+            const moved = { ...rec, openId: newId };
+            const ok = await startOpen(newId, (previousId) => withStore("readwrite", (store) => {
+                store.put(moved, newId);
+                store.delete(openId);
+                if (previousId) store.delete(previousId);
+            }));
+            if (!ok) return { refused: "error" };
+            await dropOlderCopies(moved);
+            return {
+                openId: newId,
+                fileName: rec.fileName,
+                sourceLang: rec.sourceLang || null,
+                targetLang: rec.targetLang || null,
+                edits: rec.edits || {},
+                learned: rec.learned || null,
+                repo: rec.repo || null,
+            };
+        });
+        return result || { refused: "held" };
+    } catch {
+        return { refused: "error" };
+    }
 }
 
 // The verbatim original, returned as an ArrayBuffer so .NET receives it as an
 // IJSStreamReference and reads it as a stream (bypasses the hub size limit).
-export async function loadOriginalStream() {
-    const rec = await getRec();
+// Empty when this open's record is gone.
+export async function loadOriginalStream(openId) {
+    const rec = await getOwnRec(openId);
     const xml = rec && rec.originalXml ? rec.originalXml : "";
     return new TextEncoder().encode(xml).buffer;
 }
 
-export async function clear() {
+// Deletes a session's record. For the open this tab holds (Close), it also
+// lets go of it. For any other (Discard on the restore prompt), only while no
+// live tab holds it. True when the record was deleted.
+export async function clear(openId) {
+    if (!openId) return false;
+    if (held && held.openId === openId) {
+        await deleteKey(openId);
+        release();
+        return true;
+    }
     try {
-        const db = await openDb();
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, "readwrite");
-            tx.objectStore(STORE).delete(KEY);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-        });
-    } catch { /* ignore */ }
+        return (await whileUnheld(openId, async () => { await deleteKey(openId); return true; })) === true;
+    } catch {
+        return false;
+    }
 }
 
 // Reads the verbatim original from IndexedDB, fills the hidden export form with
@@ -142,11 +513,15 @@ export async function clear() {
 // that returns the file as a download.
 // learnJson lists the unit ids the translation memory should learn from this
 // export: the edits whose text changed since the last save (#1343).
-export async function exportNow(fileName, editsJson, learnJson) {
-    const rec = await getRec();
-    if (!rec || !rec.originalXml) return false;
+// Returns "exported", "empty", or "missing" when this open's record is gone,
+// in which case nothing is posted.
+export async function exportNow(openId, fileName, editsJson, learnJson) {
+    const rec = await getOwnRec(openId);
+    const refused = notOwned(rec, openId);
+    if (refused) return refused;
+    if (!rec.originalXml) return "empty";
     const form = document.getElementById("tr-export-form");
-    if (!form) return false;
+    if (!form) return "empty";
     // The form submit below is a navigation, which would otherwise fire the
     // unsaved-changes beforeunload prompt. Detach it first — exporting is a
     // deliberate save, not an accidental exit.
@@ -162,7 +537,7 @@ export async function exportNow(fileName, editsJson, learnJson) {
     const lang = form.querySelector("#tr-export-target-language");
     if (lang) lang.value = rec.targetLang || "";
     form.submit();
-    return true;
+    return "exported";
 }
 
 // ── In-place file editing (File System Access API) ──────────────────────────
@@ -179,12 +554,14 @@ export function supportsFsAccess() {
 }
 
 // Reads a picked/dropped handle into a fresh session record and persists the
-// handle for later in-place saves. Returns { fileName } or null.
+// handle for later in-place saves. Returns { fileName, openId } or null.
 async function adoptHandle(handle) {
     const file = await handle.getFile();
     const originalXml = await file.text();
-    await putRec({ fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle });
-    return { fileName: file.name };
+    const openId = newOpenId();
+    // Older copies of the file are dropped once the page has opened it (opened).
+    const ok = await openRecord({ openId, fileName: file.name, originalXml, sourceLang: null, targetLang: null, edits: {}, handle }, false);
+    return ok ? { fileName: file.name, openId } : null;
 }
 
 // Click-to-open on supported browsers. Wired directly to the button's click in
@@ -210,7 +587,7 @@ export function initPicker(buttonSelector) {
             return;
         }
         const res = await adoptHandle(handle);
-        if (res && dotNetRef) await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName);
+        if (res && dotNetRef) await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName, res.openId);
     };
     btn.addEventListener("click", onClick);
     pickerTeardown = () => btn.removeEventListener("click", onClick);
@@ -222,8 +599,8 @@ export function teardownPicker() {
 
 // True when the current session was opened with a writable handle (so Save can
 // write in place rather than download). Used after a refresh/restore.
-export async function hasHandle() {
-    const rec = await getRec();
+export async function hasHandle(openId) {
+    const rec = await getOwnRec(openId);
     return !!(rec && rec.handle);
 }
 
@@ -240,10 +617,14 @@ async function ensureWritePermission(handle) {
 // still runs server-side (the same /api/translator/export endpoint the download
 // path posts to) so XliffTargetWriter stays the single source of truth — we
 // just fetch the result instead of navigating to it, then write the bytes to
-// the handle. Returns a status: "saved" | "empty" | "no-handle" | "denied" | "error".
-export async function saveInPlace(fileName, editsJson, learnJson) {
-    const rec = await getRec();
-    if (!rec || !rec.originalXml) return "empty";
+// the handle. Returns a status: "saved" | "empty" | "missing" | "no-handle" |
+// "denied" | "error". "missing" means this open's record (and with it the
+// original and the handle) is gone, so nothing is posted or written.
+export async function saveInPlace(openId, fileName, editsJson, learnJson) {
+    const rec = await getOwnRec(openId);
+    const refused = notOwned(rec, openId);
+    if (refused) return refused;
+    if (!rec.originalXml) return "empty";
     if (!rec.handle) return "no-handle";
     const handle = rec.handle;
     // What the session record held when the save began, to tell afterwards
@@ -287,11 +668,11 @@ export async function saveInPlace(fileName, editsJson, learnJson) {
     // to overwrite edits typed during the save (#1268, L44); a newer overlay
     // already holds everything this one does, so it is left as it is.
     try {
-        const latest = await getRec();
-        if (latest && JSON.stringify(latest.edits || {}) === editsAtStart) {
-            latest.edits = JSON.parse(editsJson);
-            await putRec(latest);
-        }
+        const saved = JSON.parse(editsJson);
+        await updateRec(openId, (latest) => {
+            if (JSON.stringify(latest.edits || {}) !== editsAtStart) return false;
+            latest.edits = saved;
+        });
     } catch { /* best effort */ }
     return "saved";
 }
@@ -379,7 +760,7 @@ export function initDropZone(zoneSelector, inputSelector) {
             item.getAsFileSystemHandle().then(async (handle) => {
                 if (handle && handle.kind === "file" && dotNetRef) {
                     const res = await adoptHandle(handle);
-                    if (res) { await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName); return; }
+                    if (res) { await dotNetRef.invokeMethodAsync("OpenFromHandleAsync", res.fileName, res.openId); return; }
                 }
                 useFileInput(droppedFile);
             }).catch(() => useFileInput(droppedFile));

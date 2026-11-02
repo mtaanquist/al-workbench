@@ -38,6 +38,13 @@ public sealed class ProjectBuildService
     public const string TempPrefix = "oe-build-";
 
     /// <summary>
+    /// What a build that finds no compiler says. Shown on the build row to whoever pressed
+    /// Build, so it names no feed or setting; the log line beside it carries those (#1580).
+    /// </summary>
+    internal const string CompilerMissingMessage =
+        "The tool that compiles AL isn't installed on this server yet. Ask whoever runs AL Workbench to check it can reach the internet, then try again.";
+
+    /// <summary>
     /// Hard ceiling for a discovery clone — a stalled remote becomes a logged
     /// failure, not a hang. Discovery fetches only trees + app.json blobs (no
     /// working-tree checkout), so this is ample even for repos whose history is
@@ -173,7 +180,7 @@ public sealed class ProjectBuildService
         }
         else if (build is { PipelineId: not null })
         {
-            await EnsurePipelineStillBuildsAsync(build, ct).ConfigureAwait(false);
+            await EnsurePipelineStillBuildsAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
         }
         if (build is not null)
         {
@@ -250,9 +257,13 @@ public sealed class ProjectBuildService
         // the stable compiler every build has used.
         // The lease keeps the compiler on the volume while this build uses it: another
         // build may bring in a newer beta meanwhile (#1137).
-        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException(
-                "The AL compiler isn't available yet. It's downloaded from NuGet on first use — check the server has outbound access, then retry.");
+        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false);
+        if (compilerLease is null)
+        {
+            // The person who pressed Build can't act on the feed or the network; the log is for whoever can (#1580).
+            _logger.LogWarning("The AL compiler is not installed and could not be downloaded from NuGet; check the server's outbound access.");
+            throw new InvalidOperationException(CompilerMissingMessage);
+        }
         var compiler = compilerLease.Value;
 
         var buildRoot = Path.Combine(Path.GetTempPath(), TempPrefix + Guid.NewGuid().ToString("N"));
@@ -1112,16 +1123,25 @@ public sealed class ProjectBuildService
     /// Refuses a pipeline build whose pipeline was deleted or disabled while it waited
     /// in the queue: the part of <see cref="EnsureAutomationStillOnAsync"/> that holds
     /// for every build, by hand or rerun as well (#1335). The worker fails the build
-    /// with the reason.
+    /// with the reason. The person the build runs as is held to what an automatic build's
+    /// is (#1551): a build by hand can wait in the queue too, and it clones with their
+    /// credentials, so one whose account was disabled or who can no longer manage the
+    /// solution by the time it starts is refused rather than run as them.
     /// </summary>
-    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, CancellationToken ct)
+    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, int? projectOwnerId, CancellationToken ct)
     {
         var pipeline = await _db.OePipelines.AsNoTracking()
             .Where(p => p.Id == build.PipelineId && p.DeletedAt == null)
             .Select(p => new { Disabled = p.DisabledAt != null })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var runsAs = _orgContext.CurrentUserId;
         var reason = pipeline is null ? PipelineDeletedRefusal
             : pipeline.Disabled ? PipelineDisabledRefusal
+            : runsAs is not { } userId ? null
+            : !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct).ConfigureAwait(false)
+                ? InactiveRefusal
+            : !await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct).ConfigureAwait(false)
+                ? NoAccessRefusal
             : null;
         if (reason is not null)
         {
@@ -1292,7 +1312,7 @@ public sealed class ProjectBuildService
                     var log = await _processRunner.RunAsync(new ProcessRunRequest(
                         gitPath,
                         new[] { "-C", clone.Dir, "log", "--no-merges", "-n", (ChangelogCommitCap + 1).ToString(),
-                                "--pretty=format:%h%an%cI%s%ae", $"{prevSha}..HEAD" },
+                                "--pretty=format:%h\u001F%an\u001F%cI\u001F%s\u001F%ae", $"{prevSha}..HEAD" },
                         clone.Dir, Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                     var (parsed, truncated) = ParseChangelog(log.StdOut, ChangelogCommitCap);
                     var ordering = 0;
@@ -1405,7 +1425,7 @@ public sealed class ProjectBuildService
         foreach (var line in stdout.Split('\n'))
         {
             if (line.Length == 0) continue;
-            var parts = line.Split('');
+            var parts = line.Split('\u001F');
             if (parts.Length < 4) continue;
             DateTime? date = DateTimeOffset.TryParse(parts[2].Trim(), out var dto) ? dto.UtcDateTime : null;
             entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim(),

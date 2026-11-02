@@ -55,6 +55,8 @@ ignores it. Type filtering happens client-side over the search result.
 - No leading or trailing `/` (normalised away before validation fires).
 - Max 8 segments, max 260 characters total.
 - `(RelativePath, FileName)` must be unique within a recipe (case-insensitive).
+- At most 100 files per recipe (`RecipeService.MaxFiles`); a suggestion is held
+  to the same cap because it goes through the same check.
 
 `Components/Shared/RecipeFileEditor.razor` exposes Folder + File-name +
 Content inputs per row; the user-facing `RecipeDetail` page renders a
@@ -75,10 +77,13 @@ and the distinct customer names recorded on earlier uses, de-duplicated
 case-insensitively with the project's spelling winning and sorted
 alphabetically (`RecipeService.GetCustomerSuggestionsAsync`). At record
 time the typed name is matched case-insensitively against active project
-names and, on an exact match, `recipe_downloads.project_id` is stamped —
+names the user can see and, on an exact match, `recipe_downloads.project_id`
+is stamped —
 `Project.Name` is unique per org among active rows, so "picked a project"
 and "typed exactly a project's name" are the same event and no UI has to
-tell them apart. The free-text name is still stored as typed: it is the
+tell them apart. A Private solution outside the user's teams is not matched:
+the use is recorded as a plain customer name, and the suggestion list leaves
+out both that solution and any recorded name that spells it (#1545). The free-text name is still stored as typed: it is the
 label, the id is the attribution. `project_id` is nullable with
 `ON DELETE SET NULL`, so hard-deleting a project leaves the history intact.
 The admin recipe page links the customer cell to the project when one
@@ -124,12 +129,26 @@ Tools live in `Services/Mcp/Tools/CookbookTools.cs`:
   (`"Snippet"` / `"Pattern"` / `"Module"`) and a list of files each with
   its own `RelativePath`.
 - `update_recipe_suggestion(input)` — edit a pending suggestion; same
-  `GuidanceToken` gate.
+  `GuidanceToken` gate. Because the submitter can still edit while a
+  reviewer has the suggestion open, approval publishes only the version
+  the reviewer saw: the review page passes a fingerprint of the content
+  it rendered, and approval is refused (and the page reloads with the new
+  version) if the suggestion changed since.
 - `update_recipe(input)` — full-replace edit of an already-published
   recipe. Same `GuidanceToken` gate, plus a role gate: the acting user
   must be Editor or Admin (or SiteAdmin), mirroring the web admin pages.
-  `Deprecated` is optional in the payload and preserves the recipe's
-  current flag when omitted.
+  The optional fields preserve the recipe's stored value when omitted,
+  so a `get_recipe` → `update_recipe` round-trip can't silently reset
+  them (#1626): `Deprecated`; `EstimatedValueHours` (removed only by
+  `ClearEstimatedValueHours`); and the minimum version, set by
+  `MinimumApplicationVersionId` or by `MinimumApplication` - the version
+  string `get_recipe` returns, or the catalogue name or key, resolved
+  through the org's own catalogue - and removed by an empty
+  `MinimumApplication`; a kept version that has since been removed from
+  the catalogue is refused with a message asking for one of those. A file sent with a null `Content` keeps the
+  stored body of the file at that path, because `get_recipe` lists
+  files that didn't fit in its answer with a null body; a null body for
+  a path the recipe doesn't have is refused.
 - `apply_recipe(recipeId, repository, customer?)` — commits the recipe's
   files into a GitHub repository and opens a pull request for them,
   returning a `RepositoryDeliveryResult` (with `IsNewPullRequest`). It

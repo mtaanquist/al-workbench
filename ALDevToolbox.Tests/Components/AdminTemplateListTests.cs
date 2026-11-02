@@ -26,6 +26,7 @@ public sealed class AdminTemplateListTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly BunitAuthorizationContext _auth;
 
     public AdminTemplateListTests()
     {
@@ -34,9 +35,9 @@ public sealed class AdminTemplateListTests : IDisposable
         // bootstrap admin running inside the singleton system org.
         _db.OrgContext.CurrentOrganizationId = TestDb.SystemOrgId;
 
-        var auth = _ctx.AddAuthorization();
-        auth.SetAuthorized("admin@example.com");
-        auth.SetRoles("Admin");
+        _auth = _ctx.AddAuthorization();
+        _auth.SetAuthorized("admin@example.com");
+        _auth.SetRoles("Admin");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
         _ctx.Services.AddDisplayTimeZone(_db);
@@ -133,6 +134,36 @@ public sealed class AdminTemplateListTests : IDisposable
         {
             cut.FindAll("table.data-table tbody tr").Should().HaveCount(2);
             cut.Markup.Should().Contain("trashed");
+        });
+    }
+
+    /// <summary>
+    /// GEN2-2: the endpoint behind "Set as default" is Admin-only, so the page
+    /// offers it to an Admin and not to an Editor, who would only get a 403.
+    /// </summary>
+    [Theory]
+    [InlineData("Admin", true)]
+    [InlineData("Editor", false)]
+    public async Task Set_as_default_is_offered_only_to_an_admin(string role, bool offered)
+    {
+        int id;
+        await using (var seed = _db.NewContext())
+        {
+            var t = TemplateBuilder.Default(key: "not-default", organizationId: TestDb.SystemOrgId);
+            t.IsDefault = false;
+            seed.RuntimeTemplates.Add(t);
+            await seed.SaveChangesAsync();
+            id = t.Id;
+        }
+        _auth.SetRoles(role);
+
+        var cut = _ctx.Render<AdminTemplateList>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("table.data-table tbody tr").Should().HaveCount(1);
+            cut.FindAll($"form[action='/admin/templates/{id}/default']").Should().HaveCount(offered ? 1 : 0);
+            cut.Markup.Contains("Set as default").Should().Be(offered);
         });
     }
 }

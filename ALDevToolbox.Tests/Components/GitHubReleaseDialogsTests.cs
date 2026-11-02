@@ -60,6 +60,7 @@ public sealed class GitHubReleaseDialogsTests : IAsyncDisposable
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
@@ -561,11 +562,10 @@ public sealed class GitHubReleaseDialogsTests : IAsyncDisposable
     /// <summary>The deployment-wide app, with no organisation connected to it.</summary>
     private async Task ConfigureDeploymentAppAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()
