@@ -56,7 +56,7 @@ public sealed class CredentialChangeRevocationTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword);
+            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword, "198.51.100.1");
         }
 
         await AssertRevokedAsync(userId);
@@ -75,7 +75,7 @@ public sealed class CredentialChangeRevocationTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword);
+            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword, "198.51.100.1");
         }
 
         var tokens = _db.OpenIddictTokens;
@@ -120,7 +120,7 @@ public sealed class CredentialChangeRevocationTests : IDisposable
         _clock.Advance(TimeSpan.FromMinutes(1));
         await using (var ctx = _db.NewContext())
         {
-            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword);
+            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword, "198.51.100.1");
         }
 
         // Still inside the 5-minute throttle: no DB read, so no rejection yet.
@@ -143,7 +143,7 @@ public sealed class CredentialChangeRevocationTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword);
+            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword, "198.51.100.1");
         }
 
         _clock.Advance(TimeSpan.FromSeconds(1));
