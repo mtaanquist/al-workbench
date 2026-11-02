@@ -47,6 +47,17 @@ public class ReleaseImportService
     /// </summary>
     private readonly ProjectAccess _access;
 
+    /// <summary>
+    /// A second connection for the source blobs an amend inserts, so they commit
+    /// outside the amend's one long transaction and cannot deadlock with another
+    /// import of the same source (#1549, OEI-6; see
+    /// <see cref="OeIngestHelpers.UpsertFileContentsAsync"/>). This is a write on its
+    /// own connection, not a concurrent read, so it is not the read-side use of the
+    /// factory that CLAUDE.md describes. Optional so a service built by hand keeps
+    /// compiling; without it the blobs go in the amend's transaction as before.
+    /// </summary>
+    private readonly IDbContextFactory<AppDbContext>? _blobContexts;
+
     private static readonly HashSet<string> AllowedKinds = new(StringComparer.Ordinal)
     {
         "first_party",
@@ -68,8 +79,10 @@ public class ReleaseImportService
         ILogger<ReleaseImportService> logger,
         ProjectAccess access,
         ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
-        ReleaseIngests? ingests = null)
+        ReleaseIngests? ingests = null,
+        IDbContextFactory<AppDbContext>? blobContexts = null)
     {
+        _blobContexts = blobContexts;
         _db = db;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
@@ -410,6 +423,11 @@ public class ReleaseImportService
     /// and reindexes extracted call-site references (option 1 from #216)
     /// so a late-landing module retroactively resolves earlier modules'
     /// unresolved call sites.
+    ///
+    /// <para>The upload form does not call this: it runs <see cref="BeginAmendAsync"/>
+    /// in the request and queues <see cref="RunAmendAsync"/> on the import worker
+    /// (#1549). This is both halves in one call, for tests and any caller that
+    /// already holds the uploads.</para>
     /// </summary>
     public async Task<ReleaseImportSummary> AmendReleaseAsync(
         int releaseId,
@@ -417,13 +435,6 @@ public class ReleaseImportService
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(uploads);
-        var orgId = RequireOrganizationId();
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
-
-        // Same long resolution post-passes as ProcessReleaseAsync — raise the
-        // command timeout off Npgsql's 30 s default. See issue #382.
-        _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
-
         if (uploads.Count == 0)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -431,6 +442,23 @@ public class ReleaseImportService
                 ["Uploads"] = "At least one .app file is required.",
             });
         }
+        await BeginAmendAsync(releaseId, ct).ConfigureAwait(false);
+        return await RunAmendAsync(releaseId, uploads, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The request half of an amend: checks the release can take one and flips it
+    /// <c>ready → ingesting</c>, so a second submit is refused and the release shows
+    /// as importing while the job waits its turn. The flip is conditional on the
+    /// release still being <c>ready</c>, so two submits that race cannot both pass.
+    /// Throws <see cref="PlanValidationException"/> keyed <c>ReleaseId</c> when the
+    /// release is hidden, unknown, soft-deleted or not ready. Whoever calls this owes
+    /// the release a <see cref="RunAmendAsync"/> or a <see cref="RestoreAmendedReleaseAsync"/>.
+    /// </summary>
+    public async Task BeginAmendAsync(int releaseId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
 
         // Pre-check the Release's current state so the operator gets a
         // field-keyed error instead of an unexpected status flip if they
@@ -455,22 +483,76 @@ public class ReleaseImportService
                 ["ReleaseId"] = $"Release {releaseId} is soft-deleted. Restore it from the admin page before amending.",
             });
         }
-        if (!string.Equals(preview.Status, "ready", StringComparison.Ordinal))
+        var flipped = 0;
+        if (string.Equals(preview.Status, "ready", StringComparison.Ordinal))
         {
+            var now = DateTime.UtcNow;
+            flipped = await _db.OeReleases
+                .Where(r => r.Id == releaseId && r.Status == "ready" && r.DeletedAt == null)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(r => r.Status, "ingesting")
+                    .SetProperty(r => r.StatusMessage, (string?)null)
+                    .SetProperty(r => r.UpdatedAt, now), ct).ConfigureAwait(false);
+        }
+        if (flipped == 0)
+        {
+            var status = string.Equals(preview.Status, "ready", StringComparison.Ordinal) ? "ingesting" : preview.Status;
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["ReleaseId"] = $"Release {releaseId} isn't ready to amend (status = {preview.Status}). Wait for the current import to finish, or restore the release first.",
+                ["ReleaseId"] = $"Release {releaseId} isn't ready to amend (status = {status}). Wait for the current import to finish, or restore the release first.",
             });
         }
+    }
 
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Release {releaseId} disappeared between the pre-check and the load.");
+    /// <summary>
+    /// Puts a release <see cref="BeginAmendAsync"/> flipped back to <c>ready</c> when
+    /// its amend never ran: the upload could not be staged or queued, a restart lost
+    /// it, or the job found nothing to add. Nothing was written, so the release holds
+    /// what it held. Only while it is still <c>ingesting</c>; never cancelled.
+    /// </summary>
+    public Task RestoreAmendedReleaseAsync(int releaseId) =>
+        _db.OeReleases
+            .Where(r => r.Id == releaseId && r.Status == "ingesting")
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(r => r.Status, "ready")
+                .SetProperty(r => r.StatusMessage, (string?)null)
+                .SetProperty(r => r.UpdatedAt, DateTime.UtcNow), CancellationToken.None);
+
+    /// <summary>
+    /// The worker half of an amend: ingests <paramref name="uploads"/> into a release
+    /// <see cref="BeginAmendAsync"/> left <c>ingesting</c>, re-runs the release-wide
+    /// passes, and hands it back <c>ready</c> whether it succeeds or not. The import
+    /// worker runs it inside the one-heavy-import gate, so it never runs beside a DVD
+    /// import or a system-reference backfill (#1549, #1602).
+    /// </summary>
+    public async Task<ReleaseImportSummary> RunAmendAsync(
+        int releaseId,
+        IReadOnlyList<AppFileUpload> uploads,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(uploads);
+        var orgId = RequireOrganizationId();
+
+        // Same long resolution post-passes as ProcessReleaseAsync — raise the
+        // command timeout off Npgsql's 30 s default. See issue #382.
+        _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
+
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false);
+        if (release is null || release.Status != "ingesting" || release.DeletedAt is not null)
+        {
+            throw new InvalidOperationException(
+                $"Release {releaseId} is no longer waiting for these modules, so nothing was added.");
+        }
 
         using var tracked = Ingests.Track(release.Id);
-        release.Status = "ingesting";
-        release.StatusMessage = null;
-        release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        if (uploads.Count == 0)
+        {
+            await RestoreReadyAsync(release.Id).ConfigureAwait(false);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Uploads"] = "No .app files were found in the upload, so nothing was added.",
+            });
+        }
 
         _logger.LogInformation(
             "Started Release amend: ReleaseId={ReleaseId} Label={Label} Uploads={UploadCount}",
@@ -1780,10 +1862,21 @@ public class ReleaseImportService
     // unchanged.
     private static string HashHex(string content) => OeIngestHelpers.HashHex(content);
     private static int CountLines(string content) => OeIngestHelpers.CountLines(content);
-    private Task SaveWithFileContentsAsync(
+    private async Task SaveWithFileContentsAsync(
         IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> contents,
         CancellationToken ct)
-        => OeIngestHelpers.SaveWithFileContentsAsync(_db, contents, ct);
+    {
+        // Only an amend saves inside a transaction of its own; there the blobs go in
+        // on a second connection, committed at once (#1549, OEI-6).
+        if (_blobContexts is not null && contents.Count > 0 && _db.Database.CurrentTransaction is not null)
+        {
+            await using var blobs = await _blobContexts.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await OeIngestHelpers.UpsertFileContentsAsync(_db, contents, ct, insertVia: blobs).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            return;
+        }
+        await OeIngestHelpers.SaveWithFileContentsAsync(_db, contents, ct).ConfigureAwait(false);
+    }
 
     // ── BC version inference ────────────────────────────────────────────
 

@@ -441,6 +441,40 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 return;
             }
 
+            // Add modules (#216): more .apps for a release that is already imported.
+            // Inside the heavy gate, so it never bulk-writes beside a DVD import or a
+            // system-reference backfill of the same release (#1549, #1602). The amend
+            // hands the release back ready itself, whether it succeeds or not.
+            if (job.Source is ReleaseImportSource.AddModules add)
+            {
+                tempToDelete = add.TempPath;
+                try
+                {
+                    (var addUploads, archive) = ReleaseZipStaging.OpenStagedZip(add.TempPath, isDvd: false, openedStreams);
+                    using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                    {
+                        await importer.RunAmendAsync(job.ReleaseId, addUploads, ct).ConfigureAwait(false);
+                    }
+                    jobSucceeded = true;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw; // Shutdown: the amend rolled back; the next start closes the row (#483).
+                }
+                catch (Exception ex)
+                {
+                    jobFailureMessage = FriendlyMessage(ex);
+                    if (ex is PlanValidationException)
+                        _logger.LogWarning("Adding modules to release {ReleaseId} was refused: {Reason}", job.ReleaseId, jobFailureMessage);
+                    else
+                        _logger.LogError(ex, "Adding modules to release {ReleaseId} failed.", job.ReleaseId);
+                    // A failure before the amend started (an unreadable ZIP) left the
+                    // release importing; this hands it back. Harmless after one that ran.
+                    await importer.RestoreAmendedReleaseAsync(job.ReleaseId).ConfigureAwait(false);
+                }
+                return;
+            }
+
             // Project build: clone → compile → ingest. Unlike the upload paths
             // there's no archive to open — ProjectBuildService produces the
             // uploads in memory and the per-app build report. Partial success
