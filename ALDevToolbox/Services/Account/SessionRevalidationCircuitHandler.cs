@@ -224,6 +224,10 @@ public sealed class SessionRevalidationCircuitHandler : CircuitHandler
     /// principal without the claim (a cookie from before it existed) counts
     /// as older than any change, so it takes one trip through the refresh
     /// endpoint, which reads the real stamp and re-issues the cookie with it.
+    /// The user's own password change reloads their other open pages too, on
+    /// purpose: a circuit cannot tell their other tab from a stolen copy of
+    /// the same cookie (".design/auth-and-audit.md", "Every interactive page
+    /// re-checks its user").
     /// </summary>
     internal static bool StillMatches(ClaimsPrincipal principal, UserSnapshot? row)
     {
