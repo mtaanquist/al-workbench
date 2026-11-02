@@ -103,19 +103,8 @@ internal static class AdminUserEndpoints
             ctx.Response.Redirect(RouteConstants.AdminUsers);
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 
-        app.MapPost("/admin/users/{id:int}/disable", async (
-            int id, HttpContext ctx, UserAdministrationService users, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
-        {
-            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            try { await users.DisableUserAsync(id, org.CurrentOrganizationId!.Value, ct); }
-            catch (PlanValidationException ex)
-            {
-                var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Value)}");
-                return;
-            }
-            ctx.Response.Redirect(RouteConstants.AdminUsers);
-        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
+        // No POST /admin/users/{id}/disable: the Users page disables inside its
+        // circuit, after a confirmation that says what stops working (#1544).
 
         app.MapPost("/admin/users/{id:int}/enable", async (
             int id, HttpContext ctx, UserAdministrationService users, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>

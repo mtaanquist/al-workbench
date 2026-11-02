@@ -44,6 +44,79 @@ public sealed class TotpServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Coming_back_to_setup_shows_the_same_recent_secret_so_the_scanned_entry_still_works()
+    {
+        // A refused confirm sends the person back to the setup page; a new
+        // secret there would leave the entry they scanned dead (#1614).
+        var userId = await SeedUserAsync();
+        TotpEnrollment first, again, later;
+        await using (var ctx = _db.NewContext()) first = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        _clock.Advance(TimeSpan.FromMinutes(5));
+        await using (var ctx = _db.NewContext()) again = await NewTotp(ctx).BeginEnrollmentAsync(userId, resumeTicket: first.ResumeTicket);
+        _clock.Advance(TotpService.PendingSecretReuse);
+        await using (var ctx = _db.NewContext()) later = await NewTotp(ctx).BeginEnrollmentAsync(userId, resumeTicket: again.ResumeTicket);
+
+        again.SecretBase32.Should().Be(first.SecretBase32);
+        later.SecretBase32.Should().NotBe(first.SecretBase32, "a setup left open past the window starts afresh");
+        await using (var ctx = _db.NewContext())
+        {
+            var code = new OtpNet.Totp(OtpNet.Base32Encoding.ToBytes(later.SecretBase32)).ComputeTotp(_clock.GetUtcNow().UtcDateTime);
+            await NewTotp(ctx).ConfirmEnrollmentAsync(userId, code);
+        }
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Another_session_coming_to_setup_gets_a_fresh_secret_not_the_owners()
+    {
+        // Without the ticket from the browser that started setup, a second
+        // session on the account must not read the owner's pending secret:
+        // it gets a new one, so whoever confirms holds the only copy (#1614).
+        var userId = await SeedUserAsync();
+        TotpEnrollment owner, intruder, ownerBack;
+        await using (var ctx = _db.NewContext()) owner = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        await using (var ctx = _db.NewContext()) intruder = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        await using (var ctx = _db.NewContext()) ownerBack = await NewTotp(ctx).BeginEnrollmentAsync(userId, resumeTicket: owner.ResumeTicket);
+
+        intruder.SecretBase32.Should().NotBe(owner.SecretBase32);
+        ownerBack.SecretBase32.Should().NotBe(intruder.SecretBase32,
+            "the owner's ticket names a secret that has since been replaced, so it can't pick up the intruder's either");
+        ownerBack.SecretBase32.Should().NotBe(owner.SecretBase32);
+    }
+
+    [Theory]
+    [InlineData("not a ticket")]
+    [InlineData("other-user")]
+    public async Task A_ticket_that_is_not_this_users_starts_afresh(string kind)
+    {
+        var userId = await SeedUserAsync();
+        string ticket;
+        if (kind == "other-user")
+        {
+            // A ticket really made by this service, but for another account.
+            await using var ctx = _db.NewContext();
+            ctx.Users.Add(new User
+            {
+                Id = 7001,
+                OrganizationId = TestDb.DefaultOrgId,
+                Email = "other-ticket@cronus.example",
+                PasswordHash = "x",
+                Role = UserRole.User,
+                CreatedAt = _clock.GetUtcNow().UtcDateTime,
+            });
+            await ctx.SaveChangesAsync();
+            ticket = (await NewTotp(ctx).BeginEnrollmentAsync(7001)).ResumeTicket;
+        }
+        else ticket = kind;
+        TotpEnrollment first, again;
+        await using (var ctx = _db.NewContext()) first = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        await using (var ctx = _db.NewContext()) again = await NewTotp(ctx).BeginEnrollmentAsync(userId, resumeTicket: ticket);
+
+        again.SecretBase32.Should().NotBe(first.SecretBase32);
+    }
+
+    [Fact]
     public async Task Begin_enrollment_persists_encrypted_secret_but_does_not_enable_totp()
     {
         var userId = await SeedUserAsync();

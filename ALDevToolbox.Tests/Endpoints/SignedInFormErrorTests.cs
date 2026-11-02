@@ -80,18 +80,47 @@ public sealed class SignedInFormErrorTests : IClassFixture<SharedEndpointHost>
         body.Should().NotContain(Planted);
     }
 
+    /// <summary>
+    /// Every field-keyed sentence the account services throw, read from their
+    /// source, must be in the table: an edited or new sentence would otherwise
+    /// quietly show as the generic message. The keys left out never reach a
+    /// redirect: passkey sign-in and registration answer their script in JSON.
+    /// </summary>
     [Fact]
-    public void The_sentences_the_signed_in_services_throw_round_trip()
+    public void Every_sentence_the_account_services_throw_is_in_the_table()
     {
-        foreach (var message in new[]
+        string[] notRedirected = ["Passkey", "Token"];
+        var thrown = new List<string>();
+        foreach (var file in new[]
                  {
-                     AuthService.CurrentPasswordLockedOutMessage,
-                     EntraSignInService.IdentityTakenMessage,
-                     "Current password is incorrect.",
-                     "That code didn't match. Check your authenticator and try again.",
-                     "Give the token a recognisable name.",
-                     "Name must be 1-80 characters.",
+                     "TotpService.cs", "AccountService.cs", "PersonalAccessTokenService.cs",
+                     "EntraSignInService.cs", "PasskeyService.cs",
                  })
+        {
+            var source = File.ReadAllText(RepoRoot.Combine("ALDevToolbox", "Services", "Account", file));
+            foreach (Match m in Regex.Matches(source, """\["(?<key>[A-Za-z]+)"\] = "(?<text>(?:[^"\\]|\\.)*)"(?!\s*\+)"""))
+            {
+                if (notRedirected.Contains(m.Groups["key"].Value)) continue;
+                thrown.Add(m.Groups["text"].Value.Replace("\\\"", "\"").Replace("\\\\", "\\"));
+            }
+        }
+        thrown.Should().HaveCountGreaterThan(15, "the scan must actually find the services' sentences");
+
+        // Sentences held in constants or built from one, which the scan can't see.
+        var password = new Dictionary<string, string>();
+        AuthService.ValidatePassword("short", password);
+        thrown.AddRange(
+        [
+            password["Password"],
+            AuthService.CurrentPasswordLockedOutMessage,
+            EntraSignInService.IdentityTakenMessage,
+            InviteService.MicrosoftOnlyMessage,
+            StepUpService.WrongPasswordMessage,
+            StepUpService.TotpStepUpFirstMessage,
+            StepUpService.TotpSignInAgainMessage,
+        ]);
+
+        foreach (var message in thrown.Distinct())
         {
             var code = FormErrorReasons.CodeFor(message);
             code.Should().NotBe(FormErrorReasons.Generic, $"\"{message}\" is one the services throw");

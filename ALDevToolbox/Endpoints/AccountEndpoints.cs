@@ -133,9 +133,6 @@ internal static class AccountEndpoints
         return await HasMicrosoftLinkAsync(db, userId, ct);
     }
 
-    /// <summary>Shown when a Microsoft-linked account posts no password after its confirmation window closed.</summary>
-    internal static string ConfirmationExpiredMessage => FormErrorReasons.MessageFor(FormErrorReasons.ConfirmationExpired);
-
     private static Task<bool> HasMicrosoftLinkAsync(AppDbContext db, int userId, CancellationToken ct) =>
         // Filtered: the signed-in user's own links, inside their org.
         db.UserExternalLogins.AsNoTracking()
