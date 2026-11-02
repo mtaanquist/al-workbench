@@ -32,13 +32,23 @@ namespace ALDevToolbox.Tests.Mcp;
 /// </summary>
 public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
 {
-    private readonly TestDb _db = new();
+    // Created on first use, so a test that starts by seeding gets a clone of the
+    // seeded template instead of importing two apps itself (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
+
+    public ObjectExplorerToolsVisibilityTests()
+    {
+    }
+
+    /// <summary>An instance over the template being seeded, so the seed runs the same helpers.</summary>
+    private ObjectExplorerToolsVisibilityTests(TestDb database) => _database = database;
 
     private const int OwnerUserId = 9600;
     private const int MemberUserId = 9601;
     private const int OutsiderUserId = 9602;
 
-    public void Dispose() => _db.Dispose();
+    public void Dispose() => _database?.Dispose();
 
     // ── Fixture ─────────────────────────────────────────────────────────
 
@@ -55,7 +65,23 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         long ProcedureSymbolId,
         long CallingSymbolId);
 
-    private async Task<Fixture> SeedAsync()
+    /// <summary>
+    /// The seeded scenario, acting as the owner. The writes run once per test
+    /// process into a template every test clones; ids survive the clone, and the
+    /// acting identity, which lives outside the database, is set again here.
+    /// </summary>
+    private Task<Fixture> SeedAsync()
+    {
+        if (_database is not null) return SeedHereAsync();
+        _database = TestDb.FromSeed(
+            "mcp-object-explorer-visibility",
+            db => new ObjectExplorerToolsVisibilityTests(db).SeedHereAsync(),
+            out var fixture);
+        ActAs(OwnerUserId);
+        return Task.FromResult(fixture);
+    }
+
+    private async Task<Fixture> SeedHereAsync()
     {
         await SeedUsersAsync();
         ActAs(OwnerUserId);
