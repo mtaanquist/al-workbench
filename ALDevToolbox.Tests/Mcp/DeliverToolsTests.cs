@@ -283,11 +283,11 @@ public sealed class DeliverToolsTests : IDisposable
         answer.Rows[0].Outcome.Should().Contain("History page");
         var json = System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions);
         json.Length.Should().BeLessThan(25_000);
-        if (answer.Rows.Count < 50)
-        {
-            answer.Truncated.Should().BeTrue();
-            answer.Note.Should().Contain("History page");
-        }
+        // Even cut, fifty failure lines overrun the budget, so the budget - not the
+        // fifty-line cap - stops the list, and the answer must say so.
+        answer.Rows.Count.Should().BeLessThan(50);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("History page");
     }
 
     [Fact]
