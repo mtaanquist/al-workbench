@@ -87,6 +87,78 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
             .Should().BeFalse();
     }
 
+    /// <summary>
+    /// Once a held command is refused because a restore replaced the database, the
+    /// work's own failure handling (stamping a release failed, putting it back to
+    /// ready) runs next on the same context. It must not write into the restored one.
+    /// </summary>
+    [Fact]
+    public async Task After_a_held_command_is_refused_for_a_replaced_database_the_rest_of_the_work_is_refused_too()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        _maintenance.Enter("Restoring backup test.dump");
+        var held = ctx.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        _maintenance.AdvanceEpoch();
+        _maintenance.Exit();
+        var wait = () => held.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        await wait.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+
+        var user = NewUser();
+        ctx.Users.Add(user);
+        var cleanUp = () => ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        (await cleanUp.Should().ThrowAsync<DbUpdateException>())
+            .WithInnerException<DatabaseClosedForMaintenanceException>("the site is open again, but this work belonged to the old database");
+        await using var check = _db.NewContext();
+        (await check.Users.AsNoTracking().AnyAsync(u => u.Email == user.Email, TestContext.Current.CancellationToken))
+            .Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Once the restore stops waiting and goes ahead, nothing held would run, and each
+    /// held command keeps a pooled connection open through the drop and the load.
+    /// </summary>
+    [Fact]
+    public async Task A_held_command_is_let_go_as_soon_as_the_restore_goes_ahead()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        _maintenance.Enter("Restoring backup test.dump");
+        var held = ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        held.IsCompleted.Should().BeFalse();
+
+        _maintenance.MarkRestoreGoingAhead();
+
+        var wait = () => held.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await wait.Should().ThrowAsync<DatabaseClosedForMaintenanceException>("the restore is still running, so the site stays closed");
+        _maintenance.IsActive.Should().BeTrue();
+        var next = () => ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        await next.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5), "not held a second time");
+    }
+
+    /// <summary>
+    /// Saving more than one row opens a transaction of its own, so it is refused at once
+    /// rather than held: an upload caught this way fails and can be retried.
+    /// </summary>
+    [Fact]
+    public async Task A_save_of_several_rows_is_refused_at_once_rather_than_held()
+    {
+        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        _maintenance.Enter("Restoring backup test.dump");
+        ctx.Users.Add(NewUser());
+        ctx.Users.Add(NewUser());
+
+        var save = () => ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        (await save.Should().ThrowAsync<DbUpdateException>())
+            .WithInnerException<DatabaseClosedForMaintenanceException>();
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5), "it is not held");
+    }
+
     [Fact]
     public async Task A_held_command_is_refused_once_the_restore_has_waited_its_time_and_the_margin()
     {

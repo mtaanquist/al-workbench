@@ -453,6 +453,9 @@ public sealed class BackupService
                     + "Wait a few minutes, or until it has finished, then restore. Nothing was changed.",
             });
         }
+        // Commands the database guard is holding would only be refused after this,
+        // and each keeps a pooled connection open; let them go now (#1599).
+        _maintenance.MarkRestoreGoingAhead();
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
         var destructive = CancellationToken.None;

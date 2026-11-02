@@ -47,6 +47,7 @@ public sealed class MaintenanceModeState
     /// </remarks>
     public void Enter(string reason)
     {
+        _restoreGoingAhead = false;
         Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
         Entered?.Invoke();
     }
@@ -59,15 +60,39 @@ public sealed class MaintenanceModeState
     /// Nothing calls <see cref="Exit"/> for it: it stays until a SiteAdmin
     /// restores another backup or the process restarts (#1321).
     /// </summary>
-    public void HoldAfterFailedRestore(string reason) => _state = new(reason, DateTime.UtcNow, true);
+    public void HoldAfterFailedRestore(string reason)
+    {
+        _restoreGoingAhead = false;
+        _state = new(reason, DateTime.UtcNow, true);
+    }
 
     /// <summary>The current state, to hand back to <see cref="Restore"/>.</summary>
     public Snapshot Capture() => _state;
 
     /// <summary>Puts back a state taken with <see cref="Capture"/>.</summary>
-    public void Restore(Snapshot snapshot) => _state = snapshot;
+    public void Restore(Snapshot snapshot)
+    {
+        _restoreGoingAhead = false;
+        _state = snapshot;
+    }
 
-    public void Exit() => _state = new(null, default, false);
+    public void Exit()
+    {
+        _restoreGoingAhead = false;
+        _state = new(null, default, false);
+    }
+
+    private volatile bool _restoreGoingAhead;
+
+    /// <summary>
+    /// True once the restore under way has stopped waiting for running work and is
+    /// going ahead with the drop. Cleared when the flag changes again. The database
+    /// guard stops holding commands from then on (#1599).
+    /// </summary>
+    public bool RestoreGoingAhead => _restoreGoingAhead;
+
+    /// <summary>Called by the restore once nothing is running and it is about to drop the schema.</summary>
+    public void MarkRestoreGoingAhead() => _restoreGoingAhead = true;
 
     // ---- Background jobs across a restore (#1538) ----------------------------------
 

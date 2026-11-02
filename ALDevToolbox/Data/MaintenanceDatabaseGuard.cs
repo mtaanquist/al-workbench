@@ -48,7 +48,10 @@ namespace ALDevToolbox.Data;
 /// release left "importing") with nothing to put them right. A held command
 /// waits for the flag to clear, for no longer than the restore waits for
 /// running jobs plus <see cref="HoldMargin"/>, and then runs if the database
-/// is the one it started on, or is refused if a restore replaced it. Two kinds
+/// is the one it started on. It is refused if a restore replaced the database,
+/// and at once if the restore has already gone ahead; after that refusal the
+/// scope's later commands are refused too, so the work's failure handling does
+/// not write into the restored database. Two kinds
 /// are still refused at once: a command inside an open transaction, whose locks
 /// would keep the restore from dropping the schema (it rolls back, and what
 /// the work does after that is held as usual), and a synchronous command,
@@ -97,13 +100,23 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
 
     private static readonly TimeSpan HoldPoll = TimeSpan.FromMilliseconds(100);
 
+    // Set once a held command is refused: the restore went ahead, so whatever this
+    // scope's work was part of is in the database being replaced. Everything after
+    // it is refused too, or the work's own failure handling (stamping a release
+    // failed, putting it back to ready) would write into the restored database
+    // once the site reopens (#1599).
+    private volatile bool _workOutlivedItsDatabase;
+
     private void Begin(DbCommand command)
     {
-        if (!TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+        if (_workOutlivedItsDatabase || !TryPass(command)) throw new DatabaseClosedForMaintenanceException();
     }
 
     private async ValueTask BeginAsync(DbCommand command, CommandEventData eventData, CancellationToken ct)
     {
+        // Before anything else, so a restore that completes in between is seen.
+        var epoch = _maintenance.Epoch;
+        if (_workOutlivedItsDatabase) throw new DatabaseClosedForMaintenanceException();
         if (TryPass(command)) return;
         // A request that arrived during maintenance (it has the read allowance) is on
         // its way to the maintenance page: refuse it now. So is a command in an open
@@ -115,18 +128,28 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
 
         // Work that was already running when the restore began: hold it until the
         // site reopens, so a refused restore lets it carry on (#1599).
-        var epoch = _maintenance.Epoch;
         while (_maintenance.IsActive)
         {
-            // Read each time: the restore sets its wait just after turning the flag on.
-            if (DateTime.UtcNow >= _maintenance.StartedAtUtc + _maintenance.ActiveJobsWait + _holdMargin)
+            // Not once the restore has gone ahead (or is held closed after failing):
+            // nothing held would run, and each holds a pooled connection the restore
+            // may need. Read each time: the restore sets its wait after turning the
+            // flag on.
+            if (_maintenance.RestoreGoingAhead
+                || _maintenance.IsHeldAfterFailedRestore
+                || DateTime.UtcNow >= _maintenance.StartedAtUtc + _maintenance.ActiveJobsWait + _holdMargin)
             {
+                _workOutlivedItsDatabase = true;
                 throw new DatabaseClosedForMaintenanceException();
             }
             await Task.Delay(HoldPoll, ct).ConfigureAwait(false);
         }
         // A restore replaced the database meanwhile: whatever this was part of is gone.
-        if (_maintenance.Epoch != epoch || !TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+        if (_maintenance.Epoch != epoch)
+        {
+            _workOutlivedItsDatabase = true;
+            throw new DatabaseClosedForMaintenanceException();
+        }
+        if (!TryPass(command)) throw new DatabaseClosedForMaintenanceException();
     }
 
     /// <summary>
