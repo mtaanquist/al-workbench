@@ -102,8 +102,18 @@ public sealed class GitHubWebhookEndpointTests : IClassFixture<GitHubWebhookEndp
                 waitTimeout: TimeSpan.FromMilliseconds(300),
                 readDeadline: TimeSpan.FromSeconds(3));
             _holder.Senders = LoadedSenders();
-            var n = Interlocked.Increment(ref _lastSender);
-            _holder.Sender = $"192.30.{253 + n / 250}.{n % 250 + 1}";
+            _holder.Sender = SenderFor(Interlocked.Increment(ref _lastSender));
+        }
+
+        /// <summary>
+        /// The <paramref name="n"/>th test's sender, inside 192.30.253.1-192.30.255.250.
+        /// Wraps after 750 so a long run never leaves GitHub's /22 (#1604); by then
+        /// the first tests' rate-limit windows have long passed.
+        /// </summary>
+        internal static string SenderFor(int n)
+        {
+            var slot = (int)((uint)n % 750);
+            return $"192.30.{253 + slot / 250}.{slot % 250 + 1}";
         }
 
         private static int _lastSender;
@@ -241,6 +251,22 @@ public sealed class GitHubWebhookEndpointTests : IClassFixture<GitHubWebhookEndp
     {
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
         return "sha256=" + Convert.ToHexString(hmac.ComputeHash(body)).ToLowerInvariant();
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(249)]
+    [InlineData(250)]
+    [InlineData(749)]
+    [InlineData(750)]
+    [InlineData(10_000)]
+    [InlineData(int.MaxValue)]
+    public void Every_test_sender_stays_inside_GitHubs_hook_range(int n)
+    {
+        var sender = IPAddress.Parse(Host.SenderFor(n));
+
+        IPNetwork.Parse("192.30.252.0/22").Contains(sender).Should().BeTrue(
+            $"test {n} must still deliver from an address the allow-list accepts");
     }
 
     [Fact]

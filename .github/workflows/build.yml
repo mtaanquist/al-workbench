@@ -229,9 +229,20 @@ jobs:
         # A name is not a string prefix (Mcp would not pull in a McpFoo).
         # Whatever the matching rule, both shards use the same names, so a
         # test outside shard a is always inside shard b.
+        #
+        # That also means a renamed or misspelt name fails nothing: shard a
+        # quietly runs less and shard b picks it up, and the first sign is the
+        # job hitting its time limit (#1604). So each name must still be a
+        # namespace the test project declares, or both shards stop here.
         env:
           SHARD: ${{ matrix.shard }}
         run: |
+          for ns in $SHARD_A_NAMESPACES; do
+            if ! grep -rqE --include='*.cs' "^namespace ALDevToolbox\.Tests\.${ns}(\.[A-Za-z0-9_.]+)?;" ALDevToolbox.Tests; then
+              echo "::error::SHARD_A_NAMESPACES lists '$ns', but no test file declares namespace ALDevToolbox.Tests.$ns. Fix the list in build.yml."
+              exit 1
+            fi
+          done
           if [ "$SHARD" = "a" ]; then flag=--filter-namespace; else flag=--filter-not-namespace; fi
           args=()
           for ns in $SHARD_A_NAMESPACES; do

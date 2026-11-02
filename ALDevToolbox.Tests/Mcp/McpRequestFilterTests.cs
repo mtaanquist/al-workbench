@@ -346,7 +346,7 @@ public sealed class McpRequestFilterTests : IClassFixture<SharedEndpointHost>
             await seed.SaveChangesAsync();
         }
 
-        using var browser = _factory.CreateClient();
+        using var browser = _factory.CreateClient().From(TestCallerAddress.Next());
         using var loginPage = await browser.GetAsync("/login");
         using var login = await browser.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
         {
