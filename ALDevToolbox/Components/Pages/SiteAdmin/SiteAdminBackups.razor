@@ -83,7 +83,7 @@
         }
         else if (Ok == "restored")
         {
-            <Alert Tone="AlertTone.Success"><span>Restore complete — the application is back online. If you are asked to sign in, use an account from the backup. Restart the application when you can: any import or build that was still in progress when the backup was taken keeps showing as running until you do.</span></Alert>
+            <Alert Tone="AlertTone.Success"><span>Restore complete — the application is back online. If you are asked to sign in, use an account from the backup. Restart the application when you can: imports and builds that were still in progress when the backup was taken keep showing as running until you do. Deployments that were still in progress are marked as failed within a minute.</span></Alert>
         }
         else if (Ok == "former-removed")
         {

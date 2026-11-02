@@ -617,7 +617,7 @@ public sealed class TestDb : IDisposable
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var github = gitHubAccess ?? NewOfflineGitHubAccessService(ctx);
         return new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github),
+            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github), NewQuotaGuard(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
     }
 
@@ -666,7 +666,7 @@ public sealed class TestDb : IDisposable
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var projects = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access),
+            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access), NewQuotaGuard(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
         return new ALDevToolbox.Services.GitHub.RepositoryDiscoveryService(
             ctx, client, access, NewGitHubConnectionService(ctx, access), NewOrganizationConfigService(ctx),

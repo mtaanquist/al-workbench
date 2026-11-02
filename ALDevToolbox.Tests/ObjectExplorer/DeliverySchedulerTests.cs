@@ -8,6 +8,7 @@ using ALDevToolbox.Services.Workers;
 using ALDevToolbox.Tests.Auth;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -133,6 +134,45 @@ public sealed class DeliverySchedulerTests : IDisposable
 
         (await DeliveryHost.StatusAsync(_db, orphan)).Should().Be(ProjectDeliveryStatus.Failed);
         Drain(queue).Select(j => j.DeliveryId).Should().Equal(due);
+    }
+
+    /// <summary>
+    /// A restore brings back whatever the backup caught mid-install. The organisations
+    /// were already checked once in this process, so the restore's epoch moving is what
+    /// makes the next sweep check them again, against the time the database was replaced
+    /// rather than the time the process started (#1580).
+    /// </summary>
+    [Fact]
+    public async Task After_a_restore_the_next_sweep_fails_a_deployment_the_backup_caught_in_progress()
+    {
+        var seed = await DeliveryHost.SeedAsync(_db, Started.UtcDateTime);
+        await using var provider = BuildProvider();
+        var maintenance = new MaintenanceModeState();
+        var scheduler = new DeliveryScheduler(
+            provider, _clock, NullLogger<DeliveryScheduler>.Instance, new WorkerHeartbeatRegistry(), maintenance);
+        await scheduler.TickOnceAsync(CancellationToken.None);
+
+        // Claimed after this process started, so the first check left it alone; then the
+        // backup holding it is restored.
+        var caught = await AddInProgressAsync(seed, claimedAt: DateTime.UtcNow.AddMinutes(-5));
+        await scheduler.TickOnceAsync(CancellationToken.None);
+        (await DeliveryHost.StatusAsync(_db, caught)).Should().Be(ProjectDeliveryStatus.Installing, "no restore yet");
+
+        maintenance.Enter("Restoring a backup");
+        maintenance.AdvanceEpoch();
+        maintenance.Exit();
+        // Claimed once the site reopened: running, not restored.
+        var running = await AddInProgressAsync(seed, claimedAt: DateTime.UtcNow.AddMinutes(1));
+
+        await scheduler.TickOnceAsync(CancellationToken.None);
+
+        (await DeliveryHost.StatusAsync(_db, caught)).Should().Be(ProjectDeliveryStatus.Failed);
+        (await DeliveryHost.StatusAsync(_db, running)).Should().Be(ProjectDeliveryStatus.Installing);
+        await using (var read = _db.NewContext())
+        {
+            (await read.OeProjectDeliveries.AsNoTracking().SingleAsync(d => d.Id == caught))
+                .FailureMessage.Should().Contain("restored from a backup");
+        }
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────

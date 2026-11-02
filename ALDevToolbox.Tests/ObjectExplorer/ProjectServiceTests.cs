@@ -59,7 +59,7 @@ public sealed class ProjectServiceTests : IDisposable
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
         var gitHubAccess = _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, _gitHub));
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, gitHubAccess, _db.NewRepositoryReadProbe(ctx, gitHubAccess, _gitRemote), NullLogger<ProjectService>.Instance);
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, gitHubAccess, _db.NewRepositoryReadProbe(ctx, gitHubAccess, _gitRemote), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance);
     }
 
     /// <summary>What GitHub answers. Nothing is registered until a test says so.</summary>
@@ -1479,6 +1479,46 @@ public sealed class ProjectServiceTests : IDisposable
         rows.Should().ContainSingle();
         rows[0].FileName.Should().Be("Continia_Document Capture_12.0.0.0.app");
         rows[0].ContentLength.Should().Be(4);
+    }
+
+    /// <summary>
+    /// Symbol packages are stored blobs, so an organisation at its storage quota can't
+    /// add more, as with every other upload (#1580).
+    /// </summary>
+    [Fact]
+    public async Task AddSupplementalSymbols_is_refused_once_the_organisation_is_over_its_storage_quota()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var id = await svc.CreateProjectAsync(NewInput("CRONUS"));
+        await SetDefaultStorageQuotaAsync(0);
+        try
+        {
+            _db.NewQuotaGuard(ctx).Invalidate(TestDb.DefaultOrgId);
+
+            var act = () => svc.AddSupplementalSymbolsAsync(id, new[] { new SupplementalSymbolUpload("Dep.app", new byte[] { 1 }) });
+
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
+            (await svc.ListSupplementalSymbolsAsync(id)).Should().BeEmpty();
+        }
+        finally
+        {
+            await SetDefaultStorageQuotaAsync(null);
+            _db.NewQuotaGuard(ctx).Invalidate(TestDb.DefaultOrgId);
+        }
+    }
+
+    private async Task SetDefaultStorageQuotaAsync(int? megabytes)
+    {
+        await using var ctx = _db.NewContext();
+        var row = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        if (row is null)
+        {
+            row = new SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(row);
+        }
+        row.DefaultStorageQuotaMb = megabytes;
+        await ctx.SaveChangesAsync();
     }
 
     [Fact]
