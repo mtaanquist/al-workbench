@@ -223,9 +223,12 @@ public sealed class AccountAdministrationTests : IDisposable
         };
         await using (var seed = _db.NewContext())
         {
+            var lapsed = NewLink(leaverId, "lapsed");
+            lapsed.ExpiresAt = now.AddMinutes(-1);
             seed.SealedLinks.AddRange(
                 NewLink(leaverId, "open"),
                 NewLink(leaverId, "used", SealedLinkClosedReason.UsedUp),
+                lapsed,
                 NewLink(actorId, "colleague"));
             await seed.SaveChangesAsync();
         }
@@ -239,6 +242,7 @@ public sealed class AccountAdministrationTests : IDisposable
         links["open"].Ciphertext.Should().BeNull("a closed link keeps no secret");
         links["used"].ClosedReason.Should().Be(SealedLinkClosedReason.UsedUp, "a link that had already closed keeps its own reason");
         links["colleague"].ClosedAt.Should().BeNull("another person's links are theirs to keep");
+        links["lapsed"].ClosedAt.Should().BeNull("a link already past its expiry is the sweep's to record as Expired, not Revoked");
         var audit = await read.AuditLog.AsNoTracking()
             .Where(a => a.EntityType == AuditEntityType.SealedLink)
             .ToListAsync();

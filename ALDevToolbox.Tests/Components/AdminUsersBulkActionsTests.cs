@@ -156,6 +156,31 @@ public sealed class AdminUsersBulkActionsTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_rows_disable_says_what_stops_working_and_does_nothing_until_confirmed()
+    {
+        // Disabling closes open Sealed links and pending invites for good, so
+        // the one-row button asks as the bulk one does (#1544).
+        await SeedAsync(UserRole.User);
+        var cut = RenderLoaded();
+        void ClickRowDisable() => cut.WaitForAssertion(() => RowOf(cut, "una@cronus.test")
+            .QuerySelectorAll(".data-table__actions button").Single(b => b.TextContent.Trim() == "Disable").Click());
+
+        ClickRowDisable();
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog__body").TextContent
+            .Should().Contain("Una User").And.Contain("open Sealed links stop working"));
+        Answer(cut, "Cancel");
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions").Should().BeEmpty());
+        StillTrue.For(() => Stored()[UnaUserId].Status == UserStatus.Active, "saying no must leave the account working");
+
+        ClickRowDisable();
+        Answer(cut, "Disable");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Una User is disabled."));
+        Stored()[UnaUserId].Status.Should().Be(UserStatus.Disabled);
+        Stored()[UlfUserId].Status.Should().Be(UserStatus.Active);
+    }
+
+    [Fact]
     public async Task Confirmed_bulk_promote_makes_both_admins()
     {
         await SeedAsync(UserRole.User);
