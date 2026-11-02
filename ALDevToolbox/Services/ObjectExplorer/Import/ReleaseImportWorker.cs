@@ -821,10 +821,13 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 
     /// <summary>What the Add modules page says about a finished upload, as the old redirect did.</summary>
     internal static string AddModulesNote(ReleaseImportSummary summary) =>
-        $"Added {summary.ModulesImported} module(s)."
-        + (summary.ModulesSkipped > 0
-            ? $" {summary.ModulesSkipped} were already in the release and were skipped."
-            : string.Empty);
+        $"Added {summary.ModulesImported} {(summary.ModulesImported == 1 ? "module" : "modules")}."
+        + summary.ModulesSkipped switch
+        {
+            0 => string.Empty,
+            1 => " 1 was already in the release and was skipped.",
+            var n => $" {n} were already in the release and were skipped.",
+        };
 
     private static string FriendlyMessage(Exception ex) =>
         ex is PlanValidationException pve && pve.Errors.Count > 0
