@@ -49,8 +49,12 @@ public sealed class MaintenanceModeState
     {
         Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
         // Cancels the token jobs that stop for a restore took before this, and gives
-        // the jobs that start after the next Exit a fresh one.
-        Interlocked.Exchange(ref _entering, new CancellationTokenSource()).Cancel();
+        // the jobs that start after the next Exit a fresh one. The flag goes on first,
+        // so a job that reads the fresh token can see from the flag that it is too late.
+        // A callback that throws must not leave the flag on with the restore unaware.
+        var previous = Interlocked.Exchange(ref _entering, new CancellationTokenSource());
+        try { previous.Cancel(); }
+        catch (AggregateException) { }
         Entered?.Invoke();
     }
 

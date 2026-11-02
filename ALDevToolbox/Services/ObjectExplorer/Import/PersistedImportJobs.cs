@@ -57,13 +57,14 @@ public sealed class PersistedImportJobs
     /// repeated backfill, which is harmless, so it is not worth a lock.
     ///
     /// <para>A release is left alone when a backfill of it is running, or queued by
-    /// this process, or when its newest backfill completed after the release last
-    /// changed (#1578, OEI2-1): a second click during a bulk run would otherwise queue
-    /// again every release the run had just finished. A <c>queued</c> row written
-    /// before <paramref name="staleBefore"/> (this process's start, or the last
-    /// restore) is one nothing feeds: a restored database brings its queued rows
-    /// without the process that fed them (OEI2-3). It is failed, and the release gets a
-    /// fresh row like any other.</para>
+    /// this process, or when its newest finished backfill completed (not failed) after
+    /// the release last changed (#1578, OEI2-1): a second click during a bulk run would
+    /// otherwise queue again every release the run had just finished. A <c>queued</c>
+    /// row written, or a <c>running</c> row started, before
+    /// <paramref name="staleBefore"/> (this process's start, or the last restore) is one
+    /// nothing feeds or runs: a restored database brings those rows without the process
+    /// that owned them (OEI2-3). It is failed, and the release gets a fresh row like any
+    /// other.</para>
     /// </summary>
     public async Task<IReadOnlyList<(int ReleaseId, long JobRowId)>> CreateBackfillsAsync(
         IReadOnlyList<int> releaseIds,
@@ -78,20 +79,29 @@ public sealed class PersistedImportJobs
         var now = _clock.GetUtcNow().UtcDateTime;
 
         var stale = await _db.OeImportJobs
-            .Where(j => j.Kind == BackfillKind && j.Status == "queued" && j.CreatedAt < staleBefore)
+            .Where(j => j.Kind == BackfillKind && ids.Contains(j.ReleaseId)
+                && ((j.Status == "queued" && j.CreatedAt < staleBefore)
+                    || (j.Status == "running" && j.StartedAt < staleBefore)))
             .ExecuteUpdateAsync(u => u
                 .SetProperty(j => j.Status, "failed")
                 .SetProperty(j => j.ErrorMessage, StaleBackfillMessage)
                 .SetProperty(j => j.CompletedAt, now), ct).ConfigureAwait(false);
 
         var active = await ListReleasesWithActiveBackfillAsync(ct).ConfigureAwait(false);
-        var done = await _db.OeImportJobs.AsNoTracking()
-            .Where(j => j.Kind == BackfillKind && j.Status == "completed" && ids.Contains(j.ReleaseId))
-            .Join(_db.OeReleases, j => j.ReleaseId, r => r.Id, (j, r) => new { j.ReleaseId, j.CompletedAt, r.UpdatedAt })
-            .Where(x => x.CompletedAt > x.UpdatedAt)
-            .Select(x => x.ReleaseId)
-            .Distinct()
+        // Decided on the newest finished row, completed or failed: a backfill that
+        // failed after an earlier one completed (cut off, references incomplete) still
+        // needs running.
+        var finished = await _db.OeImportJobs.AsNoTracking()
+            .Where(j => j.Kind == BackfillKind && (j.Status == "completed" || j.Status == "failed")
+                && j.CompletedAt != null && ids.Contains(j.ReleaseId))
+            .Join(_db.OeReleases, j => j.ReleaseId, r => r.Id, (j, r) => new { j.ReleaseId, j.Id, j.Status, j.CompletedAt, r.UpdatedAt })
             .ToListAsync(ct).ConfigureAwait(false);
+        var done = finished
+            .GroupBy(x => x.ReleaseId)
+            .Select(g => g.OrderByDescending(x => x.CompletedAt).ThenByDescending(x => x.Id).First())
+            .Where(x => x.Status == "completed" && x.CompletedAt > x.UpdatedAt)
+            .Select(x => x.ReleaseId)
+            .ToHashSet();
 
         var source = new ReleaseImportSource.Backfill();
         var rows = ids
@@ -108,7 +118,7 @@ public sealed class PersistedImportJobs
 
     /// <summary>What a queued backfill row that nothing was feeding is failed with.</summary>
     internal const string StaleBackfillMessage =
-        "Never ran: it was queued before the last restart or restore. A new backfill was queued in its place.";
+        "Did not finish: it was queued or running before the last restart or restore. A new backfill was queued in its place.";
 
     /// <summary>
     /// Puts a backfill a restore stopped back to <c>queued</c> (#1578, OEI2-4). Keeps

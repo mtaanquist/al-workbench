@@ -38,6 +38,23 @@ public sealed class BackfillStoppedForRestoreTests : IDisposable
         after.IsCancellationRequested.Should().BeFalse("a job that starts after the restore runs normally");
     }
 
+    /// <summary>
+    /// The bulk backfill's stale cut-off: rows from before a restore that replaced the
+    /// database belong to the database that was replaced, so it moves to the restore.
+    /// </summary>
+    [Fact]
+    public void The_queue_is_fed_since_the_last_restore_that_replaced_the_database()
+    {
+        var maintenance = new MaintenanceModeState();
+        var queue = new ReleaseImportQueue(maintenance);
+        var before = queue.FedSinceUtc;
+
+        maintenance.AdvanceEpoch();
+
+        queue.FedSinceUtc.Should().Be(maintenance.EpochAdvancedAtUtc);
+        queue.FedSinceUtc.Should().BeAfter(before);
+    }
+
     [Fact]
     public async Task A_restore_stops_a_running_backfill_and_puts_it_back_on_the_queue()
     {

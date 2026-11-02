@@ -102,6 +102,53 @@ public sealed class PersistedImportJobsTests : IDisposable
     }
 
     /// <summary>
+    /// A backfill that failed after an earlier one completed decides: the release still
+    /// needs one, so the bulk action queues it.
+    /// </summary>
+    [Fact]
+    public async Task CreateBackfillsAsync_queues_a_release_whose_newest_backfill_failed_after_one_completed()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        var completed = (await svc.CreateBackfillsAsync([release.Id], Identity, DateTime.MinValue)).Single().JobRowId;
+        await svc.MarkRunningAsync(completed);
+        await svc.MarkCompletedAsync(completed);
+        var failed = await svc.CreateAsync(release.Id, Identity, new ReleaseImportSource.Backfill(), storeSymbolReference: false);
+        await svc.MarkRunningAsync(failed);
+        await svc.MarkFailedAsync(failed, "Cut off twice.");
+        await ctx.OeImportJobs.Where(j => j.Id == failed)
+            .ExecuteUpdateAsync(u => u.SetProperty(j => j.CompletedAt, DateTime.UtcNow.AddMinutes(1)));
+
+        var again = await NewService(_db.NewContext()).CreateBackfillsAsync([release.Id], Identity, DateTime.MinValue);
+
+        again.Select(r => r.ReleaseId).Should().Equal(release.Id);
+    }
+
+    /// <summary>
+    /// #1578 OEI2-3: a dump taken during a backfill holds its row as running. After the
+    /// restore nothing runs it, so it is failed and replaced like a stale queued row.
+    /// </summary>
+    [Fact]
+    public async Task CreateBackfillsAsync_replaces_a_running_row_from_before_the_restore()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        var rowId = (await svc.CreateBackfillsAsync([release.Id], Identity, DateTime.MinValue)).Single().JobRowId;
+        await svc.MarkRunningAsync(rowId);
+        var restoredAt = DateTime.UtcNow.AddSeconds(1);
+
+        var again = await NewService(_db.NewContext()).CreateBackfillsAsync([release.Id], Identity, restoredAt);
+
+        again.Select(r => r.ReleaseId).Should().Equal(release.Id);
+        await using var read = _db.NewContext();
+        var old = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == rowId);
+        old.Status.Should().Be("failed");
+        old.ErrorMessage.Should().Be(PersistedImportJobs.StaleBackfillMessage);
+    }
+
+    /// <summary>
     /// #1578 OEI2-3: a queued backfill row from before this process started or the last
     /// restore has nothing feeding it. It is failed and replaced rather than counted as
     /// waiting; one queued since is still left alone.

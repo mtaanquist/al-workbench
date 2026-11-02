@@ -422,6 +422,10 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 using var forRestore = _maintenance is null
                     ? null
                     : CancellationTokenSource.CreateLinkedTokenSource(ct, _maintenance.EnteringToken);
+                // A restore that turned the flag on between this job counting itself in and
+                // reading the token handed it the next, uncancelled token: Enter turns the
+                // flag on before it swaps the token, so the flag says so.
+                if (_maintenance?.IsActive == true) forRestore?.Cancel();
                 var token = forRestore?.Token ?? ct;
                 try
                 {
@@ -462,8 +466,13 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     }
                     if (_queue is not null)
                     {
-                        _ = ResumedImportJobs.EnqueueAllAsync(_queue, [job], _logger,
-                            "a backfill stopped for a restore", ct, paced: true, epoch: epoch);
+                        // Detached, so it must not carry this job's database allowance
+                        // (MaintenanceModeState.AllowDatabase) past the job's end.
+                        using (ExecutionContext.SuppressFlow())
+                        {
+                            _ = ResumedImportJobs.EnqueueAllAsync(_queue, [job], _logger,
+                                "a backfill stopped for a restore", ct, paced: true, epoch: epoch);
+                        }
                     }
                 }
                 catch (Exception ex)
