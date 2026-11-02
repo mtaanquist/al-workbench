@@ -722,13 +722,17 @@ that names the environment and says what the click does there:
   first app (#1568), because a later upload may need an app an earlier one brings - an
   add-on solution's upload booked after the base solution's it depends on goes after it.
   That holds when a window moves the base, too: a booking a window chose the time for
-  waits while a window booking made before it on the same environment has not been sent,
-  even when its own window is open (a different window on the other
-  solution's row, or Microsoft's update window rather than the delivery window), and goes
-  once that base is sent (#1629). Nothing records that a row was moved, so a base booked
-  for a later night holds a later window booking behind it the same way. A booking whose
-  time a person picked never waits for that; it goes at its time, and Business Central
-  refuses it if it needs a base that has not gone yet. So an Install now on an environment where an earlier booking is still waiting waits
+  waits while an install booked before it on the same environment has not been sent,
+  even when its own window is open (a different window on the other solution's row, or
+  Microsoft's update window rather than the delivery window), and goes once that base is
+  sent (#1629). The earlier install holds it when a window chose its time, or when a
+  person picked its time and that time has come - an Install now on the moved base keeps
+  the add-on behind it; a time a person set for later holds nothing until it comes.
+  Nothing records that a row was moved, so a base booked for a later night holds a later
+  window booking behind it the same way. While it waits, the environment page says
+  "Waits for <the earlier app>, booked before it" instead of "Starting shortly". A
+  booking whose time a person picked never waits for that; it goes at its time, and
+  Business Central refuses it if it needs a base that has not gone yet. So an Install now on an environment where an earlier booking is still waiting waits
   for that booking too, the whole batch if it is one; it only goes ahead of other
   environments' bookings. Which environment gets the turn is decided by the best of its
   due installs (#1608): first the environments with any due booking whose time a person

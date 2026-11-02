@@ -350,13 +350,14 @@ public sealed class UpgradeActionService
     {
         await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
 
-        return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+        var rows = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId)
             .OrderByDescending(a => a.RequestedAt)
             .ThenByDescending(a => a.Id)
             .Take(FeedLimit)
             .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
+        return await WithWhatTheyWaitForAsync(projectId, environmentId, rows, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -395,13 +396,80 @@ public sealed class UpgradeActionService
     {
         await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
 
-        return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+        var rows = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
                         && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
                         && a.Status == UpgradeActionStatus.Pending)
             .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder).ThenBy(a => a.Id)
             .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
+        return await WithWhatTheyWaitForAsync(projectId, environmentId, rows, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The installs that hold a later window booking on the same Business Central
+    /// environment until they are sent (#1629): any install not sent yet that a window
+    /// chose the time for, or whose own time has come. A booking a person set for later
+    /// holds nothing until its time. The worker drops the rows these hold from a sweep;
+    /// the environment page names them, so a held row does not read "Starting shortly"
+    /// for as long as it waits.
+    /// </summary>
+    internal static IQueryable<OeEnvironmentUpgradeAction> EarlierBookingsThatHold(
+        IQueryable<OeEnvironmentUpgradeAction> actions, DateTime now) =>
+        actions.Where(a => a.Status == UpgradeActionStatus.Pending
+                           && a.SentAt == null
+                           && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
+                           && (a.ScheduledByWindow != null || a.ExecuteAfter <= now));
+
+    /// <summary>
+    /// Names, on each pending window booking of one environment, the earlier booking it
+    /// waits for (<see cref="EarlierBookingsThatHold"/>), looked up across every solution
+    /// connected to that environment in Business Central, as the worker looks.
+    /// </summary>
+    private async Task<List<UpgradeActionRow>> WithWhatTheyWaitForAsync(
+        int projectId, int environmentId, List<UpgradeActionRow> rows, CancellationToken ct)
+    {
+        var candidates = rows.Where(r => r.IsPending && r.SentAt == null && IsAppInstall(r.Kind)).Select(r => r.Id).ToList();
+        if (candidates.Count == 0) return rows;
+        var windowed = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => candidates.Contains(a.Id) && a.ScheduledByWindow != null)
+            .Select(a => a.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+        if (windowed.Count == 0) return rows;
+
+        var here = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.ProjectId == projectId)
+            .Select(e => new { e.Project!.BcTenantId, e.Name })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (here is null) return rows;
+        var key = UpgradeActionWorker.EnvironmentKey(here.BcTenantId, projectId, here.Name);
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var holding = EarlierBookingsThatHold(_db.OeEnvironmentUpgradeActions.AsNoTracking(), now);
+        // A shared environment's other solutions book on their own rows; a solution with no
+        // tenant yet counts as its own environment.
+        holding = here.BcTenantId is { } tenant
+            ? holding.Where(a => a.Project!.BcTenantId == tenant)
+            : holding.Where(a => a.ProjectId == projectId);
+        var holders = (await holding
+                .Select(a => new
+                {
+                    a.Id, a.ProjectId, a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt, a.BatchOrder,
+                    Label = a.PackageFileName ?? a.AppName,
+                })
+                .ToListAsync(ct).ConfigureAwait(false))
+            .Where(h => UpgradeActionWorker.EnvironmentKey(h.BcTenantId, h.ProjectId, h.Name) == key)
+            .OrderBy(h => h.RequestedAt).ThenBy(h => h.BatchOrder ?? 0).ThenBy(h => h.Id)
+            .ToList();
+        if (holders.Count == 0) return rows;
+
+        var held = windowed.ToHashSet();
+        return rows.Select(r =>
+        {
+            if (!held.Contains(r.Id)) return r;
+            var first = holders.FirstOrDefault(h => h.RequestedAt < r.RequestedAt);
+            return first is null ? r : r with { WaitsFor = first.Label ?? "another app" };
+        }).ToList();
     }
 
     /// <summary>The one projection every read of the table shares, so a new column reaches every list at once.</summary>
@@ -641,7 +709,9 @@ public sealed record UpgradeActionRow(
     /// <summary>The app a booked AppSource update moves. Null for every other kind.</summary>
     Guid? AppId = null,
     /// <summary>The apps a booked AppSource update was agreed to bring along. Null for every other kind.</summary>
-    IReadOnlyList<Guid>? PrerequisiteAppIds = null)
+    IReadOnlyList<Guid>? PrerequisiteAppIds = null,
+    /// <summary>For a booked install that waits for one booked before it on the same environment (#1629), what that one installs. Null otherwise.</summary>
+    string? WaitsFor = null)
 {
     /// <summary>True while the action is still waiting for its slot — the only state with a Cancel.</summary>
     public bool IsPending => Status == UpgradeActionStatus.Pending;

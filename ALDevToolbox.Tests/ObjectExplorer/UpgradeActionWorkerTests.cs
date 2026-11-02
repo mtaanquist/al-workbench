@@ -2137,7 +2137,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     /// window on its own row. The base's window closes first, part-way through its batch.
     /// Returns the two solutions and their rows once the batch has moved.
     /// </summary>
-    private async Task<(int AddOnProject, int AddOnEnv, DateTime NextOpening)> MoveABaseBatchPastItsWindowAsync(bool bookAddOnInWindow)
+    private async Task<(int AddOnProject, int AddOnEnv, DateTime NextOpening, List<int> BaseIds)> MoveABaseBatchPastItsWindowAsync(bool bookAddOnInWindow)
     {
         var (baseProject, baseEnv) = await _f.SeedCustomerAsync("CRONUS Base");
         var (addOnProject, addOnEnv) = await _f.SeedCustomerAsync("CRONUS Add-on");
@@ -2145,7 +2145,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         // 22:00-23:00 in Copenhagen on the base's row, 22:00-02:00 on the add-on's.
         await SetWindowsAsync(baseEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(23, 0));
         await SetWindowsAsync(addOnEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(2, 0));
-        await BookInWindowAsync(baseProject, baseEnv, UploadAppTiming.DeliveryWindow, "Base1.app", "Base2.app", "Base3.app");
+        var baseIds = await BookInWindowAsync(baseProject, baseEnv, UploadAppTiming.DeliveryWindow, "Base1.app", "Base2.app", "Base3.app");
         _f.Clock.Advance(TimeSpan.FromMinutes(1));
         if (bookAddOnInWindow) await BookInWindowAsync(addOnProject, addOnEnv, UploadAppTiming.DeliveryWindow, "AddOn.app");
         var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
@@ -2158,13 +2158,13 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Clock.Advance(TimeSpan.FromMinutes(70));
         (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0,
             "the base's batch moves to the next opening, and nothing behind it on that environment goes in its place");
-        return (addOnProject, addOnEnv, opening.AddDays(1));
+        return (addOnProject, addOnEnv, opening.AddDays(1), baseIds);
     }
 
     [Fact]
     public async Task An_add_on_booked_after_its_base_waits_while_a_closed_window_has_moved_the_base()
     {
-        var (_, _, nextOpening) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
+        var (addOnProject, addOnEnv, _, _) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
 
         // Sweeps later the same night, the add-on's own window still open.
         for (var i = 0; i < 3; i++)
@@ -2174,12 +2174,34 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         }
         _f.Apps.InstalledFiles.Should().Equal(new[] { "Base1.app" },
             "an add-on booked after its base goes after it, even when a window moved the base");
+
+        // Its page says what it waits for rather than that it starts shortly.
+        await using var ctx = _f.Db.NewContext();
+        var addOn = (await _f.Svc(ctx).ListBookedInstallsAsync(addOnProject, addOnEnv)).Single();
+        addOn.WaitsFor.Should().Be("Base2.app");
+        (await _f.Svc(ctx).ListEnvironmentActivityAsync(addOnProject, addOnEnv))
+            .Single(r => r.Id == addOn.Id).WaitsFor.Should().Be("Base2.app");
+    }
+
+    [Fact]
+    public async Task Install_now_on_a_moved_base_still_sends_the_base_before_the_add_on()
+    {
+        // Review of #1693: Install now takes the base's rows off their window, and the
+        // add-on, carrying the earlier time, would sort ahead of them.
+        var (addOnProject, addOnEnv, _, baseIds) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
+
+        await AsOwnerAsync(ctx => _f.Svc(ctx).RunBookedInstallNowAsync(baseIds[1]));
+        await SweepUntilQuietAsync();
+
+        _f.Apps.InstalledFiles.Should().Equal("Base1.app", "Base2.app", "Base3.app", "AddOn.app");
+        await using var read = _f.Db.NewContext();
+        (await _f.Svc(read).ListBookedInstallsAsync(addOnProject, addOnEnv)).Should().BeEmpty();
     }
 
     [Fact]
     public async Task The_add_on_goes_once_the_moved_base_has_been_sent()
     {
-        var (_, _, nextOpening) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
+        var (_, _, nextOpening, _) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
 
         _f.Clock.Advance(nextOpening - _f.Clock.GetUtcNow().UtcDateTime);
         await SweepUntilQuietAsync();
@@ -2190,7 +2212,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     [Fact]
     public async Task An_install_a_person_timed_does_not_wait_for_a_moved_base()
     {
-        var (addOnProject, addOnEnv, _) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: false);
+        var (addOnProject, addOnEnv, _, _) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: false);
 
         // Booked after the base, for now: nobody asked it to wait for a window.
         await BookInWindowAsync(addOnProject, addOnEnv, UploadAppTiming.Now, "Hotfix.app");

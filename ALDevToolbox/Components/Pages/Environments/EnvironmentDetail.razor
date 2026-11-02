@@ -2277,10 +2277,11 @@
         return size > 1 ? $"{order + 1} of {size}" : null;
     }
 
-    /// <summary>When a booked row goes: its slot, "starting shortly" once that has come, or "installing now" while the worker has it.</summary>
+    /// <summary>When a booked row goes: its slot, "starting shortly" once that has come, or "installing now" while the worker has it. Past its slot and held behind an earlier booking (#1629), it says what it waits for.</summary>
     private string BookedWhen(UpgradeActionRow booked) =>
         booked.SentAt is not null ? (booked.Kind == UpgradeActionKind.UpdateApp ? "Updating now" : "Installing now")
-        : booked.ExecuteAfter <= Clock.GetUtcNow().UtcDateTime ? "Starting shortly"
+        : booked.ExecuteAfter <= Clock.GetUtcNow().UtcDateTime
+            ? (booked.WaitsFor is { } first ? $"Waits for {first}, booked before it" : "Starting shortly")
         : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
