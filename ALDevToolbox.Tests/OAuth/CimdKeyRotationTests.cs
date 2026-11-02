@@ -207,6 +207,36 @@ public sealed class CimdKeyRotationTests : IDisposable
         _http.RequestsTo(JwksUri).Should().Be(0, "only a row registered from a client-metadata document is refreshed");
     }
 
+    [Fact]
+    public async Task A_request_abandoned_mid_read_does_not_hold_off_the_next_one()
+    {
+        using var factory = NewFactory();
+        var refreshToken = await ConnectWithKeyAAsync(factory);
+        await AgeStoredKeysAsync(factory, CimdClientResolver.RefreshInterval + TimeSpan.FromMinutes(1));
+        var hanging = _http.Hang(JwksUri);
+        using var caller = factory.CreateClient();
+
+        // Someone sends an assertion naming the client, then drops the connection
+        // while the key set is being read.
+        using (var abandon = new CancellationTokenSource())
+        {
+            var abandoned = RefreshAsync(caller, refreshToken, _keyB, "key-b", cancellationToken: abandon.Token);
+            await hanging.WaitAsync(TimeSpan.FromSeconds(30));
+            await abandon.CancelAsync();
+            var dropped = async () => await abandoned;
+            await dropped.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        // The client rotates and signs with its new key: the read is not held off.
+        _http.Serve(JwksUri, Jwks((_keyB, "key-b")));
+        var fetches = _http.RequestsTo(JwksUri);
+        using var assistant = factory.CreateClient();
+        using var refreshed = await RefreshAsync(assistant, refreshToken, _keyB, "key-b");
+
+        _http.RequestsTo(JwksUri).Should().Be(fetches + 1);
+        refreshed.StatusCode.Should().Be(HttpStatusCode.OK, await refreshed.Content.ReadAsStringAsync());
+    }
+
     // ── Plumbing ─────────────────────────────────────────────────────────
 
     private EndpointFactory NewFactory()
@@ -274,7 +304,8 @@ public sealed class CimdKeyRotationTests : IDisposable
     }
 
     private static Task<HttpResponseMessage> RefreshAsync(
-        HttpClient client, string refreshToken, RSA key, string keyId, bool sendClientId = true)
+        HttpClient client, string refreshToken, RSA key, string keyId, bool sendClientId = true,
+        CancellationToken cancellationToken = default)
     {
         var form = new Dictionary<string, string>
         {
@@ -284,7 +315,7 @@ public sealed class CimdKeyRotationTests : IDisposable
             ["client_assertion"] = Assertion(key, keyId),
         };
         if (sendClientId) form["client_id"] = ClientId;
-        return client.PostAsync("/oauth/token", new FormUrlEncodedContent(form));
+        return client.PostAsync("/oauth/token", new FormUrlEncodedContent(form), cancellationToken);
     }
 
     /// <summary>Back-dates the row's last key read, as if it was read <paramref name="age"/> ago.</summary>
@@ -370,28 +401,55 @@ public sealed class CimdKeyRotationTests : IDisposable
         return client;
     }
 
-    /// <summary>Answers each registered URL with its JSON body, a 500 for a failed one, and 404 otherwise.</summary>
+    /// <summary>
+    /// Answers each registered URL with its JSON body, a 500 for a failed one, and 404
+    /// otherwise; a hanging URL never answers until the request is cancelled.
+    /// </summary>
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Dictionary<string, string?> _bodies = new(StringComparer.Ordinal);
         private readonly Dictionary<string, int> _requests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, TaskCompletionSource> _hanging = new(StringComparer.Ordinal);
 
-        public void Serve(string url, string body) { lock (_bodies) _bodies[url] = body; }
+        /// <summary>Makes <paramref name="url"/> hang; the returned task completes once a request reaches it.</summary>
+        public Task Hang(string url)
+        {
+            var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_bodies) _hanging[url] = reached;
+            return reached.Task;
+        }
+
+        public void Serve(string url, string body) { lock (_bodies) { _hanging.Remove(url); _bodies[url] = body; } }
 
         public void Fail(string url) { lock (_bodies) _bodies[url] = null; }
 
         public int RequestsTo(string url) { lock (_bodies) return _requests.GetValueOrDefault(url); }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var url = request.RequestUri!.ToString();
+            TaskCompletionSource? hanging;
             lock (_bodies)
             {
                 _requests[url] = _requests.GetValueOrDefault(url) + 1;
-                if (!_bodies.TryGetValue(url, out var body)) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-                return Task.FromResult(body is null
+                _hanging.TryGetValue(url, out hanging);
+            }
+            if (hanging is not null)
+            {
+                hanging.TrySetResult();
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            return Answer(url);
+        }
+
+        private HttpResponseMessage Answer(string url)
+        {
+            lock (_bodies)
+            {
+                if (!_bodies.TryGetValue(url, out var body)) return new HttpResponseMessage(HttpStatusCode.NotFound);
+                return body is null
                     ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
-                    : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+                    : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             }
         }
     }
