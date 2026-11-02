@@ -31,10 +31,11 @@ public sealed class CredentialEmailLinkTests : IDisposable
     public void Dispose() => _db.Dispose();
 
     /// <summary>
-    /// Stands in for PUBLIC_BASE_URL. Startup only parses the variable into
-    /// this singleton, so registering it directly tests the same thing without
-    /// setting a process-wide variable, which would force this class to run
-    /// alone after everything else (#1584).
+    /// Stands in for PUBLIC_BASE_URL: registers the singleton startup would
+    /// parse the variable into, so these tests cover what the app does with a
+    /// configured origin without setting a process-wide variable, which would
+    /// force this class to run alone after everything else (#1584). Reading the
+    /// variable itself is pinned by <see cref="PublicOriginEnvironmentTests"/>.
     /// </summary>
     private static void WithOrigin(IServiceCollection services, string? configured) =>
         services.AddSingleton(new PublicOrigin(PublicOrigin.Parse(configured)));

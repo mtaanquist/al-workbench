@@ -107,10 +107,8 @@ public sealed class ExplorerQueryScalingTests : IClassFixture<ExplorerQueryScali
     [Fact]
     public async Task Listing_one_folder_does_not_examine_the_whole_object_table()
     {
-        var moduleId = _moduleId;
-
         var (_, examined) = await MeasureAsync(
-            (_, tree) => tree.GetTreeChildrenAsync(moduleId, "src/Target/"));
+            (_, tree) => tree.GetTreeChildrenAsync(_moduleId, "src/Target/"));
 
         examined.Should().BeLessThan(ObjectRowBudget,
             because: "a ten-file folder listing must cost ten files' worth of object rows, "
@@ -120,12 +118,11 @@ public sealed class ExplorerQueryScalingTests : IClassFixture<ExplorerQueryScali
     [Fact]
     public async Task Searching_the_explorer_does_not_examine_the_whole_object_table()
     {
-        var moduleId = _moduleId;
         int releaseId;
         await using (var ctx = _db.NewContext())
         {
             releaseId = await ctx.OeModules.AsNoTracking()
-                .Where(m => m.Id == moduleId).Select(m => m.ReleaseId).SingleAsync();
+                .Where(m => m.Id == _moduleId).Select(m => m.ReleaseId).SingleAsync();
         }
 
         // "Needle" is on the ten target objects only, so the answer is small
@@ -154,9 +151,7 @@ public sealed class ExplorerQueryScalingTests : IClassFixture<ExplorerQueryScali
     [InlineData(Listing.Search)]
     public async Task The_object_lookup_is_keyed_not_windowed_over_the_table(Listing listing)
     {
-        var moduleId = _moduleId;
-
-        var (sql, _) = await MeasureAsync((_, tree) => Invoke(tree, listing, moduleId));
+        var (sql, _) = await MeasureAsync((_, tree) => Invoke(tree, listing, _moduleId));
 
         var objectQueries = sql.Where(s => s.Contains("oe_module_objects")).ToList();
         objectQueries.Should().NotBeEmpty(because: "the listing does read the object table");
@@ -196,12 +191,11 @@ public sealed class ExplorerQueryScalingTests : IClassFixture<ExplorerQueryScali
     [Fact]
     public async Task One_page_load_resolves_visibility_and_reads_the_blob_once()
     {
-        var moduleId = _moduleId;
         long fileId;
         await using (var ctx = _db.NewContext())
         {
             fileId = await ctx.OeModuleFiles.AsNoTracking()
-                .Where(f => f.ModuleId == moduleId && f.Path == "src/Target/Target0.al")
+                .Where(f => f.ModuleId == _moduleId && f.Path == "src/Target/Target0.al")
                 .Select(f => f.Id)
                 .SingleAsync();
         }
