@@ -33,7 +33,7 @@ public sealed record GitHubRecipeDelivery(
 /// branch.</strong> As with "Add to repository" (#623) the write goes out on
 /// the acting user's linked token, so GitHub enforces their own permissions and
 /// the pull request is genuinely theirs; and it lands on
-/// <c>aldt/recipe-&lt;slug&gt;</c> even when the default branch is unprotected,
+/// <c>aldt/recipe-&lt;id&gt;-&lt;slug&gt;</c> even when the default branch is unprotected,
 /// because a recipe is a change somebody reviews. The branch is reused for as
 /// long as its pull request is open, and the name is stepped once that pull
 /// request is closed, so nothing under review is ever rewound.</para>
@@ -50,7 +50,11 @@ public sealed record GitHubRecipeDelivery(
 /// </summary>
 public sealed class GitHubRecipeDeliveryService
 {
-    /// <summary>Branch names are <c>aldt/recipe-&lt;slug&gt;</c>, per the design doc.</summary>
+    /// <summary>
+    /// Branch names are <c>aldt/recipe-&lt;id&gt;-&lt;slug&gt;</c>, per the design doc.
+    /// The id keeps two recipes whose titles slug the same apart (#1600); a pull request
+    /// opened before that under <c>aldt/recipe-&lt;slug&gt;</c> is still joined.
+    /// </summary>
     public const string BranchPrefix = "aldt/recipe-";
 
     /// <summary>
@@ -163,7 +167,7 @@ public sealed class GitHubRecipeDeliveryService
                 "Connect your own GitHub account first, on your account page under Repository access. "
                 + "The pull request is opened in your name, so the workbench needs your GitHub account to do it.");
 
-        var target = await ChooseBranchAsync(token, repo, recipe.Title, ct);
+        var target = await ChooseBranchAsync(token, repo, recipe.Id, recipe.Title, ct);
 
         // The tree is layered onto whatever the branch (or the default branch)
         // already has, so a file the recipe carries replaces the repository's
@@ -232,18 +236,21 @@ public sealed class GitHubRecipeDeliveryService
 
     /// <summary>
     /// Picks the branch this apply belongs on, walking
-    /// <c>aldt/recipe-&lt;slug&gt;</c>, <c>-2</c>, <c>-3</c> until one of two
+    /// <c>aldt/recipe-&lt;id&gt;-&lt;slug&gt;</c>, <c>-2</c>, <c>-3</c> until one of two
     /// things is true: it has a pull request still open (join it, so a second
     /// apply lands in the review that is already running), or it does not exist
     /// at all (start it from the default branch). A branch whose pull request
     /// has been merged or closed is stepped past rather than reused - its
-    /// history is somebody's merged work.
+    /// history is somebody's merged work. Before starting a new branch, a pull
+    /// request still open under the name used before the id was added is joined
+    /// instead (<see cref="FindLegacyOpenAsync"/>).
     /// </summary>
     private async Task<BranchTarget> ChooseBranchAsync(
-        string token, GitHubRepositorySummary repo, string recipeTitle, CancellationToken ct)
+        string token, GitHubRepositorySummary repo, int recipeId, string recipeTitle, CancellationToken ct)
     {
         var slug = RecipePaths.Slugify(recipeTitle);
-        var baseName = BranchPrefix + (slug.Length == 0 ? "recipe" : slug);
+        var titlePart = slug.Length == 0 ? "recipe" : slug;
+        var baseName = $"{BranchPrefix}{recipeId}-{titlePart}";
 
         for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
         {
@@ -261,6 +268,10 @@ public sealed class GitHubRecipeDeliveryService
 
             if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is null)
             {
+                if (await FindLegacyOpenAsync(token, repo, BranchPrefix + titlePart, ct) is { } legacy)
+                {
+                    return legacy;
+                }
                 var defaultHead = await _github.GetBranchHeadShaAsync(
                     token, repo.Owner, repo.Name, repo.DefaultBranch, ct)
                     ?? throw Refuse(
@@ -277,6 +288,27 @@ public sealed class GitHubRecipeDeliveryService
         throw Refuse(
             $"'{repo.FullName}' already has branches named {baseName} through {baseName}-{MaxBranchAttempts}, "
             + "and none of them has a pull request open. Tidy those up on GitHub, then try again.");
+    }
+
+    /// <summary>
+    /// A pull request still open on a branch named the way they were before the
+    /// recipe id joined the name (<c>aldt/recipe-&lt;slug&gt;</c>, <c>-2</c>...). It
+    /// keeps that name until it is merged or closed, so an apply joins it rather
+    /// than opening a second review beside it (#1600). The walk stops at the first
+    /// name with no branch, as the old walk would have.
+    /// </summary>
+    private async Task<BranchTarget?> FindLegacyOpenAsync(
+        string token, GitHubRepositorySummary repo, string legacyBase, CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
+        {
+            var branch = attempt == 1 ? legacyBase : $"{legacyBase}-{attempt}";
+            var head = await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct);
+            if (head is null) return null;
+            var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
+            if (open is not null) return new BranchTarget(branch, head, open);
+        }
+        return null;
     }
 
     /// <summary>

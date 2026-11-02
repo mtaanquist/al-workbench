@@ -261,10 +261,10 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
 
 - **One operation, two callers.** `GitHubRecipeDeliveryService.ApplyAsync(recipeId,
   repoFullName, customerName?)` commits the recipe's files at their `RelativePath` onto
-  `aldt/recipe-<slug>` **with the user's token** and opens a pull request into the default
+  `aldt/recipe-<id>-<slug>` **with the user's token** and opens a pull request into the default
   branch. The download modal calls it once; the admin "Open update pull requests" calls
   it once per repository that took the recipe. The pull request body says which it is.
-- **Branch reuse, then stepping.** If `aldt/recipe-<slug>` has an open pull request, the
+- **Branch reuse, then stepping.** If `aldt/recipe-<id>-<slug>` has an open pull request, the
   commit is added to it (find-before-create, as the Translator does). If the branch
   exists with no open pull request (merged or closed), the name is stepped (`-2`, `-3`)
   as extension delivery does, so history is never rewritten.
@@ -293,7 +293,7 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   tree, blob, tree, commit, create/update ref, find/create pull request - was already
   on `GitHubAppClient` from phase 1, so this feature adds no
   `GitHubAppClient.<Feature>.cs` file and leaves that class as it found it.
-- **Branch choice is one read-only walk, not two rules.** `aldt/recipe-<slug>`,
+- **Branch choice is one read-only walk, not two rules.** `aldt/recipe-<id>-<slug>`,
   `-2`, `-3`... are tried in order and each is asked two questions: is a pull request
   open on it (join that one, and commit on the branch's own head), and does the branch
   exist at all (if not, cut it from the default branch head). The first name to answer
@@ -302,6 +302,12 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   name's pull request is merged, a third apply would open a *third* pull request
   beside the still-open `-2` rather than joining it. Ten names is the cap, as
   extension delivery uses.
+- **The recipe id is in the branch name (#1600).** Names were `aldt/recipe-<slug>` at
+  first, so two recipes whose titles slug the same shared one branch, and the second
+  apply joined the first recipe's pull request. The id keeps them apart. A pull request
+  opened under the old name is still joined until it is merged or closed: before the
+  walk starts a new branch, it asks the old names (`aldt/recipe-<slug>`, `-2`...) for an
+  open pull request, stopping at the first name with no branch.
 - **The tree's base is the target's own tree**, not always the default branch's -
   otherwise the second commit on a reused branch would silently revert the first.
   Files are still written over rather than merged, as the issue asks.
