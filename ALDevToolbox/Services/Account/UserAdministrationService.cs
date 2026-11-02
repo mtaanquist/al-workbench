@@ -3,6 +3,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using OpenIddict.Abstractions;
 
 namespace ALDevToolbox.Services.Account;
@@ -54,13 +55,17 @@ public sealed class UserAdministrationService
     private readonly TimeProvider _clock;
     private readonly IOpenIddictTokenManager _oauthTokens;
     private readonly IOrganizationContext _orgContext;
+    private readonly ILogger<UserAdministrationService> _logger;
 
-    public UserAdministrationService(AppDbContext db, TimeProvider clock, IOpenIddictTokenManager oauthTokens, IOrganizationContext orgContext)
+    public UserAdministrationService(
+        AppDbContext db, TimeProvider clock, IOpenIddictTokenManager oauthTokens, IOrganizationContext orgContext,
+        ILogger<UserAdministrationService> logger)
     {
         _db = db;
         _clock = clock;
         _oauthTokens = oauthTokens;
         _orgContext = orgContext;
+        _logger = logger;
     }
 
     /// <summary>
@@ -216,14 +221,16 @@ public sealed class UserAdministrationService
     private async Task CloseSealedLinksAsync(int userId, int actingOrgId, DateTime now, CancellationToken ct)
     {
         var ids = await _db.SealedLinks.AsNoTracking()
-            .Where(l => l.CreatedByUserId == userId && l.ClosedAt == null)
+            // A link past its expiry that the sweep hasn't reached yet is
+            // already dead; it is left for the sweep to record as Expired.
+            .Where(l => l.CreatedByUserId == userId && l.ClosedAt == null && l.ExpiresAt > now)
             .Select(l => l.Id)
             .ToListAsync(ct);
         if (ids.Count == 0) return;
         // Conditional, as in a revoke: a link a reveal closed a moment ago
         // keeps its own reason.
         await _db.SealedLinks
-            .Where(l => ids.Contains(l.Id) && l.ClosedAt == null)
+            .Where(l => ids.Contains(l.Id) && l.ClosedAt == null && l.ExpiresAt > now)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Ciphertext, (byte[]?)null)
                 .SetProperty(l => l.ClosedAt, now)
@@ -249,6 +256,7 @@ public sealed class UserAdministrationService
                 EntityName = link.Label,
             });
         }
+        _logger.LogInformation("Closed {Count} Sealed links of disabled user {UserId}.", closed.Count, userId);
     }
 
     /// <summary>Re-enables a disabled user without further admin approval.</summary>

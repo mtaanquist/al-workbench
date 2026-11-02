@@ -225,7 +225,7 @@ public sealed class SiteAdminServiceTests : IDisposable
     {
         var orgContext = NewSiteAdminContext();
         orgContext.CurrentUserId = actorId;
-        return new(ctx, TimeProvider.System, _db.OpenIddictTokens, orgContext);
+        return new(ctx, TimeProvider.System, _db.OpenIddictTokens, orgContext, NullLogger<UserAdministrationService>.Instance);
     }
 
     [Fact]
