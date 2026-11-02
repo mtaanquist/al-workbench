@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.RateLimiting;
 
 namespace ALDevToolbox.Services.OAuth;
@@ -32,6 +33,41 @@ public sealed class CimdFetchLimiter : IDisposable
         using var lease = _limiter.AttemptAcquire(ip ?? "unknown");
         return lease.IsAcquired;
     }
+
+    // Client id -> when the token endpoint last tried to re-read that client's key
+    // set. Only CIMD rows with an https jwks_uri ever get an entry, so it is bounded
+    // by the registered clients, not by what anonymous callers send.
+    private readonly ConcurrentDictionary<string, DateTime> _keySetAttempts = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Claims the one key-set re-read a client gets per <paramref name="interval"/>,
+    /// whether or not it then succeeds. A failed or empty read does not stamp the row,
+    /// so without this a client whose <c>jwks_uri</c> is down would cost an outbound
+    /// fetch on every token request naming it. In memory because the app runs as one
+    /// container; a restart only allows one extra attempt.
+    /// </summary>
+    public bool TryClaimKeySetRefresh(string clientId, DateTime now, TimeSpan interval)
+    {
+        while (true)
+        {
+            if (_keySetAttempts.TryGetValue(clientId, out var last))
+            {
+                if (now - last < interval) return false;
+                if (_keySetAttempts.TryUpdate(clientId, now, last)) return true;
+            }
+            else if (_keySetAttempts.TryAdd(clientId, now))
+            {
+                return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives back a claim from <see cref="TryClaimKeySetRefresh"/> that made no fetch,
+    /// so a caller over its own budget cannot hold the client's slot for the interval.
+    /// </summary>
+    public void ReleaseKeySetRefresh(string clientId, DateTime claimedAt) =>
+        _keySetAttempts.TryRemove(KeyValuePair.Create(clientId, claimedAt));
 
     public void Dispose() => _limiter.Dispose();
 }

@@ -73,7 +73,8 @@ namespace ALDevToolbox.Services.OAuth;
 /// assertion, which used to drop the connector until the person approved it
 /// again (#1576). So before OpenIddict validates the assertion, a stale row's
 /// key set is re-read from the <c>jwks_uri</c> it was registered with - at most
-/// once per <see cref="RefreshInterval"/>, on the same per-IP budget. Nothing
+/// once per <see cref="RefreshInterval"/>, on the same per-IP budget, and a
+/// failed attempt waits out the same interval before the next. Nothing
 /// else about the client changes there, and a failed re-read leaves the stored
 /// keys in place, so an outage at the client's end does not refuse a request
 /// its old key could still sign.
@@ -417,9 +418,17 @@ public sealed class CimdClientResolver :
         var lastRead = new[] { Timestamp(properties, RefreshedAtProperty), Timestamp(properties, JwksRefreshedAtProperty) }.Max();
         if (lastRead is { } read && now - read < RefreshInterval) return;
 
+        // One attempt per client per interval, successful or not: a failed read
+        // stamps nothing on the row, so this is what stops a client whose jwks_uri
+        // is down (or anyone naming it with a junk assertion) from causing a fetch
+        // on every token request.
+        if (!_fetchLimiter.TryClaimKeySetRefresh(clientId, now, RefreshInterval)) return;
+
         var ip = context.Transaction.GetHttpRequest()?.HttpContext.Connection.RemoteIpAddress?.ToString();
         if (!_fetchLimiter.TryAcquire(ip))
         {
+            // No fetch was made, so hand the slot back for the client's own next request.
+            _fetchLimiter.ReleaseKeySetRefresh(clientId, now);
             _logger.LogWarning("JWKS refresh for {ClientId} skipped: too many fetches from {Ip}.", clientId, ip);
             return;
         }
@@ -429,7 +438,7 @@ public sealed class CimdClientResolver :
         {
             keys = await FetchJwksAsync(jwksUrl, context.CancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !context.CancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "JWKS refresh for {ClientId} from {JwksUri} failed; keeping the stored keys.", clientId, jwksUrl);
             return;
@@ -450,7 +459,7 @@ public sealed class CimdClientResolver :
             _logger.LogInformation("Refreshed the key set of CIMD client {ClientId} ({KeyCount} keys) on a token request.",
                 clientId, keys.Keys.Count);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // A parallel request refreshed the same row first; theirs is as good.
             _logger.LogInformation(ex, "CIMD client {ClientId} changed concurrently during a key refresh.", clientId);

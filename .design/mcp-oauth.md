@@ -234,7 +234,11 @@ or from the assertion's `iss` when that is absent, and it only picks the
 row: the keys always come from the URL the row was registered with. A
 re-read that fails, finds no keys, or is over budget leaves the stored keys
 in place and lets OpenIddict decide, so an outage at the client's end never
-refuses a request the old key could still sign. Within the window nothing
+refuses a request the old key could still sign. A failed or empty read
+still counts as the client's one attempt for the window (held in memory,
+per client), so a `jwks_uri` that is down is not dialled on every token
+request; a request turned away for budget makes no fetch and gives its
+attempt back. Within the window nothing
 is fetched, so a key rotated moments ago is refused until the window
 passes - the cost of not letting every token request dial out.
 

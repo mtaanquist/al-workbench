@@ -97,6 +97,116 @@ public sealed class CimdKeyRotationTests : IDisposable
         refreshed.StatusCode.Should().Be(HttpStatusCode.OK, await refreshed.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task A_key_set_that_cannot_be_read_is_not_tried_again_within_the_interval()
+    {
+        using var factory = NewFactory();
+        var refreshToken = await ConnectWithKeyAAsync(factory);
+        _http.Fail(JwksUri);
+        await AgeStoredKeysAsync(factory, CimdClientResolver.RefreshInterval + TimeSpan.FromMinutes(1));
+        var fetches = _http.RequestsTo(JwksUri);
+        using var assistant = factory.CreateClient();
+
+        using var first = await RefreshAsync(assistant, refreshToken, _keyB, "key-b");
+        using var second = await RefreshAsync(assistant, refreshToken, _keyB, "key-b");
+        using var third = await RefreshAsync(assistant, refreshToken, _keyA, "key-a");
+
+        _http.RequestsTo(JwksUri).Should().Be(fetches + 1,
+            "a failed read waits out the interval like a successful one, instead of dialling out on every request");
+        third.StatusCode.Should().Be(HttpStatusCode.OK, await third.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task A_client_named_only_by_the_assertion_issuer_gets_its_rotated_keys()
+    {
+        using var factory = NewFactory();
+        var refreshToken = await ConnectWithKeyAAsync(factory);
+        _http.Serve(JwksUri, Jwks((_keyB, "key-b")));
+        await AgeStoredKeysAsync(factory, CimdClientResolver.RefreshInterval + TimeSpan.FromMinutes(1));
+        var fetches = _http.RequestsTo(JwksUri);
+        using var assistant = factory.CreateClient();
+
+        using var refreshed = await RefreshAsync(assistant, refreshToken, _keyB, "key-b", sendClientId: false);
+
+        _http.RequestsTo(JwksUri).Should().Be(fetches + 1, "the client is found from the assertion's issuer");
+        refreshed.StatusCode.Should().Be(HttpStatusCode.OK, await refreshed.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task A_token_request_without_a_client_assertion_fetches_nothing()
+    {
+        using var factory = NewFactory();
+        var refreshToken = await ConnectWithKeyAAsync(factory);
+        await AgeStoredKeysAsync(factory, CimdClientResolver.RefreshInterval + TimeSpan.FromMinutes(1));
+        var fetches = _http.RequestsTo(JwksUri);
+        using var caller = factory.CreateClient();
+
+        using var refused = await caller.PostAsync("/oauth/token", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "refresh_token",
+            ["refresh_token"] = refreshToken,
+            ["client_id"] = ClientId,
+        }));
+
+        refused.StatusCode.Should().NotBe(HttpStatusCode.OK);
+        _http.RequestsTo(JwksUri).Should().Be(fetches);
+    }
+
+    [Fact]
+    public async Task A_caller_over_its_fetch_budget_gets_no_refresh()
+    {
+        using var factory = NewFactory();
+        var refreshToken = await ConnectWithKeyAAsync(factory);
+        _http.Serve(JwksUri, Jwks((_keyB, "key-b")));
+        await AgeStoredKeysAsync(factory, CimdClientResolver.RefreshInterval + TimeSpan.FromMinutes(1));
+        var fetches = _http.RequestsTo(JwksUri);
+        var limiter = factory.Services.GetRequiredService<CimdFetchLimiter>();
+        // The test server reports no remote address; spend whichever partition it lands in.
+        foreach (var ip in new string?[] { null, "127.0.0.1", "::1" })
+        {
+            while (limiter.TryAcquire(ip)) { }
+        }
+        using var assistant = factory.CreateClient();
+
+        using var refused = await RefreshAsync(assistant, refreshToken, _keyB, "key-b");
+
+        refused.StatusCode.Should().NotBe(HttpStatusCode.OK);
+        _http.RequestsTo(JwksUri).Should().Be(fetches, "the caller has no fetches left");
+    }
+
+    [Fact]
+    public async Task A_client_registered_another_way_is_never_refreshed_from_its_url()
+    {
+        using var factory = NewFactory();
+        using (var scope = factory.Services.CreateScope())
+        {
+            // An admin-registered client that happens to use a URL as its id and
+            // carries a jwks_uri property: not ours to rewrite from the network.
+            var applications = scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>();
+            var descriptor = new OpenIddictApplicationDescriptor
+            {
+                ClientId = ClientId,
+                ClientType = OpenIddictConstants.ClientTypes.Confidential,
+                DisplayName = "CRONUS assistant",
+                JsonWebKeySet = new JsonWebKeySet(Jwks((_keyA, "key-a"))),
+                Permissions =
+                {
+                    OpenIddictConstants.Permissions.Endpoints.Token,
+                    OpenIddictConstants.Permissions.GrantTypes.RefreshToken,
+                },
+            };
+            descriptor.Properties[CimdClientResolver.JwksUriProperty] = JsonSerializer.SerializeToElement(JwksUri);
+            await applications.CreateAsync(descriptor);
+        }
+        _http.Serve(JwksUri, Jwks((_keyB, "key-b")));
+        using var caller = factory.CreateClient();
+
+        using var refused = await RefreshAsync(caller, "not-a-refresh-token", _keyB, "key-b");
+
+        refused.StatusCode.Should().NotBe(HttpStatusCode.OK);
+        _http.RequestsTo(JwksUri).Should().Be(0, "only a row registered from a client-metadata document is refreshed");
+    }
+
     // ── Plumbing ─────────────────────────────────────────────────────────
 
     private EndpointFactory NewFactory()
@@ -163,15 +273,19 @@ public sealed class CimdKeyRotationTests : IDisposable
         return JsonDocument.Parse(body).RootElement.GetProperty("refresh_token").GetString()!;
     }
 
-    private static Task<HttpResponseMessage> RefreshAsync(HttpClient client, string refreshToken, RSA key, string keyId) =>
-        client.PostAsync("/oauth/token", new FormUrlEncodedContent(new Dictionary<string, string>
+    private static Task<HttpResponseMessage> RefreshAsync(
+        HttpClient client, string refreshToken, RSA key, string keyId, bool sendClientId = true)
+    {
+        var form = new Dictionary<string, string>
         {
             ["grant_type"] = "refresh_token",
             ["refresh_token"] = refreshToken,
-            ["client_id"] = ClientId,
             ["client_assertion_type"] = OpenIddictConstants.ClientAssertionTypes.JwtBearer,
             ["client_assertion"] = Assertion(key, keyId),
-        }));
+        };
+        if (sendClientId) form["client_id"] = ClientId;
+        return client.PostAsync("/oauth/token", new FormUrlEncodedContent(form));
+    }
 
     /// <summary>Back-dates the row's last key read, as if it was read <paramref name="age"/> ago.</summary>
     private static async Task AgeStoredKeysAsync(EndpointFactory factory, TimeSpan age)
