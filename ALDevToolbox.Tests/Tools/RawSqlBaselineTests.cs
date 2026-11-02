@@ -130,6 +130,9 @@ public sealed class RawSqlBaselineTests
         ["ALDevToolbox/Services/ObjectExplorer/Projects/ProjectFollowService.cs"] = new(
             "An upsert writing the principal's user and organisation ids, for a solution checked visible first.",
             new() { ["SetFollowingAsync"] = 1 }),
+        ["ALDevToolbox/Services/ObjectExplorer/Projects/ProjectService.cs"] = new(
+            "Row locks on the solution and the teams being saved, each naming organization_id from the principal (#1603).",
+            new() { ["SetAccessAsync"] = 2 }),
         ["ALDevToolbox/Services/Organizations/DatabaseUsageService.cs"] = new(
             "Storage figures: catalogue sizes, counts grouped by organization_id for the ids passed, and the snapshot row for the principal's organisation. The cross-org snapshot listing calls RequireSiteAdmin() first; the recompute runs from the scheduler with no request.",
             new()
@@ -142,6 +145,9 @@ public sealed class RawSqlBaselineTests
                 ["ReadTableSizesAsync"] = 1,
                 ["RecomputeSnapshotsAsync"] = 1,
             }),
+        ["ALDevToolbox/Services/Organizations/TeamService.cs"] = new(
+            "Row locks on a team and the solutions it is on, each naming organization_id from the principal (#1603).",
+            new() { ["LockTeamAndItsSolutionsAsync"] = 2 }),
         ["ALDevToolbox/Services/Templates/ModuleService.cs"] = new(
             "A row lock that names organization_id from the principal.",
             new() { ["LockAsync"] = 1 }),

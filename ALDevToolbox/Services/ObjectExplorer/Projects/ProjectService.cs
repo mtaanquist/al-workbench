@@ -957,6 +957,26 @@ public sealed class ProjectService
         var orgId = RequireOrganizationId();
         ArgumentNullException.ThrowIfNull(teamIds);
 
+        // A team delete checks "is it the only team" and then deletes; without a lock it
+        // and this save could each pass and leave the solution non-Public with no team
+        // (#1603). The solution first, then the teams being kept or added, in the order
+        // TeamService takes them: a delete waits for this save and then checks what it
+        // left, and this save, waiting for a delete, then finds the team gone and says so.
+        // Raw SQL, approved for #1603 like ModuleService's lock: it skips the query filter,
+        // so each statement names the organisation itself. FOR NO KEY UPDATE, as the admin
+        // guard (#1337), so a row that only references the solution is not held up.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        var lockedTeamIds = teamIds.Distinct().Order().ToArray();
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM oe_projects WHERE id = {projectId} AND organization_id = {orgId} FOR NO KEY UPDATE", ct);
+        if (lockedTeamIds.Length > 0)
+        {
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT 1 FROM teams WHERE id = ANY({lockedTeamIds}) AND organization_id = {orgId} ORDER BY id FOR KEY SHARE", ct);
+        }
+
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
             ?? throw Validation("Visibility", "This solution no longer exists.");
@@ -999,6 +1019,7 @@ public sealed class ProjectService
         project.Visibility = visibility;
         project.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
 
         _logger.LogInformation("Set project {ProjectId} visibility to {Visibility} with {TeamCount} team(s).",
             projectId, visibility, wanted.Count);
