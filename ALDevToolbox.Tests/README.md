@@ -338,9 +338,13 @@ collection to serialise them.
     allow-list) can still be shared safely. Register it as a transient that
     reads the running test's instance off the fixture, and install fresh ones
     in the test class constructor (`GitHubWebhookEndpointTests.Host`). A
-    per-caller rate limiter most of the tests hit gets a caller address per
-    test instead of a host per test (`OAuthRedirectUriTests.Host`,
-    `GitHubWebhookEndpointTests.Host`). A pooled HTTP handler outlives a
+    per-caller rate limiter gets a caller address per test instead of a host
+    per test: every shared host honours `TestCallerAddress`, so send from
+    `_factory.CreateClient().From(TestCallerAddress.Next())` when a class
+    makes more limited calls than one caller may (ten `/oauth/register`
+    calls in ten minutes, say) - `OAuthRedirectUriTests`,
+    `McpRequestFilterTests`. The webhook tests pick their own sender inside
+    GitHub's range instead (`GitHubWebhookEndpointTests.Host`). A pooled HTTP handler outlives a
     test, so a fake behind one is reached through a forwarding handler that
     reads the running test's fake (`GitHubAppEndpointsTests.Host`).
   - Fakes a class swaps in go through a fixture that derives from

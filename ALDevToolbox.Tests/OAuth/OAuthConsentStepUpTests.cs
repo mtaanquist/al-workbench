@@ -197,7 +197,7 @@ public sealed class OAuthConsentStepUpTests : IClassFixture<SharedEndpointHost>
 
     private async Task<HttpClient> SignInAsync(string email)
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().From(TestCallerAddress.Next());
         using var loginPage = await client.GetAsync("/login");
         var token = FormToken(await loginPage.Content.ReadAsStringAsync());
         using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>

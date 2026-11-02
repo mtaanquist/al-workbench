@@ -41,7 +41,16 @@ public class SharedEndpointHost : IDisposable
         IReadOnlyDictionary<string, string?>? settings = null)
     {
         Db = new TestDb();
-        Factory = new EndpointFactory(Db, configureServices, settings: settings);
+        Factory = new EndpointFactory(
+            Db,
+            services =>
+            {
+                // Lets a test send from an address of its own (TestCallerAddress), so
+                // one test's calls never count against another's per-caller limit.
+                services.AddTestCallerAddress();
+                configureServices?.Invoke(services);
+            },
+            settings: settings);
     }
 
     /// <summary>The scratch database every test in the class shares.</summary>

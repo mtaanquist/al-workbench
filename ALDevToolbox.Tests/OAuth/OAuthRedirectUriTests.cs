@@ -31,62 +31,34 @@ public sealed class OAuthRedirectUriTests : IClassFixture<OAuthRedirectUriTests.
     // RFC 7636 appendix B test vector - any well-formed S256 challenge will do.
     private const string CodeChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
-    private static int _lastAddress;
-
     private readonly EndpointFactory _factory;
 
-    /// <summary>This test's own caller address, from the 198.18.0.0/15 benchmarking range.</summary>
-    private readonly string _address;
+    /// <summary>This test's own caller address (<see cref="TestCallerAddress"/>).</summary>
+    private readonly string _address = TestCallerAddress.Next();
 
     public OAuthRedirectUriTests(Host host)
     {
         _factory = host.Factory;
-        var n = Interlocked.Increment(ref _lastAddress);
-        _address = $"198.18.{n / 250}.{n % 250 + 1}";
     }
 
     /// <summary>A client whose requests arrive from this test's address.</summary>
     private HttpClient NewClient() => NewClient(_factory, _address);
 
-    private static HttpClient NewClient(EndpointFactory factory, string address)
-    {
-        var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add(Host.AddressHeader, address);
-        return client;
-    }
+    private static HttpClient NewClient(EndpointFactory factory, string address) =>
+        factory.CreateClient().From(address);
 
     /// <summary>
-    /// The shared host: metadata documents come from <see cref="MetadataDocumentHandler"/>,
-    /// and each request arrives from the address named in <see cref="AddressHeader"/>.
+    /// The shared host: metadata documents come from <see cref="MetadataDocumentHandler"/>.
     /// </summary>
     public sealed class Host : SharedEndpointHost
     {
-        public const string AddressHeader = "X-Test-Connection-Address";
-
         public Host()
             : base(services =>
             {
                 services.AddHttpClient(nameof(CimdClientResolver))
                     .ConfigurePrimaryHttpMessageHandler(() => new MetadataDocumentHandler());
-                services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, AddressFilter>();
             })
         {
-        }
-
-        /// <summary>Runs ahead of the app's pipeline, so the rate limiters partition on the named address.</summary>
-        private sealed class AddressFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
-        {
-            public Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(
-                Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> next) => app =>
-            {
-                app.Use(nextMiddleware => ctx =>
-                {
-                    var named = ctx.Request.Headers[AddressHeader].ToString();
-                    if (named.Length > 0) ctx.Connection.RemoteIpAddress = IPAddress.Parse(named);
-                    return nextMiddleware(ctx);
-                });
-                next(app);
-            };
         }
     }
 
