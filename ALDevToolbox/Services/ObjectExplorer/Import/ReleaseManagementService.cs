@@ -224,7 +224,9 @@ public class ReleaseManagementService
     /// solution build links it as a third-party dependency: that link cascades
     /// away silently and the build's references into the vendor objects stop
     /// resolving; and while it is still importing, which would pull the release
-    /// out from under the running import (#1616).
+    /// out from under the running import (#1616). The checks run before the delete,
+    /// not in one statement with it, so a build that links the release in between
+    /// loses that link to the cascade; its next rebuild writes it again.
     ///
     /// The supplied <paramref name="confirmLabel"/> must match the Release's
     /// actual label exactly. The UI requires admins to type the label before

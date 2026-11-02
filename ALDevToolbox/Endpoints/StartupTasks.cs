@@ -207,7 +207,7 @@ internal static class StartupTasks
         // Fence category 3 (startup, no request org): job rows only, ids out.
         var resumableReleaseIds = await db.OeImportJobs
             .IgnoreQueryFilters()
-            .Where(j => j.Status == "queued" && j.Kind != "backfill_system_references")
+            .Where(WillResumeAnImport)
             .Select(j => j.ReleaseId)
             .ToListAsync(stopping);
         var stranded = await db.OeReleases
@@ -273,6 +273,16 @@ internal static class StartupTasks
             }
         }, stopping);
     }
+
+    /// <summary>
+    /// The job rows the startup sweep treats as about to resume their release's
+    /// import: queued, and not a system-reference backfill, which re-reads a ready
+    /// release and never resumes an import (#1616). Only the predicate lives here,
+    /// so the sweep's fence reads stay in <see cref="RunAsync"/> and a test can
+    /// check it on seeded rows.
+    /// </summary>
+    internal static readonly System.Linq.Expressions.Expression<Func<ALDevToolbox.Domain.Entities.ObjectExplorer.OeImportJob, bool>> WillResumeAnImport =
+        j => j.Status == "queued" && j.Kind != "backfill_system_references";
 
     /// <summary>
     /// Idempotently resolves the singleton system organisation, creating or

@@ -268,6 +268,54 @@ public sealed class ReleaseManagementServiceTests : IDisposable
         (await read.OeReleaseDependencies.AsNoTracking().AnyAsync(d => d.DependencyReleaseId == vendorId)).Should().BeTrue();
     }
 
+    /// <summary>
+    /// #1616: the refusal names only linking builds the person can see. A build on a
+    /// Private solution outside their teams is left out, so the message does not
+    /// confirm it exists.
+    /// </summary>
+    [Fact]
+    public async Task HardDeleteAsync_refusal_does_not_name_a_build_on_a_private_solution_the_viewer_cannot_see()
+    {
+        var vendorId = await SeedReleaseAsync(label: "CRONUS Vendor 25.0 (symbols)", kind: "third_party");
+        var openBuildId = await SeedReleaseAsync(label: "CRONUS open build", kind: "project");
+        var secretBuildId = await SeedReleaseAsync(label: "CRONUS secret build", kind: "project");
+        const int outsiderId = 9616;
+        await using (var seed = _db.NewContext())
+        {
+            var now = DateTime.UtcNow;
+            seed.Users.Add(new ALDevToolbox.Domain.Entities.User
+            {
+                Id = outsiderId, OrganizationId = TestDb.DefaultOrgId, Email = "nils@example.com", PasswordHash = "x",
+                DisplayName = "Nils", Role = ALDevToolbox.Domain.Entities.UserRole.Editor,
+                Status = ALDevToolbox.Domain.Entities.UserStatus.Active, CreatedAt = now,
+            });
+            var secret = new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Secret", Visibility = ProjectVisibility.Private,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            seed.OeProjects.Add(secret);
+            seed.OeReleaseDependencies.AddRange(
+                new OeReleaseDependency { OrganizationId = TestDb.DefaultOrgId, ReleaseId = openBuildId, DependencyReleaseId = vendorId, CreatedAt = now },
+                new OeReleaseDependency { OrganizationId = TestDb.DefaultOrgId, ReleaseId = secretBuildId, DependencyReleaseId = vendorId, CreatedAt = now });
+            await seed.SaveChangesAsync();
+            // The secret build belongs to the Private solution through its import job.
+            await new PersistedImportJobs(seed, TimeProvider.System).CreateAsync(secretBuildId,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.ProjectBuild(secret.Id), storeSymbolReference: false);
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = outsiderId;
+
+        await using var ctx = _db.NewContext();
+        var svc = NewManagement(ctx);
+        await svc.SoftDeleteAsync(vendorId);
+        var act = async () => await svc.HardDeleteAsync(vendorId, confirmLabel: "CRONUS Vendor 25.0 (symbols)");
+
+        var message = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Release"];
+        message.Should().Contain("\"CRONUS open build\"").And.NotContain("CRONUS secret build");
+    }
+
     /// <summary>#1616: a release still importing is not deleted from under the running import.</summary>
     [Fact]
     public async Task HardDeleteAsync_refuses_a_release_that_is_still_importing()
@@ -341,6 +389,14 @@ public sealed class ReleaseManagementServiceTests : IDisposable
                 .ToListAsync();
         }
         shared.Should().NotBeEmpty("both imports stored the same .app's SymbolReference.json");
+        await using (var read = _db.NewContext())
+        {
+            (await read.OeModules.AsNoTracking()
+                .Where(m => m.ReleaseId == dropId && m.SymbolReferenceContentHash != null)
+                .Select(m => m.SymbolReferenceContentHash!)
+                .ToListAsync())
+                .Should().BeEquivalentTo(shared, "the deleted release offers the same symbol blobs for reclaim");
+        }
 
         // A file only the deleted release uses, so its blob must go. It is offered in
         // the same reclaim as the shared symbol blobs: without the reclaim's check on
