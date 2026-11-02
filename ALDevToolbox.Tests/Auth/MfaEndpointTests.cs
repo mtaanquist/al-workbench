@@ -244,9 +244,9 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
         using var response = await PostAsync(client, "/auth/account/2fa/email/disable",
             AntiforgeryToken(await page.Content.ReadAsStringAsync()), ("Password", ""));
 
-        var location = Uri.UnescapeDataString(response.Headers.Location!.OriginalString);
-        location.Should().Contain("Your confirmation has expired");
-        location.Should().NotContain("Password is incorrect");
+        var location = response.Headers.Location!.OriginalString;
+        location.Should().Contain("reason=" + FormErrorReasons.ConfirmationExpired);
+        location.Should().NotContain(FormErrorReasons.PasswordWrong);
     }
 
     [Fact]
