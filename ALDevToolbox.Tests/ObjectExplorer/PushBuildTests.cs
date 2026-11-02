@@ -160,6 +160,33 @@ public sealed class PushBuildTests : IDisposable
         (await ListDueAsync(Push())).Should().HaveCount(due ? 1 : 0);
     }
 
+    /// <summary>
+    /// Every reason a waiting build is refused at pickup, not only a takeover: none of them
+    /// built the commit, so the next delivery of that commit builds it (#1551).
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(PickupRefusals))]
+    public async Task Any_pickup_refusal_leaves_the_commit_due(string refusal)
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await ctx.OePipelines.Where(p => p.Id == pipelineId).Select(p => p.ProjectId).SingleAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Trigger = ProjectBuildTrigger.Push, HeadSha = GitHubWebhookPayloads.After,
+                Status = ProjectBuildStatus.Failed, FailureMessage = refusal, StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await ListDueAsync(Push())).Should().ContainSingle();
+    }
+
+    public static TheoryData<string> PickupRefusals() => new(ProjectBuildService.AutomationRefusals);
+
     [Fact]
     public async Task A_push_older_than_the_branch_head_already_recorded_is_not_due()
     {

@@ -1110,8 +1110,9 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// The reasons <see cref="EnsureAutomationStillOnAsync"/> fails a build with. Such a
-    /// build did not fail on its own merits, so it sends no build email and does not
-    /// count as the build before the next one (<c>BuildNotifier</c>).
+    /// build did not fail on its own merits, so it sends no build email, does not count
+    /// as the build before the next one (<c>BuildNotifier</c>), and does not count as
+    /// having built its commit when that commit is pushed again (<c>PushBuildService</c>).
     /// </summary>
     public static readonly IReadOnlyList<string> AutomationRefusals =
     [
