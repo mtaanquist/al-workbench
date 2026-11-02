@@ -2132,6 +2132,73 @@ public sealed class UpgradeActionWorkerTests : IDisposable
             "the turn is the environment's in Business Central, so bookings for it keep their order whichever solution made them");
     }
 
+    /// <summary>
+    /// #1629: a base solution and its add-on on one tenant, each with its own delivery
+    /// window on its own row. The base's window closes first, part-way through its batch.
+    /// Returns the two solutions and their rows once the batch has moved.
+    /// </summary>
+    private async Task<(int AddOnProject, int AddOnEnv, DateTime NextOpening)> MoveABaseBatchPastItsWindowAsync(bool bookAddOnInWindow)
+    {
+        var (baseProject, baseEnv) = await _f.SeedCustomerAsync("CRONUS Base");
+        var (addOnProject, addOnEnv) = await _f.SeedCustomerAsync("CRONUS Add-on");
+        await ShareTenantAsync(baseProject, addOnProject, addOnEnv, "PRODUCTION");
+        // 22:00-23:00 in Copenhagen on the base's row, 22:00-02:00 on the add-on's.
+        await SetWindowsAsync(baseEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(23, 0));
+        await SetWindowsAsync(addOnEnv, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(2, 0));
+        await BookInWindowAsync(baseProject, baseEnv, UploadAppTiming.DeliveryWindow, "Base1.app", "Base2.app", "Base3.app");
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        if (bookAddOnInWindow) await BookInWindowAsync(addOnProject, addOnEnv, UploadAppTiming.DeliveryWindow, "AddOn.app");
+        var opening = new DateTime(2026, 9, 11, 20, 0, 0, DateTimeKind.Utc);
+
+        _f.Clock.Advance(opening - _f.Clock.GetUtcNow().UtcDateTime);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.InstalledFiles.Should().Equal("Base1.app");
+
+        // 23:10 in Copenhagen: the base's window has closed, the add-on's is still open.
+        _f.Clock.Advance(TimeSpan.FromMinutes(70));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0,
+            "the base's batch moves to the next opening, and nothing behind it on that environment goes in its place");
+        return (addOnProject, addOnEnv, opening.AddDays(1));
+    }
+
+    [Fact]
+    public async Task An_add_on_booked_after_its_base_waits_while_a_closed_window_has_moved_the_base()
+    {
+        var (_, _, nextOpening) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
+
+        // Sweeps later the same night, the add-on's own window still open.
+        for (var i = 0; i < 3; i++)
+        {
+            _f.Clock.Advance(TimeSpan.FromMinutes(10));
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0);
+        }
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Base1.app" },
+            "an add-on booked after its base goes after it, even when a window moved the base");
+    }
+
+    [Fact]
+    public async Task The_add_on_goes_once_the_moved_base_has_been_sent()
+    {
+        var (_, _, nextOpening) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: true);
+
+        _f.Clock.Advance(nextOpening - _f.Clock.GetUtcNow().UtcDateTime);
+        await SweepUntilQuietAsync();
+
+        _f.Apps.InstalledFiles.Should().Equal("Base1.app", "Base2.app", "Base3.app", "AddOn.app");
+    }
+
+    [Fact]
+    public async Task An_install_a_person_timed_does_not_wait_for_a_moved_base()
+    {
+        var (addOnProject, addOnEnv, _) = await MoveABaseBatchPastItsWindowAsync(bookAddOnInWindow: false);
+
+        // Booked after the base, for now: nobody asked it to wait for a window.
+        await BookInWindowAsync(addOnProject, addOnEnv, UploadAppTiming.Now, "Hotfix.app");
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.Apps.InstalledFiles.Should().Equal("Base1.app", "Hotfix.app");
+    }
+
     [Fact]
     public async Task A_window_batch_that_has_started_keeps_the_turn_so_a_closing_window_leaves_one_customer_part_installed()
     {
@@ -2335,7 +2402,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task An_older_single_queued_behind_a_started_batch_does_not_lend_the_batch_its_booking_time()
+    public async Task An_older_window_single_on_a_batchs_environment_goes_before_the_batch_even_when_due_later()
     {
         var (xProject, xEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
         var (wProject, wEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
@@ -2355,18 +2422,16 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Clock.Advance(TimeSpan.FromMinutes(5));
         await BookInWindowAsync(xProject, xEnv, UploadAppTiming.DeliveryWindow, "X1.app", "X2.app", "X3.app", "X4.app");
 
+        // Before #1629 the batch started at the opening and the older single queued behind
+        // it. A window booking made earlier on the same environment now holds the batch
+        // until it is sent, as a base holds its add-on, so the batch never starts ahead of it.
         _f.Clock.Advance(opening - _f.Clock.GetUtcNow().UtcDateTime);
-        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0,
+            "the batch waits for the single booked before it on its environment");
         _f.Clock.Advance(TimeSpan.FromHours(1));
-        for (var i = 0; i < 3; i++)
-        {
-            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
-        }
-
-        _f.Apps.InstalledFiles.Should().Equal(new[] { "X1.app", "Urgent.app", "X2.app", "X3.app" },
-            "the batch's place is the booking time of the row its turn would send, not of an older row queued behind it");
         await SweepUntilQuietAsync();
-        _f.Apps.InstalledFiles.Should().Equal("X1.app", "Urgent.app", "X2.app", "X3.app", "X4.app", "XOld.app");
+
+        _f.Apps.InstalledFiles.Should().Equal("XOld.app", "Urgent.app", "X1.app", "X2.app", "X3.app", "X4.app");
     }
 
     [Fact]
