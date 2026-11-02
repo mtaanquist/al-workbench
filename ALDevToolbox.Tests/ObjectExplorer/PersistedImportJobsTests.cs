@@ -101,6 +101,33 @@ public sealed class PersistedImportJobsTests : IDisposable
         failed.ErrorMessage.Should().Contain("interrupted by a restart");
     }
 
+    /// <summary>
+    /// #1549: an import that had saved its release ready, but died before its row was
+    /// closed, is closed on start rather than resumed, which would wipe the finished
+    /// release and download it again.
+    /// </summary>
+    [Theory]
+    [InlineData("url")]
+    [InlineData("bc_artifact")]
+    public async Task Reconcile_closes_a_url_or_artifact_job_whose_release_is_already_ready(string kind)
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        ReleaseImportSource source = kind == "url"
+            ? new ReleaseImportSource.Url("https://download.microsoft.com/x.zip")
+            : new ReleaseImportSource.BcArtifact("https://bcartifacts.example/onprem/26.0.1/dk");
+        var id = await svc.CreateAsync(release.Id, Identity, source, storeSymbolReference: false);
+        await svc.MarkRunningAsync(id); // killed after the ingest, during the drift scan
+
+        var resumable = await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+
+        resumable.Should().BeEmpty();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == id)).Status.Should().Be("completed");
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == release.Id)).Status.Should().Be("ready");
+    }
+
     [Fact]
     public async Task CreateAsync_writes_a_queued_row_with_url_source_fields()
     {

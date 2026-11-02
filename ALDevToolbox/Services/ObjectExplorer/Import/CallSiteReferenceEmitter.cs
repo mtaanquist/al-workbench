@@ -328,7 +328,7 @@ public class CallSiteReferenceEmitter
         // OrdinalIgnoreCase to match the previous per-component case-insensitive
         // comparison; "first wins" preserves the
         // old "first candidate in typeRows order" behaviour. See issue #365.
-        static string KindNameKey(string kind, string name) => kind + " " + name;
+        static string KindNameKey(string kind, string name) => kind + "\0" + name;
         var objectIdByKindName = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         foreach (var t in typeRows)
         {

@@ -20,7 +20,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// Modelled after <see cref="BackupScheduler"/>: polls every minute,
 /// tracks the last run in memory (cheap, and missing a day on app restart
 /// is harmless — autovacuum still keeps the table queryable), and fires once
-/// the day's slot has passed since the last run. A sweep that fails also
+/// the day's slot has passed since the last run. A fresh process counts the
+/// most recent slot as already run, so a deploy in working hours waits for the
+/// next one instead of vacuuming next to resumed imports and users (#1549). A sweep that fails also
 /// counts as the day's run: retrying it every minute would start the same
 /// long statement again all day, cancelling autovacuum on that table each
 /// time it waits for the lock (#1632).
@@ -65,7 +67,7 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
     private readonly TimeProvider _clock;
     private readonly ILogger<ObjectExplorerVacuumScheduler> _logger;
     private readonly int _hourUtc;
-    private DateTimeOffset? _lastRunUtc;
+    private DateTimeOffset _lastRunUtc;
 
     public ObjectExplorerVacuumScheduler(
         IServiceProvider services,
@@ -90,6 +92,7 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
         _clock = clock;
         _logger = logger;
         _hourUtc = ParseHour(config["OE_VACUUM_HOUR_UTC"]);
+        _lastRunUtc = MostRecentSlot(clock.GetUtcNow());
     }
 
     private static int ParseHour(string? raw)
@@ -141,7 +144,9 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
             VacuumStatements.Length, sw.ElapsedMilliseconds);
     }
 
-    private bool ShouldRun(DateTimeOffset now)
+    private bool ShouldRun(DateTimeOffset now) => _lastRunUtc < MostRecentSlot(now);
+
+    private DateTimeOffset MostRecentSlot(DateTimeOffset now)
     {
         // Compute the most recent scheduled time at _hourUtc. If we
         // haven't run since that timestamp, it's our window. Re-checking
@@ -149,10 +154,8 @@ public sealed class ObjectExplorerVacuumScheduler : PolledScheduler
         // (host was down at the scheduled hour) on the next tick.
         var todayScheduled = new DateTimeOffset(
             now.Year, now.Month, now.Day, _hourUtc, 0, 0, TimeSpan.Zero);
-        var scheduled = now >= todayScheduled
+        return now >= todayScheduled
             ? todayScheduled
             : todayScheduled.AddDays(-1);
-
-        return _lastRunUtc is null || _lastRunUtc.Value < scheduled;
     }
 }

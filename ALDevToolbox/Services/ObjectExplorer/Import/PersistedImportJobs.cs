@@ -206,8 +206,10 @@ public sealed class PersistedImportJobs
         // migration / seed / interrupted-release reconciliation already
         // sits in (see StartupTasks). No user in scope at startup; reading
         // every org's job rows here is the design.
-        // A build's row comes along so it resumes in its place in the build queue (#1137).
-        // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
+        // A build's row comes along so it resumes in its place in the build queue (#1137),
+        // and the release's status so a finished import is closed, not redone (#1549).
+        // The filter is off for those reads too; they are pinned to b.ReleaseId ==
+        // j.ReleaseId and r.Id == j.ReleaseId, the job's own release.
         // Fence category 3 (startup, no request org): each job carries its own org id.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
@@ -219,6 +221,10 @@ public sealed class PersistedImportJobs
                 Build = _db.OeProjectBuilds
                     .Where(b => b.ReleaseId == j.ReleaseId)
                     .Select(b => new { b.PipelineId, b.BcTarget, b.Trigger, b.Status })
+                    .FirstOrDefault(),
+                ReleaseStatus = _db.OeReleases
+                    .Where(r => r.Id == j.ReleaseId)
+                    .Select(r => r.Status)
                     .FirstOrDefault(),
             })
             .ToListAsync(ct).ConfigureAwait(false);
@@ -235,6 +241,15 @@ public sealed class PersistedImportJobs
             var row = survivor.Job;
             switch (row.Kind)
             {
+                case "url" or "bc_artifact" when survivor.ReleaseStatus == "ready":
+                    // The import had saved its release ready, and the process died in
+                    // the steps after (the drift scan) before the row was closed.
+                    // Resuming would wipe a finished release and download it again,
+                    // and a failed re-download would turn it failed (#1549), so the
+                    // row is closed instead, as a finished build's is (#1181).
+                    row.Status = "completed";
+                    row.CompletedAt = now;
+                    break;
                 case "url" when !string.IsNullOrEmpty(row.DownloadUrl):
                     // Reset to queued so the worker re-runs from scratch. The
                     // download is idempotent: it writes to a fresh temp file.

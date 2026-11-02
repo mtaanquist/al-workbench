@@ -46,14 +46,35 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
     }
 
     [Fact]
-    public async Task The_first_tick_after_a_start_vacuums_every_table_it_names()
+    public async Task A_fresh_process_waits_for_the_next_slot_and_then_vacuums_every_table_it_names()
     {
         var scheduler = NewScheduler(hour: null);
+        var ct = TestContext.Current.CancellationToken;
 
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(0, "a restart does not vacuum at once (#1549)");
+
+        _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
         // Throws if any table the scheduler names is missing from the migrated schema.
-        await scheduler.TickOnceAsync(TestContext.Current.CancellationToken);
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(1);
+    }
 
-        _runs.Should().Be(1, "a fresh process has not run yesterday's slot, so it catches up at once");
+    [Fact]
+    public async Task A_process_started_after_the_slot_waits_for_tomorrows()
+    {
+        _clock.Advance(TimeSpan.FromHours(9)); // 10:00, a deploy in working hours.
+        var scheduler = NewScheduler(hour: null);
+        var ct = TestContext.Current.CancellationToken;
+
+        await scheduler.TickOnceAsync(ct);
+        _clock.Advance(TimeSpan.FromHours(16)); // 02:00 the next day
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(0, "today's slot counts as run for a process started after it");
+
+        _clock.Advance(TimeSpan.FromHours(1)); // 03:00
+        await scheduler.TickOnceAsync(ct);
+        _runs.Should().Be(1);
     }
 
     [Theory]
@@ -66,19 +87,19 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
         var scheduler = NewScheduler(configured);
         var ct = TestContext.Current.CancellationToken;
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(1);
+        _runs.Should().Be(0);
 
         _clock.Advance(Start.Date.AddHours(expectedHour).AddMinutes(-1) - Start.UtcDateTime);
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(1, "a minute before the slot is still yesterday's");
+        _runs.Should().Be(0, "a minute before the slot is still yesterday's");
 
         _clock.Advance(TimeSpan.FromMinutes(1));
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(2, "the slot has come");
+        _runs.Should().Be(1, "the slot has come");
 
         _clock.Advance(TimeSpan.FromMinutes(1));
         await scheduler.TickOnceAsync(ct);
-        _runs.Should().Be(2, "one run per slot");
+        _runs.Should().Be(1, "one run per slot");
     }
 
     [Fact]

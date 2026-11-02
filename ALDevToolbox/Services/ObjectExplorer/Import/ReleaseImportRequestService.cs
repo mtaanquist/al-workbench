@@ -702,10 +702,21 @@ public sealed class ReleaseImportRequestService
         List<Stream> openedStreams)
     {
         var sourceZips = sourceZipFiles.Where(f => f.Length > 0).ToArray();
-        var sourceByBasename = sourceZips.ToDictionary(
-            f => Path.GetFileNameWithoutExtension(f.FileName).Replace(".Source", "", StringComparison.OrdinalIgnoreCase),
-            f => f,
-            StringComparer.OrdinalIgnoreCase);
+        static string Stem(UploadedFile f) =>
+            Path.GetFileNameWithoutExtension(f.FileName).Replace(".Source", "", StringComparison.OrdinalIgnoreCase);
+        // Two source ZIPs that pair with the same .app ("CRONUS App.Source.zip" and
+        // "CRONUS App.zip", or names differing only in case) are a mistake the person
+        // can fix, not a crash (#1549).
+        var clash = sourceZips.GroupBy(Stem, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (clash is not null)
+        {
+            var names = clash.Select(f => $"'{f.FileName}'").ToList();
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["SourceZips"] = $"{string.Join(" and ", names)} are both source for the same app. Pick only one of them.",
+            });
+        }
+        var sourceByBasename = sourceZips.ToDictionary(Stem, f => f, StringComparer.OrdinalIgnoreCase);
 
         var uploads = new List<AppFileUpload>(appFiles.Count);
         foreach (var af in appFiles)

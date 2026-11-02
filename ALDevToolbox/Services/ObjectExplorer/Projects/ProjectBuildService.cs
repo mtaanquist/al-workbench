@@ -1301,7 +1301,7 @@ public sealed class ProjectBuildService
                     var log = await _processRunner.RunAsync(new ProcessRunRequest(
                         gitPath,
                         new[] { "-C", clone.Dir, "log", "--no-merges", "-n", (ChangelogCommitCap + 1).ToString(),
-                                "--pretty=format:%h%an%cI%s%ae", $"{prevSha}..HEAD" },
+                                "--pretty=format:%h\u001F%an\u001F%cI\u001F%s\u001F%ae", $"{prevSha}..HEAD" },
                         clone.Dir, Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                     var (parsed, truncated) = ParseChangelog(log.StdOut, ChangelogCommitCap);
                     var ordering = 0;
@@ -1414,7 +1414,7 @@ public sealed class ProjectBuildService
         foreach (var line in stdout.Split('\n'))
         {
             if (line.Length == 0) continue;
-            var parts = line.Split('');
+            var parts = line.Split('\u001F');
             if (parts.Length < 4) continue;
             DateTime? date = DateTimeOffset.TryParse(parts[2].Trim(), out var dto) ? dto.UtcDateTime : null;
             entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim(),

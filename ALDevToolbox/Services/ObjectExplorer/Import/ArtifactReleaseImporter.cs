@@ -180,12 +180,22 @@ public sealed class ArtifactReleaseImporter
                 .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
+            if (existing is { Status: "failed" })
+            {
+                // A failed preview is re-run in place the next night, as a failed
+                // shipped version is (#1222), instead of waiting out the 14-day
+                // refresh age with no usable preview (#1549).
+                await RequeueFailedAsync(existing.Id, preview, ct).ConfigureAwait(false);
+                outcomes.Add(new ArtifactImportOutcome(ArtifactImportStatus.Queued, existing.Id, preview.Label));
+                continue;
+            }
+
             if (existing is not null)
             {
                 // BcVersion is stamped from the Base Application manifest at ingest
                 // and matches the insider build number, so "same build" is a direct
                 // compare; a null (failed before the manifest was read) counts as
-                // different so the retry happens once the row is old enough.
+                // a different build. A failed row never gets here: it is re-run above.
                 var sameBuild = string.Equals(existing.BcVersion, preview.Version, StringComparison.OrdinalIgnoreCase);
                 var stale = now - existing.ImportedAt >= PreviewRefreshAge;
                 if (existing.Status == "ingesting" || sameBuild || !stale)

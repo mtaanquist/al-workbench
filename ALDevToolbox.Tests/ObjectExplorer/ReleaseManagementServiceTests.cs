@@ -220,7 +220,9 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
             (await act.Should().ThrowAsync<PlanValidationException>())
                 .Which.Errors.Should().ContainKey("Release")
-                .WhoseValue.Should().Contain("parent");
+                .WhoseValue.Should().Contain("parent")
+                .And.Contain("\"Customer X\"", "the person needs to know which release to delete first (#1549)")
+                .And.Contain("soft-deleted");
         }
 
         // The refusal happens before anything is removed: both rows, and the parent's modules, survive.

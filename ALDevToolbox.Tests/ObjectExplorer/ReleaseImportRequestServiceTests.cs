@@ -753,6 +753,30 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         Track(source.TempPath);
     }
 
+    /// <summary>
+    /// #1549: two source ZIPs that pair with the same .app are a field error, not a
+    /// crash, and nothing is created.
+    /// </summary>
+    [Theory]
+    [InlineData("CRONUS App.Source.zip", "CRONUS App.zip")]
+    [InlineData("CRONUS App.Source.zip", "cronus app.source.zip")]
+    public async Task Two_source_zips_for_the_same_app_are_refused_by_the_field(string first, string second)
+    {
+        await using var ctx = _db.NewContext();
+        var label = "CRONUS " + Guid.NewGuid().ToString("N");
+
+        var act = () => NewService(ctx, new ReleaseImportQueue()).SubmitAsync(Submission(
+            label: label,
+            appFiles: [Text("CRONUS App.app", "not really an app")],
+            sourceZips: [EmptyZip(first), EmptyZip(second)]));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("SourceZips")
+            .WhoseValue.Should().Contain(first).And.Contain(second);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Label == label)).Should().BeFalse();
+    }
+
     // ── URL, then folder ZIP, then individual files ──────────────────────
 
     [Fact]
