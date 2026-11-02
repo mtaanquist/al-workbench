@@ -126,8 +126,9 @@ public sealed class ObjectExplorerVacuumSchedulerTests : IDisposable
     [Fact]
     public async Task Each_vacuum_runs_under_the_long_command_timeout()
     {
+        var scheduler = NewScheduler(hour: null); // started at 01:00
         _clock.Advance(TimeSpan.FromHours(2)); // 03:00, the slot.
-        await NewScheduler(hour: null).TickOnceAsync(TestContext.Current.CancellationToken);
+        await scheduler.TickOnceAsync(TestContext.Current.CancellationToken);
 
         _watcher.Timeouts.Should().NotBeEmpty()
             .And.AllSatisfy(t => t.Should().Be((int)ObjectExplorerVacuumScheduler.VacuumCommandTimeout.TotalSeconds));
