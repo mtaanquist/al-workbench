@@ -438,7 +438,15 @@ public sealed class CimdClientResolver :
         {
             keys = await FetchJwksAsync(jwksUrl, context.CancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !context.CancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            // The caller went away, which says nothing about the jwks_uri. Hand the
+            // slot back: otherwise a junk assertion and a dropped connection would
+            // hold off the client's own re-read for the whole interval.
+            _fetchLimiter.ReleaseKeySetRefresh(clientId, now);
+            throw;
+        }
+        catch (Exception ex)
         {
             _logger.LogWarning(ex, "JWKS refresh for {ClientId} from {JwksUri} failed; keeping the stored keys.", clientId, jwksUrl);
             return;
