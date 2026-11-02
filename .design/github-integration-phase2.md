@@ -962,8 +962,10 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   the person building on push and the nightly preview check run as, on every pipeline of
   the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
   waiting as the previous person is then refused when its turn comes; such a refused build
-  does not count as having built its commit, so a redelivery of that push builds it as the
-  new person, though nothing re-queues it on its own (#1551). When the new person
+  does not count as having built its commit, so a redelivery of that push, or the next
+  push whose head is that commit, builds it as the new person. Nothing re-queues it on
+  its own: the refusal is on the build's history, and the next delivery picks it up
+  (#1551). The same holds for every other refusal at pickup. When the new person
   has nothing to clone one of the solution's providers with, the pipeline shows it as
   paused straight away. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
