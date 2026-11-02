@@ -270,6 +270,10 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (first is null) return null;
         var lastSent = await installs
+            // A sent time marks a row the worker tried to send, whatever Business Central
+            // answered. The two settles that never try - a dependent skipped after a
+            // failure, a booking whose requester was disabled - leave it unset, so they do
+            // not count as an install (#1603).
             .Where(a => a.SentAt != null)
             .MaxAsync(a => a.SentAt, ct).ConfigureAwait(false);
         return new InstallTurn(lastSent, first.ExecuteAfter, first.RequestedAt);
@@ -286,7 +290,8 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// <see cref="ConfirmOneAsync"/>). Internal so a test can drive one sweep against a
     /// seeded database without the hosted-service loop. Returns how many rows were sent or
     /// asked about again; rows only settled on the way (a dependent skipped because the
-    /// app before it failed) do not count, so the sweep does not stop on one.
+    /// app before it failed, or a booking whose requester was disabled since) do not
+    /// count, so the sweep does not stop on one.
     /// </summary>
     internal async Task<int> RunDueActionsAsync(int orgId, bool isSystem, CancellationToken ct, SweepPass pass = SweepPass.Both)
     {
@@ -630,6 +635,14 @@ public sealed class UpgradeActionWorker : BackgroundService
         return moved > 0;
     }
 
+    /// <summary>The history line for a booking whose requester may no longer do it: disabled since, or off the solution or the update team.</summary>
+    private static string NoPermissionOutcome(UpgradeActionKind kind) => kind switch
+    {
+        UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
+        UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
+        _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
+    };
+
     /// <summary>What one due row came to: left alone, settled without a send, sent, or left alone because a deployment holds its environment.</summary>
     private enum RunOutcome { Skipped, Settled, Sent, EnvironmentBusy }
 
@@ -702,12 +715,12 @@ public sealed class UpgradeActionWorker : BackgroundService
                     : blocked.BcAppId is { } blockedApp && waitsFor.Contains(blockedApp)
                     ? $"{action.Label} wasn't updated, because {blockedName}, which it waits for, wasn't updated."
                     : $"{action.Label} wasn't updated, because the update of {blockedName} before it failed, and it brings along an app both of them wait for.";
-                var skippedAt = _clock.GetUtcNow().UtcDateTime;
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                    // No sent time: nothing went to Business Central, and the install
+                    // turns read a sent time as an install this environment got (#1603).
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
-                        .SetProperty(a => a.SentAt, skippedAt)
                         .SetProperty(a => a.PackageContent, (byte[]?)null)
                         .SetProperty(a => a.Outcome, skippedOutcome),
                         ct).ConfigureAwait(false);
@@ -725,6 +738,24 @@ public sealed class UpgradeActionWorker : BackgroundService
             && await MovedPastClosedWindowAsync(scope, db, action, window, ct).ConfigureAwait(false))
         {
             return RunOutcome.Skipped;
+        }
+
+        // A disabled account runs nothing, booked before it was disabled or not (#1235).
+        // Settled before the claim and without a sent time, as a skipped dependent is:
+        // nothing goes to Business Central, so it is no install for the turns (#1603). The
+        // compare-and-set still lets a racing cancel win.
+        if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
+        {
+            var refused = await db.OeEnvironmentUpgradeActions
+                .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                    .SetProperty(a => a.PackageContent, (byte[]?)null)
+                    .SetProperty(a => a.Outcome, NoPermissionOutcome(action.Kind)),
+                    ct).ConfigureAwait(false);
+            if (refused == 0) return RunOutcome.Skipped;
+            await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);
+            return RunOutcome.Settled;
         }
 
         // A deployment and a booked install never go to one Business Central environment
@@ -776,11 +807,6 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         try
         {
-            // A disabled account runs nothing, booked before it was disabled or not (#1235).
-            if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
-            {
-                throw new ProjectAccessDeniedException();
-            }
             var actions = scope.ServiceProvider.GetRequiredService<UpgradeActionService>();
             if (action.Kind == UpgradeActionKind.UploadApp)
             {
@@ -877,12 +903,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         catch (ProjectAccessDeniedException)
         {
             status = UpgradeActionStatus.Failed;
-            outcome = action.Kind switch
-            {
-                UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
-                UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
-                _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
-            };
+            outcome = NoPermissionOutcome(action.Kind);
         }
         catch (Exception ex)
         {

@@ -226,6 +226,35 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         after.Should().NotBeNull("the install let go of the environment");
     }
 
+    [Fact]
+    public async Task A_disabled_requesters_booked_install_settles_without_a_sent_time_even_while_a_deployment_holds_the_environment()
+    {
+        // #1603: nothing goes to Business Central, so the row needs neither the gate nor a
+        // sent time, and does not wait behind a running deployment to be settled.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 1, "Core.app");
+        var tenant = await TenantOfAsync(projectId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == UpgradeActionTestFixture.OwnerUserId)
+                .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, ALDevToolbox.Domain.Entities.UserStatus.Disabled));
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        using (var deployment = _f.Deliveries.TryEnterEnvironment(tenant, projectId, "Production"))
+        {
+            deployment.Should().NotBeNull();
+            (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None))
+                .Should().Be(0, "a settle without a send is not counted as sent");
+        }
+
+        _f.Apps.InstalledFiles.Should().BeEmpty();
+        var stored = await _f.ReadActionAsync(ids[0]);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("no longer had permission");
+        stored.SentAt.Should().BeNull("nothing was sent, so it is no install for the turns");
+    }
+
     private async Task<Guid?> TenantOfAsync(int projectId)
     {
         await using var ctx = _f.Db.NewContext();
@@ -1976,6 +2005,105 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Apps.InstalledFiles.Should().Equal("A1.app", "W1.app", "A2.app", "B1.app");
     }
 
+    /// <summary>
+    /// An install row from an environment's history: one the worker sent
+    /// (<paramref name="reached"/>), or one settled without a send, as a dependent skipped
+    /// after a failure or a disabled requester's booking is - failed, with no sent time.
+    /// </summary>
+    private async Task AddInstallHistoryAsync(int orgId, int projectId, int environmentId, DateTime sentAt, bool reached)
+    {
+        await using var ctx = _f.Db.NewContext();
+        ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        {
+            OrganizationId = orgId, ProjectId = projectId, EnvironmentId = environmentId,
+            Kind = UpgradeActionKind.UploadApp, PackageFileName = "Earlier.app",
+            Status = reached ? UpgradeActionStatus.Sent : UpgradeActionStatus.Failed,
+            RequestedAt = sentAt.AddHours(-1), ExecuteAfter = sentAt.AddHours(-1), SentAt = reached ? sentAt : null,
+            BcAppId = reached ? Guid.NewGuid() : null, BcOperationId = reached ? Guid.NewGuid() : null,
+            Outcome = reached ? "Installed Earlier.app." : "Earlier.app wasn't installed, because the app before it didn't install.",
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task An_environment_whose_last_rows_were_skipped_without_a_send_is_not_counted_as_just_served()
+    {
+        // #1603 (SOL4-1): CRONUS Denmark's environment got no install from its last rows -
+        // they were dependents skipped after a failure - while CRONUS Sweden's really had
+        // one ten minutes ago. Denmark is the one waiting longest for a real install.
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (sProject, sEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        var now = _f.Clock.GetUtcNow().UtcDateTime;
+        await AddInstallHistoryAsync(TestDb.DefaultOrgId, dProject, dEnv, now.AddMinutes(-1), reached: false);
+        await AddInstallHistoryAsync(TestDb.DefaultOrgId, sProject, sEnv, now.AddMinutes(-10), reached: true);
+        await BookUploadAsync(sProject, sEnv, hoursAhead: 1, "Sweden.app");
+        await BookUploadAsync(dProject, dEnv, hoursAhead: 1, "Denmark.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+
+        _f.Apps.InstalledFiles.Should().Equal("Denmark.app");
+    }
+
+    [Fact]
+    public async Task A_send_business_central_refused_still_counts_as_the_environments_turn()
+    {
+        // Review of #1603: a customer whose sends all fail before Business Central accepts
+        // them (broken credentials, say) still had its turn each time, or forty bookings
+        // would take every sweep from everyone else.
+        var (dProject, dEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (sProject, sEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        await BookUploadAsync(dProject, dEnv, hoursAhead: 1, "D1.app");
+        await BookUploadAsync(dProject, dEnv, hoursAhead: 1, "D2.app");
+        await BookUploadAsync(sProject, sEnv, hoursAhead: 1, "S1.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        _f.Apps.InstallThrows = new BcApiException(System.Net.HttpStatusCode.Unauthorized, "The credentials were rejected.");
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Apps.InstallThrows = null;
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "S1.app" }, "Denmark had the last turn, though Business Central refused it");
+    }
+
+    [Fact]
+    public async Task A_dependent_skipped_after_a_failure_is_settled_without_a_sent_time()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 1, "Core.app", "Reports.app");
+        _f.Apps.OnOperationStatus = name => name == "Core.app" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        await SweepUntilQuietAsync();
+
+        var skipped = await _f.ReadActionAsync(ids[1]);
+        skipped.Status.Should().Be(UpgradeActionStatus.Failed);
+        skipped.SentAt.Should().BeNull("nothing went to Business Central for it, so it is no install for the turns");
+    }
+
+    [Fact]
+    public async Task Of_three_environments_the_one_served_longest_ago_goes_first()
+    {
+        // The #1606 rotation with more than two environments: longest ago first, and each
+        // install sends its environment to the back.
+        var (aProject, aEnv) = await _f.SeedCustomerAsync("CRONUS Denmark");
+        var (bProject, bEnv) = await _f.SeedCustomerAsync("CRONUS Sweden");
+        var (cProject, cEnv) = await _f.SeedCustomerAsync("CRONUS Norway");
+        var now = _f.Clock.GetUtcNow().UtcDateTime;
+        await AddInstallHistoryAsync(TestDb.DefaultOrgId, aProject, aEnv, now.AddMinutes(-30), reached: true);
+        await AddInstallHistoryAsync(TestDb.DefaultOrgId, bProject, bEnv, now.AddMinutes(-10), reached: true);
+        await AddInstallHistoryAsync(TestDb.DefaultOrgId, cProject, cEnv, now.AddMinutes(-20), reached: true);
+        await BookUploadAsync(bProject, bEnv, hoursAhead: 1, "B1.app", "B2.app");
+        await BookUploadAsync(cProject, cEnv, hoursAhead: 1, "C1.app");
+        await BookUploadAsync(aProject, aEnv, hoursAhead: 1, "A1.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
+        await SweepUntilQuietAsync();
+
+        _f.Apps.InstalledFiles.Should().Equal("A1.app", "C1.app", "B1.app", "B2.app");
+    }
+
     [Fact]
     public async Task Two_solutions_on_one_tenant_share_its_environment_so_an_add_on_does_not_install_before_its_base()
     {
@@ -2341,6 +2469,27 @@ public sealed class UpgradeActionWorkerTests : IDisposable
             UploadAppTiming.AtTime, slot));
 
         _f.Clock.Advance(TimeSpan.FromHours(3));
+        (await _f.Worker().RunOneUploadAsync(CancellationToken.None)).Should().BeTrue();
+
+        _f.Apps.InstalledFiles.Should().Equal("Denmark.app");
+    }
+
+    [Fact]
+    public async Task An_organisation_whose_last_rows_were_skipped_without_a_send_is_not_counted_as_just_served()
+    {
+        // #1603 (SOL3-1): this organisation's last rows were settled without reaching
+        // Business Central; the other organisation really had an install ten minutes ago.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var (otherProjectId, otherEnvId) = await _f.SeedOtherOrgCustomerAsync();
+        var now = _f.Clock.GetUtcNow().UtcDateTime;
+        await AddInstallHistoryAsync(TestDb.DefaultOrgId, projectId, envId, now.AddMinutes(-1), reached: false);
+        await AddInstallHistoryAsync(TestDb.OtherOrgId, otherProjectId, otherEnvId, now.AddMinutes(-10), reached: true);
+        await _f.InOtherOrgAsync(ctx => _f.Connections(ctx).InstallUploadedAppsAsync(
+            otherProjectId, otherEnvId, new[] { new UploadPackage(new byte[] { 1, 2, 3 }, "Sweden.app") },
+            UploadAppTiming.AtTime, _f.Clock.GetUtcNow().AddHours(1)));
+        await BookUploadAsync(projectId, envId, hoursAhead: 1, "Denmark.app");
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+
         (await _f.Worker().RunOneUploadAsync(CancellationToken.None)).Should().BeTrue();
 
         _f.Apps.InstalledFiles.Should().Equal("Denmark.app");
