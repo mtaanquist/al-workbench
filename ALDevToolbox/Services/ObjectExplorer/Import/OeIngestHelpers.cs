@@ -91,11 +91,22 @@ internal static class OeIngestHelpers
     /// for them. A blob deleted between the insert and the lock is inserted again
     /// (#1181).
     /// </para>
+    /// <para>
+    /// <paramref name="insertVia"/>, when given, is a second context on its own
+    /// connection that runs the insert outside <paramref name="db"/>'s transaction, so
+    /// the new blobs commit at once and only the lock is held in that transaction.
+    /// An amend holds one transaction across every chunk, and blobs it inserted
+    /// uncommitted in an early chunk made another import of the same source wait on
+    /// it while it waited on that import for a later chunk: a deadlock (#1549,
+    /// OEI-6). A committed blob that nothing references yet is harmless; the reclaim
+    /// removes it once nothing does.
+    /// </para>
     /// </summary>
     public static async Task UpsertFileContentsAsync(
         AppDbContext db,
         IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> contents,
-        CancellationToken ct)
+        CancellationToken ct,
+        AppDbContext? insertVia = null)
     {
         if (contents.Count == 0) return;
         var hashes = new string[contents.Count];
@@ -115,7 +126,7 @@ internal static class OeIngestHelpers
         {
             // Sorted, so two imports running at once take the same hashes in the same
             // order and wait on each other rather than deadlock (#1137).
-            await db.Database.ExecuteSqlRawAsync(
+            await (insertVia ?? db).Database.ExecuteSqlRawAsync(
                 "INSERT INTO oe_file_contents (content_hash, content, content_length, line_count) " +
                 "SELECT * FROM unnest({0}::text[], {1}::text[], {2}::int[], {3}::int[]) ORDER BY 1 " +
                 "ON CONFLICT (content_hash) DO NOTHING",

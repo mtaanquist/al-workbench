@@ -33,6 +33,7 @@ internal static class LeftoverImportTempFiles
         ReleaseZipStaging.NestedTempPrefix,
         ReleaseImportRequestService.FolderZipTempPrefix,
         ReleaseImportRequestService.CalTxtTempPrefix,
+        ReleaseImportRequestService.AddModulesTempPrefix,
     ];
 
     /// <summary>

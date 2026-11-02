@@ -46,8 +46,12 @@ public sealed record GitHubFileContent(string Path, string Text, string Sha);
 /// <summary>One file to commit: its repository-relative path and its bytes.</summary>
 public sealed record GitHubCommitFile(string Path, byte[] Content);
 
-/// <summary>A pull request the workbench opened, as the success state needs it.</summary>
-public sealed record GitHubPullRequest(int Number, string HtmlUrl, string HeadBranch);
+/// <summary>
+/// A pull request the workbench opened, as the success state needs it.
+/// <see cref="Title"/> is filled in when it was read back from GitHub, and null
+/// when it was not known.
+/// </summary>
+public sealed record GitHubPullRequest(int Number, string HtmlUrl, string HeadBranch, string? Title = null);
 
 /// <summary>Who a commit is credited to, when the workbench has to say (issue #622).</summary>
 /// <param name="Name">The display name git records as the author.</param>

@@ -140,19 +140,15 @@ internal static class ObjectExplorerEndpoints
 
             try
             {
-                var summary = await imports.AmendAsync(
+                // Queued on the import worker (#1549); the page says how it went.
+                await imports.AmendAsync(
                     releaseId,
                     ToUpload(form.Files.GetFile("FolderZip")),
                     ToUploads(form, "AppFiles"),
                     ToUploads(form, "SourceZips"),
                     ct);
 
-                ctx.Response.Redirect(
-                    $"/admin/object-explorer/release/{releaseId}/modules"
-                    + $"?ok=amended"
-                    + $"&modules={summary.ModulesImported}"
-                    + $"&skipped={summary.ModulesSkipped}"
-                    + $"&refs={summary.ReferencesImported}");
+                ctx.Response.Redirect($"/admin/object-explorer/release/{releaseId}/modules?ok=queued");
             }
             catch (PlanValidationException ex)
             {

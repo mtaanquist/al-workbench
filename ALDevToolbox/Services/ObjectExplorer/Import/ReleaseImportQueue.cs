@@ -81,6 +81,7 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
         {
             ReleaseImportSource.StagedZip zip => zip.TempPath,
             ReleaseImportSource.CalTxt cal => cal.TempPath,
+            ReleaseImportSource.AddModules add => add.TempPath,
             _ => null,
         };
         if (path is null) return;
@@ -232,6 +233,17 @@ public abstract record ReleaseImportSource
     /// container-local <c>/tmp</c> and so is never resumed after a restart.
     /// </summary>
     public sealed record CalTxt(string TempPath, string EncodingName) : ReleaseImportSource;
+
+    /// <summary>
+    /// More <c>.app</c> files for a release that is already imported (Add modules,
+    /// #216), staged to a temp ZIP the worker walks like an uploaded folder ZIP. The
+    /// release keeps its data: the request flipped it to <c>ingesting</c>, and the
+    /// job hands it back <c>ready</c> whatever happens. Queued rather than run in the
+    /// request so it takes the one-heavy-import gate (#1549, #1602). Like
+    /// <see cref="StagedZip"/> it is never resumed after a restart; the restart puts
+    /// the release back to <c>ready</c> unchanged instead.
+    /// </summary>
+    public sealed record AddModules(string TempPath) : ReleaseImportSource;
 
     /// <summary>
     /// Maintenance re-extraction over already-stored source: repopulate

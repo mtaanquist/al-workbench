@@ -146,9 +146,9 @@ internal static class GenerationEndpoints
                 if (!string.IsNullOrWhiteSpace(savedConfig))
                 {
                     var import = await configs.ParseAsync(savedConfig, ct);
-                    if (import.Workspace is { } workspace)
+                    if (import.Workspace is not null)
                     {
-                        sibling = SiblingWorkspaceContext.FromSavedWorkspace(workspace, import.Extensions);
+                        sibling = SiblingWorkspaceContext.FromSavedWorkspace(import);
                     }
                 }
 
