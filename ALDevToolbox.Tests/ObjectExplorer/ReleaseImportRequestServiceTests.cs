@@ -777,6 +777,105 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Label == label)).Should().BeFalse();
     }
 
+    // ── Add modules is queued (#1549, #1602) ──────────────────────────────
+
+    private async Task<int> SeedReleaseAsync(Data.AppDbContext ctx, string status)
+    {
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS " + Guid.NewGuid().ToString("N"), Kind = "third_party",
+            Status = status, ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        return release.Id;
+    }
+
+    [Fact]
+    public async Task Adding_modules_queues_the_files_paired_as_picked_and_leaves_the_release_importing()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedReleaseAsync(ctx, "ready");
+        var queue = new ReleaseImportQueue();
+        var app = FromFile(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+
+        var outcome = await NewService(ctx, queue).AmendAsync(releaseId, folderZipFile: null,
+            [app, Text("CRONUS Extra.app", "not really an app")],
+            [EmptyZip("Microsoft_DK_Core.Source.zip")]);
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.Queued>().Which.ReleaseId.Should().Be(releaseId);
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        var staged = job!.Source.Should().BeOfType<ReleaseImportSource.AddModules>().Subject;
+        Track(staged.TempPath);
+        (await StatusAsync(releaseId)).Should().Be("ingesting");
+        await using var read = _db.NewContext();
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == job.JobRowId);
+        row.Kind.Should().Be(PersistedImportJobs.AddModulesKind);
+        row.Status.Should().Be("queued");
+
+        // The worker walks the staged ZIP and finds each app beside its own source.
+        var streams = new List<Stream>();
+        var (uploads, archive) = ReleaseZipStaging.OpenStagedZip(staged.TempPath, isDvd: false, streams);
+        using (archive)
+        {
+            uploads.Select(u => (u.FileName, HasSource: u.SourceZipStream is not null)).Should().BeEquivalentTo(
+                [("Microsoft_DK_Core.app", true), ("CRONUS Extra.app", false)]);
+            foreach (var s in streams) await s.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Adding_modules_with_two_source_zips_for_one_app_is_refused_and_the_release_stays_ready()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedReleaseAsync(ctx, "ready");
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).AmendAsync(releaseId, folderZipFile: null,
+            [Text("CRONUS App.app", "not really an app")],
+            [EmptyZip("CRONUS App.Source.zip"), EmptyZip("CRONUS App.zip")]);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("SourceZips");
+        (await StatusAsync(releaseId)).Should().Be("ready");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Adding_modules_to_a_release_that_is_not_ready_is_refused()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedReleaseAsync(ctx, "failed");
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).AmendAsync(releaseId, EmptyZip("applications.zip"), [], []);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ReleaseId");
+        (await StatusAsync(releaseId)).Should().Be("failed");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Adding_modules_cut_off_at_a_full_queue_hands_the_release_back_ready_and_fails_its_row()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedReleaseAsync(ctx, "ready");
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        var act = () => NewService(ctx, queue).AmendAsync(releaseId, EmptyZip("applications.zip"), [], [], cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        (await StatusAsync(releaseId)).Should().Be("ready", "nothing was added, so the release keeps what it held");
+        await using var read = _db.NewContext();
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId);
+        row.Status.Should().Be("failed", "a queued row nothing will run must not be picked up at the next start");
+        File.Exists(row.StagedZipPath).Should().BeFalse("no job will open the staged upload");
+    }
+
     // ── URL, then folder ZIP, then individual files ──────────────────────
 
     [Fact]
