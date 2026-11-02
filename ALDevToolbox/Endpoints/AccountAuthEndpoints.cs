@@ -559,7 +559,7 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization();
 
@@ -576,7 +576,7 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization();
 

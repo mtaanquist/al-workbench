@@ -30,7 +30,11 @@ public sealed class ApplyRecipeToolTests : IDisposable
     private const string OrgLogin = "cronus-dk";
     private const string Repo = "cronus-dk/solution-a";
     private const string BaseSha = "base-commit-sha";
-    private const string Branch = "aldt/recipe-doc-attachments";
+    // The fake matches routes by path prefix, so a NotFound on this root answers
+    // "no such branch" for every recipe branch, old-style names included, unless a
+    // test registers a longer route for one.
+    private const string BranchRoot = "aldt/recipe-";
+    private static string BranchFor(int recipeId) => $"aldt/recipe-{recipeId}-doc-attachments";
 
     private readonly TestDb _db = new();
 
@@ -65,7 +69,7 @@ public sealed class ApplyRecipeToolTests : IDisposable
         var result = await tools.ApplyRecipeAsync(recipeId, Repo, "CRONUS A/S");
 
         result.RepositoryFullName.Should().Be(Repo);
-        result.Branch.Should().Be(Branch);
+        result.Branch.Should().Be(BranchFor(recipeId));
         result.BaseBranch.Should().Be("main");
         result.PullRequestNumber.Should().Be(11);
         result.PullRequestUrl.Should().Be($"https://github.com/{Repo}/pull/11");
@@ -171,7 +175,7 @@ public sealed class ApplyRecipeToolTests : IDisposable
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson())
             .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Repo))
             .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
-            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{BranchRoot}", HttpStatusCode.NotFound)
             .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/main", HttpStatusCode.OK,
                 $"{{\"ref\":\"refs/heads/main\",\"object\":{{\"sha\":\"{BaseSha}\"}}}}")
             .On(HttpMethod.Get, $"/repos/{Repo}/git/commits/{BaseSha}", HttpStatusCode.OK,

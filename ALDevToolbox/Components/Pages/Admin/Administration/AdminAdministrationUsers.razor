@@ -586,7 +586,9 @@
             if (affected.Count > 8) names += $", and {affected.Count - 8} more";
             var confirmed = await _confirm.OpenAsync(
                 title: $"{Capitalize(label)} {affected.Count} user(s)?",
-                message: $"This will {label}: {names}.",
+                message: action == BulkAction.Disable
+                    ? $"This will disable: {names}. They are signed out everywhere, and their access tokens, connected AI assistants, unaccepted invites and open Sealed links stop working. Re-enabling them later does not bring any of these back."
+                    : $"This will {label}: {names}.",
                 confirmLabel: Capitalize(label),
                 confirmButtonClass: action == BulkAction.Disable ? "btn--danger" : "btn--primary");
             if (!confirmed) return;

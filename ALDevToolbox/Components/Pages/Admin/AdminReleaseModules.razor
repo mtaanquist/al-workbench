@@ -1,9 +1,11 @@
 @page "/admin/object-explorer/release/{ReleaseId:int}/modules"
 @attribute [Authorize(Roles = "Admin,Editor")]
 @inject ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService ObjectExplorer
+@inject ALDevToolbox.Services.ObjectExplorer.Import.PersistedImportJobs ImportJobs
 @inject IAntiforgery Antiforgery
 @inject IHttpContextAccessor Http
 @using ALDevToolbox.Services.ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Import
 @using Microsoft.AspNetCore.Antiforgery
 
 @*
@@ -34,6 +36,32 @@
         }
     </SubtitleContent>
     <Notices>
+        @if (_lastUpload is { } last)
+        {
+            @switch (last.Status)
+            {
+                case "queued":
+                    <Alert Tone="AlertTone.Info">
+                        <span>Your modules are waiting their turn behind other imports. Refresh this page to check.</span>
+                    </Alert>
+                    break;
+                case "running":
+                    <Alert Tone="AlertTone.Info">
+                        <span>Adding your modules. This can take a while on a large release. Refresh this page to check.</span>
+                    </Alert>
+                    break;
+                case "failed" when FinishedWithin(last, TimeSpan.FromDays(7)):
+                    <Alert Tone="AlertTone.Danger">
+                        <span>Your last upload was not added, and the release is unchanged. @last.ErrorMessage</span>
+                    </Alert>
+                    break;
+                case "completed" when Http.HttpContext?.Request.Query.ContainsKey("ok") == true || FinishedWithin(last, TimeSpan.FromHours(1)):
+                    <Alert Tone="AlertTone.Success">
+                        <span>@(last.ErrorMessage ?? "Your modules were added.")</span>
+                    </Alert>
+                    break;
+            }
+        }
         @if (Status is { } status)
         {
             @if (status.IsError)
@@ -66,8 +94,9 @@
                 </Action>
             </EmptyState>
         }
-        else
+        else if (_lastUpload?.Status is not ("queued" or "running"))
         {
+            @* While this page's own upload runs, the notice above already says so. *@
             <Alert Tone="AlertTone.Warn">
                 <span>
                 This release is currently <strong>@_release!.Status</strong>.
@@ -183,6 +212,12 @@
     private AntiforgeryTokenSet? _antiforgeryToken;
     private ReleaseDetail? _release;
     private List<ModuleListItem>? _modules;
+    private AddModulesJobState? _lastUpload;
+
+    // A finished upload's notice is news for a while, not for ever: a failure for a
+    // week, a success for an hour (or on the redirect back).
+    private static bool FinishedWithin(AddModulesJobState job, TimeSpan window) =>
+        job.CompletedAt is { } at && at > DateTime.UtcNow - window;
     private (string Message, bool IsError)? Status { get; set; }
 
     protected override async Task OnInitializedAsync()
@@ -198,18 +233,13 @@
             {
                 Status = (msg, true);
             }
-            else
-            {
-                var ok = ctx.Request.Query["ok"].ToString();
-                if (!string.IsNullOrEmpty(ok))
-                {
-                    Status = (FormatOk(ok, ctx.Request.Query), false);
-                }
-            }
         }
 
         _release = await ObjectExplorer.GetReleaseAsync(ReleaseId);
         if (_release is null) return;
+        // The upload runs on the import worker (#1549), so its outcome is read back
+        // from its job row rather than carried on the redirect.
+        _lastUpload = await ImportJobs.GetLatestAddModulesAsync(ReleaseId);
 
         // Show every module - test / internal / language-pack included -
         // so the operator can spot duplicates before re-uploading.
@@ -220,16 +250,4 @@
                 IncludeLanguagePack: true));
     }
 
-    private static string FormatOk(string ok, IQueryCollection q) => ok switch
-    {
-        "amended" => $"Added {q["modules"]} module(s)"
-            + (int.TryParse(q["skipped"].ToString(), out var sk) && sk > 0
-                ? $" ({sk} byte-identical re-upload(s) skipped)"
-                : string.Empty)
-            + "."
-            + (int.TryParse(q["refs"].ToString(), out var refs) && refs > 0
-                ? $" Re-emitted {refs} call-site reference(s)."
-                : string.Empty),
-        _ => "Done.",
-    };
 }

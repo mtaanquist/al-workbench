@@ -16,6 +16,10 @@ project thread "One-time secret sharing links".
   it, presses Show secret (typing the passphrase first, if there is one), and copies it.
 - When the last allowed view is used, the link expires, or the sender revokes it, the link
   stops working and the encrypted copy is deleted.
+- Disabling a user closes the links they sent that are still open, the same way a revoke
+  does, with an audit row per link naming the admin who disabled them. Someone who has
+  left, or whose account was taken over, should not leave working links behind (decided
+  by Mads on 2026-11-02, closing rather than a note on the disable dialog; #1544).
 - The sender can open their own link to check what they sent without using up a view
   (asked for by Mads on 2026-10-29). They need the whole link and the passphrase like
   anyone else, and must be signed in to the organisation as the person who created it.

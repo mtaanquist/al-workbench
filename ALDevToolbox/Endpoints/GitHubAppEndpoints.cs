@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.GitHub;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.DataProtection;
@@ -189,8 +190,7 @@ internal static class GitHubAppEndpoints
             var app = await settings.GetGitHubAppViewAsync(ct);
             if (!app.IsConfigured || string.IsNullOrEmpty(app.ClientId) || !app.HasClientSecret)
             {
-                RedirectToAccount(ctx,
-                    "GitHub is not set up on this server yet. Ask whoever runs AL Workbench to finish setting it up, then try again.");
+                RedirectToAccount(ctx, FormErrorReasons.GitHubNotSetUp);
                 return;
             }
 
@@ -236,8 +236,7 @@ internal static class GitHubAppEndpoints
                 logger.LogWarning("Rejected a GitHub account-link callback whose state did not validate.");
                 // No field-name prefix on this one: they pressed a button, and
                 // "GitHub:" in front of it reads as a rejected form field.
-                RedirectToAccountPlain(ctx,
-                    "Connecting your GitHub account did not finish in time, or had already been done. Choose Connect GitHub to start again.");
+                RedirectToAccountPlain(ctx, FormErrorReasons.GitHubLinkStale);
                 return;
             }
 
@@ -247,8 +246,7 @@ internal static class GitHubAppEndpoints
                 // GitHub sends error=access_denied when the person pressed
                 // Cancel on the authorisation screen. That is a decision, not a
                 // fault, so it gets a plain sentence.
-                RedirectToAccount(ctx,
-                    "GitHub was not connected. You can choose Connect GitHub whenever you want to try again.");
+                RedirectToAccount(ctx, FormErrorReasons.GitHubCancelled);
                 return;
             }
 
@@ -260,18 +258,19 @@ internal static class GitHubAppEndpoints
             }
             catch (PlanValidationException ex)
             {
-                RedirectToAccount(ctx, ex.Errors.First().Value);
+                // The service's sentence names the GitHub login, so it can't be
+                // a fixed code; the page says the same without the name.
+                logger.LogInformation("GitHub account link refused: {Reason}", ex.Errors.First().Value);
+                RedirectToAccount(ctx, FormErrorReasons.GitHubTaken);
             }
             catch (GitHubAppNotConfiguredException)
             {
-                RedirectToAccount(ctx,
-                    "GitHub is not set up on this server yet. Ask whoever runs AL Workbench to finish setting it up, then try again.");
+                RedirectToAccount(ctx, FormErrorReasons.GitHubNotSetUp);
             }
             catch (GitHubApiException ex)
             {
                 logger.LogWarning(ex, "GitHub refused to complete an account link.");
-                RedirectToAccount(ctx,
-                    $"GitHub could not finish connecting your account: {ex.Message}");
+                RedirectToAccount(ctx, FormErrorReasons.GitHubRefused);
             }
         }).RequireAuthorization();
 
@@ -291,8 +290,7 @@ internal static class GitHubAppEndpoints
             catch (Exception ex)
             {
                 loggerFactory.CreateLogger("GitHubAccountLink").LogError(ex, "Failed to unlink a GitHub account.");
-                RedirectToAccount(ctx,
-                    "An unexpected error occurred. Your GitHub account is still connected.");
+                RedirectToAccount(ctx, FormErrorReasons.GitHubUnlinkFailed);
             }
         }).RequireAuthorization();
 
@@ -311,13 +309,13 @@ internal static class GitHubAppEndpoints
             + Uri.EscapeDataString(message));
 
     /// <summary>
-    /// The same, back to the Account section. That page renders a message only
-    /// when it is paired with the <c>err=</c> label naming what failed - the
-    /// pair <see cref="EntraAuthEndpoints"/> redirects with - so the label is
-    /// added here rather than left to seven call sites to remember.
+    /// Back to the Account section with a <see cref="FormErrorReasons"/> code,
+    /// never a sentence: that page is the signed-in user's own, so a link
+    /// must not be able to put text on it (#1544). The <c>err=</c> label marks
+    /// it as something that went wrong.
     /// </summary>
-    private static void RedirectToAccount(HttpContext ctx, string message) =>
-        RedirectWithMessage(ctx, $"{AccountReposSection}?{RouteConstants.ErrQuery}=GitHub", message);
+    private static void RedirectToAccount(HttpContext ctx, string reason) =>
+        ctx.Response.Redirect($"{AccountReposSection}?{RouteConstants.ErrQuery}=GitHub&{RouteConstants.ReasonQuery}={reason}");
 
     /// <summary>
     /// The same, without the <c>err=</c> field label. For the things that went
@@ -325,8 +323,8 @@ internal static class GitHubAppEndpoints
     /// person came back to twice - where naming a field would invent a form
     /// they never filled in.
     /// </summary>
-    private static void RedirectToAccountPlain(HttpContext ctx, string message) =>
-        RedirectWithMessage(ctx, AccountReposSection, message);
+    private static void RedirectToAccountPlain(HttpContext ctx, string reason) =>
+        ctx.Response.Redirect($"{AccountReposSection}?{RouteConstants.ReasonQuery}={reason}");
 
     /// <summary>
     /// Mints a single-use <c>state</c> for one handshake: Data Protection

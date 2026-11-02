@@ -58,6 +58,75 @@ async function withStore(mode, fn) {
     }
 }
 
+// ── A small index entry beside each record (OEX5-2) ──────────────────────
+//
+// A record holds its file's whole original XML, which can be tens of MB. The
+// restore prompt and the one-session-per-file sweep need only which file it
+// is and when it was saved, so each record has an index entry under
+// META_PREFIX + its id holding just that, written in the same transaction as
+// the record. Those two read the keys and the entries, never a record.
+//
+// The entry names its id `id`, not `openId`: a tab still running the script
+// from before the index (during a deploy) skips anything without an openId,
+// so it never offers or sweeps an entry as if it were a session. A record such
+// a tab writes gets no entry; readIndex() fills one in the first time it sees
+// the record without one, and drops an entry whose record has gone.
+const META_PREFIX = "meta:";
+
+function metaOf(rec) {
+    return { id: rec.openId, fileName: rec.fileName || "", savedAt: rec.savedAt || 0, repo: rec.repo || null, handle: rec.handle || null };
+}
+
+// Every stored session as its index entry, shaped like a record without the
+// file in it: { openId, fileName, savedAt, repo, handle }.
+async function readIndex() {
+    const { keys, metas } = await withStore("readonly", (store, done) => {
+        const out = { keys: [], metas: [] };
+        const k = store.getAllKeys();
+        k.onsuccess = () => {
+            out.keys = k.result || [];
+            const m = store.getAll(IDBKeyRange.bound(META_PREFIX, META_PREFIX + "\uffff"));
+            m.onsuccess = () => { out.metas = m.result || []; done(out); };
+        };
+    });
+    const byId = new Map();
+    for (const m of metas) if (m && m.id) byId.set(m.id, m);
+    const ids = keys.filter((k) => typeof k === "string" && !k.startsWith(META_PREFIX) && k !== LEGACY_KEY);
+    const missing = ids.filter((id) => !byId.has(id));
+    if (missing.length > 0) await addIndexEntries(missing, byId);
+    const stored = new Set(ids);
+    const orphans = [...byId.keys()].filter((id) => !stored.has(id));
+    if (orphans.length > 0) {
+        await withStore("readwrite", (store) => {
+            for (const id of orphans) store.delete(META_PREFIX + id);
+        }).catch(() => {});
+    }
+    return ids.filter((id) => byId.has(id)).map((id) => {
+        const m = byId.get(id);
+        return { openId: id, fileName: m.fileName, savedAt: m.savedAt, repo: m.repo || null, handle: m.handle || null };
+    });
+}
+
+// Writes the index entry of each record in `ids` that has none, reading those
+// records once. A record with no openId of its own is not a session and gets
+// none, as before the index.
+async function addIndexEntries(ids, byId) {
+    try {
+        await withStore("readwrite", (store) => {
+            for (const id of ids) {
+                const req = store.get(id);
+                req.onsuccess = () => {
+                    const rec = req.result;
+                    if (!rec || rec.openId !== id) return;
+                    const m = metaOf(rec);
+                    store.put(m, META_PREFIX + id);
+                    byId.set(id, m);
+                };
+            }
+        });
+    } catch { /* not offered this time; the next look tries again */ }
+}
+
 // ── One record per open (#1595, #1609) ───────────────────────────────────
 //
 // Every open - an upload, a file from disk, a file from a repository, or a
@@ -236,6 +305,7 @@ async function updateRec(openId, change) {
                 if (!rec || rec.openId !== openId || change(rec) === false) { done(false); return; }
                 rec.savedAt = Date.now();
                 store.put(rec, openId);
+                store.put(metaOf(rec), META_PREFIX + openId);
                 done(true);
             };
         });
@@ -259,7 +329,11 @@ async function openRecord(rec, dropOlder = true) {
     rec.savedAt = Date.now();
     const ok = await startOpen(rec.openId, (previousId) => withStore("readwrite", (store) => {
         store.put(rec, rec.openId);
-        if (previousId && previousId !== rec.openId) store.delete(previousId);
+        store.put(metaOf(rec), META_PREFIX + rec.openId);
+        if (previousId && previousId !== rec.openId) {
+            store.delete(previousId);
+            store.delete(META_PREFIX + previousId);
+        }
     }));
     if (ok && dropOlder) await dropOlderCopies(rec);
     return ok;
@@ -314,10 +388,7 @@ async function superseded(r, all) {
 async function dropOlderCopies(rec) {
     try {
         const live = await heldIds();
-        const all = await withStore("readonly", (store, done) => {
-            const req = store.getAll();
-            req.onsuccess = () => done(req.result || []);
-        });
+        const all = await readIndex();
         for (const r of all) {
             if (!r || !r.openId || r.openId === rec.openId || live.has(r.openId)) continue;
             if ((r.savedAt || 0) > (rec.savedAt || 0)) continue;
@@ -353,7 +424,10 @@ export async function putBaseStream(fileName, sourceLang, targetLang, streamRef,
     if (rebase) {
         const rec = { openId: replaceOpenId, fileName, originalXml, sourceLang, targetLang, edits: {}, repo: repo || null, savedAt: Date.now() };
         try {
-            await withStore("readwrite", (store) => { store.put(rec, replaceOpenId); });
+            await withStore("readwrite", (store) => {
+                store.put(rec, replaceOpenId);
+                store.put(metaOf(rec), META_PREFIX + replaceOpenId);
+            });
             return replaceOpenId;
         } catch {
             return null;
@@ -401,12 +475,17 @@ async function migrateLegacy() {
             if (!rec.fileName || !rec.originalXml) return;
             rec.openId = newOpenId();
             store.put(rec, rec.openId);
+            store.put(metaOf(rec), META_PREFIX + rec.openId);
         };
     });
 }
 
+// Deletes a record and its index entry.
 function deleteKey(key) {
-    return withStore("readwrite", (store) => { store.delete(key); }).catch(() => {});
+    return withStore("readwrite", (store) => {
+        store.delete(key);
+        store.delete(META_PREFIX + key);
+    }).catch(() => {});
 }
 
 // For the restore prompt: the newest session no live tab holds, as its id,
@@ -419,10 +498,8 @@ export async function peek(maxAgeMs) {
     try {
         await migrateLegacy();
         const live = await heldIds();
-        const all = await withStore("readonly", (store, done) => {
-            const req = store.getAll();
-            req.onsuccess = () => done(req.result || []);
-        });
+        // The index entries only: a stored file can be tens of MB (OEX5-2).
+        const all = await readIndex();
         const now = Date.now();
         const free = all.filter((r) => r && r.openId && !live.has(r.openId));
         // A session with a newer record of its file, held or not, is out of
@@ -460,8 +537,13 @@ export async function loadMeta(openId) {
             const moved = { ...rec, openId: newId };
             const ok = await startOpen(newId, (previousId) => withStore("readwrite", (store) => {
                 store.put(moved, newId);
+                store.put(metaOf(moved), META_PREFIX + newId);
                 store.delete(openId);
-                if (previousId) store.delete(previousId);
+                store.delete(META_PREFIX + openId);
+                if (previousId) {
+                    store.delete(previousId);
+                    store.delete(META_PREFIX + previousId);
+                }
             }));
             if (!ok) return { refused: "error" };
             await dropOlderCopies(moved);

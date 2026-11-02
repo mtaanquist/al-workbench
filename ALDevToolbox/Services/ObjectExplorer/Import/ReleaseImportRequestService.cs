@@ -253,14 +253,16 @@ public sealed class ReleaseImportRequestService
     }
 
     /// <summary>
-    /// Amends modules into an existing release (#216) from the same upload
+    /// Queues more modules for an existing release (#216) from the same upload
     /// shapes the import form accepts: a folder ZIP, or individual <c>.app</c>
-    /// files with their paired <c>.Source.zip</c>s. Synchronous — the streams
-    /// are consumed in-request, and the staged ZIP is deleted before returning.
-    /// Throws <see cref="PlanValidationException"/> when nothing was picked, or
-    /// when the importer refuses the amend.
+    /// files with their paired <c>.Source.zip</c>s. The release is flipped to
+    /// <c>ingesting</c>, the files are staged to one temp ZIP, and the amend runs on
+    /// the import worker like a DVD import, inside the one-heavy-import gate (#1549,
+    /// #1602). Throws <see cref="PlanValidationException"/> when nothing was picked,
+    /// when two source ZIPs pair with the same app, when the release cannot take an
+    /// amend, or when the upload cannot be staged; the release is left as it was.
     /// </summary>
-    public async Task<ReleaseImportSummary> AmendAsync(
+    public async Task<ReleaseImportOutcome> AmendAsync(
         int releaseId,
         UploadedFile? folderZipFile,
         IReadOnlyList<UploadedFile> appFileUploads,
@@ -270,40 +272,101 @@ public sealed class ReleaseImportRequestService
         var folderZip = folderZipFile is { Length: > 0 } fz ? fz : null;
         var appFiles = appFileUploads.Where(f => f.Length > 0).ToArray();
 
-        if (folderZipFile is null && appFiles.Length == 0)
+        if (folderZip is null && appFiles.Length == 0)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["AppFiles"] = "Pick a folder ZIP or at least one .app file before submitting.",
             });
         }
+        // Paired before anything changes, so a clash is refused with the release untouched.
+        var pairs = folderZip is null ? PairIndividualFiles(appFiles, sourceZips) : null;
 
-        var openedStreams = new List<Stream>();
-        ZipArchive? folderArchive = null;
-        string? tempFolderZipPath = null;
+        // From the flip on the release reads as importing; until the job row says so,
+        // this tracker tells a build waiting on it that someone is (#1180).
+        using var tracking = _importer.Ingests.Track(releaseId);
+        await _importer.BeginAmendAsync(releaseId, ct).ConfigureAwait(false);
+
+        string? stagedPath = null;
+        long? jobRowId = null;
         try
         {
-            List<AppFileUpload> uploads;
-            if (folderZip is not null)
+            try
             {
-                (uploads, folderArchive, tempFolderZipPath) =
-                    await BuildUploadsFromFolderZipAsync(folderZip, openedStreams, ct).ConfigureAwait(false);
+                stagedPath = pairs is null
+                    ? await StageUploadToTempAsync(folderZip!, AddModulesTempPrefix, ".zip", ct).ConfigureAwait(false)
+                    : await StagePairsToTempZipAsync(pairs, ct).ConfigureAwait(false);
             }
-            else
+            catch (IOException ex)
             {
-                uploads = BuildUploadsFromIndividualFiles(appFiles, sourceZips, openedStreams);
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    ["AppFiles"] = "Could not save the upload on the server: " + ex.Message,
+                });
             }
 
-            return await _importer.AmendReleaseAsync(releaseId, uploads, ct).ConfigureAwait(false);
+            var source = new ReleaseImportSource.AddModules(stagedPath);
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing modules for a release");
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId.Value),
+                ct).ConfigureAwait(false);
+            _logger.LogInformation("Queued {Count} module upload(s) for release {ReleaseId}.", pairs?.Count ?? 1, releaseId);
+            return new ReleaseImportOutcome.Queued(releaseId);
         }
-        finally
+        catch (Exception ex)
         {
-            DisposeAll(openedStreams);
-            folderArchive?.Dispose();
-            if (tempFolderZipPath is not null && File.Exists(tempFolderZipPath))
+            _logger.LogWarning(ex, "Adding modules to release {ReleaseId} stopped before it was queued; handing it back.", releaseId);
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, AddModulesNotQueuedMessage).ConfigureAwait(false);
+            await _importer.RestoreAmendedReleaseAsync(releaseId).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>Temp-file prefix for the uploads of an Add modules job (#1549).</summary>
+    public const string AddModulesTempPrefix = "oe-amend-";
+
+    private const string AddModulesNotQueuedMessage =
+        "The upload stopped before it was queued, so nothing was added. Add the modules again.";
+
+    /// <summary>
+    /// Writes individually picked <c>.app</c> files and their paired source ZIPs into
+    /// one temp ZIP, one folder per app, so the worker pairs them exactly as they were
+    /// paired here. Stored, not compressed: both are ZIPs already.
+    /// </summary>
+    private static async Task<string> StagePairsToTempZipAsync(
+        IReadOnlyList<(UploadedFile App, UploadedFile? Source)> pairs, CancellationToken ct)
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), AddModulesTempPrefix + Guid.NewGuid().ToString("N") + ".zip");
+        try
+        {
+            await using var fs = File.Create(tempPath);
+            using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+            for (var i = 0; i < pairs.Count; i++)
             {
-                try { File.Delete(tempFolderZipPath); } catch { /* swallow */ }
+                var (app, source) = pairs[i];
+                var appName = Path.GetFileName(app.FileName);
+                await CopyIntoAsync(zip, $"{i:D3}/{appName}", app, ct).ConfigureAwait(false);
+                if (source is not null)
+                {
+                    var sourceName = Path.GetFileNameWithoutExtension(appName) + ".Source.zip";
+                    await CopyIntoAsync(zip, $"{i:D3}/{sourceName}", source, ct).ConfigureAwait(false);
+                }
             }
+        }
+        catch
+        {
+            try { File.Delete(tempPath); } catch { /* swallow */ }
+            throw;
+        }
+        return tempPath;
+
+        static async Task CopyIntoAsync(ZipArchive zip, string name, UploadedFile file, CancellationToken ct)
+        {
+            var entry = zip.CreateEntry(name, CompressionLevel.NoCompression);
+            await using var to = entry.Open();
+            await using var from = file.OpenRead();
+            await from.CopyToAsync(to, ct).ConfigureAwait(false);
         }
     }
 
@@ -678,28 +741,37 @@ public sealed class ReleaseImportRequestService
         return tempPath;
     }
 
-    /// <summary>
-    /// Stages the uploaded folder ZIP to a temp file and walks every
-    /// <c>.app</c> entry — the synchronous amend path (#216) consumes the entry
-    /// streams in-request, so it gets the archive + temp path back to dispose.
-    /// </summary>
-    private static async Task<(List<AppFileUpload> Uploads, ZipArchive Archive, string TempPath)>
-        BuildUploadsFromFolderZipAsync(
-            UploadedFile folderZip,
-            List<Stream> openedStreams,
-            CancellationToken ct)
-    {
-        var tempPath = await StageUploadToTempAsync(folderZip, FolderZipTempPrefix, ".zip", ct).ConfigureAwait(false);
-        var (uploads, archive) = ReleaseZipStaging.OpenStagedZip(tempPath, isDvd: false, openedStreams);
-        return (uploads, archive, tempPath);
-    }
-
     // ── Individual-file path (legacy / partner extensions) ─────────────
 
     private static List<AppFileUpload> BuildUploadsFromIndividualFiles(
         IReadOnlyList<UploadedFile> appFiles,
         IReadOnlyList<UploadedFile> sourceZipFiles,
         List<Stream> openedStreams)
+    {
+        var uploads = new List<AppFileUpload>(appFiles.Count);
+        foreach (var (app, source) in PairIndividualFiles(appFiles, sourceZipFiles))
+        {
+            var appStream = app.OpenRead();
+            openedStreams.Add(appStream);
+            Stream? sourceStream = null;
+            if (source is not null)
+            {
+                sourceStream = source.OpenRead();
+                openedStreams.Add(sourceStream);
+            }
+            uploads.Add(new AppFileUpload(app.FileName, appStream, sourceStream));
+        }
+        return uploads;
+    }
+
+    /// <summary>
+    /// Pairs each picked <c>.app</c> with the source ZIP named after it, if one was
+    /// picked. Throws <see cref="PlanValidationException"/> keyed <c>SourceZips</c>
+    /// when two source ZIPs would pair with the same app.
+    /// </summary>
+    private static List<(UploadedFile App, UploadedFile? Source)> PairIndividualFiles(
+        IReadOnlyList<UploadedFile> appFiles,
+        IReadOnlyList<UploadedFile> sourceZipFiles)
     {
         var sourceZips = sourceZipFiles.Where(f => f.Length > 0).ToArray();
         static string Stem(UploadedFile f) =>
@@ -718,25 +790,22 @@ public sealed class ReleaseImportRequestService
         }
         var sourceByBasename = sourceZips.ToDictionary(Stem, f => f, StringComparer.OrdinalIgnoreCase);
 
-        var uploads = new List<AppFileUpload>(appFiles.Count);
+        var pairs = new List<(UploadedFile App, UploadedFile? Source)>(appFiles.Count);
         foreach (var af in appFiles)
         {
-            var appStream = af.OpenRead();
-            openedStreams.Add(appStream);
-            Stream? sourceStream = null;
+            UploadedFile? source = null;
             var stem = Path.GetFileNameWithoutExtension(af.FileName);
             foreach (var key in EnumeratePossibleSourceKeys(stem))
             {
                 if (sourceByBasename.TryGetValue(key, out var match))
                 {
-                    sourceStream = match.OpenRead();
-                    openedStreams.Add(sourceStream);
+                    source = match;
                     break;
                 }
             }
-            uploads.Add(new AppFileUpload(af.FileName, appStream, sourceStream));
+            pairs.Add((af, source));
         }
-        return uploads;
+        return pairs;
     }
 
     /// <summary>

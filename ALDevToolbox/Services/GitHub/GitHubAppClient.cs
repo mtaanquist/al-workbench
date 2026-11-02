@@ -1039,7 +1039,10 @@ public sealed partial class GitHubAppClient
             var htmlUrl = item.TryGetProperty("html_url", out var u) ? u.GetString() : null;
             if (number > 0 && !string.IsNullOrEmpty(htmlUrl))
             {
-                return new GitHubPullRequest(number, htmlUrl!, headBranch);
+                var title = item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String
+                    ? t.GetString()
+                    : null;
+                return new GitHubPullRequest(number, htmlUrl!, headBranch, title);
             }
         }
         return null;

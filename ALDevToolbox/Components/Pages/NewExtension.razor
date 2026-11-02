@@ -494,7 +494,7 @@
                         @* Spaces come out of the file name, exactly as the generator
                            emits it - naming a file that is not in the ZIP sends the
                            user hunting. *@
-                        <code class="code">@($"{CustomerNaming.Apply(_workspaceContext.WorkspaceName, FolderStyle)}.code-workspace")</code>
+                        <code class="code">@CodeWorkspaceFileNameOf(_workspaceContext)</code>
                         file into your existing workspace, replacing the old workspace
                         file. The new <code class="code">folders</code> array already lists every
                         extension plus the new one.
@@ -568,7 +568,18 @@
         // The saved settings file as it was read, posted with the form so the
         // download endpoint builds its context from the same file.
         ProjectPlan SavedPlan,
-        string ConfigToml);
+        string ConfigToml,
+        // The name the workspace's .code-workspace file was saved under, when
+        // the settings recorded it (#1615); null derives it from the folder style.
+        string? CodeWorkspaceFileName);
+
+    /// <summary>
+    /// The .code-workspace file the download rewrites: the name the settings
+    /// recorded, else the one today's folder style gives - the same choice the
+    /// generator makes, so the page names the file that is in the ZIP.
+    /// </summary>
+    private string CodeWorkspaceFileNameOf(WorkspaceImportContext context) =>
+        context.CodeWorkspaceFileName ?? $"{CustomerNaming.Apply(context.WorkspaceName, FolderStyle)}.code-workspace";
 
     // Import-config feedback. _importFileName labels the picked file next to
     // the button; _importMessage is the success/seed line shown underneath;
@@ -1208,7 +1219,8 @@
         // New Workspace and Template Detail so all three previews stay identical.
         return PreviewTreeBuilder.BuildWorkspacePreview(
             rootName, children, ALDevToolbox.Services.Generation.WorkspaceConfigService.FileName, workspaceRootPaths,
-            _selected?.RootFolders.OrderBy(f => f.Ordering).Select(f => f.Path));
+            _selected?.RootFolders.OrderBy(f => f.Ordering).Select(f => f.Path),
+            CodeWorkspaceFileNameOf(context));
     }
 
 
@@ -1291,7 +1303,7 @@
                     + "including its ID range and dependencies.", new());
 
             case WorkspaceConfigService.WorkspaceKind when import.Workspace is not null:
-                ApplyImportedWorkspace(import.Workspace, import.Extensions, toml);
+                ApplyImportedWorkspace(import.Workspace, import.Extensions, toml, import.CodeWorkspaceFileName);
                 // Extensions include the workspace's own Core, so the others
                 // (modules, and extensions added since) are what is left after it.
                 var others = Math.Max(0, import.Extensions.Count - 1);
@@ -1351,7 +1363,8 @@
     /// empty identities list (older configs), we fall back to estimating the
     /// next slot from the template's defaults.
     /// </summary>
-    private void ApplyImportedWorkspace(ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions, string toml)
+    private void ApplyImportedWorkspace(
+        ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions, string toml, string? codeWorkspaceFileName)
     {
         var template = _templates?.FirstOrDefault(t => t.Key == plan.TemplateKey);
         _selected = template ?? _selected;
@@ -1403,7 +1416,8 @@
             extensions,
             plan.TenantId,
             plan,
-            toml);
+            toml,
+            codeWorkspaceFileName);
     }
 
     /// <summary>

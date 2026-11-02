@@ -957,21 +957,48 @@ public sealed class ProjectService
         var orgId = RequireOrganizationId();
         ArgumentNullException.ThrowIfNull(teamIds);
 
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
-            ?? throw Validation("Visibility", "This solution no longer exists.");
-
         // Changing who may see a solution is governance, not work on it: the same set
         // as deleting it, and for the same reason a team grant never included delete.
         // Under the old model manage was owner-and-admins here anyway; now that a
         // Public solution is managed by everyone, leaving this on manage would let
         // anybody re-govern it - lock a shared solution to a team of their own, or
-        // open a narrowed one back up. See .design/teams-and-visibility.md.
-        if (!await _access.CanDeleteAsync(project.CreatedByUserId, ct))
+        // open a narrowed one back up. See .design/teams-and-visibility.md. Asked
+        // before the locks below, so a refused caller never queues behind a writer.
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => new { p.CreatedByUserId })
+            .FirstOrDefaultAsync(ct)
+            ?? throw Validation("Visibility", "This solution no longer exists.");
+        if (!await _access.CanDeleteAsync(ownerId.CreatedByUserId, ct))
         {
             throw new ProjectAccessDeniedException(
                 "Only the solution's owner or an organisation admin can change who may see it.");
         }
+
+        // A team delete checks "is it the only team" and then deletes; without a lock it
+        // and this save could each pass and leave the solution non-Public with no team
+        // (#1603). Teams, then the solution, in the order TeamService takes them: a delete
+        // waits for this save and then checks what it left, and this save, waiting for a
+        // delete, then finds the team gone and says so. Raw SQL, approved for #1603 like
+        // ModuleService's lock: it skips the query filter, so each statement names the
+        // organisation itself. The teams being kept or added FOR KEY SHARE, which is what
+        // linking them takes anyway; the solution FOR NO KEY UPDATE, as the admin guard
+        // (#1337), so a row that only references it is not held up.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        var lockedTeamIds = teamIds.Distinct().Order().ToArray();
+        if (lockedTeamIds.Length > 0)
+        {
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT 1 FROM teams WHERE id = ANY({lockedTeamIds}) AND organization_id = {orgId} ORDER BY id FOR KEY SHARE", ct);
+        }
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM oe_projects WHERE id = {projectId} AND organization_id = {orgId} FOR NO KEY UPDATE", ct);
+
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
+            ?? throw Validation("Visibility", "This solution no longer exists.");
 
         var (_, wanted) = await ValidateAccessAsync(new ProjectAccessSettings(visibility, teamIds), ct);
 
@@ -999,6 +1026,7 @@ public sealed class ProjectService
         project.Visibility = visibility;
         project.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
 
         _logger.LogInformation("Set project {ProjectId} visibility to {Visibility} with {TeamCount} team(s).",
             projectId, visibility, wanted.Count);

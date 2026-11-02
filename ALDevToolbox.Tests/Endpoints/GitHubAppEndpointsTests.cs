@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Endpoints;
+using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.GitHub;
@@ -42,8 +43,9 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
 {
     private const string Password = "correct horse battery staple";
 
-    private const string Refused = "Connecting your GitHub account did not finish in time";
-    private const string AcceptedWithoutCode = "GitHub was not connected.";
+    // The account side redirects with a reason code, never a sentence (#1544).
+    private const string Refused = "reason=" + FormErrorReasons.GitHubLinkStale;
+    private const string AcceptedWithoutCode = "reason=" + FormErrorReasons.GitHubCancelled;
 
     private const string InstallRefused = "That link has expired or was already used.";
     private const string InstallReplayed = "That setup link had already been used. Nothing changed";
@@ -163,8 +165,8 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
         var (client, userId) = await SignInAsync();
         var state = MintState(GitHubAppEndpoints.LinkStateProtectionPurpose, userId);
 
-        (await CallbackAsync(client, state)).Should().Contain(Uri.EscapeDataString(AcceptedWithoutCode));
-        (await CallbackAsync(client, state)).Should().Contain(Uri.EscapeDataString(Refused), "a state is single use");
+        (await CallbackAsync(client, state)).Should().Contain(AcceptedWithoutCode);
+        (await CallbackAsync(client, state)).Should().Contain(Refused, "a state is single use");
     }
 
     [Fact]
@@ -173,7 +175,7 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
         var (client, userId) = await SignInAsync();
         var state = MintState(GitHubAppEndpoints.StateProtectionPurpose, userId);
 
-        (await CallbackAsync(client, state)).Should().Contain(Uri.EscapeDataString(Refused));
+        (await CallbackAsync(client, state)).Should().Contain(Refused);
     }
 
     [Fact]
@@ -183,7 +185,7 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
         var state = MintState(GitHubAppEndpoints.LinkStateProtectionPurpose, userId,
             issuedAt: DateTimeOffset.UtcNow.AddMinutes(-16));
 
-        (await CallbackAsync(client, state)).Should().Contain(Uri.EscapeDataString(Refused));
+        (await CallbackAsync(client, state)).Should().Contain(Refused);
     }
 
     [Fact]
@@ -193,7 +195,7 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
         var colleagueId = await SeedColleagueAsync();
         var state = MintState(GitHubAppEndpoints.LinkStateProtectionPurpose, colleagueId);
 
-        (await CallbackAsync(client, state)).Should().Contain(Uri.EscapeDataString(Refused),
+        (await CallbackAsync(client, state)).Should().Contain(Refused,
             "a callback pasted into another person's session must not connect anything");
         userId.Should().NotBe(colleagueId);
     }
@@ -203,7 +205,7 @@ public sealed class GitHubAppEndpointsTests : IClassFixture<GitHubAppEndpointsTe
     {
         var (client, _) = await SignInAsync();
 
-        (await CallbackAsync(client, "not-a-state")).Should().Contain(Uri.EscapeDataString(Refused));
+        (await CallbackAsync(client, "not-a-state")).Should().Contain(Refused);
     }
 
     [Fact]
