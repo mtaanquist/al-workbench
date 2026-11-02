@@ -194,6 +194,47 @@ public sealed class BackupSchedulerTests : IDisposable
         perOrg.Should().NotContainKey(pending);
     }
 
+    /// <summary>
+    /// A snapshot that fails in the scheduled run is tried again later the same day,
+    /// after the same pause as the full backup, rather than waiting for tomorrow's
+    /// window; and not on every one-minute poll (#1550).
+    /// </summary>
+    [Fact]
+    public async Task A_failed_snapshot_is_tried_again_the_same_day_after_a_pause()
+    {
+        await SeedSettingsAsync(enabled: true, scheduledTimeUtc: new TimeOnly(2, 0));
+        _clock.Advance(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(5));
+        var blocked = await SeedOrganizationAsync("blocked", isPending: false);
+        // A file where the organisation's snapshot folder should be, so its snapshot fails.
+        var tenants = Path.Combine(_backupsDir, "tenants");
+        Directory.CreateDirectory(tenants);
+        var obstacle = Path.Combine(tenants, "blocked");
+        await File.WriteAllTextAsync(obstacle, "in the way", TestContext.Current.CancellationToken);
+        var options = _options with { PgDumpPath = StubPgDump(exitCode: 0, out var runs) };
+        var scheduler = NewScheduler();
+
+        await TickOnceAsync(scheduler, options);
+        (await SnapshotCountAsync(blocked)).Should().Be(0);
+        (await SnapshotCountAsync(TestDb.DefaultOrgId)).Should().Be(1, "one failure does not stop the others");
+
+        File.Delete(obstacle);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await TickOnceAsync(scheduler, options);
+        (await SnapshotCountAsync(blocked)).Should().Be(0, "the next poll does not try again straight away");
+
+        _clock.Advance(BackupScheduler.FailedRunBackoff);
+        await TickOnceAsync(scheduler, options);
+        (await SnapshotCountAsync(blocked)).Should().Be(1, "once the pause is over it is tried again, the same day");
+        (await SnapshotCountAsync(TestDb.DefaultOrgId)).Should().Be(1, "a served organisation is not taken twice");
+        Runs(runs).Should().Be(1, "the full backup was already done for today");
+    }
+
+    private async Task<int> SnapshotCountAsync(int organizationId)
+    {
+        await using var read = _db.NewContext();
+        return await read.PerTenantBackups.AsNoTracking().CountAsync(b => b.OrganizationId == organizationId);
+    }
+
     [Fact]
     public async Task Single_tenant_mode_takes_the_backup_but_no_per_tenant_snapshots()
     {

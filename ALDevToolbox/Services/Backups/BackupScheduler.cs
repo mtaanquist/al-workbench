@@ -38,6 +38,20 @@ public sealed class BackupScheduler : PolledScheduler
     /// </summary>
     private DateTime? _retryNotBeforeUtc;
 
+    /// <summary>
+    /// The same pause per organisation for a failed scheduled snapshot, so one that
+    /// failed is tried again later today rather than tomorrow, and not every minute
+    /// (#1550). In memory only.
+    /// </summary>
+    private readonly Dictionary<int, DateTime> _perTenantRetryNotBeforeUtc = new();
+
+    /// <summary>
+    /// The organisations whose snapshot for <see cref="_perTenantWindow"/> is known to
+    /// exist, so the polls after the window do not ask the database about each again.
+    /// </summary>
+    private readonly HashSet<int> _perTenantServed = new();
+    private DateTime _perTenantWindow;
+
     public BackupScheduler(IServiceProvider services, TimeProvider clock, ISingleTenantMode singleTenant, MaintenanceModeState maintenance, ILogger<BackupScheduler> logger, WorkerHeartbeatRegistry heartbeats)
         // Poll every minute; flag stale if no tick has landed in 5 (~3x the poll
         // interval). Active-duration ceiling matches the longest legitimate backup run
@@ -106,45 +120,14 @@ public sealed class BackupScheduler : PolledScheduler
             .OrderByDescending(b => b.CreatedAt)
             .Select(b => (DateTime?)b.CreatedAt)
             .FirstOrDefaultAsync(ct);
-        if (lastScheduled is not null && lastScheduled >= todayWindow) return;
-
-        // A failed run is tried again after a pause, not on every one-minute
-        // poll for the rest of the day (#1269).
-        if (_retryNotBeforeUtc is { } retryAt && nowUtc < retryAt) return;
-
-        _logger.LogInformation(
-            "BackupScheduler triggering scheduled backup (scheduled-for={Scheduled:o}, now={Now:o}).",
-            todayWindow, nowUtc);
-        Backup? created = null;
-        try
+        // Once today's full backup exists the tick goes on to the snapshots, so an
+        // organisation whose snapshot failed is tried again today (#1550).
+        if (lastScheduled is null || lastScheduled < todayWindow)
         {
-            created = await backups.CreateAsync(BackupKind.Scheduled, ct);
-            _retryNotBeforeUtc = null;
-        }
-        catch (Exception ex)
-        {
-            _retryNotBeforeUtc = nowUtc + FailedRunBackoff;
-            _logger.LogError(ex, "Scheduled backup failed; trying again after {RetryAt:o}.", _retryNotBeforeUtc);
-        }
-
-        if (created is not null)
-        {
-            try
-            {
-                await offsite.UploadAsync(created.Id, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Off-site upload failed for backup {FileName}.", created.FileName);
-            }
-            try
-            {
-                await offsite.PruneAsync(ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Off-site prune failed.");
-            }
+            // A failed run is tried again after a pause, not on every one-minute
+            // poll for the rest of the day (#1269).
+            if (_retryNotBeforeUtc is { } retryAt && nowUtc < retryAt) return;
+            await RunFullBackupAsync(backups, offsite, todayWindow, nowUtc, ct);
         }
 
         // Per-tenant snapshots are a multi-tenant surface — single-tenant
@@ -160,8 +143,16 @@ public sealed class BackupScheduler : PolledScheduler
             .Where(o => !o.IsSystem && !o.IsPending)
             .Select(o => o.Id)
             .ToListAsync(ct);
+        if (_perTenantWindow != todayWindow)
+        {
+            _perTenantWindow = todayWindow;
+            _perTenantServed.Clear();
+            _perTenantRetryNotBeforeUtc.Clear();
+        }
         foreach (var orgId in orgs)
         {
+            if (_perTenantServed.Contains(orgId)) continue;
+            if (_perTenantRetryNotBeforeUtc.TryGetValue(orgId, out var orgRetryAt) && nowUtc < orgRetryAt) continue;
             PerTenantBackup? perTenantRow = null;
             try
             {
@@ -172,12 +163,26 @@ public sealed class BackupScheduler : PolledScheduler
                     .OrderByDescending(b => b.CreatedAt)
                     .Select(b => (DateTime?)b.CreatedAt)
                     .FirstOrDefaultAsync(ct);
-                if (lastPerTenant is not null && lastPerTenant >= todayWindow) continue;
+                if (lastPerTenant is not null && lastPerTenant >= todayWindow)
+                {
+                    _perTenantServed.Add(orgId);
+                    continue;
+                }
                 perTenantRow = await perTenant.CreateAsync(orgId, BackupKind.Scheduled, ct);
+                _perTenantServed.Add(orgId);
+                _perTenantRetryNotBeforeUtc.Remove(orgId);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Shutting down: not a failure of this organisation's snapshot, and
+                // the rest would each fail the same way.
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Scheduled per-tenant snapshot failed for org {OrgId}.", orgId);
+                _perTenantRetryNotBeforeUtc[orgId] = nowUtc + FailedRunBackoff;
+                _logger.LogError(ex, "Scheduled per-tenant snapshot failed for org {OrgId}; trying again after {RetryAt:o}.",
+                    orgId, _perTenantRetryNotBeforeUtc[orgId]);
             }
 
             // Mirror the freshly-written per-tenant snapshot off-site too —
@@ -189,12 +194,69 @@ public sealed class BackupScheduler : PolledScheduler
                 {
                     await offsite.UploadPerTenantAsync(perTenantRow.Id, ct);
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex,
                         "Off-site upload of per-tenant snapshot {FileName} (org {OrgId}) failed.",
                         perTenantRow.FileName, orgId);
                 }
+            }
+        }
+    }
+
+    private async Task RunFullBackupAsync(
+        BackupService backups, OffsiteBackupService offsite, DateTime todayWindow, DateTime nowUtc, CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "BackupScheduler triggering scheduled backup (scheduled-for={Scheduled:o}, now={Now:o}).",
+            todayWindow, nowUtc);
+        Backup? created = null;
+        try
+        {
+            created = await backups.CreateAsync(BackupKind.Scheduled, ct);
+            _retryNotBeforeUtc = null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutting down: not a failed run, and the snapshots after it would each
+            // fail the same way, one error line per organisation (#1550).
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _retryNotBeforeUtc = nowUtc + FailedRunBackoff;
+            _logger.LogError(ex, "Scheduled backup failed; trying again after {RetryAt:o}.", _retryNotBeforeUtc);
+        }
+
+        if (created is not null)
+        {
+            try
+            {
+                await offsite.UploadAsync(created.Id, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Off-site upload failed for backup {FileName}.", created.FileName);
+            }
+            try
+            {
+                await offsite.PruneAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Off-site prune failed.");
             }
         }
     }

@@ -133,6 +133,33 @@ public sealed class PushBuildTests : IDisposable
         (await ListDueAsync(Push())).Should().BeEmpty("GitHub redelivering a push does not build it twice");
     }
 
+    /// <summary>
+    /// A waiting push build refused because someone else took the automatic builds over
+    /// never built its commit, so a redelivery of that push builds it as the new person
+    /// (#1551). A build that failed on its own merits still counts as built.
+    /// </summary>
+    [Theory]
+    [InlineData("Someone else took over this pipeline's automatic builds before this build started.", true)]
+    [InlineData("The compiler reported 3 errors.", false)]
+    public async Task A_commit_whose_push_build_was_refused_at_pickup_is_due_again(string failure, bool due)
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await ctx.OePipelines.Where(p => p.Id == pipelineId).Select(p => p.ProjectId).SingleAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Trigger = ProjectBuildTrigger.Push, HeadSha = GitHubWebhookPayloads.After,
+                Status = ProjectBuildStatus.Failed, FailureMessage = failure, StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await ListDueAsync(Push())).Should().HaveCount(due ? 1 : 0);
+    }
+
     [Fact]
     public async Task A_push_older_than_the_branch_head_already_recorded_is_not_due()
     {

@@ -278,7 +278,7 @@
                         <td class="u-muted">
                             @if (p.Latest is { } w)
                             {
-                                <span>@Verb(w.Status) <Timestamp Value="@(w.FinishedAt ?? w.StartedAt)" Relative="true" /></span>
+                                <span>@Verb(w.Status) <Timestamp Value="@PipelineBuilds.StartedWhen(w.Status, w.StartedAt, w.FinishedAt)" Relative="true" /></span>
                             }
                             else
                             {
@@ -524,7 +524,7 @@
     /// build that is queued or running is the answer, so the row stops asking for one.
     /// </summary>
     private bool IsReady(PipelineArtifactsRow p) =>
-        _summaries.GetValueOrDefault(p.Id) is { IsAhead: true }
+        !p.Disabled && _summaries.GetValueOrDefault(p.Id) is { IsAhead: true }
         && p.Latest?.Status is not ("queued" or "building");
 
     /// <summary>

@@ -208,7 +208,7 @@ public sealed class ToolAccessGateTests : IDisposable
     [Fact]
     public async Task A_disabled_tools_own_api_endpoints_404()
     {
-        await DisableToolsAsync(ToolKey.Cookbook, ToolKey.Translator, ToolKey.ObjectExplorer);
+        await DisableToolsAsync(ToolKey.Cookbook, ToolKey.Translator, ToolKey.ObjectExplorer, ToolKey.Templates);
 
         using var factory = new EndpointFactory(_db);
         using var client = factory.CreateClient();
@@ -222,6 +222,10 @@ public sealed class ToolAccessGateTests : IDisposable
         // endpoint refuses as a 400; either way it is not the login redirect an
         // enabled tool's endpoint gives a signed-out caller.
         export.StatusCode.Should().BeOneOf(HttpStatusCode.NotFound, HttpStatusCode.BadRequest);
+        // The generator's posts and download links go with Templates (#1615).
+        (await client.GetAsync("/generate/download/abc")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        using var generate = await client.PostAsync("/generate/workspace", new FormUrlEncodedContent([]));
+        generate.StatusCode.Should().BeOneOf(HttpStatusCode.NotFound, HttpStatusCode.BadRequest);
     }
 
     [Fact]
@@ -238,6 +242,10 @@ public sealed class ToolAccessGateTests : IDisposable
             "signed out, the file download sends you to sign in");
         using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
         export.StatusCode.Should().Be(HttpStatusCode.Redirect, "signed out, the export sends you to sign in");
+        (await client.GetAsync("/generate/download/abc")).StatusCode.Should().Be(HttpStatusCode.Redirect,
+            "signed out, the generated download sends you to sign in");
+        using var generate = await client.PostAsync("/generate/workspace", new FormUrlEncodedContent([]));
+        generate.StatusCode.Should().Be(HttpStatusCode.Redirect, "signed out, the generator sends you to sign in");
     }
 
     [Fact]

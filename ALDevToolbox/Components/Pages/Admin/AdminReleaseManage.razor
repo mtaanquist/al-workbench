@@ -121,9 +121,10 @@
                 </a>
                 @if (_release.DeletedAt is null && _release.Status == "ready")
                 {
-                    <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/backfill-system-references")">
+                    <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/backfill-system-references")"
+                          data-oe-import-form>
                         <AntiforgeryToken />
-                        <button type="submit" class="btn" title="Re-extract built-in/system method calls (Insert, Modify, SetRange, ...) over stored source. Needed for releases imported before this feature shipped.">
+                        <button type="submit" class="btn" data-oe-import-submit data-oe-busy-label="Queuing..." title="Re-extract built-in/system method calls (Insert, Modify, SetRange, ...) over stored source. Needed for releases imported before this feature shipped.">
                             <Icon Name="rotate-ccw" Width="16" Height="16" />
                             <span>Backfill system references</span>
                         </button>
@@ -238,7 +239,8 @@
                     }
                 </p>
                 <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/recover-symbols")"
-                      enctype="multipart/form-data">
+                      enctype="multipart/form-data"
+                      data-oe-import-form data-oe-wait-label="Rebuilding..." data-oe-wait-hint="Saving the symbols and queuing the rebuild. Keep this tab open.">
                     <AntiforgeryToken />
                     <section class="form-sec">
                         <label class="field">
@@ -247,8 +249,9 @@
                             <small class="field__hint">Pick one or more compiled <code>.app</code> packages - the dependencies named in the build report above.</small>
                         </label>
                     </section>
+                    <ImportProgressBanner />
                     <div class="form-actions">
-                        <button type="submit" class="btn">
+                        <button type="submit" class="btn" data-oe-import-submit data-oe-busy-label="Uploading...">
                             <Icon Name="hammer" Width="16" Height="16" />
                             <span>Upload &amp; rebuild</span>
                         </button>
@@ -276,10 +279,11 @@
                         dependency symbols above instead if the failures were unmet dependencies.</text>
                     }
                 </p>
-                <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/retry")">
+                <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/retry")"
+                      data-oe-import-form>
                     <AntiforgeryToken />
                     <div class="form-actions">
-                        <button type="submit" class="btn">
+                        <button type="submit" class="btn" data-oe-import-submit data-oe-busy-label="Clearing the last attempt...">
                             <Icon Name="rotate-ccw" Width="16" Height="16" />
                             <span>Retry build</span>
                         </button>
@@ -303,7 +307,8 @@
                     previous attempt's partial data is cleared first so the re-run starts clean.
                 </p>
                 <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/retry")"
-                      enctype="multipart/form-data">
+                      enctype="multipart/form-data"
+                      data-oe-import-form data-oe-wait-label="Clearing the last attempt..." data-oe-wait-hint="On a large release this takes a few minutes. Keep this tab open.">
                     <AntiforgeryToken />
                     <section class="form-sec">
                         @if (_origin is null || _origin.Kind is not ("bc_artifact" or "staged_zip" or "cal_txt"))
@@ -373,8 +378,9 @@
                             <span>Keep extra debugging data for each extension</span>
                         </label>
                     </section>
+                    <ImportProgressBanner />
                     <div class="form-actions">
-                        <button type="submit" class="btn">
+                        <button type="submit" class="btn" data-oe-import-submit data-oe-busy-label="Retrying...">
                             <Icon Name="rotate-ccw" Width="16" Height="16" />
                             <span>Retry import</span>
                         </button>
