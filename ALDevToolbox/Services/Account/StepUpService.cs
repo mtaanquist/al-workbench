@@ -35,7 +35,17 @@ public sealed class StepUpService
     /// </summary>
     public const string StepUpFirstMessage = "Your confirmation ran out. Choose Add a passkey again to confirm it's you, then finish adding it.";
 
+    /// <summary>
+    /// The authenticator-app counterpart of <see cref="StepUpFirstMessage"/>:
+    /// the confirmation ran out between opening the setup page and sending
+    /// the code.
+    /// </summary>
+    public const string TotpStepUpFirstMessage = "Your confirmation ran out. Confirm it's you again, then scan the new QR code.";
+
     public const string WrongPasswordMessage = "Password is incorrect.";
+
+    /// <summary>The session's account could not be read: sign in again.</summary>
+    public const string TotpSignInAgainMessage = "Sign in again, then set up the authenticator app.";
 
     private readonly AppDbContext _db;
     private readonly PasskeyService _passkeys;
@@ -101,13 +111,43 @@ public sealed class StepUpService
     /// else, so far) gives its current password, which is the most it can
     /// prove and keeps a first passkey possible.
     /// </summary>
-    public async Task<string?> PasskeyRegistrationRefusalAsync(
-        ClaimsPrincipal principal, int userId, string? password, string ip, CancellationToken ct)
+    public Task<string?> PasskeyRegistrationRefusalAsync(
+        ClaimsPrincipal principal, int userId, string? password, string ip, CancellationToken ct) =>
+        NewWayInRefusalAsync(principal, userId, password, ip,
+            "Sign in again, then add the passkey.", StepUpFirstMessage, ct);
+
+    /// <summary>
+    /// Null when this session may turn on an authenticator app, else the
+    /// sentence to show. The same proof as adding a passkey: a second factor
+    /// added from a borrowed session would lock the owner out of their own
+    /// password sign-in (#1614, AUTH4-3).
+    /// </summary>
+    public Task<string?> TotpEnrollmentRefusalAsync(
+        ClaimsPrincipal principal, int userId, string? password, string ip, CancellationToken ct) =>
+        NewWayInRefusalAsync(principal, userId, password, ip,
+            TotpSignInAgainMessage, TotpStepUpFirstMessage, ct);
+
+    /// <summary>
+    /// Whether this session must step up before adding a sign-in method:
+    /// it is not fresh and the account has a way to confirm. False means the
+    /// session may go ahead, with the current password when it is not fresh.
+    /// What the pages ask before showing the add controls.
+    /// </summary>
+    public async Task<bool> MustStepUpBeforeAddingAsync(ClaimsPrincipal principal, int userId, CancellationToken ct)
+    {
+        if (await IsFreshForPasskeyAsync(principal, ct)) return false;
+        var methods = await AvailableMethodsAsync(userId, StepUpAuth.Method(principal), ct);
+        return methods?.Any == true;
+    }
+
+    private async Task<string?> NewWayInRefusalAsync(
+        ClaimsPrincipal principal, int userId, string? password, string ip,
+        string signInAgain, string stepUpFirst, CancellationToken ct)
     {
         if (await IsFreshForPasskeyAsync(principal, ct)) return null;
         var methods = await AvailableMethodsAsync(userId, StepUpAuth.Method(principal), ct);
-        if (methods is null) return "Sign in again, then add the passkey.";
-        if (methods.Any) return StepUpFirstMessage;
+        if (methods is null) return signInAgain;
+        if (methods.Any) return stepUpFirst;
 
         // Filtered: the signed-in user's own row, inside their org.
         var account = await _db.Users.AsNoTracking()

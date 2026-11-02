@@ -181,12 +181,22 @@ internal static class AccountMfaEndpoints
         // --- TOTP self-service ----------------------------------------------
 
         app.MapPost("/auth/account/2fa/totp/confirm", async (
-            HttpContext ctx, TotpService totp, IOrganizationContext org, AppDbContext db,
+            HttpContext ctx, TotpService totp, StepUpService stepUp, IOrganizationContext org, AppDbContext db,
             IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin, TimeProvider clock,
             IDataProtectionProvider protection, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
+            // The same proof as adding a passkey: a recent second step, or the
+            // current password when the account has nothing to step up with
+            // (#1614). The page asks for it first; this is the backstop.
+            var refusal = await stepUp.TotpEnrollmentRefusalAsync(
+                ctx.User, org.CurrentUserId!.Value, form["Password"].ToString(), ResolveIp(ctx), ct);
+            if (refusal is not null)
+            {
+                ctx.Response.Redirect($"/account/2fa/totp/setup?{RouteConstants.ErrQuery}=Password&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(refusal)}");
+                return;
+            }
             try
             {
                 var codes = await totp.ConfirmEnrollmentAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct);

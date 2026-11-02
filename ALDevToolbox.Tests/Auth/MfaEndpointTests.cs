@@ -276,7 +276,8 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
 
         using var security = await client.GetAsync("/account/security");
         var token = AntiforgeryToken(await security.Content.ReadAsStringAsync());
-        using (var on = await PostAsync(client, "/auth/account/2fa/totp/confirm", token, ("Code", CurrentCode(secret))))
+        using (var on = await PostAsync(client, "/auth/account/2fa/totp/confirm", token,
+                   ("Code", CurrentCode(secret)), ("Password", Password)))
         {
             on.Headers.Location!.OriginalString.Should().StartWith("/account/2fa/recovery-codes");
         }
@@ -294,6 +295,45 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
         notices.Should().Equal(
             ALDevToolbox.Components.Email.AuthenticatorAppChangedEmail.TurnedOnSubject,
             ALDevToolbox.Components.Email.AuthenticatorAppChangedEmail.TurnedOffSubject);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not the password")]
+    public async Task Turning_on_an_authenticator_app_without_the_password_is_refused(string password)
+    {
+        // A borrowed session on a password-only account could otherwise add a
+        // second step the owner doesn't have and lock them out (#1614, AUTH4-3).
+        var email = $"app-no-proof-{password.Length}@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        using (var loginPage = await client.GetAsync("/login"))
+        using (var login = await PostAsync(client, "/auth/login",
+                   AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password)))
+        {
+            login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        }
+        string secret;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            secret = (await scope.ServiceProvider.GetRequiredService<TotpService>().BeginEnrollmentAsync(userId)).SecretBase32;
+        }
+        using var security = await client.GetAsync("/account/security");
+
+        using var on = await PostAsync(client, "/auth/account/2fa/totp/confirm",
+            AntiforgeryToken(await security.Content.ReadAsStringAsync()),
+            ("Code", CurrentCode(secret)), ("Password", password));
+
+        on.Headers.Location!.OriginalString.Should().StartWith("/account/2fa/totp/setup?err=Password");
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeFalse();
+        (await read.EmailOutboxMessages.IgnoreQueryFilters().AnyAsync(m => m.ToEmail == email && m.Purpose == EmailPurpose.AuthenticatorAppChanged))
+            .Should().BeFalse("nothing was turned on");
     }
 
     [Fact]

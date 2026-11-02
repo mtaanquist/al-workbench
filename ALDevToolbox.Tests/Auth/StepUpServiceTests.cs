@@ -86,6 +86,38 @@ public sealed class StepUpServiceTests : IDisposable
         attempt.Ip.Should().Be("203.0.113.9");
     }
 
+    [Fact]
+    public async Task Turning_on_an_authenticator_app_asks_an_account_that_can_confirm_to_step_up_first()
+    {
+        // The same proof as adding a passkey (#1614, AUTH4-3): with email codes
+        // on, the account can confirm properly, so the password is not enough.
+        var userId = await SeedUserAsync(totp: false, emailMfa: true);
+        var principal = PasswordSession();
+        await using var ctx = _db.NewContext();
+        var service = NewService(ctx);
+
+        (await service.MustStepUpBeforeAddingAsync(principal, userId, CancellationToken.None)).Should().BeTrue();
+        (await service.TotpEnrollmentRefusalAsync(principal, userId, "x", "203.0.113.10", CancellationToken.None))
+            .Should().Be(StepUpService.TotpStepUpFirstMessage);
+    }
+
+    [Fact]
+    public async Task Turning_on_an_authenticator_app_takes_the_password_when_there_is_nothing_to_step_up_with()
+    {
+        var userId = await SeedUserAsync(totp: false, emailMfa: false);
+        var principal = PasswordSession();
+        await using var ctx = _db.NewContext();
+        var service = NewService(ctx);
+
+        (await service.MustStepUpBeforeAddingAsync(principal, userId, CancellationToken.None)).Should().BeFalse();
+        (await service.TotpEnrollmentRefusalAsync(principal, userId, "wrong", "203.0.113.11", CancellationToken.None))
+            .Should().Be(StepUpService.WrongPasswordMessage);
+    }
+
+    private static System.Security.Claims.ClaimsPrincipal PasswordSession() =>
+        new(new System.Security.Claims.ClaimsIdentity(
+            [new System.Security.Claims.Claim(StepUpAuth.MethodClaim, SignInMethod.Password.ToString())], "Test"));
+
     private StepUpService NewService(AppDbContext ctx)
     {
         var clock = TimeProvider.System;

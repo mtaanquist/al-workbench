@@ -6,6 +6,7 @@
 @using ALDevToolbox.Services.Account
 @inject IOrganizationContext Org
 @inject TotpService Totp
+@inject StepUpService StepUp
 @inject NavigationManager Nav
 
 @*
@@ -29,7 +30,28 @@
         </Alert>
     }
 
-    @if (_enrollment is null)
+    @if (_mustStepUp)
+    {
+        @* Turning this on adds a second factor the owner would then need, so it
+           asks for the same proof as adding a passkey (#1614). The QR is not
+           shown, nor a secret made, until the person has confirmed. *@
+        <section class="card">
+            <div class="card__head">
+                <div>
+                    <h2 class="card__title">Confirm it's you first</h2>
+                    <p class="card__sub">Turning on an authenticator app changes how you sign in, so we check it's really you before showing the code to scan.</p>
+                </div>
+            </div>
+            <div class="card__foot">
+                <a class="btn" href="/account/security">Cancel</a>
+                <a class="btn btn--primary" href="@ConfirmUrl">
+                    <Icon Name="shield" Width="16" Height="16" />
+                    <span>Confirm it's you</span>
+                </a>
+            </div>
+        </section>
+    }
+    else if (_enrollment is null)
     {
         <div class="loading-block"><span class="spinner"></span><span>Loading...</span></div>
     }
@@ -62,12 +84,23 @@
                         <p class="card__sub">This proves the app is set up correctly before we switch it on.</p>
                     </div>
                 </div>
-                <div class="card__body">
+                <div class="card__body u-stack">
                     <label class="field" style="max-width:220px">
                         <span class="field__label">Six-digit code</span>
                         <input class="input" type="text" name="Code" inputmode="numeric" pattern="[0-9]{6}"
                                maxlength="6" required autocomplete="one-time-code" placeholder="123456" />
                     </label>
+                    @if (_needsPassword)
+                    {
+                        @* No recent confirmation and nothing else to confirm with:
+                           the current password is the proof, as when adding a
+                           first passkey. *@
+                        <label class="field" style="max-width:320px">
+                            <span class="field__label">Current password</span>
+                            <input class="input" type="password" name="Password" required autocomplete="current-password" />
+                            <span class="field__hint">To confirm it's you before adding a new step to your sign-in.</span>
+                        </label>
+                    }
                 </div>
                 <div class="card__foot">
                     <a class="btn" href="/account/security">Cancel</a>
@@ -86,11 +119,24 @@
     // can't put its own text on this page (#1544).
     [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
 
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
+
+    private static readonly string ConfirmUrl = ALDevToolbox.Endpoints.StepUpEndpoints.Url("/account/2fa/totp/setup");
+
     private TotpEnrollment? _enrollment;
+    private bool _mustStepUp;
+    private bool _needsPassword;
 
     protected override async Task OnInitializedAsync()
     {
         if (Org.CurrentUserId is null) { Nav.NavigateTo("/account"); return; }
+        if (AuthStateTask is not null)
+        {
+            var principal = (await AuthStateTask).User;
+            _mustStepUp = await StepUp.MustStepUpBeforeAddingAsync(principal, Org.CurrentUserId.Value, CancellationToken.None);
+            if (_mustStepUp) return;
+            _needsPassword = !await StepUp.IsFreshForPasskeyAsync(principal, CancellationToken.None);
+        }
         try
         {
             _enrollment = await Totp.BeginEnrollmentAsync(Org.CurrentUserId.Value);
