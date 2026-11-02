@@ -253,9 +253,24 @@ public class ReleaseManagementService
             .AnyAsync(r => r.ParentReleaseId == releaseId, ct).ConfigureAwait(false);
         if (hasChildren)
         {
+            // Names up to three children this person can see, so they know what to
+            // delete first; no count, since some may be on solutions hidden from them.
+            // Soft-deleted children count, and are hidden from the normal list, so
+            // the message says so (#1549).
+            var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+            var childLabels = await _db.OeReleases.AsNoTracking()
+                .Where(r => r.ParentReleaseId == releaseId)
+                .Where(_access.VisibleReleasePredicate(snapshot))
+                .OrderByDescending(r => r.Id)
+                .Select(r => r.Label)
+                .Take(3)
+                .ToListAsync(ct).ConfigureAwait(false);
+            var named = childLabels.Count == 0
+                ? string.Empty
+                : ", such as " + string.Join(", ", childLabels.Select(l => $"\"{l}\""));
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Release"] = "Another Release uses this one as its parent. Delete the dependent Release first.",
+                ["Release"] = $"Other releases use this one as their parent{named}. Delete them first; soft-deleted ones count too.",
             });
         }
 

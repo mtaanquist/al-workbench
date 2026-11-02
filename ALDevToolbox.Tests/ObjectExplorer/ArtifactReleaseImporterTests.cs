@@ -362,6 +362,38 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse("only the stale preview was re-queued");
     }
 
+    /// <summary>
+    /// #1549: a preview whose import failed is re-run in place the next night, like
+    /// a failed shipped version (#1222), not left failed for the fortnight.
+    /// </summary>
+    [Fact]
+    public async Task ImportPreviewsAsync_re_runs_a_fresh_failed_preview_in_place()
+    {
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk",
+            status: "failed", prerelease: true, importedAt: DateTime.UtcNow.AddDays(-1));
+        failed.StatusMessage = "The download was cut off.";
+        var current = Release("Business Central 30.0 (DK) Preview", "bc-insider:30.0:dk",
+            prerelease: true, bcVersion: "30.0.55227.0");
+        ctx.OeReleases.AddRange(failed, current);
+        await ctx.SaveChangesAsync();
+
+        var queue = new ReleaseImportQueue();
+        var outcomes = await NewImporter(ctx, queue, withInsider: true).ImportPreviewsAsync("dk");
+
+        outcomes.Select(o => o.Status).Should().Equal(ArtifactImportStatus.Queued, ArtifactImportStatus.AlreadyImported);
+        outcomes[0].ReleaseId.Should().Be(failed.Id, "the preview is re-run in place, not duplicated");
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failed.Id);
+        release.Status.Should().Be("ingesting");
+        release.DeletedAt.Should().BeNull();
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.ReleaseId.Should().Be(failed.Id);
+        job.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>()
+            .Which.ApplicationUrl.Should().Be($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.0.55190.0/dk");
+    }
+
     [Fact]
     public async Task ImportPreviewsAsync_keeps_a_fresh_preview_even_when_the_channel_has_a_newer_build()
     {

@@ -167,7 +167,7 @@ public sealed class TranslationMemoryService
 
             var srcHash = Hash(e.SourceText);
             var tgtHash = Hash(e.TargetText);
-            var key = $"{srcLang}{tgtLang}{srcHash}{tgtHash}";
+            var key = $"{srcLang}\u001F{tgtLang}\u001F{srcHash}\u001F{tgtHash}";
             // Last write wins on collision within the batch.
             byKey[key] = new PreparedEntry(
                 srcLang, tgtLang, e.SourceText, e.TargetText, srcHash, tgtHash, e.Kind,
@@ -196,12 +196,12 @@ public sealed class TranslationMemoryService
                     && tgtLangs.Contains(e.TargetLanguage))
                 .ToListAsync(ct).ConfigureAwait(false);
             var existingByKey = existing.ToDictionary(
-                e => $"{e.SourceLanguage}{e.TargetLanguage}{e.SourceHash}{e.TargetHash}",
+                e => $"{e.SourceLanguage}\u001F{e.TargetLanguage}\u001F{e.SourceHash}\u001F{e.TargetHash}",
                 StringComparer.Ordinal);
 
             foreach (var c in chunk)
             {
-                var key = $"{c.SourceLanguage}{c.TargetLanguage}{c.SourceHash}{c.TargetHash}";
+                var key = $"{c.SourceLanguage}\u001F{c.TargetLanguage}\u001F{c.SourceHash}\u001F{c.TargetHash}";
                 if (existingByKey.TryGetValue(key, out var row))
                 {
                     row.HitCount += 1;
