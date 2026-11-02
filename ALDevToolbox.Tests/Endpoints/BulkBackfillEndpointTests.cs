@@ -55,8 +55,8 @@ public sealed class BulkBackfillEndpointTests : IDisposable
     }
 
     [Theory]
-    [InlineData("0", "3", "Nothing new to queue. 3 release(s) already had one waiting and were left alone.")]
-    [InlineData("5", "2", "Queued a system-reference backfill for 5 ready release(s). 2 release(s) already had one waiting and were left alone. They run in the background")]
+    [InlineData("0", "3", "Nothing new to queue. 3 release(s) were left alone: their backfill is still waiting, or has already run since they last changed.")]
+    [InlineData("5", "2", "Queued a system-reference backfill for 5 ready release(s). 2 release(s) were left alone: their backfill is still waiting, or has already run since they last changed. They run in the background")]
     [InlineData("5", "0", "Queued a system-reference backfill for 5 ready release(s). They run in the background")]
     public void The_notice_says_what_was_queued_and_what_was_left_alone(string queued, string skipped, string expected)
     {

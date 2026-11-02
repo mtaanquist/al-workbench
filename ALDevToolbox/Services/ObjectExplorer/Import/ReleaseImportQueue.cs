@@ -34,7 +34,30 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     // before a restore replaced the database is dropped rather than run against
     // the restored one (#1538).
     public ReleaseImportQueue(Operations.MaintenanceModeState? maintenance = null)
-        : base(capacity: 16, maintenance: maintenance) { }
+        : base(capacity: 16, maintenance: maintenance)
+    {
+        _maintenance = maintenance;
+    }
+
+    private readonly Operations.MaintenanceModeState? _maintenance;
+
+    private static readonly DateTime ProcessStartedUtc =
+        System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime();
+
+    /// <summary>
+    /// Since when this queue's jobs come from this process and this database: the
+    /// later of the process start and the last restore. A <c>queued</c> row written
+    /// before then was queued by a process or a database that is gone, so nothing
+    /// feeds it unless startup queued it again, which stamps it anew (#1578, OEI2-3).
+    /// </summary>
+    public DateTime FedSinceUtc
+    {
+        get
+        {
+            var restored = _maintenance?.EpochAdvancedAtUtc ?? default;
+            return restored > ProcessStartedUtc ? restored : ProcessStartedUtc;
+        }
+    }
 
     /// <summary>
     /// A job dropped across a restore frees its paced slot like one the worker took,

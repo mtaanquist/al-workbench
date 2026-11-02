@@ -57,7 +57,10 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
     {
         _services = services;
         _logger = logger;
+        _maintenance = maintenance;
     }
+
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     protected override string Describe(ReleaseImportJob job) => $"ReleaseId={job.ReleaseId}";
 
@@ -364,6 +367,8 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         ZipArchive? archive2 = null;
         string? tempToDelete2 = null;
         var jobSucceeded = false;
+        // Set when the job put its own row back to queued (a backfill stopped for a restore).
+        var leaveRowAsIs = false;
         // What a finished Add modules job says about itself on its page (#1549).
         string? completedNote = null;
         string? jobFailureMessage = null;
@@ -411,22 +416,35 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             // path by the source flavour — C/AL stores its slices under CAL/.
             if (job.Source is ReleaseImportSource.Backfill)
             {
+                // A restore stops a backfill rather than wait hours for a bulk run to
+                // reach a gap (#1578, OEI2-4). Read before the work starts, so only a
+                // restore that begins during it cancels it; the epoch is the one this
+                // job was queued under, since none moves while a counted job runs.
+                var epoch = _queue?.Epoch;
+                using var forRestore = _maintenance is null
+                    ? null
+                    : CancellationTokenSource.CreateLinkedTokenSource(ct, _maintenance.EnteringToken);
+                // A restore that turned the flag on between this job counting itself in and
+                // reading the token handed it the next, uncancelled token: Enter turns the
+                // flag on before it swaps the token, so the flag says so.
+                if (_maintenance?.IsActive == true) forRestore?.Cancel();
+                var token = forRestore?.Token ?? ct;
                 try
                 {
                     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                     var isCal = await db.OeModuleFiles.AsNoTracking()
                         .Where(f => f.Module!.ReleaseId == job.ReleaseId)
-                        .AnyAsync(f => f.Path.StartsWith("CAL/"), ct).ConfigureAwait(false);
-                    using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                        .AnyAsync(f => f.Path.StartsWith("CAL/"), token).ConfigureAwait(false);
+                    using (await importer.Ingests.EnterHeavyAsync(token).ConfigureAwait(false))
                     {
                         if (isCal)
                         {
                             var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
-                            await calImporter.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                            await calImporter.BackfillSystemReferencesAsync(job.ReleaseId, token).ConfigureAwait(false);
                         }
                         else
                         {
-                            await importer.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                            await importer.BackfillSystemReferencesAsync(job.ReleaseId, token).ConfigureAwait(false);
                         }
                     }
                     jobSucceeded = true;
@@ -434,6 +452,30 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     throw; // Shutdown, not a failure — see #483 (leave for reconciler).
+                }
+                catch (OperationCanceledException) when (forRestore?.IsCancellationRequested == true)
+                {
+                    // Stopped for a restore. The backfill deletes before it emits, so
+                    // running it again is safe: the row goes back to queued, not failed,
+                    // and the job back on the queue under its own epoch. A restore that
+                    // replaces the database drops it there; one that stops short runs it.
+                    _logger.LogInformation("Stopped the system-reference backfill of release {ReleaseId} for a restore; it will run again.", job.ReleaseId);
+                    leaveRowAsIs = true;
+                    if (job.JobRowId != 0)
+                    {
+                        try { await persistedJobs.MarkQueuedAgainAsync(job.JobRowId).ConfigureAwait(false); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Could not put job row {JobRowId} back to queued.", job.JobRowId); }
+                    }
+                    if (_queue is not null)
+                    {
+                        // Detached, so it must not carry this job's database allowance
+                        // (MaintenanceModeState.AllowDatabase) past the job's end.
+                        using (ExecutionContext.SuppressFlow())
+                        {
+                            _ = ResumedImportJobs.EnqueueAllAsync(_queue, [job], _logger,
+                                "a backfill stopped for a restore", ct, paced: true, epoch: epoch);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -698,7 +740,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             {
                 try { File.Delete(tempToDelete2); } catch { /* swallow */ }
             }
-            if (job.JobRowId != 0 && ShouldFinaliseJobRow(jobSucceeded, ct.IsCancellationRequested))
+            if (job.JobRowId != 0 && !leaveRowAsIs && ShouldFinaliseJobRow(jobSucceeded, ct.IsCancellationRequested))
             {
                 try
                 {
@@ -779,10 +821,13 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 
     /// <summary>What the Add modules page says about a finished upload, as the old redirect did.</summary>
     internal static string AddModulesNote(ReleaseImportSummary summary) =>
-        $"Added {summary.ModulesImported} module(s)."
-        + (summary.ModulesSkipped > 0
-            ? $" {summary.ModulesSkipped} were already in the release and were skipped."
-            : string.Empty);
+        $"Added {summary.ModulesImported} {(summary.ModulesImported == 1 ? "module" : "modules")}."
+        + summary.ModulesSkipped switch
+        {
+            0 => string.Empty,
+            1 => " 1 was already in the release and was skipped.",
+            var n => $" {n} were already in the release and were skipped.",
+        };
 
     private static string FriendlyMessage(Exception ex) =>
         ex is PlanValidationException pve && pve.Errors.Count > 0

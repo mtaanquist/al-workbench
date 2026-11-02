@@ -75,6 +75,14 @@ public sealed class AddModulesJobTests : IDisposable
         return (status, modules, job.Status, job.ErrorMessage);
     }
 
+    [Theory]
+    [InlineData(1, 0, "Added 1 module.")]
+    [InlineData(2, 1, "Added 2 modules. 1 was already in the release and was skipped.")]
+    [InlineData(0, 3, "Added 0 modules. 3 were already in the release and were skipped.")]
+    public void The_finished_note_counts_in_plain_words(int added, int skipped, string expected) =>
+        ReleaseImportWorker.AddModulesNote(new ReleaseImportSummary(1, added, skipped, 0, 0, 0, 0))
+            .Should().Be(expected);
+
     [Fact]
     public async Task The_worker_adds_the_queued_modules_and_hands_the_release_back_ready()
     {
@@ -88,7 +96,7 @@ public sealed class AddModulesJobTests : IDisposable
         state.Status.Should().Be("ready");
         state.Modules.Should().Be(2);
         state.JobStatus.Should().Be("completed");
-        state.JobError.Should().Be("Added 1 module(s).", "the page says how many were added, as the old redirect did");
+        state.JobError.Should().Be("Added 1 module.", "the page says how many were added, as the old redirect did");
         File.Exists(((ReleaseImportSource.AddModules)job.Source).TempPath).Should().BeFalse("the worker deletes the staged upload");
     }
 

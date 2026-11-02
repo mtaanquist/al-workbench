@@ -46,7 +46,7 @@ public sealed record ReleaseImportSubmission(
 
 /// <summary>
 /// What the bulk system-reference backfill queued, and how many releases it left
-/// alone because a backfill was already queued or running for them.
+/// alone because a backfill was already queued, running, or done since they changed.
 /// </summary>
 public sealed record BackfillQueueResult(int Queued, int Skipped);
 
@@ -637,9 +637,20 @@ public sealed class ReleaseImportRequestService
     {
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
         var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct).ConfigureAwait(false);
-        await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId),
-            ct).ConfigureAwait(false);
+        try
+        {
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId),
+                ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A row nothing will feed would block the bulk backfill for this release
+            // until the next restart (#1578, OEI2-3); fail it instead.
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath: null,
+                "The request ended before this was queued, so it never ran. Try again.").ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
@@ -661,14 +672,17 @@ public sealed class ReleaseImportRequestService
     ///
     /// <para>A release that already has a backfill queued or running is skipped:
     /// that run re-extracts the same stored source, so a second click adds nothing
-    /// but another hour on the queue.</para>
+    /// but another hour on the queue. So is one whose backfill already ran since it
+    /// last changed, which a second click during a run would otherwise queue again
+    /// (#1578). A queued row from before this process started or the last restore
+    /// is failed and replaced, since nothing feeds it.</para>
     /// </summary>
     public async Task<BackfillQueueResult> QueueBackfillAllAsync(IReadOnlyList<int> releaseIds, CancellationToken ct = default)
     {
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a system-reference backfill");
         // Before the rows are written, so a restore from here on drops the feed (#1538).
         var epoch = _queue.Epoch;
-        var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, ct).ConfigureAwait(false);
+        var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, _queue.FedSinceUtc, ct).ConfigureAwait(false);
         var source = new ReleaseImportSource.Backfill();
         var jobs = rows
             .Select(r => new ReleaseImportJob(r.ReleaseId, identity, source, StoreSymbolReference: false, r.JobRowId))
@@ -679,7 +693,7 @@ public sealed class ReleaseImportRequestService
         }
         var skipped = releaseIds.Distinct().Count() - jobs.Count;
         _logger.LogInformation(
-            "Queued {Count} system-reference backfill(s), skipping {Skipped} already queued.",
+            "Queued {Count} system-reference backfill(s), skipping {Skipped} already queued or done.",
             jobs.Count, skipped);
         return new BackfillQueueResult(jobs.Count, skipped);
     }

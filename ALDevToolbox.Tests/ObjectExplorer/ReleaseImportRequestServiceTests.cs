@@ -681,6 +681,41 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #1578 OEI2-3: a maintenance enqueue cut off at a full queue fails the row it
+    /// wrote, so the bulk backfill does not take it for one still waiting.
+    /// </summary>
+    [Fact]
+    public async Task A_backfill_cut_off_at_a_full_queue_fails_its_job_row()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = (await SeedReadyReleasesAsync(ctx, 1)).Single();
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var enqueue = NewService(ctx, queue).EnqueueImportAsync(
+            releaseId, new ReleaseImportSource.Backfill(), storeSymbolReference: false, request.Token);
+        var written = false;
+        while (!enqueue.IsCompleted && !written)
+        {
+            await using (var probe = _db.NewContext())
+            {
+                written = await probe.OeImportJobs.AsNoTracking().AnyAsync(j => j.ReleaseId == releaseId);
+            }
+            if (!written) await Task.Delay(20);
+        }
+        written.Should().BeTrue("the row is written before the enqueue");
+        await request.CancelAsync();
+
+        await enqueue.Awaiting(e => e.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == releaseId))
+            .Status.Should().Be("failed");
+    }
+
     private static async Task<List<int>> SeedReadyReleasesAsync(Data.AppDbContext ctx, int count)
     {
         var now = DateTime.UtcNow;
