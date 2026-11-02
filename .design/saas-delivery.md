@@ -1395,6 +1395,9 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
     whose check fails is tried again next sweep). Only deliveries claimed before the process started
     count, because the worker is already draining by then and one it claimed since is running, not
     orphaned (#1114) — folded into the scheduler to avoid a second cross-org startup site.
+    A restore runs the same check again: the restored database can hold deliveries the backup caught
+    mid-publish, so when the restore epoch moves every org is checked once more, against the time the
+    database was replaced, and the failure says the site was restored rather than restarted (#1580).
   - Times are entered/displayed in the project's `bc_time_zone` (customer's local time). The window
     may wrap past midnight.
 

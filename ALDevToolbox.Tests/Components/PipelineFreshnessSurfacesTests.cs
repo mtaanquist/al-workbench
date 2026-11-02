@@ -49,6 +49,7 @@ public sealed class PipelineFreshnessSurfacesTests : IAsyncDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<PipelineService>();
         _ctx.Services.AddScoped<BuildFreshnessService>();

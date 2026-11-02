@@ -139,6 +139,7 @@ public sealed class RepositoryDiscoverySchedulerTests : IDisposable
         services.AddSingleton(new ProjectDiscoveryQueue());
         services.AddScoped<ProjectDiscoveryService>();
         services.AddScoped<ProjectService>();
+        services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(services);
         _db.AddGitHubServices(services, api);
         return services.BuildServiceProvider();

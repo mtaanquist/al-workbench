@@ -82,8 +82,22 @@ public sealed class MaintenanceModeState
     /// </summary>
     public long Epoch => Interlocked.Read(ref _epoch);
 
+    private long _epochAdvancedAtTicks;
+
+    /// <summary>
+    /// When <see cref="Epoch"/> last moved, in UTC; <c>default</c> before the first
+    /// restore. Anything the restored database shows as claimed before then was
+    /// claimed by the database that was replaced, not by a job running now (#1580).
+    /// </summary>
+    public DateTime EpochAdvancedAtUtc => new(Interlocked.Read(ref _epochAdvancedAtTicks), DateTimeKind.Utc);
+
     /// <summary>Called by the restore once the database it dropped has been replaced (or failed to be).</summary>
-    public void AdvanceEpoch() => Interlocked.Increment(ref _epoch);
+    public void AdvanceEpoch()
+    {
+        // The time first, so a reader that sees the new epoch also sees its time.
+        Interlocked.Exchange(ref _epochAdvancedAtTicks, DateTime.UtcNow.Ticks);
+        Interlocked.Increment(ref _epoch);
+    }
 
     /// <summary>Background jobs that have started and not finished.</summary>
     public int ActiveJobs => Volatile.Read(ref _activeJobs);

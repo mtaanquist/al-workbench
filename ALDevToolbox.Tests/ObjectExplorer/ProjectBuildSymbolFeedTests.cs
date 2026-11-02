@@ -203,6 +203,24 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Clones.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A build that finds no compiler says so in words the person who pressed Build can
+    /// act on: no feed name, nothing only the operator could change (#1580).
+    /// </summary>
+    [Fact]
+    public async Task A_build_with_no_compiler_tells_the_user_who_to_ask_without_naming_the_feed()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var missing = new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
+            new AlCompilerOptions { ExplicitAlcPath = Path.Combine(_root, "no-such-alc") });
+
+        var act = () => BuildAsync(projectId, releaseId, compiler: missing);
+
+        var thrown = await act.Should().ThrowAsync<InvalidOperationException>();
+        thrown.Which.Message.Should().Be(ProjectBuildService.CompilerMissingMessage);
+        thrown.Which.Message.Should().NotContain("NuGet").And.NotContain("outbound");
+    }
+
     // ── Repositories nobody has confirmed they can read ─────────────────
 
     /// <summary>Adds a repository to the seeded solution that nobody has confirmed they can read.</summary>

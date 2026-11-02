@@ -108,7 +108,9 @@ Then restart the container when you can. Any import or build that was still in
 progress when the backup was taken comes back from the dump looking as if it
 is running, with nothing behind it. Startup marks those as interrupted (and
 resumes URL imports), as it does after any restart; until then they keep
-showing as running.
+showing as running. Deployments the backup caught in progress do not wait for
+the restart: within a minute of the site reopening they are marked as failed,
+and whoever started them is told to deploy the build again.
 
 ### Before anything is dropped
 

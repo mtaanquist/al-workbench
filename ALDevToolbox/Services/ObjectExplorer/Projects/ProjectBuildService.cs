@@ -38,6 +38,13 @@ public sealed class ProjectBuildService
     public const string TempPrefix = "oe-build-";
 
     /// <summary>
+    /// What a build that finds no compiler says. Shown on the build row to whoever pressed
+    /// Build, so it names no feed or setting; the log line beside it carries those (#1580).
+    /// </summary>
+    internal const string CompilerMissingMessage =
+        "The tool that compiles AL isn't installed on this server yet. Ask whoever runs AL Workbench to check it can reach the internet, then try again.";
+
+    /// <summary>
     /// Hard ceiling for a discovery clone — a stalled remote becomes a logged
     /// failure, not a hang. Discovery fetches only trees + app.json blobs (no
     /// working-tree checkout), so this is ample even for repos whose history is
@@ -250,9 +257,13 @@ public sealed class ProjectBuildService
         // the stable compiler every build has used.
         // The lease keeps the compiler on the volume while this build uses it: another
         // build may bring in a newer beta meanwhile (#1137).
-        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException(
-                "The AL compiler isn't available yet. It's downloaded from NuGet on first use — check the server has outbound access, then retry.");
+        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false);
+        if (compilerLease is null)
+        {
+            // The person who pressed Build can't act on the feed or the network; the log is for whoever can (#1580).
+            _logger.LogWarning("The AL compiler is not installed and could not be downloaded from NuGet; check the server's outbound access.");
+            throw new InvalidOperationException(CompilerMissingMessage);
+        }
         var compiler = compilerLease.Value;
 
         var buildRoot = Path.Combine(Path.GetTempPath(), TempPrefix + Guid.NewGuid().ToString("N"));
