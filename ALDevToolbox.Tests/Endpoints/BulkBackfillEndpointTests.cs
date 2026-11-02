@@ -55,12 +55,14 @@ public sealed class BulkBackfillEndpointTests : IDisposable
     }
 
     [Theory]
-    [InlineData("0", "3", "Nothing new to queue. 3 release(s) were left alone: their backfill is still waiting, or has already run since they last changed.")]
-    [InlineData("5", "2", "Queued a system-reference backfill for 5 ready release(s). 2 release(s) were left alone: their backfill is still waiting, or has already run since they last changed. They run in the background")]
-    [InlineData("5", "0", "Queued a system-reference backfill for 5 ready release(s). They run in the background")]
+    [InlineData("0", "3", "Nothing new to queue. 3 releases were left alone: their backfill is still waiting, or has already run since they last changed.")]
+    [InlineData("0", "1", "Nothing new to queue. 1 release was left alone: its backfill is still waiting, or has already run since it last changed.")]
+    [InlineData("5", "2", "Queued a system-reference backfill for 5 ready releases. They run in the background - watch progress on the workers page. 2 releases were left alone: their backfill is still waiting, or has already run since they last changed.")]
+    [InlineData("1", "1", "Queued a system-reference backfill for 1 ready release. It runs in the background - watch progress on the workers page. 1 release was left alone: its backfill is still waiting, or has already run since it last changed.")]
+    [InlineData("5", "0", "Queued a system-reference backfill for 5 ready releases. They run in the background - watch progress on the workers page.")]
     public void The_notice_says_what_was_queued_and_what_was_left_alone(string queued, string skipped, string expected)
     {
-        AdminObjectExplorerIndex.FormatBackfillQueued(queued, skipped).Should().StartWith(expected);
+        AdminObjectExplorerIndex.FormatBackfillQueued(queued, skipped).Should().Be(expected);
     }
 
     // ---- helpers -----------------------------------------------------------
