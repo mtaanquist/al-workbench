@@ -4,6 +4,7 @@ using System.Text;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Cookbook;
@@ -20,12 +21,16 @@ public sealed class RecipeSuggestionService
     private readonly AppDbContext _db;
     private readonly ILogger<RecipeSuggestionService> _logger;
     private readonly IOrganizationContext _orgContext;
+    private readonly StorageQuotaGuard _quotaGuard;
 
-    public RecipeSuggestionService(AppDbContext db, ILogger<RecipeSuggestionService> logger, IOrganizationContext orgContext)
+    public RecipeSuggestionService(
+        AppDbContext db, ILogger<RecipeSuggestionService> logger, IOrganizationContext orgContext,
+        StorageQuotaGuard quotaGuard)
     {
         _db = db;
         _logger = logger;
         _orgContext = orgContext;
+        _quotaGuard = quotaGuard;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -37,6 +42,7 @@ public sealed class RecipeSuggestionService
     /// <summary>Submits a draft recipe for admin review. Returns the persisted row's id.</summary>
     public async Task<int> SubmitAsync(RecipeSuggestionInput input, CancellationToken ct = default)
     {
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         var orgId = RequireOrganizationId();
         var userId = RequireUserId();
 
@@ -204,6 +210,9 @@ public sealed class RecipeSuggestionService
     /// </summary>
     public async Task<Recipe> ApproveAsync(int suggestionId, string reviewedFingerprint, CancellationToken ct = default)
     {
+        // Approving writes a recipe, which RecipeService.CreateAsync would refuse
+        // over the quota too (#1600).
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         var orgId = RequireOrganizationId();
         var deciderId = RequireUserId();
 

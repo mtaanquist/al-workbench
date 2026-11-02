@@ -223,13 +223,19 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_procedures", ReadOnly = true)]
-    [Description("Searches a BC release for procedures (global, local, internal and protected methods, triggers, event publishers and event subscribers) by name. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
+    [Description("Searches a BC release for procedures (global, local, internal and protected methods, triggers, event publishers and event subscribers) by name. Pass a namePattern, a moduleId, or both: a blank namePattern without a moduleId is refused, because listing every procedure in a release is not a search. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
     public async Task<CappedRows<ReleaseProcedureMatch>> SearchProceduresAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
-        [Description("Substring of the procedure name.")] string namePattern,
+        [Description("Substring of the procedure name. May be blank only when moduleId is given, which lists that module's procedures.")] string namePattern,
         [Description("Optional ModuleId to narrow to one module.")] long? moduleId = null,
         CancellationToken ct = default)
     {
+        // The service returns nothing for a blank term over a whole release (OEX3-2);
+        // say why, so an empty result is not read as "no procedures".
+        if (string.IsNullOrWhiteSpace(namePattern) && moduleId is null)
+        {
+            throw new McpException("Pass a namePattern, or a moduleId to list one module's procedures.");
+        }
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
         var rows = await _search.SearchProceduresInReleaseAsync(releaseId, namePattern, moduleId, MaxProcedureMatches + 1, ct: ct);
         return CappedRows<ReleaseProcedureMatch>.From(rows, MaxProcedureMatches, "procedures", "ordered by module",
@@ -325,9 +331,7 @@ public sealed class ObjectExplorerTools
             : await _references.FindReferencesForSymbolAsync(releaseId, query, take, ct);
         if (filtered)
         {
-            // FindReferences* fetch one row past the cap, so more than the cap
-            // means the set the filter ran over was itself cut short.
-            var checkedAll = matches.Count <= ReferenceQueryService.MaxReferenceMatches;
+            var checkedAll = UsageFilterCheckedAll(matches);
             matches = matches
                 .Where(m => wantedUsage switch
                 {
@@ -352,6 +356,18 @@ public sealed class ObjectExplorerTools
         return ReferenceSearchResult.From(matches, MaxReferenceRows,
             "Pass targetField or targetProcedure to narrow the search.");
     }
+
+    /// <summary>
+    /// Whether a usage-filtered find_references saw every reference. The
+    /// reference query fetches one row past the cap, so more than the cap means
+    /// it was cut. The declarations and interface implementations a member
+    /// search adds before and after it are separate queries with caps of their
+    /// own, so they are left out of the count, or a complete answer reads as
+    /// cut.
+    /// </summary>
+    internal static bool UsageFilterCheckedAll(IEnumerable<ReferenceMatch> matches) =>
+        matches.Count(m => m.Category is not ("declaration" or "implementation"))
+            <= ReferenceQueryService.MaxReferenceMatches;
 
     [McpServerTool(Name = "find_system_references", ReadOnly = true)]
     [Description("Finds the calls to a built-in / system method on a specific object in a BC release — the calls that find_references deliberately omits. On a table: Insert, Modify, ModifyAll, Delete, DeleteAll, Get, Find/FindFirst/FindLast/FindSet, SetRange, Validate and so on; on a page: Run, RunModal, SetRecord; on a report: Run, RunModal, SaveAsPdf, SaveAs; on a codeunit: Run. Both the instance form (CustomerList.RunModal()) and the static form (Page.RunModal(Page::\"Customer List\")) are found. Use this to answer 'where is this table inserted/modified/deleted?' or 'where is this page opened?'. Optionally narrow to some methods. Capped at 50 rows ordered by module, then object; Truncated and Note say whether more were left out.")]

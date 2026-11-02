@@ -122,6 +122,36 @@ public sealed class MyServiceTests : IDisposable
 For audit-interceptor tests use `TestDb.NewContextWithAudit(interceptor)`
 so the same write path the application uses runs in the test.
 
+**Seeded templates.** When most tests in a class start from the same costly
+seed (the Object Explorer `.app` imports are the example), build it once with
+`TestDb.FromSeed(key, seed, out value)`. The seed runs once per test process
+on a fresh clone; every later call gets its own clone of the result, and
+`value` is what the seed returned (ids survive the clone). The same key must
+always mean the same seed, and the seed runs as the default organisation. A
+test that writes anything before it seeds can't use the clone, so create the
+`TestDb` lazily and fall back to seeding the slow way when it already exists
+(`ObjectExplorer/DkReleaseSeed` and `ExplorerTreeTests`):
+
+```csharp
+private TestDb? _database;
+private TestDb _db => _database ??= new TestDb();
+public void Dispose() => _database?.Dispose();
+
+private Task<int> SeedAsync()
+{
+    if (_database is not null) return DkReleaseSeed.ImportAsync(_database);
+    _database = DkReleaseSeed.NewDatabase(out var releaseId);
+    return Task.FromResult(releaseId);
+}
+```
+
+**Seeded users.** Give a user you seed to sign in with
+`PasswordHash = TestPasswords.Hash(password)`. It hashes at bcrypt's minimum
+work factor and caches per password, and since bcrypt reads the factor back
+from the hash, the sign-in is cheap too. Call `AuthService.HashPassword` only
+in a test about hashing itself, or one that should start from the hash the app
+makes.
+
 Every fixture database holds three organisations, and `TestDb.OrgContext`
 acts as an ordinary tenant unless a test says otherwise (#1441):
 
@@ -279,8 +309,8 @@ collection to serialise them.
     on what it seeded: a user from `SharedEndpointHost.UniqueEmail(...)`, rows
     looked up by the id the test got back. Sign-in is rate limited per email
     address, so a constant address signed in from every test locks the class
-    out part way through. `HashPassword` gives the bcrypt hash once per
-    fixture instead of once per test.
+    out part way through. `HashPassword` returns `TestPasswords.Hash` (see
+    "Seeded users" below).
   - Keep a host per test (an `EndpointFactory` in the test, or in the class
     constructor as before) when a test changes state the host or the whole
     database shares: a `system_settings` value the tests set differently
@@ -308,9 +338,13 @@ collection to serialise them.
     allow-list) can still be shared safely. Register it as a transient that
     reads the running test's instance off the fixture, and install fresh ones
     in the test class constructor (`GitHubWebhookEndpointTests.Host`). A
-    per-caller rate limiter most of the tests hit gets a caller address per
-    test instead of a host per test (`OAuthRedirectUriTests.Host`,
-    `GitHubWebhookEndpointTests.Host`). A pooled HTTP handler outlives a
+    per-caller rate limiter gets a caller address per test instead of a host
+    per test: every shared host honours `TestCallerAddress`, so send from
+    `_factory.CreateClient().From(TestCallerAddress.Next())` when a class
+    makes more limited calls than one caller may (ten `/oauth/register`
+    calls in ten minutes, say) - `OAuthRedirectUriTests`,
+    `McpRequestFilterTests`. The webhook tests pick their own sender inside
+    GitHub's range instead (`GitHubWebhookEndpointTests.Host`). A pooled HTTP handler outlives a
     test, so a fake behind one is reached through a forwarding handler that
     reads the running test's fake (`GitHubAppEndpointsTests.Host`).
   - Fakes a class swaps in go through a fixture that derives from

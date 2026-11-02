@@ -131,8 +131,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = AdminEmail,
             DisplayName = "Admin",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                .HashPassword(AdminPassword),
+            PasswordHash = TestPasswords.Hash(AdminPassword),
             Role = UserRole.Admin,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),

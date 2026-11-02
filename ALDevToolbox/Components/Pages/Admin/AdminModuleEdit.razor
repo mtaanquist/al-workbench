@@ -806,7 +806,11 @@
         catch (PlanValidationException ex)
         {
             _fieldErrors = ex.Errors;
-            _saveError = $"Couldn't save: {ex.Errors.Count} validation error(s). See messages next to each field.";
+            // The storage quota refusal has no field to sit under, so its own
+            // message is the alert rather than "see messages next to each field".
+            _saveError = ex.Errors.TryGetValue("storage", out var storage)
+                ? storage
+                : $"Couldn't save: {ex.Errors.Count} validation error(s). See messages next to each field.";
         }
         catch (Exception ex)
         {

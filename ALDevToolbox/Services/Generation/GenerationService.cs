@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
@@ -5,6 +6,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Generation;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Services.Templates;
 
@@ -55,6 +57,18 @@ public class GenerationService
         _logger = logger;
     }
 
+    /// <summary>
+    /// A read-only snapshot for one generation. The template or module, its
+    /// folders and its files are separate reads, and an Editor's save or a
+    /// repository refresh in between would otherwise leave extension folders
+    /// empty in a download that reports success (#1600). Null when the caller
+    /// already runs in a transaction, whose isolation then applies.
+    /// </summary>
+    private async Task<IDbContextTransaction?> BeginSnapshotAsync(CancellationToken ct) =>
+        _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct)
+            : null;
+
     private Task<OrganizationConfig> GetOrgConfigAsync(CancellationToken ct) =>
         _orgConfig.GetForAsync(
             _orgContext.CurrentOrganizationId
@@ -94,6 +108,7 @@ public class GenerationService
     public async Task<GeneratedArchive> GenerateWorkspaceAsync(ProjectPlan plan, CancellationToken ct = default)
     {
         var stopwatch = Stopwatch.StartNew();
+        await using var snapshot = await BeginSnapshotAsync(ct);
         var (resolvedPlan, template, extensions, orgConfig) = await PrepareWorkspaceAsync(plan, pathsOnly: false, ct);
 
         var (stream, fileCount) = await _zipBuilder.BuildWorkspaceAsync(resolvedPlan, template, extensions, orgConfig, ct);
@@ -146,6 +161,7 @@ public class GenerationService
         plan = await ResolveLatestVersionAsync(plan, ct);
 
         var stopwatch = Stopwatch.StartNew();
+        await using var snapshot = await BeginSnapshotAsync(ct);
         var template = await LoadTemplateAsync(plan.TemplateKey, ct);
 
         // OrgConfig is needed both for the sibling-rewrite path (which
@@ -653,6 +669,12 @@ public class GenerationService
         if (plan.CoreIdRangeTo <= plan.CoreIdRangeFrom) errors[nameof(plan.CoreIdRangeTo)] = "Must be greater than 'from'.";
         if (string.IsNullOrWhiteSpace(plan.ApplicationVersion)) errors[nameof(plan.ApplicationVersion)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.RuntimeVersion)) errors[nameof(plan.RuntimeVersion)] = "Required.";
+        // The same 8-4-4-4-12 form the field's pattern asks for: the value goes
+        // into the launch configurations, where anything else fails only when
+        // the user publishes (#1545).
+        if (!string.IsNullOrWhiteSpace(plan.TenantId) && !Guid.TryParseExact(plan.TenantId.Trim(), "D", out _))
+            errors[nameof(plan.TenantId)] =
+                "Give the tenant ID as a GUID, for example 8a4f1c3e-1b2d-4e6f-9c1a-3d5b7e9f2a4c, or leave it blank.";
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
 
@@ -662,6 +684,9 @@ public class GenerationService
         if (string.IsNullOrWhiteSpace(plan.TemplateKey)) errors[nameof(plan.TemplateKey)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.ExtensionName) || !ExtensionNameRegex.IsMatch(plan.ExtensionName))
             errors[nameof(plan.ExtensionName)] = "Required. Letters, digits and spaces only; must start with a letter.";
+        else if (plan.ExtensionName.Length > CustomerNaming.MaxExtensionNameLength)
+            errors[nameof(plan.ExtensionName)] =
+                $"At most {CustomerNaming.MaxExtensionNameLength} characters, which is the most Business Central accepts.";
         // Not a form field: the publisher always comes from the org's defaults.
         // "Required." would send the user hunting for an input that isn't there.
         if (string.IsNullOrWhiteSpace(plan.Publisher))

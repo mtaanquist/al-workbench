@@ -631,7 +631,7 @@ public sealed class ModuleSourceServiceTests : IDisposable
         Folders: []);
 
     private ModuleService NewModuleService(AppDbContext ctx) =>
-        new(ctx, Microsoft.Extensions.Logging.Abstractions.NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+        new(ctx, Microsoft.Extensions.Logging.Abstractions.NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
 
     private static FakeGitHubApi PublicApi(string sha, byte[] tarball, string gitRef = "HEAD") =>
         new FakeGitHubApi()

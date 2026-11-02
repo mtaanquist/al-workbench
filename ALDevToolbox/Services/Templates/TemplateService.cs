@@ -42,13 +42,17 @@ public class TemplateService
     private readonly ILogger<TemplateService> _logger;
     private readonly IOrganizationContext _orgContext;
     private readonly FolderTreeHydrator _folderTree;
+    private readonly StorageQuotaGuard _quotaGuard;
 
-    public TemplateService(AppDbContext db, ILogger<TemplateService> logger, IOrganizationContext orgContext, FolderTreeHydrator folderTree)
+    public TemplateService(
+        AppDbContext db, ILogger<TemplateService> logger, IOrganizationContext orgContext, FolderTreeHydrator folderTree,
+        StorageQuotaGuard quotaGuard)
     {
         _db = db;
         _logger = logger;
         _orgContext = orgContext;
         _folderTree = folderTree;
+        _quotaGuard = quotaGuard;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -289,6 +293,7 @@ public class TemplateService
     /// </summary>
     public async Task<RuntimeTemplate> CreateAsync(TemplateAuthoring input, CancellationToken ct = default)
     {
+        await _quotaGuard.EnsureCanWriteAsync(ct);
         var (defaults, appSourceCop, defaultModuleIds, appVersionId, includedFileIds) =
             await ValidateAsync(input, existingId: null, savedModuleKeys: NoModuleKeys, ct);
 
@@ -350,7 +355,17 @@ public class TemplateService
         };
 
         _db.RuntimeTemplates.Add(template);
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch
+        {
+            // A failed insert stays tracked otherwise, and the page's next
+            // save would try it again alongside its own (#1600).
+            _db.ChangeTracker.Clear();
+            throw;
+        }
 
         _logger.LogInformation(
             "Created runtime template '{Key}' (id={Id}) with {Extensions} extension(s).",
@@ -368,6 +383,12 @@ public class TemplateService
     /// </summary>
     public async Task UpdateAsync(int id, TemplateAuthoring input, CancellationToken ct = default)
     {
+        await _quotaGuard.EnsureCanWriteAsync(ct);
+        // The editor page's context outlives one save, and EF hands back the
+        // instances it already tracks without re-reading them. Another tab's
+        // save rebuilds the extensions, so forget the old ones rather than
+        // cascade deletes onto rows that are gone (#1600).
+        _db.ChangeTracker.Clear();
         var existing = await _db.RuntimeTemplates
             .Include(t => t.WorkspaceExtensions)
                 .ThenInclude(e => e.Dependencies)

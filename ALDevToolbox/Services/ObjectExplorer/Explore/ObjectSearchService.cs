@@ -293,6 +293,11 @@ public sealed class ObjectSearchService
         bool includeInherited = false, CancellationToken ct = default)
     {
         if (!await ReleaseVisibleAsync(releaseId, ct)) return new();
+        // Nothing typed and no extension picked would sort every procedure-like
+        // symbol of the release (a full DVD has hundreds of thousands) to show
+        // the first few hundred; the name index cannot help without a term. The
+        // tab asks for a name instead, as Source text does (OEX3-2).
+        if (string.IsNullOrWhiteSpace(search) && moduleId is null) return new();
         // Scope by an explicit module-id set (own modules, or the whole visible
         // chain when including inherited) rather than a `module.release_id` join.
         // `kind` isn't selective here (most symbols are procedures), so the join

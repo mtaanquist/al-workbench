@@ -157,7 +157,7 @@ public sealed class AntiforgeryRejectionTests : IClassFixture<SharedEndpointHost
     [Fact]
     public async Task OAuth_authorize_post_without_antiforgery_token_is_rejected()
     {
-        using var client = _factory.CreateClient();
+        using var client = _factory.CreateClient().From(TestCallerAddress.Next());
 
         // Anonymous Dynamic Client Registration — the same door the attack in
         // the issue walks through.

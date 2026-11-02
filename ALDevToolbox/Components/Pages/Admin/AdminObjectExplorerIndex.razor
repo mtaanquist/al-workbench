@@ -224,7 +224,7 @@
         _              => "Done.",
     };
 
-    private static string FormatBackfillQueued(string queued, string skipped)
+    internal static string FormatBackfillQueued(string queued, string skipped)
     {
         var alreadyQueued = int.TryParse(skipped, out var n) && n > 0
             ? $" {n} release(s) already had one waiting and were left alone."

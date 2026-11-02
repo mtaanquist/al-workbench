@@ -54,7 +54,9 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
         org retired it, so leave it out of the template's defaults rather
         than restoring it
     for the default application version:
-        reuse the local row that shares the key, otherwise clone it
+        reuse the local row that shares the key, otherwise clone it; if
+        the local row is soft-deleted, leave the template with no default
+        version rather than restoring it
     for each included organisation file:
         point the clone at the acting org's own file with the same path
         (every org carries its own copy, possibly edited); skip a path the

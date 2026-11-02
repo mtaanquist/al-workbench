@@ -14,6 +14,20 @@
     See .design/design-migration.md.
 *@
 
+@if (NeedsSearch)
+{
+    <div class="card">
+        <div class="empty-state">
+            <span class="empty-state__icon"><Icon Name="search" Width="21" Height="21" /></span>
+            <span class="empty-state__title">Find a procedure by name</span>
+            <span class="empty-state__text">
+                Type part of a procedure name in the search box, or pick an
+                extension to list all of its procedures.
+            </span>
+        </div>
+    </div>
+    return;
+}
 @if (Results is { Count: 0 })
 {
     <div class="card">
@@ -88,6 +102,11 @@
 @code {
     [Parameter] public List<ReleaseProcedureMatch>? Results { get; set; }
     [Parameter] public int? ViewReleaseSeed { get; set; }
+    /// <summary>
+    /// True when nothing is typed and no extension is picked: the tab asks for
+    /// a name rather than listing every procedure in the release.
+    /// </summary>
+    [Parameter] public bool NeedsSearch { get; set; }
     /// <summary>True when the search found more procedures than it shows.</summary>
     [Parameter] public bool Capped { get; set; }
 

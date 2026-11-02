@@ -242,7 +242,7 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = email,
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = TestPasswords.Hash(Password),
             Role = isSiteAdmin ? UserRole.Admin : UserRole.User,
             IsSiteAdmin = isSiteAdmin,
             Status = UserStatus.Active,

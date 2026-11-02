@@ -64,6 +64,28 @@ public sealed class StepUpServiceTests : IDisposable
         methods.EmailCode.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task A_wrong_password_before_a_first_passkey_is_recorded_with_the_callers_address()
+    {
+        // A password-only account proves itself with its current password
+        // before adding a first passkey; a wrong one counts towards the
+        // lockout, and is recorded with where it came from (#1649).
+        var userId = await SeedUserAsync(totp: false, emailMfa: false);
+        var principal = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+            [new System.Security.Claims.Claim(StepUpAuth.MethodClaim, SignInMethod.Password.ToString())], "Test"));
+        await using (var ctx = _db.NewContext())
+        {
+            var refusal = await NewService(ctx).PasskeyRegistrationRefusalAsync(
+                principal, userId, "not-the-password", "203.0.113.9", CancellationToken.None);
+            refusal.Should().Be(StepUpService.WrongPasswordMessage);
+        }
+
+        await using var read = _db.NewContext();
+        var attempt = read.LoginAttempts.Single(a => a.Email == "ada@cronus.example");
+        attempt.Succeeded.Should().BeFalse();
+        attempt.Ip.Should().Be("203.0.113.9");
+    }
+
     private StepUpService NewService(AppDbContext ctx)
     {
         var clock = TimeProvider.System;

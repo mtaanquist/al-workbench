@@ -598,6 +598,9 @@ public sealed class ReleaseComparisonService
     /// shares one release label, so the plain list showed hundreds of
     /// identical entries (#1570). Any other file is offered every other
     /// release with the file except builds, which the global pickers never list.
+    /// So is a file in a project release no build row points at any more (an
+    /// imported one, or one whose build was removed): it has no Solution builds
+    /// to offer, and an empty picker would be no use to anyone.
     /// </para>
     /// </summary>
     public async Task<List<CompareTargetOption>> GetCompareTargetsAsync(
@@ -631,7 +634,8 @@ public sealed class ReleaseComparisonService
 
         // Build releases: the picker's order and labels come from the build list.
         List<ReleaseListItem>? builds = null;
-        if (anchor.ReleaseKind == OeRelease.ProjectBuildKind)
+        if (anchor.ReleaseKind == OeRelease.ProjectBuildKind
+            && await _db.OeProjectBuilds.AsNoTracking().AnyAsync(b => b.ReleaseId == anchor.ReleaseId, ct))
         {
             builds = await BuildCompareCandidates.ListAsync(_db, _access, anchor.ReleaseId, ct,
                 withFile: (anchor.AppId, anchor.Path));
