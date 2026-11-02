@@ -261,10 +261,10 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
 
 - **One operation, two callers.** `GitHubRecipeDeliveryService.ApplyAsync(recipeId,
   repoFullName, customerName?)` commits the recipe's files at their `RelativePath` onto
-  `aldt/recipe-<slug>` **with the user's token** and opens a pull request into the default
+  `aldt/recipe-<id>-<slug>` **with the user's token** and opens a pull request into the default
   branch. The download modal calls it once; the admin "Open update pull requests" calls
   it once per repository that took the recipe. The pull request body says which it is.
-- **Branch reuse, then stepping.** If `aldt/recipe-<slug>` has an open pull request, the
+- **Branch reuse, then stepping.** If `aldt/recipe-<id>-<slug>` has an open pull request, the
   commit is added to it (find-before-create, as the Translator does). If the branch
   exists with no open pull request (merged or closed), the name is stepped (`-2`, `-3`)
   as extension delivery does, so history is never rewritten.
@@ -293,7 +293,7 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   tree, blob, tree, commit, create/update ref, find/create pull request - was already
   on `GitHubAppClient` from phase 1, so this feature adds no
   `GitHubAppClient.<Feature>.cs` file and leaves that class as it found it.
-- **Branch choice is one read-only walk, not two rules.** `aldt/recipe-<slug>`,
+- **Branch choice is one read-only walk, not two rules.** `aldt/recipe-<id>-<slug>`,
   `-2`, `-3`... are tried in order and each is asked two questions: is a pull request
   open on it (join that one, and commit on the branch's own head), and does the branch
   exist at all (if not, cut it from the default branch head). The first name to answer
@@ -302,6 +302,20 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   name's pull request is merged, a third apply would open a *third* pull request
   beside the still-open `-2` rather than joining it. Ten names is the cap, as
   extension delivery uses.
+- **The recipe id is in the branch name (#1600).** Names were `aldt/recipe-<slug>` at
+  first, so two recipes whose titles slug the same shared one branch, and the second
+  apply joined the first recipe's pull request. The id keeps them apart. A recipe's pull
+  request opened under the old name is still joined until it is merged or closed: before
+  the walk starts a new branch, it asks the old names (`aldt/recipe-<slug>`, `-2`...) for
+  an open pull request, stopping at the first name with no branch. Because the old name
+  is shared by every recipe with that slug, one found there is joined only when its title
+  is this recipe's ("Apply the <title> recipe") and this recipe has been applied to that
+  repository before; otherwise a new-style branch is started. An old name for a title
+  that starts with a number can equal a new one (recipe 7 "12 Setup" was
+  `aldt/recipe-12-setup`, recipe 12 "Setup" is now), so the new-style walk steps past an
+  open pull request whose "Apply the X recipe" title slugs to exactly the branch it is
+  on. Any other open pull request on a new-style name is joined, retitled or not: the id
+  says whose it is.
 - **The tree's base is the target's own tree**, not always the default branch's -
   otherwise the second commit on a reused branch would silently revert the first.
   Files are still written over rather than merged, as the issue asks.
@@ -962,10 +976,10 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   the person building on push and the nightly preview check run as, on every pipeline of
   the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
   waiting as the previous person is then refused when its turn comes; such a refused build
-  does not count as having built its commit, so a redelivery of that push, or the next
-  push whose head is that commit, builds it as the new person. Nothing re-queues it on
-  its own: the refusal is on the build's history, and the next delivery picks it up
-  (#1551). The same holds for every other refusal at pickup. When the new person
+  does not count as having built its commit, and neither does a build refused at pickup
+  for any other reason: a redelivery of that push from GitHub builds it as the current
+  run-as person; otherwise it waits for the next push or a manual Build. Nothing
+  re-queues it on its own (#1551). When the new person
   has nothing to clone one of the solution's providers with, the pipeline shows it as
   paused straight away. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build

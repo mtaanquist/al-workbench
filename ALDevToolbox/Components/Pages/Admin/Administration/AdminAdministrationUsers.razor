@@ -278,10 +278,9 @@
                             <span class="u-row">
                                 @if (!locked && u.Status == UserStatus.Active)
                                 {
-                                    <form method="post" action="/admin/users/@u.Id/disable">
-                                        <AntiforgeryToken />
-                                        <button type="submit" class="btn btn--sm">Disable</button>
-                                    </form>
+                                    @* Asks first: disabling closes open Sealed links and
+                                       pending invites for good (#1544). *@
+                                    <button type="button" class="btn btn--sm" disabled="@_busy" @onclick="() => RequestDisableAsync(u)">Disable</button>
                                 }
                                 else if (!locked && u.Status == UserStatus.Disabled)
                                 {
@@ -564,6 +563,61 @@
         }
     }
 
+    /// <summary>
+    /// What disabling takes away, said before it happens. Disabling closes
+    /// things that re-enabling cannot bring back, so the per-row button asks
+    /// as the bulk one does.
+    /// </summary>
+    private static string DisableWarning(string names) =>
+        $"This will disable: {names}. They are signed out everywhere, and their access tokens, connected AI assistants, unaccepted invites and open Sealed links stop working. Re-enabling them later does not bring any of these back.";
+
+    private async Task RequestDisableAsync(User user)
+    {
+        if (_busy) return;
+        var orgId = Org.CurrentOrganizationId;
+        if (orgId is null) return;
+        if (_confirm is not null && !await _confirm.OpenAsync(
+                title: $"Disable {user.DisplayName}?",
+                message: DisableWarning(user.DisplayName),
+                confirmLabel: "Disable",
+                confirmButtonClass: "btn--danger"))
+        {
+            return;
+        }
+
+        _busy = true;
+        _lastError = null;
+        _lastSuccess = null;
+        _lastFailures = Array.Empty<BulkActionFailure>();
+        try
+        {
+            var result = await Accounts.BulkDisableUsersAsync([user.Id], orgId.Value);
+            if (result.AllSucceeded)
+            {
+                _lastSuccess = $"{user.DisplayName} is disabled.";
+            }
+            else
+            {
+                _lastError = result.Failures.FirstOrDefault()?.Reason ?? "The change was rejected.";
+            }
+            await LoadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _lastError = ex.Errors.FirstOrDefault().Value ?? "The change was rejected.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Disabling user {UserId} raised an unexpected error.", user.Id);
+            _lastError = "An unexpected error occurred. The change was not saved.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
     private async Task RequestBulkAsync(BulkAction action)
     {
         if (_selected.Count == 0 || _busy || _active is null) return;
@@ -586,7 +640,7 @@
             if (affected.Count > 8) names += $", and {affected.Count - 8} more";
             var confirmed = await _confirm.OpenAsync(
                 title: $"{Capitalize(label)} {affected.Count} user(s)?",
-                message: $"This will {label}: {names}.",
+                message: action == BulkAction.Disable ? DisableWarning(names) : $"This will {label}: {names}.",
                 confirmLabel: Capitalize(label),
                 confirmButtonClass: action == BulkAction.Disable ? "btn--danger" : "btn--primary");
             if (!confirmed) return;

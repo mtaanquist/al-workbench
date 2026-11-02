@@ -188,7 +188,11 @@ Its consequence for teams: **deleting a team is refused while it is the last tea
 any non-Public project**, listing the projects that block it. The refusal is
 deliberate rather than auto-resetting those projects to Public — silently making a
 Private project world-readable is exactly the failure this feature exists to prevent.
-That refusal lives in `TeamService.DeleteTeamAsync`.
+That refusal lives in `TeamService.DeleteTeamAsync`. It and the access save
+(`ProjectService.SetAccessAsync`) lock the team rows, then the solution rows, before they
+check, so two deletes at once, or a delete and an access save, cannot each pass against
+the state before the other and leave a solution with no team: the second waits and checks
+what the first left (#1603).
 
 ## Authorisation
 

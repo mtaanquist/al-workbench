@@ -333,7 +333,7 @@ public class ReleaseManagementService
         _db.OeReleases.Remove(release);
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
 
-        var reclaimed = await ReclaimOrphanedBlobsAsync(candidateHashes, ct).ConfigureAwait(false);
+        var reclaimed = await ReclaimOrphanedBlobsAsync(_db, _logger, candidateHashes, ct).ConfigureAwait(false);
 
         _logger.LogWarning(
             "Hard-deleted Release {ReleaseId} ({Label}). Dependent oe_* rows cascade-removed; reclaimed {Reclaimed} orphaned shared content blob(s) of {Candidates} candidate(s).",
@@ -371,7 +371,7 @@ public class ReleaseManagementService
             "DELETE FROM oe_modules WHERE release_id = {0}",
             new object[] { releaseId }, ct).ConfigureAwait(false);
 
-        var reclaimed = await ReclaimOrphanedBlobsAsync(candidateHashes, ct).ConfigureAwait(false);
+        var reclaimed = await ReclaimOrphanedBlobsAsync(_db, _logger, candidateHashes, ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Cleared ingested data for Release {ReleaseId}: removed {Modules} module(s), reclaimed {Reclaimed} orphaned blob(s) of {Candidates} candidate(s).",
@@ -404,7 +404,8 @@ public class ReleaseManagementService
     /// <c>SymbolReference.json</c>, references any more. Raw SQL so the
     /// <c>NOT EXISTS</c> check sees ALL orgs (the EF query filter doesn't apply)
     /// — a blob still used by another tenant must survive. Returns the count
-    /// reclaimed. Shared by hard-delete and retry-clear.
+    /// reclaimed. Shared by hard-delete and retry-clear, and by an amend that rolled
+    /// back after its blobs had committed on their own connection (#1549).
     /// <para>
     /// A blob an import is saving at that moment is locked by it
     /// (<see cref="OeIngestHelpers.UpsertFileContentsAsync"/>) and is skipped, not
@@ -417,7 +418,7 @@ public class ReleaseManagementService
     /// stays, which costs only space (#1181).
     /// </para>
     /// </summary>
-    private async Task<int> ReclaimOrphanedBlobsAsync(IReadOnlyList<string> candidateHashes, CancellationToken ct)
+    internal static async Task<int> ReclaimOrphanedBlobsAsync(AppDbContext db, ILogger logger, IReadOnlyList<string> candidateHashes, CancellationToken ct)
     {
         var reclaimed = 0;
         foreach (var chunk in candidateHashes.Chunk(ReclaimChunkSize))
@@ -426,7 +427,7 @@ public class ReleaseManagementService
             {
                 try
                 {
-                    reclaimed += await _db.Database.ExecuteSqlRawAsync(
+                    reclaimed += await db.Database.ExecuteSqlRawAsync(
                         "DELETE FROM oe_file_contents c WHERE c.content_hash IN (" +
                         "SELECT o.content_hash FROM oe_file_contents o WHERE o.content_hash = ANY({0}) " +
                         "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = o.content_hash) " +
@@ -441,7 +442,7 @@ public class ReleaseManagementService
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
                 {
-                    _logger.LogWarning(
+                    logger.LogWarning(
                         "Left up to {Candidates} shared content blob(s) in place after {Attempts} attempts: imports kept starting to use them.",
                         chunk.Length, attempt);
                     break;

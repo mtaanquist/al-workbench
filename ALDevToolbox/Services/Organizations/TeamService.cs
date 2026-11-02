@@ -264,8 +264,17 @@ public sealed class TeamService
     /// </remarks>
     public async Task DeleteTeamAsync(int id, CancellationToken ct = default)
     {
-        RequireOrganizationId();
+        var orgId = RequireOrganizationId();
         await EnsureCanAdministerTeamsAsync(ct).ConfigureAwait(false);
+
+        // The "only team" check below reads and the delete writes; two deletes, or a delete
+        // and an access save, could each pass it and leave a Private or Read-only solution
+        // with no team (#1603). Locked first, in the order ProjectService.SetAccessAsync
+        // takes them, so the second writer waits and then checks what the first left.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        await LockTeamAndItsSolutionsAsync(orgId, id, ct);
 
         var team = await _db.Teams.FirstOrDefaultAsync(t => t.Id == id, ct);
         if (team is null) return;
@@ -291,9 +300,33 @@ public sealed class TeamService
         _db.TeamMembers.RemoveRange(members);
         _db.Teams.Remove(team);
         await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
 
         _logger.LogInformation("Deleted team {TeamId} ({Name}) and its {MemberCount} membership row(s).",
             id, team.Name, members.Count);
+    }
+
+    /// <summary>
+    /// Takes the locks a team delete needs for the rest of the current transaction: the
+    /// team row, then every solution the team is on, in id order. Raw SQL, approved for
+    /// #1603 like ModuleService's lock: it skips the query filter, so each statement names
+    /// the organisation itself.
+    /// <para>The team first, <c>FOR UPDATE</c>: it waits for any access save that is
+    /// adding the team to a solution (that save holds it <c>FOR KEY SHARE</c>), so the
+    /// solutions are read only after that link is committed and every one of them is
+    /// locked. Read the other way round, a link committed while the delete waited on the
+    /// team was never locked, and a second delete could empty that solution alongside it.
+    /// The solutions are locked <c>FOR NO KEY UPDATE</c>, as the admin guard locks its
+    /// organisation (#1337): two writers still queue on each other, but a row that only
+    /// references the solution - a build, an audit entry - is not held up.</para>
+    /// </summary>
+    private async Task LockTeamAndItsSolutionsAsync(int orgId, int teamId, CancellationToken ct)
+    {
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM teams WHERE id = {teamId} AND organization_id = {orgId} FOR UPDATE", ct);
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM oe_projects WHERE organization_id = {orgId} AND id IN (SELECT project_id FROM oe_project_teams WHERE team_id = {teamId} AND organization_id = {orgId}) ORDER BY id FOR NO KEY UPDATE",
+            ct);
     }
 
     /// <summary>Adds an org member to a team. Managers and admins.</summary>

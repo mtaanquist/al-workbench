@@ -339,6 +339,64 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     /// <summary>
+    /// Work already running when the restore began is held by the database guard.
+    /// When the drop itself fails, the site reopens on the same database, so that
+    /// work must be let through then, not refused because the restore was about to
+    /// drop (#1599).
+    /// </summary>
+    [Fact]
+    public async Task Work_held_through_a_drop_that_fails_runs_once_the_site_reopens()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", "exit 0");
+        var backupId = await AddBackupRowWithFileAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // The pause keeps the restore at its drop while the held work waits.
+            await ctx.Database.ExecuteSqlRawAsync("""
+                CREATE FUNCTION refuse_drop_slowly() RETURNS event_trigger LANGUAGE plpgsql AS
+                $$ BEGIN PERFORM pg_sleep(1); RAISE EXCEPTION 'drop refused for the test'; END $$;
+                CREATE EVENT TRIGGER refuse_drop_slowly ON ddl_command_start
+                    WHEN TAG IN ('DROP SCHEMA') EXECUTE FUNCTION refuse_drop_slowly();
+                """, TestContext.Current.CancellationToken);
+        }
+        var svc = NewService(_options with { PgRestorePath = tool });
+
+        try
+        {
+            var restore = svc.RestoreAsync(backupId);
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!_maintenance.IsActive && DateTime.UtcNow < deadline) await Task.Delay(20, TestContext.Current.CancellationToken);
+            _maintenance.IsActive.Should().BeTrue();
+
+            await using var page = _db.NewContext(new ALDevToolbox.Data.MaintenanceDatabaseGuard(
+                _maintenance, new AmbientOrganizationContext(), holdMargin: TimeSpan.FromSeconds(30)));
+            page.Organizations.Add(new Organization
+            {
+                Name = "Held", Slug = "held-through-a-failed-drop", IsPending = false, CreatedAt = DateTime.UtcNow,
+            });
+            var held = page.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+            var act = () => restore;
+            (await act.Should().ThrowAsync<InvalidOperationException>())
+                .Which.Should().NotBeOfType<BackupRestoreFailedException>("nothing was dropped");
+            _maintenance.IsActive.Should().BeFalse();
+
+            await held.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await using var check = _db.NewContext();
+            (await check.Organizations.AsNoTracking()
+                .AnyAsync(o => o.Slug == "held-through-a-failed-drop", TestContext.Current.CancellationToken))
+                .Should().BeTrue("the held write ran on the database it started on");
+        }
+        finally
+        {
+            await using var ctx = _db.NewContext();
+            await ctx.Database.ExecuteSqlRawAsync("DROP EVENT TRIGGER refuse_drop_slowly; DROP FUNCTION refuse_drop_slowly();", TestContext.Current.CancellationToken);
+            _maintenance.Exit();
+        }
+    }
+
+    /// <summary>
     /// A failure that empties the database can only put back the per-tenant
     /// snapshots whose organisations exist, which is none of them. The next
     /// restore that succeeds must put back the full list read before that
@@ -1100,7 +1158,7 @@ public sealed class BackupServiceTests : IDisposable
                         TestDb.NewAuditInterceptor(),
                         // Not a SiteAdmin and no request: only the restore's own
                         // allowance can get its commands past the guard.
-                        new ALDevToolbox.Data.MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext()))
+                        new ALDevToolbox.Data.MaintenanceDatabaseGuard(_maintenance, new AmbientOrganizationContext(), holdMargin: TimeSpan.Zero))
                     .Options,
                 _db.OrgContext)
             : _db.NewContextWithAudit(TestDb.NewAuditInterceptor());

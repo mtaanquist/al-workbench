@@ -18,6 +18,19 @@ public sealed class RecoveryCodeService
     private const string Alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     private const int GroupLength = 5;
 
+    /// <summary>The bcrypt work factor recovery codes are hashed at in production.</summary>
+    public const int ProductionWorkFactor = 10;
+
+    /// <summary>
+    /// The work factor <see cref="RegenerateAsync"/> hashes at. Always
+    /// <see cref="ProductionWorkFactor"/> in the app; the test assembly lowers it
+    /// to bcrypt's minimum at load, because issuing codes is ten hashes and each
+    /// guess up to ten verifies, which made the two-step sign-in tests take
+    /// minutes (#1584). Verify reads the factor back from each stored hash, so
+    /// lowering it changes nothing a test asserts on.
+    /// </summary>
+    internal static int WorkFactor { get; set; } = ProductionWorkFactor;
+
     private readonly AppDbContext _db;
     private readonly TimeProvider _clock;
 
@@ -48,7 +61,7 @@ public sealed class RecoveryCodeService
             _db.UserRecoveryCodes.Add(new UserRecoveryCode
             {
                 UserId = userId,
-                CodeHash = BCrypt.Net.BCrypt.HashPassword(Normalise(plain), workFactor: 10),
+                CodeHash = BCrypt.Net.BCrypt.HashPassword(Normalise(plain), workFactor: WorkFactor),
                 CreatedAt = now,
             });
         }

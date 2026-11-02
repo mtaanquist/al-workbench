@@ -3,6 +3,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using OpenIddict.Abstractions;
 
 namespace ALDevToolbox.Services.Account;
@@ -54,13 +55,17 @@ public sealed class UserAdministrationService
     private readonly TimeProvider _clock;
     private readonly IOpenIddictTokenManager _oauthTokens;
     private readonly IOrganizationContext _orgContext;
+    private readonly ILogger<UserAdministrationService> _logger;
 
-    public UserAdministrationService(AppDbContext db, TimeProvider clock, IOpenIddictTokenManager oauthTokens, IOrganizationContext orgContext)
+    public UserAdministrationService(
+        AppDbContext db, TimeProvider clock, IOpenIddictTokenManager oauthTokens, IOrganizationContext orgContext,
+        ILogger<UserAdministrationService> logger)
     {
         _db = db;
         _clock = clock;
         _oauthTokens = oauthTokens;
         _orgContext = orgContext;
+        _logger = logger;
     }
 
     /// <summary>
@@ -125,7 +130,8 @@ public sealed class UserAdministrationService
     /// way back in: the cookie (via <see cref="User.CredentialsChangedAt"/>,
     /// which <c>CookieSessionRevalidation</c> compares against the session's
     /// start), the user's personal access tokens, their OAuth consents and the
-    /// access and refresh tokens issued under them. The PAT and OAuth request
+    /// access and refresh tokens issued under them, the invites they sent that
+    /// are still pending, and their open Sealed links. The PAT and OAuth request
     /// paths already refuse a non-active user on every call, so this is belt
     /// and braces there; it also means re-enabling the account later does not
     /// quietly bring old tokens back to life.
@@ -194,6 +200,7 @@ public sealed class UserAdministrationService
         await _db.Invites
             .Where(i => i.InvitedByUserId == userId && i.AcceptedAt == null && i.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(i => i.RevokedAt, now), ct);
+        await CloseSealedLinksAsync(userId, actingOrgId, now, ct);
         await _db.SaveChangesAsync(ct);
         // OpenIddict stores Subject = the user id (OAuthEndpoints.MapAuthorizeComplete).
         // Its manager shares this scoped context, so the revocation joins the transaction.
@@ -201,6 +208,55 @@ public sealed class UserAdministrationService
         // leaves hundreds of rows per user (#1259).
         await _oauthTokens.RevokeBySubjectAsync(userId.ToString(), ct);
         await tx.CommitAsync(ct);
+    }
+
+    /// <summary>
+    /// Closes the open Sealed links the disabled user sent, as a revoke would:
+    /// the secret is dropped and the link stops opening. Someone who has left
+    /// should not keep a way to hand out what they shared, and a link sent
+    /// from a taken-over account should stop with it (#1544). Each closed link
+    /// gets the same audit row a revoke writes, naming the admin who disabled
+    /// the sender. Filtered like the revocations in <see cref="DisableUserAsync"/>.
+    /// </summary>
+    private async Task CloseSealedLinksAsync(int userId, int actingOrgId, DateTime now, CancellationToken ct)
+    {
+        var ids = await _db.SealedLinks.AsNoTracking()
+            // A link past its expiry that the sweep hasn't reached yet is
+            // already dead; it is left for the sweep to record as Expired.
+            .Where(l => l.CreatedByUserId == userId && l.ClosedAt == null && l.ExpiresAt > now)
+            .Select(l => l.Id)
+            .ToListAsync(ct);
+        if (ids.Count == 0) return;
+        // Conditional, as in a revoke: a link a reveal closed a moment ago
+        // keeps its own reason.
+        await _db.SealedLinks
+            .Where(l => ids.Contains(l.Id) && l.ClosedAt == null && l.ExpiresAt > now)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Ciphertext, (byte[]?)null)
+                .SetProperty(l => l.ClosedAt, now)
+                .SetProperty(l => l.ClosedReason, SealedLinkClosedReason.Revoked), ct);
+        // Audit only the links this call closed.
+        var closed = await _db.SealedLinks.AsNoTracking()
+            .Where(l => ids.Contains(l.Id) && l.ClosedAt == now && l.ClosedReason == SealedLinkClosedReason.Revoked)
+            .Select(l => new { l.Id, l.Label })
+            .ToListAsync(ct);
+        var actorId = _orgContext.CurrentUserId;
+        var actor = await AuditActor.ResolveAsync(_db, actorId, ct);
+        foreach (var link in closed)
+        {
+            _db.AuditLog.Add(new AuditLogEntry
+            {
+                Timestamp = now,
+                ChangedBy = actor,
+                ChangedByUserId = actorId,
+                OrganizationId = actingOrgId,
+                EntityType = AuditEntityType.SealedLink,
+                EntityId = link.Id,
+                Action = AuditAction.Deleted,
+                EntityName = link.Label,
+            });
+        }
+        _logger.LogInformation("Closed {Count} Sealed links of disabled user {UserId}.", closed.Count, userId);
     }
 
     /// <summary>Re-enables a disabled user without further admin approval.</summary>
