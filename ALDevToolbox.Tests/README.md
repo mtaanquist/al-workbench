@@ -285,11 +285,14 @@ collection to serialise them.
   (`Auth:WebAuthn:RpId`, say) goes in the `settings:` argument. It reaches
   that host only.
 - **Environment.** A knob startup reads straight off the environment
-  (`PUBLIC_BASE_URL`, `SINGLE_TENANT_MODE`) goes in `environment:`. That sets
+  (`SINGLE_TENANT_MODE`) goes in `environment:`. That sets
   a process-wide variable, so the class must carry
   `[Collection(ProcessEnvironmentCollection.Name)]`, which runs it on its own
   after the parallel collections. Keep that list short: if a knob can move to
-  `settings:`, move it.
+  `settings:`, move it, and if startup only parses it into a singleton,
+  register that singleton in `configureServices` instead. `PUBLIC_BASE_URL`
+  is one: register `new PublicOrigin(PublicOrigin.Parse(url))`
+  (`CredentialEmailLinkTests`).
 - **Schedulers.** The factory takes the polled schedulers out of the host
   (backups, the BCQuality mirror, the Microsoft feed sync and the rest), so a
   host that lives past their startup delay doesn't clone repositories or call

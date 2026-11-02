@@ -230,7 +230,7 @@ public sealed class AdminTranslationMemoryTests : IDisposable
         await _db.NewSystemSettingsService(ctx).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: System.Security.Cryptography.RSA.Create(2048).ExportRSAPrivateKeyPem(),
+            PrivateKeyPem: TestKeys.GitHubAppPem,
             ClearPrivateKey: false));
     }
 
