@@ -58,6 +58,9 @@ public class ReleaseImportService
     /// </summary>
     private readonly IDbContextFactory<AppDbContext>? _blobContexts;
 
+    /// <summary>The blobs the running amend committed on <see cref="_blobContexts"/>.</summary>
+    private readonly HashSet<string> _amendBlobHashes = new(StringComparer.Ordinal);
+
     private static readonly HashSet<string> AllowedKinds = new(StringComparer.Ordinal)
     {
         "first_party",
@@ -545,6 +548,7 @@ public class ReleaseImportService
         }
 
         using var tracked = Ingests.Track(release.Id);
+        _amendBlobHashes.Clear();
         if (uploads.Count == 0)
         {
             await RestoreReadyAsync(release.Id).ConfigureAwait(false);
@@ -635,6 +639,7 @@ public class ReleaseImportService
             // the release holds what it held before: hand it back ready. An amend
             // has no job to resume it, so leaving it importing would strand it (#1180).
             await RestoreReadyAsync(release.Id).ConfigureAwait(false);
+            await ReclaimAmendBlobsAsync(release.Id).ConfigureAwait(false);
             throw;
         }
 
@@ -657,6 +662,33 @@ public class ReleaseImportService
             ReferencesImported: totals.ReferencesImported,
             SourceFilesImported: totals.SourceFilesImported,
             TranslationsImported: totals.TranslationsImported);
+    }
+
+    /// <summary>
+    /// Removes the blobs a rolled-back amend committed on its own connection that
+    /// nothing references, which no release delete would ever offer the reclaim
+    /// (#1549). One another import is saving at that moment is locked and skipped.
+    /// Never cancelled, and never throws: the amend's own error is what the caller
+    /// rethrows, and a blob left behind costs only space.
+    /// </summary>
+    private async Task ReclaimAmendBlobsAsync(int releaseId)
+    {
+        if (_amendBlobHashes.Count == 0) return;
+        try
+        {
+            var reclaimed = await ReleaseManagementService.ReclaimOrphanedBlobsAsync(
+                _db, _logger, _amendBlobHashes.ToList(), CancellationToken.None).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Reclaimed {Count} source blob(s) the rolled-back amend of release {ReleaseId} had saved.", reclaimed, releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not reclaim the source blobs of the rolled-back amend of release {ReleaseId}.", releaseId);
+        }
+        finally
+        {
+            _amendBlobHashes.Clear();
+        }
     }
 
     /// <summary>
@@ -1871,6 +1903,9 @@ public class ReleaseImportService
         if (_blobContexts is not null && contents.Count > 0 && _db.Database.CurrentTransaction is not null)
         {
             await using var blobs = await _blobContexts.CreateDbContextAsync(ct).ConfigureAwait(false);
+            blobs.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
+            // Remembered, so an amend that rolls back can reclaim what it committed here.
+            _amendBlobHashes.UnionWith(contents.Keys);
             await OeIngestHelpers.UpsertFileContentsAsync(_db, contents, ct, insertVia: blobs).ConfigureAwait(false);
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             return;

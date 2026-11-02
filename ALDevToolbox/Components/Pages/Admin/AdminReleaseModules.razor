@@ -42,7 +42,7 @@
             {
                 case "queued":
                     <Alert Tone="AlertTone.Info">
-                        <span>Your modules are waiting to be added. Another import is running first. Refresh this page to check.</span>
+                        <span>Your modules are waiting their turn behind other imports. Refresh this page to check.</span>
                     </Alert>
                     break;
                 case "running":
@@ -50,14 +50,14 @@
                         <span>Adding your modules. This can take a while on a large release. Refresh this page to check.</span>
                     </Alert>
                     break;
-                case "failed":
+                case "failed" when FinishedWithin(last, TimeSpan.FromDays(7)):
                     <Alert Tone="AlertTone.Danger">
                         <span>Your last upload was not added, and the release is unchanged. @last.ErrorMessage</span>
                     </Alert>
                     break;
-                case "completed" when Http.HttpContext?.Request.Query.ContainsKey("ok") == true:
+                case "completed" when Http.HttpContext?.Request.Query.ContainsKey("ok") == true || FinishedWithin(last, TimeSpan.FromHours(1)):
                     <Alert Tone="AlertTone.Success">
-                        <span>Your modules were added.</span>
+                        <span>@(last.ErrorMessage ?? "Your modules were added.")</span>
                     </Alert>
                     break;
             }
@@ -213,6 +213,11 @@
     private ReleaseDetail? _release;
     private List<ModuleListItem>? _modules;
     private AddModulesJobState? _lastUpload;
+
+    // A finished upload's notice is news for a while, not for ever: a failure for a
+    // week, a success for an hour (or on the redirect back).
+    private static bool FinishedWithin(AddModulesJobState job, TimeSpan window) =>
+        job.CompletedAt is { } at && at > DateTime.UtcNow - window;
     private (string Message, bool IsError)? Status { get; set; }
 
     protected override async Task OnInitializedAsync()

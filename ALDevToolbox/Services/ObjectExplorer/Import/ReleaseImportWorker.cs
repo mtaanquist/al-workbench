@@ -364,6 +364,8 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         ZipArchive? archive2 = null;
         string? tempToDelete2 = null;
         var jobSucceeded = false;
+        // What a finished Add modules job says about itself on its page (#1549).
+        string? completedNote = null;
         string? jobFailureMessage = null;
         try
         {
@@ -451,19 +453,36 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 try
                 {
                     (var addUploads, archive) = ReleaseZipStaging.OpenStagedZip(add.TempPath, isDvd: false, openedStreams);
+                    ReleaseImportSummary summary;
                     using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
                     {
-                        await importer.RunAmendAsync(job.ReleaseId, addUploads, ct).ConfigureAwait(false);
+                        summary = await importer.RunAmendAsync(job.ReleaseId, addUploads, ct).ConfigureAwait(false);
                     }
+                    completedNote = AddModulesNote(summary);
                     jobSucceeded = true;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    throw; // Shutdown: the amend rolled back; the next start closes the row (#483).
+                    // Shutdown: the amend rolled back, or never started, and the staged
+                    // upload goes with this process. Closed here, so the next start does
+                    // not take a running row with a ready release for a finished one.
+                    await importer.RestoreAmendedReleaseAsync(job.ReleaseId).ConfigureAwait(false);
+                    if (job.JobRowId != 0)
+                    {
+                        await persistedJobs.MarkFailedAsync(job.JobRowId, PersistedImportJobs.AddModulesLostMessage, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    jobFailureMessage = FriendlyMessage(ex);
+                    // A refusal says what to fix; anything else gets plain words, not
+                    // an exception's text.
+                    jobFailureMessage = ex switch
+                    {
+                        PlanValidationException => FriendlyMessage(ex),
+                        InvalidDataException => "One of the files is not a valid .app or ZIP file, so nothing was added.",
+                        _ => "Something went wrong while adding the modules, so nothing was added. Try again.",
+                    };
                     if (ex is PlanValidationException)
                         _logger.LogWarning("Adding modules to release {ReleaseId} was refused: {Reason}", job.ReleaseId, jobFailureMessage);
                     else
@@ -689,7 +708,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     // row in "running" forever. The status write must complete
                     // regardless of why we're unwinding.
                     if (jobSucceeded)
-                        await persistedJobs.MarkCompletedAsync(job.JobRowId, CancellationToken.None).ConfigureAwait(false);
+                        await persistedJobs.MarkCompletedAsync(job.JobRowId, CancellationToken.None, completedNote).ConfigureAwait(false);
                     else
                         await persistedJobs.MarkFailedAsync(job.JobRowId, jobFailureMessage ?? "Import failed.", CancellationToken.None).ConfigureAwait(false);
                 }
@@ -757,6 +776,13 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
     /// </summary>
     internal static bool ShouldFinaliseJobRow(bool jobSucceeded, bool cancellationRequested) =>
         jobSucceeded || !cancellationRequested;
+
+    /// <summary>What the Add modules page says about a finished upload, as the old redirect did.</summary>
+    internal static string AddModulesNote(ReleaseImportSummary summary) =>
+        $"Added {summary.ModulesImported} module(s)."
+        + (summary.ModulesSkipped > 0
+            ? $" {summary.ModulesSkipped} were already in the release and were skipped."
+            : string.Empty);
 
     private static string FriendlyMessage(Exception ex) =>
         ex is PlanValidationException pve && pve.Errors.Count > 0

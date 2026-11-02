@@ -38,12 +38,12 @@ public sealed class AddModulesJobTests : IDisposable
     private static readonly AmbientOrganizationScope.OrganizationIdentity Identity =
         new(OrganizationId: TestDb.DefaultOrgId, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
 
-    private ReleaseImportService NewImporter(Data.AppDbContext ctx, bool blobsOnOwnConnection = true) =>
+    private ReleaseImportService NewImporter(Data.AppDbContext ctx, bool blobsOnOwnConnection = true, ReleaseIngests? ingests = null) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
             new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext),
-            blobContexts: blobsOnOwnConnection ? _db.NewContextFactory() : null);
+            ingests: ingests, blobContexts: blobsOnOwnConnection ? _db.NewContextFactory() : null);
 
     private async Task<int> SeedReadyReleaseAsync(string label)
     {
@@ -88,6 +88,7 @@ public sealed class AddModulesJobTests : IDisposable
         state.Status.Should().Be("ready");
         state.Modules.Should().Be(2);
         state.JobStatus.Should().Be("completed");
+        state.JobError.Should().Be("Added 1 module(s).", "the page says how many were added, as the old redirect did");
         File.Exists(((ReleaseImportSource.AddModules)job.Source).TempPath).Should().BeFalse("the worker deletes the staged upload");
     }
 
@@ -130,12 +131,13 @@ public sealed class AddModulesJobTests : IDisposable
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task An_amends_source_blobs_commit_outside_its_transaction(bool blobsOnOwnConnection)
+    public async Task A_rolled_back_amend_leaves_no_source_blobs_behind(bool blobsOnOwnConnection)
     {
         // OEI-6: the blobs the first upload inserted commit at once on their own
-        // connection, so a rolled-back amend leaves them behind (unreferenced, for the
-        // reclaim) and never held them locked against another import. Without the
-        // second connection they roll back with the amend, as before.
+        // connection, so they are never held locked against another import. A
+        // rolled-back amend then reclaims the ones nothing references, since no release
+        // delete would ever offer them. Without the second connection they roll back
+        // with the amend, as before. Either way none is left behind.
         var releaseId = await SeedReadyReleaseAsync("BC 25.18 DK (add blobs " + blobsOnOwnConnection + ")");
         await using (var tamper = _db.NewContext())
         {
@@ -157,11 +159,7 @@ public sealed class AddModulesJobTests : IDisposable
 
         await using var after = _db.NewContext();
         (await after.OeModules.CountAsync(m => m.ReleaseId == releaseId)).Should().Be(1);
-        var blobs = await after.OeFileContents.CountAsync();
-        if (blobsOnOwnConnection)
-            blobs.Should().BeGreaterThan(before, "the first upload's blobs were committed on their own connection");
-        else
-            blobs.Should().Be(before);
+        (await after.OeFileContents.CountAsync()).Should().Be(before);
     }
 
     [Fact]
@@ -186,6 +184,59 @@ public sealed class AddModulesJobTests : IDisposable
         state.Modules.Should().Be(1);
         state.JobStatus.Should().Be("failed");
         state.JobError.Should().Be(PersistedImportJobs.AddModulesLostMessage);
+    }
+
+    [Fact]
+    public async Task A_restart_after_the_amend_committed_closes_the_row_as_completed()
+    {
+        // The process died after the amend had committed and handed the release back
+        // ready, in the drift scan, before the worker closed the row.
+        var releaseId = await SeedReadyReleaseAsync("BC 25.18 DK (add committed)");
+        var job = await QueueAsync(releaseId, "Microsoft_OIOUBL.app");
+        await using (var ctx = _db.NewContext())
+        {
+            await new PersistedImportJobs(ctx, TimeProvider.System).MarkRunningAsync(job.JobRowId);
+            await ctx.OeReleases.Where(r => r.Id == releaseId).ExecuteUpdateAsync(u => u.SetProperty(r => r.Status, "ready"));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await new PersistedImportJobs(ctx, TimeProvider.System).ReconcileOnStartupAsync()).Should().BeEmpty();
+        }
+
+        var state = await StateAsync(releaseId, job.JobRowId);
+        state.Status.Should().Be("ready");
+        state.JobStatus.Should().Be("completed", "the modules were added; saying to add them again would be wrong");
+    }
+
+    [Fact]
+    public async Task The_amend_waits_for_the_heavy_import_gate()
+    {
+        var releaseId = await SeedReadyReleaseAsync("BC 25.18 DK (add gate)");
+        var job = await QueueAsync(releaseId, "Microsoft_OIOUBL.app");
+        var ingests = new ReleaseIngests();
+
+        Task run;
+        using (await ingests.EnterHeavyAsync(CancellationToken.None))
+        {
+            run = new TestWorker(this, ingests).RunAsync(job);
+            var giveUp = DateTime.UtcNow.AddMinutes(1);
+            while ((await StateAsync(releaseId, job.JobRowId)).JobStatus != "running")
+            {
+                DateTime.UtcNow.Should().BeBefore(giveUp);
+                await Task.Delay(20);
+            }
+            await Task.Delay(200);
+
+            // A DVD import or a backfill holds the gate: the amend has not started.
+            var waiting = await StateAsync(releaseId, job.JobRowId);
+            waiting.Modules.Should().Be(1);
+            waiting.Status.Should().Be("ingesting");
+            run.IsCompleted.Should().BeFalse();
+        }
+
+        await run.WaitAsync(TimeSpan.FromMinutes(2));
+        (await StateAsync(releaseId, job.JobRowId)).Modules.Should().Be(2);
     }
 
     [Fact]
@@ -234,19 +285,19 @@ public sealed class AddModulesJobTests : IDisposable
     /// <summary>Runs one job through the real worker code, with the services it resolves built by hand.</summary>
     private sealed class TestWorker : ReleaseImportWorker
     {
-        public TestWorker(AddModulesJobTests test)
-            : base(Channel.CreateUnbounded<ReleaseImportJob>().Reader, BuildServices(test),
+        public TestWorker(AddModulesJobTests test, ReleaseIngests? ingests = null)
+            : base(Channel.CreateUnbounded<ReleaseImportJob>().Reader, BuildServices(test, ingests),
                 NullLogger<ReleaseImportWorker>.Instance, new WorkerHeartbeatRegistry(), nameof(TestWorker), maintenance: null)
         {
         }
 
         public Task RunAsync(ReleaseImportJob job) => RunJobAsync(job, CancellationToken.None);
 
-        private static ServiceProvider BuildServices(AddModulesJobTests test)
+        private static ServiceProvider BuildServices(AddModulesJobTests test, ReleaseIngests? ingests)
         {
             var services = new ServiceCollection();
             services.AddScoped(_ => test._db.NewContext());
-            services.AddScoped(sp => test.NewImporter(sp.GetRequiredService<Data.AppDbContext>()));
+            services.AddScoped(sp => test.NewImporter(sp.GetRequiredService<Data.AppDbContext>(), ingests: ingests));
             services.AddScoped(sp => new PersistedImportJobs(sp.GetRequiredService<Data.AppDbContext>(), TimeProvider.System));
             return services.BuildServiceProvider();
         }

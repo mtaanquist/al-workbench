@@ -154,7 +154,11 @@ public sealed class PersistedImportJobs
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
-    public async Task MarkCompletedAsync(long jobRowId, CancellationToken ct = default)
+    /// <param name="note">
+    /// What to say about the run, kept in the message column as the backfill note is,
+    /// so no schema change is needed: an Add modules job's counts, for its page (#1549).
+    /// </param>
+    public async Task MarkCompletedAsync(long jobRowId, CancellationToken ct = default, string? note = null)
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
@@ -162,6 +166,7 @@ public sealed class PersistedImportJobs
         if (row is null) return;
         row.Status = "completed";
         row.CompletedAt = _clock.GetUtcNow().UtcDateTime;
+        if (note is not null) row.ErrorMessage = Truncate(note, 4000);
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
@@ -361,6 +366,14 @@ public sealed class PersistedImportJobs
                         JobRowId: row.Id));
                     break;
                 }
+                case AddModulesKind when survivor.ReleaseStatus == "ready":
+                    // The amend had committed and handed the release back ready, and
+                    // the process died in the steps after (the drift scan) before the
+                    // row was closed. A graceful stop closes the row itself, so a
+                    // running row with a ready release is one that finished.
+                    row.Status = "completed";
+                    row.CompletedAt = now;
+                    break;
                 case AddModulesKind:
                     // The staged upload is gone with the container's temp folder. The
                     // amend writes in one transaction, so a cut-off run left nothing
