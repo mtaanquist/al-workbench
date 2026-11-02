@@ -373,6 +373,50 @@ public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
             .Should().BeFalse("no QR code or secret before the person has confirmed");
     }
 
+    [Fact]
+    public async Task The_setup_page_shows_its_secret_again_only_to_the_browser_that_started_it()
+    {
+        // Coming back from a refused confirm keeps the scanned entry working,
+        // but a second session on the account must not read the owner's
+        // pending secret: it gets a new one, so the owner's confirm then
+        // fails instead of turning on a factor someone else holds (#1614).
+        const string email = "app-two-sessions@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var owner = await SignInWithPasswordAsync(email);
+        var other = await SignInWithPasswordAsync(email);
+
+        var first = await SetupSecretAsync(owner);
+        var again = await SetupSecretAsync(owner);
+        var intruder = await SetupSecretAsync(other);
+
+        again.Should().Be(first, "the browser that started setup comes back to the same secret");
+        intruder.Should().NotBe(first, "another session gets its own secret, never the owner's");
+    }
+
+    private async Task<HttpClient> SignInWithPasswordAsync(string email)
+    {
+        var client = _factory.CreateClient();
+        using var loginPage = await client.GetAsync("/login");
+        using var login = await PostAsync(client, "/auth/login",
+            AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password));
+        login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        return client;
+    }
+
+    private static async Task<string> SetupSecretAsync(HttpClient client)
+    {
+        using var page = await client.GetAsync("/account/2fa/totp/setup");
+        page.StatusCode.Should().Be(HttpStatusCode.OK);
+        var match = System.Text.RegularExpressions.Regex.Match(await page.Content.ReadAsStringAsync(), "<pre>([A-Z2-7]+)</pre>");
+        match.Success.Should().BeTrue("the setup page shows the secret to type in");
+        return match.Groups[1].Value;
+    }
+
     /// <summary>
     /// A password sign-in on an account that then turns email codes on: the
     /// session is not recently confirmed, and the account now has a way to.

@@ -1,6 +1,8 @@
 @page "/account/2fa/totp/setup"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
-@rendermode InteractiveServer
+@* Rendered on the server only, never interactive: the page has nothing to
+   click that isn't a link or a form post, and it has to set the cookie that
+   lets this browser - and no other - come back to the same secret (#1614). *@
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Services
 @using ALDevToolbox.Services.Account
@@ -120,6 +122,7 @@
     [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
 
     [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
 
     private static readonly string ConfirmUrl = ALDevToolbox.Endpoints.StepUpEndpoints.Url("/account/2fa/totp/setup");
 
@@ -139,9 +142,24 @@
         }
         try
         {
-            // Shows the same secret again when the person comes back from a
-            // refused confirm, so the entry they scanned still works.
-            _enrollment = await Totp.BeginEnrollmentAsync(Org.CurrentUserId.Value, keepRecent: true);
+            // Shows the same secret again when this browser comes back from a
+            // refused confirm, so the entry they scanned still works. Another
+            // session has no ticket and gets a new secret instead.
+            var ticket = HttpContext?.Request.Cookies[TotpService.PendingSetupCookieName];
+            _enrollment = await Totp.BeginEnrollmentAsync(Org.CurrentUserId.Value, resumeTicket: ticket);
+            if (HttpContext is { Response.HasStarted: false } http)
+            {
+                // The page carries the secret, so no cache may keep it.
+                http.Response.Headers.CacheControl = "no-store";
+                http.Response.Cookies.Append(TotpService.PendingSetupCookieName, _enrollment.ResumeTicket, new CookieOptions
+                {
+                    HttpOnly = true,
+                    SameSite = SameSiteMode.Lax,
+                    Secure = http.Request.IsHttps,
+                    Path = "/account/2fa/totp",
+                    MaxAge = TotpService.PendingSecretReuse,
+                });
+            }
         }
         catch (Exception)
         {

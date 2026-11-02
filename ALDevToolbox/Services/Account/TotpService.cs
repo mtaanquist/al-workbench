@@ -13,9 +13,11 @@ namespace ALDevToolbox.Services.Account;
 /// Result of <see cref="TotpService.BeginEnrollmentAsync"/>. The Base32 secret
 /// and <c>otpauth://</c> URI are the same value in two presentations; the QR
 /// PNG is rendered server-side so we don't ship a JS QR library.
-/// All three are shown to the user once during setup.
+/// All three are shown to the user once during setup. <see cref="ResumeTicket"/>
+/// is not shown: the setup page keeps it in a cookie so that browser, and only
+/// that browser, sees the same secret again when it comes back.
 /// </summary>
-public sealed record TotpEnrollment(string SecretBase32, string OtpAuthUri, byte[] QrPng);
+public sealed record TotpEnrollment(string SecretBase32, string OtpAuthUri, byte[] QrPng, string ResumeTicket);
 
 /// <summary>
 /// TOTP (RFC 6238) enrollment + verification. Secret is generated server-side
@@ -35,8 +37,27 @@ public sealed class TotpService
     public const string TotpSecretProtectionPurpose = "ALDevToolbox.UserTotpSecret";
     private const string Issuer = "AL Workbench";
 
+    /// <summary>
+    /// Protects <see cref="TotpEnrollment.ResumeTicket"/>. New with #1614 and
+    /// nothing long-lived is stored under it, but like every purpose string it
+    /// must not be renamed while tickets are in flight.
+    /// </summary>
+    public const string PendingSetupProtectionPurpose = "ALDevToolbox.TotpPendingSetup";
+
+    /// <summary>The cookie the setup page keeps <see cref="TotpEnrollment.ResumeTicket"/> in.</summary>
+    public const string PendingSetupCookieName = "alwb_totp_setup";
+
+    /// <summary>
+    /// How long the setup page shows the same unconfirmed secret again rather
+    /// than making a new one: long enough to come back from a refused confirm
+    /// or a step-up, short enough that a setup page left open overnight
+    /// starts afresh.
+    /// </summary>
+    public static readonly TimeSpan PendingSecretReuse = TimeSpan.FromMinutes(15);
+
     private readonly AppDbContext _db;
     private readonly IDataProtector _protector;
+    private readonly IDataProtector _ticketProtector;
     private readonly TimeProvider _clock;
     private readonly RecoveryCodeService _recoveryCodes;
 
@@ -48,6 +69,7 @@ public sealed class TotpService
     {
         _db = db;
         _protector = protection.CreateProtector(TotpSecretProtectionPurpose);
+        _ticketProtector = protection.CreateProtector(PendingSetupProtectionPurpose);
         _clock = clock;
         _recoveryCodes = recoveryCodes;
     }
@@ -59,14 +81,18 @@ public sealed class TotpService
     /// a current code to <see cref="ConfirmEnrollmentAsync"/> flips the
     /// enrollment to active.
     /// <para>
-    /// With <paramref name="keepRecent"/>, an unconfirmed secret made within
-    /// <see cref="PendingSecretReuse"/> is shown again instead of replaced. The
-    /// setup page asks for that: a refused confirm (wrong password, a
-    /// confirmation that ran out) sends the person back to it, and a new
-    /// secret would leave the entry they already scanned dead (#1614).
+    /// With a <paramref name="resumeTicket"/> from an earlier call, an
+    /// unconfirmed secret made within <see cref="PendingSecretReuse"/> is shown
+    /// again instead of replaced. The setup page asks for that: a refused
+    /// confirm (wrong password, a confirmation that ran out) sends the person
+    /// back to it, and a new secret would leave the entry they already scanned
+    /// dead (#1614). The ticket names that exact secret and the page keeps it
+    /// in the browser that made it, so another session on the account - one
+    /// that should not be able to read the owner's pending secret - gets a
+    /// fresh one, which leaves the owner's confirm failing as before.
     /// </para>
     /// </summary>
-    public async Task<TotpEnrollment> BeginEnrollmentAsync(int userId, CancellationToken ct = default, bool keepRecent = false)
+    public async Task<TotpEnrollment> BeginEnrollmentAsync(int userId, CancellationToken ct = default, string? resumeTicket = null)
     {
         // Fence category 4 (explicitly scoped user-id lookup): both reads pinned to userId.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
@@ -78,9 +104,11 @@ public sealed class TotpService
         // Same category 4 read, pinned to s.UserId == userId.
         var existing = await _db.UserTotpSecrets.IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.UserId == userId, ct);
-        if (keepRecent && existing is { ConfirmedAt: null } && now - existing.CreatedAt < PendingSecretReuse)
+        if (existing is { ConfirmedAt: null } && now - existing.CreatedAt < PendingSecretReuse
+            && TicketMatches(resumeTicket, userId, existing.SecretEncrypted))
         {
             secretBase32 = _protector.Unprotect(existing.SecretEncrypted);
+            encrypted = existing.SecretEncrypted;
         }
         else if (existing is null)
         {
@@ -113,7 +141,25 @@ public sealed class TotpService
         var label = $"{Issuer}:{user.Email}";
         var uri = $"otpauth://totp/{Uri.EscapeDataString(label)}?secret={secretBase32}&issuer={Uri.EscapeDataString(Issuer)}";
         var qr = RenderQr(uri);
-        return new TotpEnrollment(secretBase32, uri, qr);
+        return new TotpEnrollment(secretBase32, uri, qr, _ticketProtector.Protect(TicketFor(userId, encrypted)));
+    }
+
+    // The ticket names one stored secret by a hash of its ciphertext, which a
+    // restart replaces; the ciphertext itself never leaves the server.
+    private static string TicketFor(int userId, string secretEncrypted) =>
+        $"{userId}:{Convert.ToBase64String(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secretEncrypted)))}";
+
+    private bool TicketMatches(string? ticket, int userId, string secretEncrypted)
+    {
+        if (string.IsNullOrEmpty(ticket)) return false;
+        try
+        {
+            return _ticketProtector.Unprotect(ticket) == TicketFor(userId, secretEncrypted);
+        }
+        catch (CryptographicException)
+        {
+            return false; // tampered, or from a key ring that has since rotated out
+        }
     }
 
     /// <summary>
@@ -122,14 +168,6 @@ public sealed class TotpService
     /// issues 10 fresh recovery codes (returned for one-time display). Refused
     /// once the enrollment is confirmed (issue #1422).
     /// </summary>
-    /// <summary>
-    /// How long the setup page shows the same unconfirmed secret again rather
-    /// than making a new one: long enough to come back from a refused confirm
-    /// or a step-up, short enough that a setup page left open overnight
-    /// starts afresh.
-    /// </summary>
-    public static readonly TimeSpan PendingSecretReuse = TimeSpan.FromMinutes(15);
-
     public async Task<IReadOnlyList<string>> ConfirmEnrollmentAsync(int userId, string code, CancellationToken ct = default)
     {
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId.
