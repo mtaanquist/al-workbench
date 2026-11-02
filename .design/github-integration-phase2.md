@@ -310,9 +310,12 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   an open pull request, stopping at the first name with no branch. Because the old name
   is shared by every recipe with that slug, one found there is joined only when its title
   is this recipe's ("Apply the <title> recipe") and this recipe has been applied to that
-  repository before; otherwise a new-style branch is started. The new-style walk also
-  steps past an open pull request titled for another recipe, since an old name for a
-  title that starts with a number can equal a new one (`aldt/recipe-12-setup`).
+  repository before; otherwise a new-style branch is started. An old name for a title
+  that starts with a number can equal a new one (recipe 7 "12 Setup" was
+  `aldt/recipe-12-setup`, recipe 12 "Setup" is now), so the new-style walk steps past an
+  open pull request whose "Apply the X recipe" title slugs to exactly the branch it is
+  on. Any other open pull request on a new-style name is joined, retitled or not: the id
+  says whose it is.
 - **The tree's base is the target's own tree**, not always the default branch's -
   otherwise the second commit on a reused branch would silently revert the first.
   Files are still written over rather than merged, as the issue asks.

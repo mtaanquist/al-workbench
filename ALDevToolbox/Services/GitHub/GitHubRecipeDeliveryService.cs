@@ -244,10 +244,9 @@ public sealed class GitHubRecipeDeliveryService
     /// apply lands in the review that is already running), or it does not exist
     /// at all (start it from the default branch). A branch whose pull request
     /// has been merged or closed is stepped past rather than reused - its
-    /// history is somebody's merged work. So is an open pull request whose
-    /// title names another recipe: an old-style name for a title that starts
-    /// with a number (recipe 7 "12 Setup") can equal this recipe's new-style
-    /// name (recipe 12 "Setup"). Before starting a new branch, a pull request
+    /// history is somebody's merged work. So is an open pull request another
+    /// recipe opened under an old-style name that equals this one
+    /// (<see cref="IsAnotherRecipesOldBranch"/>). Before starting a new branch, a pull request
     /// of this recipe still open under the name used before the id was added is
     /// joined instead (<see cref="FindLegacyOpenAsync"/>).
     /// </summary>
@@ -263,7 +262,7 @@ public sealed class GitHubRecipeDeliveryService
             var branch = attempt == 1 ? baseName : $"{baseName}-{attempt}";
 
             var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
-            if (open is { Title: { } openTitle } && openTitle != PullRequestTitle(recipeTitle))
+            if (IsAnotherRecipesOldBranch(branch, open?.Title))
             {
                 _logger.LogInformation(
                     "Branch {Branch} on {RepoFullName} has an open pull request for another recipe; trying the next name.",
@@ -300,7 +299,36 @@ public sealed class GitHubRecipeDeliveryService
 
         throw Refuse(
             $"'{repo.FullName}' already has branches named {baseName} through {baseName}-{MaxBranchAttempts}, "
-            + "and none of them has a pull request open. Tidy those up on GitHub, then try again.");
+            + "and none of them can take this recipe's pull request. Tidy those up on GitHub, then try again.");
+    }
+
+    /// <summary>
+    /// True when the open pull request on <paramref name="branch"/> is another
+    /// recipe's, opened under the old name: its title reads "Apply the X recipe"
+    /// and X slugs to exactly this branch name (or one of its <c>-n</c> steps)
+    /// the way old names were made. That only happens when X starts with a
+    /// number (recipe 7 "12 Setup" was <c>aldt/recipe-12-setup</c>, recipe 12
+    /// "Setup" is now). Any other title, including this recipe's own after an
+    /// edit to the recipe or to the pull request, is not reason enough: the id
+    /// in a new-style name says whose branch it is.
+    /// </summary>
+    private static bool IsAnotherRecipesOldBranch(string branch, string? pullRequestTitle)
+    {
+        const string Lead = "Apply the ", Tail = " recipe";
+        if (pullRequestTitle is null
+            || pullRequestTitle.Length <= Lead.Length + Tail.Length
+            || !pullRequestTitle.StartsWith(Lead, StringComparison.Ordinal)
+            || !pullRequestTitle.EndsWith(Tail, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var slug = RecipePaths.Slugify(pullRequestTitle[Lead.Length..^Tail.Length]);
+        var oldBase = BranchPrefix + (slug.Length == 0 ? "recipe" : slug);
+        if (branch == oldBase) return true;
+        return branch.StartsWith(oldBase + "-", StringComparison.Ordinal)
+            && int.TryParse(branch[(oldBase.Length + 1)..], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var step)
+            && step >= 2;
     }
 
     /// <summary>

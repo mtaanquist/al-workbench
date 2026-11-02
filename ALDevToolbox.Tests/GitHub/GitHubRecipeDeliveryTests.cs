@@ -409,8 +409,8 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
     /// <summary>
     /// An old-style name for a title starting with a number can equal a
     /// new-style one: recipe 7 "12 Setup" was <c>aldt/recipe-12-setup</c>, which
-    /// is what recipe 12 "Setup" is called now. A pull request there titled for
-    /// another recipe is stepped past rather than joined.
+    /// is what recipe 12 "Setup" is called now. A pull request there that
+    /// another recipe opened under its old name is stepped past rather than joined.
     /// </summary>
     [Fact]
     public async Task A_new_style_name_whose_open_pull_request_is_another_recipes_is_stepped_past()
@@ -418,7 +418,7 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
         await ReadyAsync();
         var recipeId = await SeedRecipeAsync();
         var taken = BranchFor(recipeId);
-        var api = LegacyOpenApi(taken, "Apply the 12 Doc attachments recipe")
+        var api = LegacyOpenApi(taken, $"Apply the {recipeId} Doc attachments recipe")
             .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{taken}-2", HttpStatusCode.NotFound);
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
@@ -427,6 +427,29 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
 
         delivery.IsNewPullRequest.Should().BeTrue();
         delivery.PullRequest.HeadBranch.Should().Be($"{taken}-2");
+    }
+
+    /// <summary>
+    /// The id in a new-style name says whose branch it is, so this recipe's own
+    /// pull request is joined even when its title no longer matches word for
+    /// word: the recipe was retitled, or someone edited the title on GitHub.
+    /// </summary>
+    [Theory]
+    [InlineData("Apply the Doc Attachments recipe")]
+    [InlineData("[WIP] Apply the Doc attachments recipe")]
+    public async Task This_recipes_own_pull_request_is_joined_whatever_its_title_says_now(string title)
+    {
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        var api = LegacyOpenApi(BranchFor(recipeId), title);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeId, Repo);
+
+        delivery.IsNewPullRequest.Should().BeFalse();
+        delivery.PullRequest.Number.Should().Be(7);
+        delivery.PullRequest.HeadBranch.Should().Be(BranchFor(recipeId));
     }
 
     [Fact]
