@@ -1087,11 +1087,17 @@ public sealed partial class GitHubAppClient
     /// answers that with a 409 rather than a 404, and it means the same thing to
     /// a caller: there are no files.</para>
     /// </summary>
+    /// <param name="recursive">
+    /// False lists only the top folder - enough for a caller looking for a file
+    /// at the root, and cheap on a large repository.
+    /// </param>
     public async Task<GitHubTree> ListTreeAsync(
-        string credential, string owner, string repo, string treeIsh, CancellationToken ct = default)
+        string credential, string owner, string repo, string treeIsh, CancellationToken ct = default, bool recursive = true)
     {
         using var request = NewRequest(
-            HttpMethod.Get, $"{RepoPath(owner, repo)}/git/trees/{EscapePath(treeIsh)}?recursive=1", credential);
+            HttpMethod.Get,
+            $"{RepoPath(owner, repo)}/git/trees/{EscapePath(treeIsh)}{(recursive ? "?recursive=1" : string.Empty)}",
+            credential);
         // A repository with no commits answers 409 "Git Repository is empty" from
         // every Git Data route. That is an answer - the repository has no files -
         // and a caller sweeping an organisation must not count it as a failure.

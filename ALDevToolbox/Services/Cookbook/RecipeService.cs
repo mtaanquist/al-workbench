@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 
 namespace ALDevToolbox.Services.Cookbook;
@@ -41,6 +42,8 @@ public sealed class RecipeService
     public const int MaxCustomerNameLength = 200;
     /// <summary>Cap on a recorded repository's <c>owner/name</c>, matching the column.</summary>
     public const int MaxRepositoryLength = 300;
+    /// <summary>Cap on how many files one recipe or suggestion carries, so a suggestion cannot be used to store without limit.</summary>
+    public const int MaxFiles = 100;
 
     // One segment in a recipe file's RelativePath. Letters/digits/`._-`,
     // plus space anywhere but the first character. Matches the same shape
@@ -54,13 +57,17 @@ public sealed class RecipeService
     private readonly ILogger<RecipeService> _logger;
     private readonly IOrganizationContext _orgContext;
     private readonly StorageQuotaGuard _quotaGuard;
+    private readonly ProjectAccess _projectAccess;
 
-    public RecipeService(AppDbContext db, ILogger<RecipeService> logger, IOrganizationContext orgContext, StorageQuotaGuard quotaGuard)
+    public RecipeService(
+        AppDbContext db, ILogger<RecipeService> logger, IOrganizationContext orgContext, StorageQuotaGuard quotaGuard,
+        ProjectAccess projectAccess)
     {
         _db = db;
         _logger = logger;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
+        _projectAccess = projectAccess;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -209,6 +216,11 @@ public sealed class RecipeService
     {
         await _quotaGuard.EnsureCanWriteAsync(ct);
         var orgId = RequireOrganizationId();
+        // The editor page's context outlives one save, and EF hands back the
+        // instances it already tracks without re-reading them. Forget them, so a
+        // file someone else removed since (an assistant's update_recipe, another
+        // tab) is not updated or deleted a second time (#1600).
+        _db.ChangeTracker.Clear();
         var existing = await _db.Recipes
             .Include(s => s.Files)
             .FirstOrDefaultAsync(s => s.Id == id, ct)
@@ -360,17 +372,24 @@ public sealed class RecipeService
     /// <c>ILike</c> because a customer name may legitimately contain <c>_</c> or
     /// <c>%</c>, which <c>ILike</c> would read as wildcards and match the wrong
     /// project. Org-scoped by the EF query filter. See issue #541.
+    ///
+    /// Only solutions the caller can see are matched: a Private solution's exact
+    /// name typed by someone outside its team is recorded as a plain customer
+    /// name, so the download neither lands on that solution nor confirms the
+    /// name exists (#1545).
     /// </summary>
-    private Task<int?> ResolveProjectIdAsync(string name, CancellationToken ct)
+    private async Task<int?> ResolveProjectIdAsync(string name, CancellationToken ct)
     {
         // Explicit even though RecordUseAsync repeats it: this query runs first,
         // and a lookup that leans on the tenant filter should refuse outright
         // rather than quietly match nothing when there's no org in context.
         RequireOrganizationId();
         var lowered = name.ToLowerInvariant();
-        return _db.OeProjects
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct);
+        return await _db.OeProjects
             .AsNoTracking()
             .Where(p => p.DeletedAt == null && p.Name.ToLower() == lowered)
+            .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
             .Select(p => (int?)p.Id)
             .FirstOrDefaultAsync(ct);
     }
@@ -529,16 +548,33 @@ public sealed class RecipeService
     /// filtering by typing gains nothing from being grouped. Two queries rather
     /// than a SQL union so the de-dup uses the same comparison as
     /// <see cref="RecordDownloadAsync"/>'s project match. See issue #541.
+    ///
+    /// Only projects the caller can see are offered, and a recorded name that
+    /// spells a Private project the caller cannot see is left out too, so the
+    /// list never confirms a hidden project's name (#1545).
     /// </summary>
     public async Task<List<string>> GetCustomerSuggestionsAsync(CancellationToken ct = default)
     {
         RequireOrganizationId();
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct);
 
         var projectNames = await _db.OeProjects
             .AsNoTracking()
             .Where(p => p.DeletedAt == null)
+            .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
             .Select(p => p.Name)
             .ToListAsync(ct);
+
+        // Every active project's name, less the visible ones: what is left
+        // names a project this caller cannot see.
+        var hiddenNames = new HashSet<string>(
+            await _db.OeProjects
+                .AsNoTracking()
+                .Where(p => p.DeletedAt == null)
+                .Select(p => p.Name)
+                .ToListAsync(ct),
+            StringComparer.OrdinalIgnoreCase);
+        hiddenNames.ExceptWith(projectNames);
 
         var recordedNames = await _db.RecipeDownloads
             .AsNoTracking()
@@ -550,7 +586,7 @@ public sealed class RecipeService
         var suggestions = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // Projects first so theirs is the spelling that survives the de-dup.
-        foreach (var name in projectNames.Concat(recordedNames))
+        foreach (var name in projectNames.Concat(recordedNames.Where(n => !hiddenNames.Contains(n))))
         {
             if (seen.Add(name)) suggestions.Add(name);
         }
@@ -670,7 +706,15 @@ public sealed class RecipeService
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
+            // The entries that failed stay tracked otherwise, and the page's
+            // next save would try them again alongside its own (#1600).
+            _db.ChangeTracker.Clear();
             throw new PlanValidationException(new Dictionary<string, string> { ["Title"] = message });
+        }
+        catch
+        {
+            _db.ChangeTracker.Clear();
+            throw;
         }
     }
 
@@ -794,6 +838,11 @@ public sealed class RecipeService
         if (files.Count == 0)
         {
             errors["Files"] = "At least one file is required.";
+            return;
+        }
+        if (files.Count > MaxFiles)
+        {
+            errors["Files"] = $"A recipe can hold at most {MaxFiles} files.";
             return;
         }
 

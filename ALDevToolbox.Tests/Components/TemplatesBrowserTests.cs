@@ -46,6 +46,7 @@ public sealed class TemplatesBrowserTests : IDisposable
                 .AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<FolderTreeHydrator>();
         _ctx.Services.AddScoped<TemplateService>();
+        _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>),
             typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));

@@ -235,7 +235,7 @@ public sealed class AdminEmailChangeNoticeTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = AdminEmail,
             DisplayName = "Sam Berg",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(AdminPassword),
+            PasswordHash = TestPasswords.Hash(AdminPassword),
             Role = UserRole.Admin,
             Status = UserStatus.Active,
             CreatedAt = created,

@@ -223,7 +223,7 @@ public sealed class CredentialChangeRevocationTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = Email,
             DisplayName = "Victim",
-            PasswordHash = NewAuth(seed).HashPassword(OldPassword),
+            PasswordHash = TestPasswords.Hash(OldPassword),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = Now,

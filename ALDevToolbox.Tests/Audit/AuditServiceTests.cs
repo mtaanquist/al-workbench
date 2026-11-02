@@ -118,6 +118,32 @@ public sealed class AuditServiceTests : IDisposable
         nextOfThird.Should().BeNull("nothing after the most recent");
     }
 
+    /// <summary>
+    /// "_" and "%" typed into "Changed by" match themselves, not any character
+    /// (#1550): j_doe@ must not list jxdoe@, and a lone % must not list everything.
+    /// </summary>
+    [Fact]
+    public async Task The_changed_by_filter_takes_wildcard_characters_literally()
+    {
+        var ts = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.AuditLog.AddRange(
+                NewEntry(ts, TestDb.DefaultOrgId, "j_doe@cronus.example"),
+                NewEntry(ts, TestDb.DefaultOrgId, "jxdoe@cronus.example"),
+                NewEntry(ts, TestDb.DefaultOrgId, "100%@cronus.example"));
+            await ctx.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+
+        async Task<IEnumerable<string>> ByAsync(string actor) =>
+            (await NewService().GetPagedAsync(new AuditFilter(null, null, null, actor, null, null), 0, 50)).Items.Select(r => r.ChangedBy);
+
+        (await ByAsync("j_doe")).Should().Equal("j_doe@cronus.example");
+        (await ByAsync("%")).Should().Equal("100%@cronus.example");
+        (await ByAsync("JXDOE")).Should().Equal(["jxdoe@cronus.example"], "the match is still case-insensitive");
+    }
+
     private AuditService NewService() => new(_db.NewContextFactory(), _db.OrgContext);
 
     private async Task SeedAuditRowsAsync()

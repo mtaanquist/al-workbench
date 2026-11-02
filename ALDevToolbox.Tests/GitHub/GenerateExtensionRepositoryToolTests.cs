@@ -134,8 +134,8 @@ public sealed class GenerateExtensionRepositoryToolTests : IDisposable
         var client = _db.NewGitHubAppClient(ctx, api);
         var access = _db.NewGitHubAccessService(ctx, client);
         var tools = new WorkspaceTools(
-            new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx)),
-            new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx)),
+            new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
             new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext),
             _db.NewGenerationService(ctx),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),

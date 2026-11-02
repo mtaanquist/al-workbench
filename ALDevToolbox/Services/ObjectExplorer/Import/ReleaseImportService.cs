@@ -349,15 +349,43 @@ public class ReleaseImportService
     /// <c>ingesting</c>. A failure to write the status is logged rather than thrown,
     /// so the caller rethrows the error that got it here.
     /// </summary>
-    public async Task FailUnqueuedRetryAsync(int releaseId)
+    public Task FailUnqueuedRetryAsync(int releaseId) => FailUnqueuedAsync(releaseId, RetryNotQueuedMessage);
+
+    /// <summary>
+    /// The status message a new release gets when its import stopped before its job
+    /// row was written (#1632). With no row there is no saved origin for Retry to
+    /// re-run, so it says to import again.
+    /// </summary>
+    public const string ImportNotQueuedMessage =
+        "The import stopped before it was queued, so nothing was imported. Soft delete this release and import it again.";
+
+    /// <summary>
+    /// <see cref="ImportNotQueuedMessage"/> for an import that had written its job row
+    /// (it stopped waiting on a full queue): the row keeps the origin, so Retry works.
+    /// </summary>
+    public const string ImportNotQueuedRetryMessage =
+        "The import stopped before it was queued, so nothing was imported. Retry the import.";
+
+    /// <summary>
+    /// <see cref="FailUnqueuedRetryAsync"/> for a new import: the submit commits the
+    /// release as <c>ingesting</c> before it stages the upload and queues the job, so
+    /// a request cut off in between (the tab closed during the copy, a full queue)
+    /// would otherwise leave it importing until the next restart (#1632). The message
+    /// says to retry only when <paramref name="retryable"/>: a release whose job row
+    /// was never written has no saved origin for Retry to re-run.
+    /// </summary>
+    public Task FailUnqueuedImportAsync(int releaseId, bool retryable) =>
+        FailUnqueuedAsync(releaseId, retryable ? ImportNotQueuedRetryMessage : ImportNotQueuedMessage);
+
+    private async Task FailUnqueuedAsync(int releaseId, string message)
     {
         try
         {
-            await StampFailedAsync(releaseId, RetryNotQueuedMessage, onlyWhileIngesting: true).ConfigureAwait(false);
+            await StampFailedAsync(releaseId, message, onlyWhileIngesting: true).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Could not fail release {ReleaseId} after its retry stopped before the import was queued.", releaseId);
+            _logger.LogError(ex, "Could not fail release {ReleaseId} after it stopped before its import was queued.", releaseId);
         }
     }
 
