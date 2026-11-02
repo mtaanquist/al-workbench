@@ -116,7 +116,7 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         yield return ("compare_release_files", (t, key, f) => t.CompareReleaseFilesAsync(key, f.OpenReleaseLabel));
         yield return ("compare_release_files (hidden on the right)", (t, key, f) => t.CompareReleaseFilesAsync(f.OpenReleaseLabel, key));
         yield return ("search_objects", (t, key, f) => t.SearchObjectsAsync(key, namePattern: ""));
-        yield return ("search_procedures", (t, key, f) => t.SearchProceduresAsync(key, namePattern: ""));
+        yield return ("search_procedures", (t, key, f) => t.SearchProceduresAsync(key, namePattern: f.ProcedureName));
         yield return ("search_content", (t, key, f) => t.SearchContentAsync(key, query: "procedure"));
         yield return ("find_references", (t, key, f) => t.FindReferencesAsync(key, f.ObjectName, f.ObjectKind));
         yield return ("find_system_references", (t, key, f) => t.FindSystemReferencesAsync(key, f.ObjectName, f.ObjectKind));

@@ -223,13 +223,19 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "search_procedures", ReadOnly = true)]
-    [Description("Searches a BC release for procedures (global, local, internal and protected methods, triggers, event publishers and event subscribers) by name. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
+    [Description("Searches a BC release for procedures (global, local, internal and protected methods, triggers, event publishers and event subscribers) by name. Pass a namePattern, a moduleId, or both: a blank namePattern without a moduleId is refused, because listing every procedure in a release is not a search. Returns the owning object + module for each hit. Capped at 75 rows; Truncated and Note say whether more were left out, so lengthen namePattern or pass moduleId to narrow it.")]
     public async Task<CappedRows<ReleaseProcedureMatch>> SearchProceduresAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
-        [Description("Substring of the procedure name.")] string namePattern,
+        [Description("Substring of the procedure name. May be blank only when moduleId is given, which lists that module's procedures.")] string namePattern,
         [Description("Optional ModuleId to narrow to one module.")] long? moduleId = null,
         CancellationToken ct = default)
     {
+        // The service returns nothing for a blank term over a whole release (OEX3-2);
+        // say why, so an empty result is not read as "no procedures".
+        if (string.IsNullOrWhiteSpace(namePattern) && moduleId is null)
+        {
+            throw new McpException("Pass a namePattern, or a moduleId to list one module's procedures.");
+        }
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
         var rows = await _search.SearchProceduresInReleaseAsync(releaseId, namePattern, moduleId, MaxProcedureMatches + 1, ct: ct);
         return CappedRows<ReleaseProcedureMatch>.From(rows, MaxProcedureMatches, "procedures", "ordered by module",

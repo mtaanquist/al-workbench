@@ -264,6 +264,37 @@ public sealed class BuildCompareCandidatesTests : IDisposable
             t.ReleaseId == otherImport && t.ReleaseLabel == "CRONUS 1.1");
     }
 
+    /// <summary>
+    /// OEX3-3: a file in a project release no build row points at has no
+    /// Solution builds to offer, so it is offered the other releases with the
+    /// file, as an imported release's file is - not an empty picker. Builds
+    /// still stay out.
+    /// </summary>
+    [Fact]
+    public async Task File_in_a_project_release_with_no_build_is_offered_the_other_releases_with_the_file()
+    {
+        long anchorFile;
+        int otherImport;
+        var appId = Guid.NewGuid();
+        await using (var seed = _db.NewContext())
+        {
+            var untracked = await SeedProjectReleaseAsync(seed, "CRONUS imported by hand");
+            anchorFile = await SeedAppFileAsync(seed, untracked, appId, "src/Sales.al");
+            otherImport = await SeedReleaseAsync(seed, "CRONUS 1.1", "third_party");
+            await SeedAppFileAsync(seed, otherImport, appId, "src/Sales.al");
+
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var build = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, projectId, pipelineId: null, build, ProjectBuildStatus.Ready, DateTime.UtcNow);
+            await SeedAppFileAsync(seed, build, appId, "src/Sales.al");
+        }
+
+        await using var read = _db.NewContext();
+        var targets = await NewComparison(read).GetCompareTargetsAsync(anchorFile);
+
+        targets.Should().ContainSingle().Which.ReleaseId.Should().Be(otherImport);
+    }
+
     // ── Seed helpers ─────────────────────────────────────────────────────
 
     private static async Task<int> SeedProjectAsync(AppDbContext ctx, string name)
