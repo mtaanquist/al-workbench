@@ -1891,7 +1891,7 @@ public sealed class DeliveryService
         using var environment = _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, target.EnvironmentName);
         if (environment is null)
         {
-            _logger.LogDebug("Delivery {DeliveryId} waits: another deployment to {Env} is running.", deliveryId, target.EnvironmentName);
+            _logger.LogDebug("Delivery {DeliveryId} waits: another deployment or a booked install to {Env} is running.", deliveryId, target.EnvironmentName);
             return false;
         }
         if (await EarlierOneWaitsAsync())

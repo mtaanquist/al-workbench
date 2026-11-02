@@ -232,14 +232,15 @@ internal static class ObjectExplorerViewerEndpoints
             return session is null ? Results.NotFound() : Results.Ok(session);
         }).RequireAuthorization();
 
-        app.MapGet("/api/object-explorer/references/sessions/{token}", (
+        app.MapGet("/api/object-explorer/references/sessions/{token}", async (
             string token,
             HttpContext ctx,
-            ReferenceSessionService sessions) =>
+            ReferenceSessionService sessions,
+            CancellationToken ct) =>
         {
             var owner = OwnerKey(ctx);
             if (owner is null) return Results.Unauthorized();
-            var session = sessions.Get(token, owner);
+            var session = await sessions.GetAsync(token, owner, ct);
             return session is null ? Results.NotFound() : Results.Ok(session);
         }).RequireAuthorization();
 

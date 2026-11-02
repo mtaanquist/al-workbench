@@ -141,6 +141,30 @@ public sealed class PipelineFreshnessSurfacesTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task List_a_disabled_pipeline_ahead_of_its_build_is_not_ready_to_build()
+    {
+        // Build refuses a disabled pipeline, so the list must not count or mark it (#1551).
+        var s = await SeedPipelineAsync("CRONUS Base");
+        await AddBuildAsync(_db, s.ProjectId, s.PipelineId, s.RepositoryId);
+        await AddHeadAsync(_db, s.RepositoryId, "main", Newest, commits: [Built, Newer, Newest]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == s.PipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<PipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = Row(cut, "CRONUS Base");
+            row.TextContent.Should().Contain("Disabled");
+            row.ClassList.Should().NotContain("pl-ahead", "a disabled pipeline does not ask to be built");
+            cut.FindAll(".pill-tab").Should().NotContain(t => t.TextContent.Contains("Ready to build"));
+        });
+    }
+
+    [Fact]
     public async Task List_a_pipeline_ahead_without_pull_requests_counts_the_commits_and_says_when()
     {
         var s = await SeedPipelineAsync("CRONUS Base");

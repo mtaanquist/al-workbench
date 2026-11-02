@@ -168,8 +168,12 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         services.AddScoped<NotificationService>();
         services.AddScoped<UpgradeActionNotifier>();
         services.AddScoped<UpgradeCheckNotifier>();
+        services.AddSingleton(Deliveries);
         return _provider = services.BuildServiceProvider();
     }
+
+    /// <summary>The delivery queue whose environment gate deployments and booked installs share (#1629).</summary>
+    public ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryQueue Deliveries { get; } = new();
 
     /// <summary>The notification emails the worker sent.</summary>
     public CapturingEmailService Emails { get; } = new();

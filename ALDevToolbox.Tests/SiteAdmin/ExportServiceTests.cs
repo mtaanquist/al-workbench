@@ -231,6 +231,30 @@ public sealed class ExportServiceTests : IDisposable
         parsed.RootFolderPaths.Should().Equal(".alpackages");
     }
 
+    [Fact]
+    public async Task ExportAllAsync_writes_the_size_a_module_takes_from_its_repository()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            var following = ModuleBuilder.Default("mod-following");
+            following.SourceIdRangeSize = 120;
+            seed.Modules.Add(following);
+            await seed.SaveChangesAsync();
+        }
+
+        string toml;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = new ExportService(ctx, _db.OrgContext, new FolderTreeHydrator(ctx), NullLogger<ExportService>.Instance);
+            var archive = await svc.ExportAllAsync();
+            using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+            using var reader = new StreamReader(zip.GetEntry("modules/mod-following.toml")!.Open());
+            toml = await reader.ReadToEndAsync();
+        }
+
+        toml.Should().Contain("id_range_size = 120", "a blank size that follows the repository is exported as it stands (#1631)");
+    }
+
     private async Task<List<string>> ExportAndListEntriesAsync()
     {
         await using var ctx = _db.NewContext();

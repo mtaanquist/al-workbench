@@ -75,6 +75,7 @@ public sealed class TemplateImportServiceTests : IDisposable
         var importedModule = imported.DefaultModules.Single().Module!;
         importedModule.Key.Should().Be("payment");
         importedModule.OrganizationId.Should().Be(TestDb.OtherOrgId);
+        importedModule.SourceIdRangeSize.Should().Be(120, "the fork goes on following the repository's size (#1631)");
         var moduleFolders = await verify.ModuleExtensionFolders
             .IgnoreQueryFilters()
             .Where(f => f.ModuleId == importedModule.Id)
@@ -249,6 +250,53 @@ public sealed class TemplateImportServiceTests : IDisposable
         (await verify.RuntimeTemplateDefaultModules.IgnoreQueryFilters()
                 .CountAsync(d => d.OrganizationId == TestDb.OtherOrgId))
             .Should().Be(0);
+    }
+
+    /// <summary>
+    /// #1545: when the importing org deleted its own application version with
+    /// the template's default key, the imported template gets no default version
+    /// rather than one the end-user picker hides, and the version stays deleted.
+    /// </summary>
+    [Fact]
+    public async Task Import_links_no_default_version_the_importing_org_deleted()
+    {
+        await SeedSystemCatalogueAsync();
+        int localVersionId;
+        await using (var seed = _db.NewContext())
+        {
+            var local = new ApplicationVersion
+            {
+                OrganizationId = TestDb.OtherOrgId,
+                Key = "bc24",
+                Name = "BC 24",
+                Application = "24.0.0.0",
+                Runtime = "15",
+                Ordering = 0,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+                DeletedAt = DateTime.UtcNow,
+            };
+            seed.ApplicationVersions.Add(local);
+            await seed.SaveChangesAsync();
+            localVersionId = local.Id;
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).ImportTemplateAsync(systemTemplateId);
+        }
+
+        await using var verify = _db.NewContext();
+        var imported = await verify.RuntimeTemplates.IgnoreQueryFilters()
+            .SingleAsync(t => t.OrganizationId == TestDb.OtherOrgId && t.Key == "runtime-system");
+        imported.DefaultApplicationVersionId.Should().BeNull();
+        var versions = await verify.ApplicationVersions.IgnoreQueryFilters()
+            .Where(v => v.OrganizationId == TestDb.OtherOrgId)
+            .ToListAsync();
+        versions.Should().ContainSingle().Which.Id.Should().Be(localVersionId);
+        versions.Single().DeletedAt.Should().NotBeNull();
     }
 
     [Fact]
@@ -529,6 +577,7 @@ public sealed class TemplateImportServiceTests : IDisposable
         var module = ModuleBuilder.Default("payment", "Payment", organizationId: TestDb.SystemOrgId)
             .WithDependency("11111111-1111-1111-1111-111111111111", "Base App", "Microsoft", "27.0.0.0")
             .WithExtensionFolder("Setup", ("Payment.Setup.al", "// payment setup"));
+        module.SourceIdRangeSize = 120;
 
         var appVersion = new ApplicationVersion
         {

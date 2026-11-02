@@ -273,6 +273,19 @@ public sealed class ProjectDetailCustomerTests : IAsyncDisposable
         cut.FindAll("button").Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task An_empty_list_tells_a_reader_who_can_fill_it_in_including_the_solutions_team()
+    {
+        // Managing is the owner, an admin, or the solution's team, so the copy must not
+        // send the reader to the owner alone (#1551).
+        var id = await SeedDescribedAsync();
+
+        var cut = Render(id, canManage: false);
+
+        cut.Markup.Should().Contain("The solution's owner, someone on its team, or an administrator can add");
+        cut.Markup.Should().NotContain("The solution's owner or an administrator can add");
+    }
+
     // ── Modules ─────────────────────────────────────────────────────────
 
     private async Task<int> SeedCatalogModuleAsync(string name, Guid? appId = null)

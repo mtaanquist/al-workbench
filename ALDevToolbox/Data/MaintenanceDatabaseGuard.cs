@@ -67,6 +67,17 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     /// </summary>
     internal Func<bool>? CircuitOnSiteAdminConsole { get; set; }
 
+    /// <summary>
+    /// The same question for whatever a SiteAdmin's circuit event runs, in any DI
+    /// scope. The property above sits on the circuit scope's guard only, so work a
+    /// console page does in a scope of its own (a cache miss that opens one) got a
+    /// guard without it and was refused during a restore (#1599). The circuit
+    /// handler sets this around each event of a SiteAdmin's circuit; being an
+    /// <see cref="AsyncLocal{T}"/>, it follows the event's work into child scopes
+    /// and ends with it. Only set for a SiteAdmin, so it answers for both halves.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<bool>?> SiteAdminCircuitOnConsole = new();
+
     private void Begin(DbCommand command)
     {
         if (_maintenance.TryBeginJob())
@@ -81,9 +92,10 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     }
 
     private bool OnSiteAdminConsole() =>
-        _org.IsSiteAdmin
-        && (_http?.HttpContext?.Request.Path.StartsWithSegments(HttpOrganizationContext.SiteAdminPathPrefix) == true
-            || CircuitOnSiteAdminConsole?.Invoke() == true);
+        (_org.IsSiteAdmin
+            && (_http?.HttpContext?.Request.Path.StartsWithSegments(HttpOrganizationContext.SiteAdminPathPrefix) == true
+                || CircuitOnSiteAdminConsole?.Invoke() == true))
+        || SiteAdminCircuitOnConsole.Value?.Invoke() == true;
 
     /// <summary>
     /// Whether a command only reads. Deliberately conservative, since a wrong

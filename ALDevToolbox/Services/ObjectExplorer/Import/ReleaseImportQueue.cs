@@ -36,8 +36,33 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     public ReleaseImportQueue(Operations.MaintenanceModeState? maintenance = null)
         : base(capacity: 16, maintenance: maintenance) { }
 
-    /// <summary>A paced job dropped across a restore frees its slot like one the worker took.</summary>
-    protected override void OnDiscarded(ReleaseImportJob job, long epoch) => MarkPickedUp(job);
+    /// <summary>
+    /// A job dropped across a restore frees its paced slot like one the worker took,
+    /// and its staged upload, which only the job's run would otherwise delete.
+    /// </summary>
+    protected override void OnDiscarded(ReleaseImportJob job, long epoch)
+    {
+        MarkPickedUp(job);
+        DeleteStagedUpload(job);
+    }
+
+    /// <summary>
+    /// Deletes the temp file an uploaded ZIP or C/AL export was staged to, for a job
+    /// that is dropped without running. Without this the file stays in the
+    /// container's <c>/tmp</c> until the next start sweeps it, and a few dropped
+    /// multi-GB uploads can fill the scratch space new uploads are staged to (#1599).
+    /// </summary>
+    internal static void DeleteStagedUpload(ReleaseImportJob job)
+    {
+        var path = job.Source switch
+        {
+            ReleaseImportSource.StagedZip zip => zip.TempPath,
+            ReleaseImportSource.CalTxt cal => cal.TempPath,
+            _ => null,
+        };
+        if (path is null) return;
+        try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
 
     /// <summary>
     /// How many paced jobs may wait in the channel at once. One keeps the worker

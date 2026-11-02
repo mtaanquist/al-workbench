@@ -21,9 +21,12 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class ObjectExplorerServiceTests : IDisposable
 {
-    private readonly TestDb _db = new();
+    // Created on first use, so a test that starts by seeding gets a clone of
+    // the seeded template instead of an empty database (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
 
-    public void Dispose() => _db.Dispose();
+    public void Dispose() => _database?.Dispose();
 
     private static readonly string FixtureRoot =
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
@@ -64,23 +67,15 @@ public sealed class ObjectExplorerServiceTests : IDisposable
 
     /// <summary>
     /// Imports the two fixtures into one Release. Returns the Release id so
-    /// follow-up assertions can navigate it without re-seeding.
+    /// follow-up assertions can navigate it without re-seeding. A test that
+    /// seeds first gets a clone of a template that already holds the release;
+    /// one that has written rows already pays for a real import.
     /// </summary>
-    private async Task<int> SeedSingleReleaseAsync()
+    private Task<int> SeedSingleReleaseAsync()
     {
-        await using var ctx = _db.NewContext();
-        var svc = NewImporter(ctx);
-        await using var s1 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
-        await using var s2 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
-        var summary = await svc.ImportReleaseAsync(new ReleaseImportRequest(
-            Label: "BC 25.18 DK", Kind: "first_party",
-            ParentReleaseId: null, ApplicationVersionId: null,
-            Uploads: new[]
-            {
-                new AppFileUpload("Microsoft_DK_Core.app", s1, null),
-                new AppFileUpload("Microsoft_OIOUBL.app", s2, null),
-            }));
-        return summary.ReleaseId;
+        if (_database is not null) return DkReleaseSeed.ImportAsync(_database);
+        _database = DkReleaseSeed.NewDatabase(out var releaseId);
+        return Task.FromResult(releaseId);
     }
 
     // ── List Releases / Module / Object surfaces ────────────────────────
@@ -1040,6 +1035,34 @@ public sealed class ObjectExplorerServiceTests : IDisposable
             releaseId, search: target!.Name, moduleId: null, take: 500);
 
         hits.Should().Contain(h => h.Id == target.Id && h.ProcedureKind == kind);
+    }
+
+    /// <summary>
+    /// OEX2-4: "View source" on a procedure hit opens the file at the
+    /// procedure, not at the first line of its object; a procedure with no
+    /// line of its own (symbols only) falls back to the object's.
+    /// </summary>
+    [Fact]
+    public async Task SearchProceduresInReleaseAsync_links_to_the_procedures_own_line()
+    {
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+        var expected = await read.OeModuleSymbols.AsNoTracking()
+            .Where(s => s.Module!.ReleaseId == releaseId && ProcedureKinds.All.Contains(s.Kind))
+            .Select(s => new { s.Id, s.LineNumber, ObjectLine = s.Object!.LineNumber })
+            .ToDictionaryAsync(s => s.Id);
+        expected.Values.Should().Contain(s => s.LineNumber > 0 && s.LineNumber != s.ObjectLine,
+            because: "the fixtures must hold a procedure below its object's first line for this to prove anything");
+
+        var hits = await NewSearch(read).SearchProceduresInReleaseAsync(
+            releaseId, search: null, moduleId: null, take: 500);
+
+        hits.Should().NotBeEmpty();
+        foreach (var hit in hits)
+        {
+            var e = expected[hit.Id];
+            hit.LineNumber.Should().Be(e.LineNumber > 0 ? e.LineNumber : e.ObjectLine);
+        }
     }
 
     [Fact]
