@@ -252,7 +252,8 @@ public class WorkspaceConfigService
     /// The saved <c>.code-workspace</c> file name, when it is a plain file name
     /// at the workspace root. The name is written back as a path in a ZIP and
     /// in a repository, so anything with a folder in it, a <c>..</c>, a control
-    /// character or another extension is dropped rather than trusted, and the
+    /// character, a character Windows refuses in a file name, or another
+    /// extension is dropped rather than trusted, and the
     /// name is derived instead, as for a file saved before it was recorded.
     /// </summary>
     internal static string? ParseCodeWorkspaceFileName(string? saved)
@@ -260,7 +261,7 @@ public class WorkspaceConfigService
         if (string.IsNullOrWhiteSpace(saved)) return null;
         var name = saved.Trim();
         if (name.Length > 255
-            || name.IndexOfAny(['/', '\\', ':']) >= 0
+            || name.IndexOfAny(['/', '\\', ':', '<', '>', '"', '|', '?', '*']) >= 0
             || name.StartsWith('.')
             || name.Any(char.IsControl)
             || !name.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase))

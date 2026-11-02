@@ -227,6 +227,9 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
     [InlineData("C:CronusAS.code-workspace")]
     [InlineData(".code-workspace")]
     [InlineData("CronusAS.json")]
+    [InlineData("Cronus|AS.code-workspace")]
+    [InlineData("Cronus?AS.code-workspace")]
+    [InlineData("Cronus\"AS.code-workspace")]
     [InlineData("Cronus\u0001AS.code-workspace")]
     public async Task A_saved_file_name_that_is_not_a_plain_file_name_is_ignored(string saved)
     {
