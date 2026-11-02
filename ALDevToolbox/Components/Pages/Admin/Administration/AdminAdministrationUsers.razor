@@ -16,9 +16,10 @@
 @*
     Users tab of the Administration surface. Read-mostly: pending invites,
     pending signups, and active/disabled user management with per-row and
-    bulk actions. Per-row actions POST to the existing /admin/users/*
-    endpoints (which stayed at their original URLs after the page move);
-    role changes run inside this circuit via UserAdministrationService.
+    bulk actions. Re-enable and the invite actions POST to the existing
+    /admin/users/* endpoints (which stayed at their original URLs after the
+    page move); disabling asks for confirmation first and, like role changes,
+    runs inside this circuit via UserAdministrationService.
     There's no global "Save changes" button here - every action mutates a
     single row at submit time, so dirty state never accumulates.
 *@

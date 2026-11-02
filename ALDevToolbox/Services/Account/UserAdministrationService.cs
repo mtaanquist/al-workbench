@@ -200,7 +200,7 @@ public sealed class UserAdministrationService
         await _db.Invites
             .Where(i => i.InvitedByUserId == userId && i.AcceptedAt == null && i.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(i => i.RevokedAt, now), ct);
-        await CloseSealedLinksAsync(userId, actingOrgId, now, ct);
+        var closedLinks = await CloseSealedLinksAsync(userId, actingOrgId, now, ct);
         await _db.SaveChangesAsync(ct);
         // OpenIddict stores Subject = the user id (OAuthEndpoints.MapAuthorizeComplete).
         // Its manager shares this scoped context, so the revocation joins the transaction.
@@ -208,6 +208,10 @@ public sealed class UserAdministrationService
         // leaves hundreds of rows per user (#1259).
         await _oauthTokens.RevokeBySubjectAsync(userId.ToString(), ct);
         await tx.CommitAsync(ct);
+        if (closedLinks > 0)
+        {
+            _logger.LogInformation("Closed {Count} Sealed links of disabled user {UserId}.", closedLinks, userId);
+        }
     }
 
     /// <summary>
@@ -218,7 +222,8 @@ public sealed class UserAdministrationService
     /// gets the same audit row a revoke writes, naming the admin who disabled
     /// the sender. Filtered like the revocations in <see cref="DisableUserAsync"/>.
     /// </summary>
-    private async Task CloseSealedLinksAsync(int userId, int actingOrgId, DateTime now, CancellationToken ct)
+    /// <returns>How many links it closed, for the log line written after the commit.</returns>
+    private async Task<int> CloseSealedLinksAsync(int userId, int actingOrgId, DateTime now, CancellationToken ct)
     {
         var ids = await _db.SealedLinks.AsNoTracking()
             // A link past its expiry that the sweep hasn't reached yet is
@@ -226,7 +231,7 @@ public sealed class UserAdministrationService
             .Where(l => l.CreatedByUserId == userId && l.ClosedAt == null && l.ExpiresAt > now)
             .Select(l => l.Id)
             .ToListAsync(ct);
-        if (ids.Count == 0) return;
+        if (ids.Count == 0) return 0;
         // Conditional, as in a revoke: a link a reveal closed a moment ago
         // keeps its own reason.
         await _db.SealedLinks
@@ -256,7 +261,7 @@ public sealed class UserAdministrationService
                 EntityName = link.Label,
             });
         }
-        _logger.LogInformation("Closed {Count} Sealed links of disabled user {UserId}.", closed.Count, userId);
+        return closed.Count;
     }
 
     /// <summary>Re-enables a disabled user without further admin approval.</summary>
