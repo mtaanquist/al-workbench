@@ -205,6 +205,50 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Disable_closes_the_open_sealed_links_the_user_sent()
+    {
+        // Someone who has left, or whose account was taken over, should not
+        // leave links behind that still hand out what they shared (#1544).
+        var orgId = TestDb.DefaultOrgId;
+        var actorId = await SeedActiveAdminAsync(orgId, "sealed-actor@example.com");
+        ActAs(orgId, actorId);
+        var leaverId = await SeedActiveUserAsync(orgId, "sealed-leaver@example.com", UserRole.User);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        SealedLink NewLink(int by, string label, SealedLinkClosedReason? closed = null) => new()
+        {
+            OrganizationId = orgId, CreatedByUserId = by, Token = "tok-" + label, Label = label,
+            Ciphertext = closed is null ? [1, 2, 3] : null, Iv = [0], LinkCheckHash = [0],
+            CreatedAt = now.AddHours(-1), ExpiresAt = now.AddDays(1),
+            ClosedAt = closed is null ? null : now.AddMinutes(-30), ClosedReason = closed,
+        };
+        await using (var seed = _db.NewContext())
+        {
+            seed.SealedLinks.AddRange(
+                NewLink(leaverId, "open"),
+                NewLink(leaverId, "used", SealedLinkClosedReason.UsedUp),
+                NewLink(actorId, "colleague"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(leaverId, orgId);
+
+        await using var read = _db.NewContext();
+        var links = await read.SealedLinks.AsNoTracking().ToDictionaryAsync(l => l.Label!);
+        links["open"].ClosedAt.Should().Be(now);
+        links["open"].ClosedReason.Should().Be(SealedLinkClosedReason.Revoked);
+        links["open"].Ciphertext.Should().BeNull("a closed link keeps no secret");
+        links["used"].ClosedReason.Should().Be(SealedLinkClosedReason.UsedUp, "a link that had already closed keeps its own reason");
+        links["colleague"].ClosedAt.Should().BeNull("another person's links are theirs to keep");
+        var audit = await read.AuditLog.AsNoTracking()
+            .Where(a => a.EntityType == AuditEntityType.SealedLink)
+            .ToListAsync();
+        audit.Should().ContainSingle();
+        audit[0].EntityId.Should().Be(links["open"].Id);
+        audit[0].Action.Should().Be(AuditAction.Deleted);
+        audit[0].ChangedByUserId.Should().Be(actorId, "the admin who disabled the sender closed it");
+    }
+
+    [Fact]
     public async Task Disable_refuses_to_lock_out_the_last_active_admin()
     {
         var orgId = TestDb.OtherOrgId;
