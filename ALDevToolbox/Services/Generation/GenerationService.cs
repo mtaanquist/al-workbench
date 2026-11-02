@@ -960,7 +960,8 @@ public record SiblingWorkspaceContext(
     string? CodeWorkspaceJson = null,
     /// <summary>
     /// The name of the <c>.code-workspace</c> file the workspace already has,
-    /// when the caller found one - a GitHub repository's own. The file is
+    /// when the caller knows it - a GitHub repository's own, or the name its
+    /// saved settings recorded. The file is
     /// rewritten under that name rather than one derived again from the
     /// organisation's folder style, which may have changed since the workspace
     /// was generated (#1615). Null derives it.
@@ -973,18 +974,24 @@ public record SiblingWorkspaceContext(
     /// generator checks the new extension's IDs against the saved ones, takes
     /// the saved publisher, and writes the settings back with the new extension
     /// listed. Shared by the GitHub delivery and the ZIP download so both build
-    /// the same context from the same file (#1239).
+    /// the same context from the same file (#1239). The <c>.code-workspace</c>
+    /// file name the settings recorded is carried too, so the file is rewritten
+    /// under the name it already has (#1615).
     /// </summary>
-    public static SiblingWorkspaceContext FromSavedWorkspace(
-        ProjectPlan workspace, IReadOnlyList<WorkspaceExtensionIdentity> extensions) =>
-        new(
+    public static SiblingWorkspaceContext FromSavedWorkspace(WorkspaceConfigImport import)
+    {
+        var workspace = import.Workspace
+            ?? throw new ArgumentException("Not a workspace's saved settings.", nameof(import));
+        return new(
             workspace.WorkspaceName,
             workspace.SelectedModuleKeys,
-            extensions.Select(e => e.Folder).ToList(),
+            import.Extensions.Select(e => e.Folder).ToList(),
             workspace.ShortName,
             workspace.ExtensionPrefix,
             SavedPlan: workspace,
-            SavedExtensions: extensions);
+            SavedExtensions: import.Extensions,
+            CodeWorkspaceFileName: import.CodeWorkspaceFileName);
+    }
 
     /// <summary>
     /// The <c>.code-workspace</c> file this workspace is rewritten under: the one

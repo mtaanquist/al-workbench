@@ -113,7 +113,8 @@ public sealed class WorkspaceZipBuilder
                 FolderPath: string.Empty,
                 TenantId: plan.TenantId,
                 FolderStyle: folderStyle);
-            WriteString(archive, $"{rootFolder}/{rootFolder}.code-workspace",
+            var codeWorkspaceFile = $"{rootFolder}.code-workspace";
+            WriteString(archive, $"{rootFolder}/{codeWorkspaceFile}",
                 BuildCodeWorkspace(
                     orgConfig.Settings.CodeWorkspaceJson,
                     template.CodeWorkspaceJson,
@@ -131,7 +132,7 @@ public sealed class WorkspaceZipBuilder
                 IdRangeTo: e.IdRangeTo,
                 SourceRepository: e.SourceRepository,
                 SourceCommit: e.SourceCommit)).ToList();
-            WriteString(archive, $"{rootFolder}/{WorkspaceConfigService.FileName}", _config.BuildWorkspace(plan, identities));
+            WriteString(archive, $"{rootFolder}/{WorkspaceConfigService.FileName}", _config.BuildWorkspace(plan, identities, codeWorkspaceFile));
             fileCount++;
         }
 
@@ -342,7 +343,8 @@ public sealed class WorkspaceZipBuilder
                         // even if the organisation's policy changes later.
                         _config.BuildWorkspace(
                             sibling.SavedPlan with { ExtensionPrefix = sibling.ExtensionPrefix ?? string.Empty },
-                            identities));
+                            identities,
+                            workspaceFile));
                     fileCount++;
                 }
             }

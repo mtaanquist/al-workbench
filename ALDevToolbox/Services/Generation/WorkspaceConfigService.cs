@@ -57,9 +57,13 @@ public class WorkspaceConfigService
     /// id-ranges) of every generated extension. The identity block is what lets
     /// a later sibling-extension import declare real dependencies and avoid
     /// id-range collisions; pass an empty list when no identities are available
-    /// (e.g. legacy callers).
+    /// (e.g. legacy callers). <paramref name="codeWorkspaceFileName"/> is the
+    /// name the workspace's <c>.code-workspace</c> file was written under, so an
+    /// extension added later rewrites that file rather than one named after the
+    /// organisation's folder style as it stands then (#1615).
     /// </summary>
-    public string BuildWorkspace(ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions)
+    public string BuildWorkspace(
+        ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions, string? codeWorkspaceFileName = null)
     {
         var doc = new WorkspaceDoc
         {
@@ -81,6 +85,7 @@ public class WorkspaceConfigService
                 SelectedExtensions = plan.SelectedExtensionPaths.ToList(),
                 Modules = plan.SelectedModuleKeys.ToList(),
                 TenantId = plan.TenantId,
+                CodeWorkspace = codeWorkspaceFileName ?? string.Empty,
                 Extensions = extensions
                     .Select(e => new ExtensionIdentitySection
                     {
@@ -200,7 +205,8 @@ public class WorkspaceConfigService
                 WorkspaceKind,
                 await BuildWorkspaceImportAsync(doc, ct),
                 null,
-                ParseExtensions(doc.Workspace?.Extensions)),
+                ParseExtensions(doc.Workspace?.Extensions),
+                ParseCodeWorkspaceFileName(doc.Workspace?.CodeWorkspace)),
             ExtensionKind => new WorkspaceConfigImport(
                 ExtensionKind,
                 null,
@@ -240,6 +246,28 @@ public class WorkspaceConfigService
                 SourceCommit: string.IsNullOrEmpty(row.SourceCommit) ? null : row.SourceCommit));
         }
         return result;
+    }
+
+    /// <summary>
+    /// The saved <c>.code-workspace</c> file name, when it is a plain file name
+    /// at the workspace root. The name is written back as a path in a ZIP and
+    /// in a repository, so anything with a folder in it, a <c>..</c>, a control
+    /// character or another extension is dropped rather than trusted, and the
+    /// name is derived instead, as for a file saved before it was recorded.
+    /// </summary>
+    internal static string? ParseCodeWorkspaceFileName(string? saved)
+    {
+        if (string.IsNullOrWhiteSpace(saved)) return null;
+        var name = saved.Trim();
+        if (name.Length > 255
+            || name.IndexOfAny(['/', '\\', ':']) >= 0
+            || name.StartsWith('.')
+            || name.Any(char.IsControl)
+            || !name.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return name;
     }
 
     private async Task<ProjectPlan> BuildWorkspaceImportAsync(UnionDoc doc, CancellationToken ct)
@@ -408,6 +436,12 @@ public class WorkspaceConfigService
         /// the reader falls back to the empty string.
         /// </summary>
         public string TenantId { get; set; } = string.Empty;
+        /// <summary>
+        /// The name the workspace's <c>.code-workspace</c> file was written
+        /// under (#1615). Empty on older configs; the reader then derives it
+        /// from the organisation's folder style.
+        /// </summary>
+        public string CodeWorkspace { get; set; } = string.Empty;
     }
 
     private class ExtensionSection
@@ -494,9 +528,12 @@ public record WorkspaceExtensionIdentity(
 /// extension identity rows from a workspace config (GUIDs / names / id-ranges
 /// for Core + every module) and is empty for extension-kind imports or for
 /// older workspace configs that lack the section.
+/// <see cref="CodeWorkspaceFileName"/> is the name the workspace's
+/// <c>.code-workspace</c> file was written under; null on older configs.
 /// </summary>
 public record WorkspaceConfigImport(
     string Kind,
     ProjectPlan? Workspace,
     StandaloneExtensionPlan? Extension,
-    IReadOnlyList<WorkspaceExtensionIdentity> Extensions);
+    IReadOnlyList<WorkspaceExtensionIdentity> Extensions,
+    string? CodeWorkspaceFileName = null);

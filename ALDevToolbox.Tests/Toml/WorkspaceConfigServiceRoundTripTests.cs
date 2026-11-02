@@ -181,6 +181,79 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
         parsed.Workspace.EffectiveShortName.Should().Be("CRONUS A/S");
     }
 
+    /// <summary>
+    /// #1615: the settings record the name the <c>.code-workspace</c> file was
+    /// written under, so an extension added after the folder style changed
+    /// rewrites that file instead of adding a second one.
+    /// </summary>
+    [Fact]
+    public async Task The_code_workspace_file_name_round_trips()
+    {
+        await SeedTemplateAsync("runtime-15");
+        using var buildCtx = _db.NewContext();
+        var toml = new WorkspaceConfigService(buildCtx)
+            .BuildWorkspace(MinimalPlan(), Array.Empty<WorkspaceExtensionIdentity>(), "CronusAS.code-workspace");
+
+        toml.Should().Contain("code_workspace = \"CronusAS.code-workspace\"");
+        await using var ctx = _db.NewContext();
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.CodeWorkspaceFileName.Should().Be("CronusAS.code-workspace");
+    }
+
+    [Fact]
+    public async Task A_config_written_before_the_file_name_was_recorded_reads_it_as_unknown()
+    {
+        await SeedTemplateAsync("runtime-15");
+        using var buildCtx = _db.NewContext();
+        var toml = new WorkspaceConfigService(buildCtx)
+            .BuildWorkspace(MinimalPlan(), Array.Empty<WorkspaceExtensionIdentity>());
+
+        await using var ctx = _db.NewContext();
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.CodeWorkspaceFileName.Should().BeNull();
+    }
+
+    /// <summary>
+    /// The name is written back as a path in a ZIP and in a repository, so a
+    /// hand-edited value that is anything but a plain file name at the root is
+    /// ignored, and the name is derived as for an older file.
+    /// </summary>
+    [Theory]
+    [InlineData("../evil.code-workspace")]
+    [InlineData("sub/CronusAS.code-workspace")]
+    [InlineData("sub\\CronusAS.code-workspace")]
+    [InlineData("C:CronusAS.code-workspace")]
+    [InlineData(".code-workspace")]
+    [InlineData("CronusAS.json")]
+    [InlineData("Cronus\u0001AS.code-workspace")]
+    public async Task A_saved_file_name_that_is_not_a_plain_file_name_is_ignored(string saved)
+    {
+        await SeedTemplateAsync("runtime-15");
+        using var buildCtx = _db.NewContext();
+        var toml = new WorkspaceConfigService(buildCtx)
+            .BuildWorkspace(MinimalPlan(), Array.Empty<WorkspaceExtensionIdentity>(), saved);
+
+        await using var ctx = _db.NewContext();
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.CodeWorkspaceFileName.Should().BeNull();
+    }
+
+    private static ProjectPlan MinimalPlan() => new(
+        TemplateKey: "runtime-15",
+        WorkspaceName: "CRONUS A/S",
+        ShortName: null,
+        ExtensionPrefix: "CRO",
+        Brief: "", Description: "",
+        ApplicationVersion: "24.0.0.0",
+        RuntimeVersion: "15.2",
+        CoreIdRangeFrom: 80000, CoreIdRangeTo: 80999,
+        IncludeExamples: true,
+        SelectedExtensionPaths: Array.Empty<string>(),
+        SelectedModuleKeys: Array.Empty<string>());
+
     private async Task SeedTemplateAsync(string key)
     {
         await using var ctx = _db.NewContext();
