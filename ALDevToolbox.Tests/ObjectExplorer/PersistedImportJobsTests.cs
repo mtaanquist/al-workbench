@@ -52,7 +52,7 @@ public sealed class PersistedImportJobsTests : IDisposable
         var release = await SeedReleaseAsync(ctx, status: "ready");
 
         // The second id names no release, so its row breaks the foreign key on save.
-        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id, int.MaxValue - 7], Identity);
+        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id, int.MaxValue - 7], Identity, DateTime.MinValue);
 
         await act.Should().ThrowAsync<DbUpdateException>();
         await using var read = _db.NewContext();
@@ -68,11 +68,107 @@ public sealed class PersistedImportJobsTests : IDisposable
         using var cancelled = new CancellationTokenSource();
         await cancelled.CancelAsync();
 
-        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id], Identity, cancelled.Token);
+        var act = () => NewService(ctx).CreateBackfillsAsync([release.Id], Identity, DateTime.MinValue, cancelled.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         await using var read = _db.NewContext();
         (await read.OeImportJobs.AsNoTracking().CountAsync()).Should().Be(0);
+    }
+
+    /// <summary>
+    /// #1578 OEI2-1: a second click during a bulk run leaves alone the releases the run
+    /// has already finished, unless the release changed after its backfill.
+    /// </summary>
+    [Fact]
+    public async Task CreateBackfillsAsync_skips_a_release_backfilled_since_it_last_changed()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var done = await SeedReleaseAsync(ctx, status: "ready");
+        var changed = await SeedReleaseAsync(ctx, status: "ready");
+        var first = await svc.CreateBackfillsAsync([done.Id, changed.Id], Identity, DateTime.MinValue);
+        foreach (var (_, rowId) in first)
+        {
+            await svc.MarkRunningAsync(rowId);
+            await svc.MarkCompletedAsync(rowId);
+        }
+        // Imported again after its backfill ran.
+        await ctx.OeReleases.Where(r => r.Id == changed.Id)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.UpdatedAt, DateTime.UtcNow.AddMinutes(5)));
+
+        var second = await NewService(_db.NewContext()).CreateBackfillsAsync([done.Id, changed.Id], Identity, DateTime.MinValue);
+
+        second.Select(r => r.ReleaseId).Should().Equal(changed.Id);
+    }
+
+    /// <summary>
+    /// #1578 OEI2-3: a queued backfill row from before this process started or the last
+    /// restore has nothing feeding it. It is failed and replaced rather than counted as
+    /// waiting; one queued since is still left alone.
+    /// </summary>
+    [Fact]
+    public async Task CreateBackfillsAsync_replaces_a_queued_row_nothing_feeds_and_keeps_one_that_is_fed()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var orphaned = await SeedReleaseAsync(ctx, status: "ready");
+        var fed = await SeedReleaseAsync(ctx, status: "ready");
+        var rows = await svc.CreateBackfillsAsync([orphaned.Id, fed.Id], Identity, DateTime.MinValue);
+        var orphanedRow = rows.Single(r => r.ReleaseId == orphaned.Id).JobRowId;
+        var restoredAt = DateTime.UtcNow;
+        await ctx.OeImportJobs.Where(j => j.Id == orphanedRow)
+            .ExecuteUpdateAsync(u => u.SetProperty(j => j.CreatedAt, restoredAt.AddHours(-1)));
+        await ctx.OeImportJobs.Where(j => j.ReleaseId == fed.Id)
+            .ExecuteUpdateAsync(u => u.SetProperty(j => j.CreatedAt, restoredAt.AddMinutes(1)));
+
+        var again = await NewService(_db.NewContext()).CreateBackfillsAsync([orphaned.Id, fed.Id], Identity, restoredAt);
+
+        again.Select(r => r.ReleaseId).Should().Equal(orphaned.Id);
+        await using var read = _db.NewContext();
+        var old = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == orphanedRow);
+        old.Status.Should().Be("failed");
+        old.ErrorMessage.Should().Be(PersistedImportJobs.StaleBackfillMessage);
+    }
+
+    /// <summary>
+    /// A backfill startup queues again is fed by this process, so it is stamped as
+    /// queued now and the bulk action does not take it for one nothing feeds.
+    /// </summary>
+    [Fact]
+    public async Task A_backfill_queued_again_at_startup_is_not_taken_for_a_stale_row()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        var rowId = (await svc.CreateBackfillsAsync([release.Id], Identity, DateTime.MinValue)).Single().JobRowId;
+        await ctx.OeImportJobs.Where(j => j.Id == rowId)
+            .ExecuteUpdateAsync(u => u.SetProperty(j => j.CreatedAt, DateTime.UtcNow.AddHours(-3)));
+        var startedAt = DateTime.UtcNow.AddSeconds(-1);
+
+        await NewService(_db.NewContext()).ReconcileOnStartupAsync();
+        var again = await NewService(_db.NewContext()).CreateBackfillsAsync([release.Id], Identity, startedAt);
+
+        again.Should().BeEmpty("the reconciled row is waiting in this process's queue");
+        await using var read = _db.NewContext();
+        (await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == rowId)).Status.Should().Be("queued");
+    }
+
+    /// <summary>#1578 OEI2-4: a backfill a restore stopped goes back to queued, not failed.</summary>
+    [Fact]
+    public async Task MarkQueuedAgainAsync_puts_a_running_backfill_back_to_queued()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx, status: "ready");
+        var rowId = (await svc.CreateBackfillsAsync([release.Id], Identity, DateTime.MinValue)).Single().JobRowId;
+        await svc.MarkRunningAsync(rowId);
+
+        await svc.MarkQueuedAgainAsync(rowId);
+
+        await using var read = _db.NewContext();
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == rowId);
+        row.Status.Should().Be("queued");
+        row.StartedAt.Should().BeNull();
     }
 
     /// <summary>
@@ -89,7 +185,7 @@ public sealed class PersistedImportJobsTests : IDisposable
         var svc = NewService(ctx);
         var waiting = await SeedReleaseAsync(ctx, status: "ready");
         var interrupted = await SeedReleaseAsync(ctx, status: "ready");
-        var rows = await svc.CreateBackfillsAsync([waiting.Id, interrupted.Id], Identity);
+        var rows = await svc.CreateBackfillsAsync([waiting.Id, interrupted.Id], Identity, DateTime.MinValue);
         var waitingRow = rows.Single(r => r.ReleaseId == waiting.Id).JobRowId;
         var interruptedRow = rows.Single(r => r.ReleaseId == interrupted.Id).JobRowId;
         await svc.MarkRunningAsync(interruptedRow);
@@ -121,7 +217,7 @@ public sealed class PersistedImportJobsTests : IDisposable
         var svc = NewService(ctx);
         var interrupted = await SeedReleaseAsync(ctx, status: "ready");
         var waiting = await SeedReleaseAsync(ctx, status: "ready");
-        var rows = await svc.CreateBackfillsAsync([interrupted.Id, waiting.Id], Identity);
+        var rows = await svc.CreateBackfillsAsync([interrupted.Id, waiting.Id], Identity, DateTime.MinValue);
         var interruptedRow = rows.Single(r => r.ReleaseId == interrupted.Id).JobRowId;
         var waitingRow = rows.Single(r => r.ReleaseId == waiting.Id).JobRowId;
         await svc.MarkRunningAsync(interruptedRow);

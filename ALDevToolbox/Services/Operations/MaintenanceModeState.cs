@@ -48,11 +48,25 @@ public sealed class MaintenanceModeState
     public void Enter(string reason)
     {
         Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
+        // Cancels the token jobs that stop for a restore took before this, and gives
+        // the jobs that start after the next Exit a fresh one.
+        Interlocked.Exchange(ref _entering, new CancellationTokenSource()).Cancel();
         Entered?.Invoke();
     }
 
     /// <summary>Raised after <see cref="Enter"/> turns the flag on. Test seam.</summary>
     internal event Action? Entered;
+
+    private CancellationTokenSource _entering = new();
+
+    /// <summary>
+    /// Cancelled the next time <see cref="Enter"/> turns the flag on. A job that is
+    /// safe to stop and run again later (a system-reference backfill) links its token
+    /// to this, so a restore does not have to wait for it to finish (#1578, OEI2-4).
+    /// Read it when the job starts: a token read after <see cref="Enter"/> is the
+    /// next one, and is not cancelled.
+    /// </summary>
+    public CancellationToken EnteringToken => Volatile.Read(ref _entering).Token;
 
     /// <summary>
     /// Keeps the flag on after a restore failed once the database was dropped.

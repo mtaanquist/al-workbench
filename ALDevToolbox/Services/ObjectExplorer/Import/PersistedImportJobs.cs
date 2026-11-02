@@ -50,25 +50,52 @@ public sealed class PersistedImportJobs
 
     /// <summary>
     /// Writes a <c>queued</c> backfill row for each of <paramref name="releaseIds"/> that
-    /// has no backfill queued or running yet, all in one transaction, and returns the
-    /// rows it wrote. All or nothing: a cancelled request or a failed write leaves no
-    /// row behind that nothing will ever feed to the queue, and that would block the
-    /// next attempt at the same release (#1542). Two submits that race can still both
-    /// pass the already-queued check; the cost is a repeated backfill, which is
-    /// harmless, so it is not worth a lock.
+    /// needs one, all in one transaction, and returns the rows it wrote. All or nothing:
+    /// a cancelled request or a failed write leaves no row behind that nothing will ever
+    /// feed to the queue, and that would block the next attempt at the same release
+    /// (#1542). Two submits that race can still both pass the checks; the cost is a
+    /// repeated backfill, which is harmless, so it is not worth a lock.
+    ///
+    /// <para>A release is left alone when a backfill of it is running, or queued by
+    /// this process, or when its newest backfill completed after the release last
+    /// changed (#1578, OEI2-1): a second click during a bulk run would otherwise queue
+    /// again every release the run had just finished. A <c>queued</c> row written
+    /// before <paramref name="staleBefore"/> (this process's start, or the last
+    /// restore) is one nothing feeds: a restored database brings its queued rows
+    /// without the process that fed them (OEI2-3). It is failed, and the release gets a
+    /// fresh row like any other.</para>
     /// </summary>
     public async Task<IReadOnlyList<(int ReleaseId, long JobRowId)>> CreateBackfillsAsync(
         IReadOnlyList<int> releaseIds,
         AmbientOrganizationScope.OrganizationIdentity identity,
+        DateTime staleBefore,
         CancellationToken ct = default)
     {
         await using var tx = _db.Database.CurrentTransaction is null
             ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
             : null;
+        var ids = releaseIds.Distinct().ToList();
+        var now = _clock.GetUtcNow().UtcDateTime;
+
+        var stale = await _db.OeImportJobs
+            .Where(j => j.Kind == BackfillKind && j.Status == "queued" && j.CreatedAt < staleBefore)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(j => j.Status, "failed")
+                .SetProperty(j => j.ErrorMessage, StaleBackfillMessage)
+                .SetProperty(j => j.CompletedAt, now), ct).ConfigureAwait(false);
+
         var active = await ListReleasesWithActiveBackfillAsync(ct).ConfigureAwait(false);
+        var done = await _db.OeImportJobs.AsNoTracking()
+            .Where(j => j.Kind == BackfillKind && j.Status == "completed" && ids.Contains(j.ReleaseId))
+            .Join(_db.OeReleases, j => j.ReleaseId, r => r.Id, (j, r) => new { j.ReleaseId, j.CompletedAt, r.UpdatedAt })
+            .Where(x => x.CompletedAt > x.UpdatedAt)
+            .Select(x => x.ReleaseId)
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false);
+
         var source = new ReleaseImportSource.Backfill();
-        var rows = releaseIds.Distinct()
-            .Where(id => !active.Contains(id))
+        var rows = ids
+            .Where(id => !active.Contains(id) && !done.Contains(id))
             .Select(id => NewRow(id, identity, source, storeSymbolReference: false))
             .ToList();
         _db.OeImportJobs.AddRange(rows);
@@ -76,6 +103,24 @@ public sealed class PersistedImportJobs
         if (tx is not null) await tx.CommitAsync(ct).ConfigureAwait(false);
         return rows.Select(r => (r.ReleaseId, r.Id)).ToList();
     }
+
+    private const string BackfillKind = "backfill_system_references";
+
+    /// <summary>What a queued backfill row that nothing was feeding is failed with.</summary>
+    internal const string StaleBackfillMessage =
+        "Never ran: it was queued before the last restart or restore. A new backfill was queued in its place.";
+
+    /// <summary>
+    /// Puts a backfill a restore stopped back to <c>queued</c> (#1578, OEI2-4). Keeps
+    /// the organisation filter on: the worker runs the job in its own organisation.
+    /// Never cancelled, since the job's token is what stopped it.
+    /// </summary>
+    public Task MarkQueuedAgainAsync(long jobRowId) =>
+        _db.OeImportJobs
+            .Where(j => j.Id == jobRowId && j.Status == "running")
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(j => j.Status, "queued")
+                .SetProperty(j => j.StartedAt, (DateTime?)null), CancellationToken.None);
 
     private OeImportJob NewRow(
         int releaseId,
@@ -342,6 +387,9 @@ public sealed class PersistedImportJobs
                     var cutOff = row.Status == "running";
                     row.Status = "queued";
                     row.StartedAt = null;
+                    // Queued again by this process, which feeds it: stamped now, so the
+                    // bulk action does not take it for a row nothing feeds (OEI2-3).
+                    row.CreatedAt = now;
                     if (cutOff) row.ErrorMessage = CutOffBackfillNote;
                     (cutOff ? cutOffBackfills : toResume).Add(new ReleaseImportJob(
                         ReleaseId: row.ReleaseId,
