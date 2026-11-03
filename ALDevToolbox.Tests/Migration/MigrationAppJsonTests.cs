@@ -32,6 +32,35 @@ public sealed class MigrationAppJsonTests
         """;
 
     [Fact]
+    public void Properties_follow_the_templates_order_and_spelling_whatever_order_the_source_used()
+    {
+        var source = Parse("""
+            {
+              "features": [ "TranslationFile" ],
+              "runtime": "16.0",
+              "supportedLocales": [ "da-DK" ],
+              "IdRanges": [ { "from": 50000, "to": 50099 } ],
+              "version": "2.3.0.0",
+              "publisher": "CRONUS",
+              "name": "CRONUS Base",
+              "id": "11111111-1111-1111-1111-111111111111",
+              "brief": "Base app for CRONUS"
+            }
+            """);
+
+        var (result, _) = MigrationAppJson.Normalize(Parse(Template), source);
+
+        var templateKeys = Parse(Template).Select(p => p.Key).ToList();
+        var keys = result.Select(p => p.Key).ToList();
+        keys.Where(k => templateKeys.Contains(k)).Should().Equal(
+            templateKeys.Where(k => k != "dependencies"),
+            "every property the template has sits where the template puts it");
+        keys.Should().Contain("idRanges").And.NotContain("IdRanges");
+        keys.Last().Should().Be("supportedLocales", "a kept setting the template lacks follows the template's");
+        result["idRanges"]![0]!["from"]!.GetValue<int>().Should().Be(50000);
+    }
+
+    [Fact]
     public void Identity_and_wiring_stay_the_sources_and_house_style_comes_from_the_template()
     {
         var source = Parse("""

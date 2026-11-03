@@ -122,6 +122,39 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_migration_stops_before_creating_anything_when_main_moved_since_the_preview()
+    {
+        if (!GitAvailable()) return;
+        var userId = await SeedUserWithTokenAsync();
+        await MigrationTestServices.SeedTemplateAsync(_db);
+        var origin = _temp.Sub("origin-moved");
+        WriteApp(origin, BaseId, "CRONUS Base");
+        CommitAll(origin, "main");
+
+        var job = Job(userId, Repo("r1", "cronus-base", origin)) with
+        {
+            Create = new MigrationCreateRequest("cronus-as", true, false, null,
+                new Dictionary<string, string> { ["cronus-base"] = "0000000000000000000000000000000000000000" }),
+        };
+        _queue.TryStart(job, "cronus/Sales", "https://dev.azure.com/cronus/Sales", out _).Should().NotBeNull();
+        await using (var ctx = _db.NewContext())
+        {
+            var previewer = NewPreviewer(ctx);
+            previewer.WorkRoot = _temp.Sub("work-moved");
+            using (AmbientOrganizationScope.Enter(job.Identity))
+            {
+                await previewer.RunAsync(job, CancellationToken.None);
+            }
+        }
+
+        var run = _queue.Get(job.Id, TestDb.DefaultOrgId, userId)!;
+        run.IsMigration.Should().BeTrue();
+        run.Status.Should().Be(MigrationPreviewStatus.Failed);
+        run.Error.Should().Contain("main has changed in cronus-base").And.Contain("Nothing was created");
+        run.Outcome.Should().BeNull();
+    }
+
+    [Fact]
     public async Task A_missing_token_fails_the_preview_with_where_to_add_one()
     {
         var userId = await SeedUserAsync();
@@ -146,6 +179,7 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
         new UserRepositoryTokenService(ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider),
         _queue,
         MigrationTestServices.NewBuilder(_db, ctx),
+        _db.NewRepositoryMigrationPublisher(ctx),
         NullLogger<RepositoryMigrationPreviewer>.Instance);
 
     private static MigrationPreviewJob Job(int userId, params AzureDevOpsRepository[] repositories) => new(

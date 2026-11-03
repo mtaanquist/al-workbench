@@ -157,6 +157,10 @@ internal static class TenantTableCatalog
         "user_notification_settings",
         "oauth_consents",
         "audit_log",
+        // The record of past migrations (#1701): who moved which customer from
+        // where, and into which repository. History, like the audit log, so a
+        // restore keeps it as it is rather than rolling it back.
+        "repository_migrations",
     ];
 
     /// <summary>

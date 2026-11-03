@@ -237,13 +237,43 @@ public sealed class GitHubWorkspaceRepositoryService
         ProjectPlan plan, string repositoryName, bool isPrivate, int? solutionId = null,
         CancellationToken ct = default)
     {
-        var userId = RequireUserId();
-
         // The plan's own rules first: a workspace nobody could generate is not
         // worth a round trip to GitHub, and its errors are keyed to the fields
         // that caused them rather than to the repository.
         var planErrors = await _generation.ValidateWorkspaceAsync(plan, ct);
         if (planErrors.Count > 0) throw new PlanValidationException(planErrors.ToDictionary(e => e.Key, e => e.Value));
+
+        var gate = await CheckCanCreateAsync(repositoryName, solutionId, ct);
+
+        // Generate before creating anything: a generator failure now costs
+        // nothing, while the same failure after the repository exists would
+        // leave an empty one behind with no way to retry into it.
+        var (files, archiveName, archiveBytes) = await BuildFilesAsync(plan, ct);
+
+        var result = await CreateAndFillAsync(
+            gate, plan, isPrivate, solutionId, addPipelines: true,
+            async (token, repository, standards, author, fillCt) =>
+            {
+                var (standardsFileCount, headSha) = await FillAsync(
+                    token, repository, gate.OrgLogin, plan, files, standards, author, fillCt);
+                return new RepositoryFillResult(files.Count, standardsFileCount, headSha);
+            },
+            ct);
+        return result with { ArchiveFileName = archiveName, Archive = archiveBytes };
+    }
+
+    /// <summary>
+    /// Every refusal "Create repository" can give before anything exists on
+    /// GitHub: the name, the solution, the GitHub connection, the caller's
+    /// membership of the organisation, and the installation's permission to
+    /// create repositories. Migrate repositories (#1701) asks this on the
+    /// request, before it queues anything, and the creation asks it again.
+    /// </summary>
+    /// <exception cref="PlanValidationException">Something stands in the way; keyed as <see cref="CreateAsync"/> keys it.</exception>
+    internal async Task<RepositoryCreationGate> CheckCanCreateAsync(
+        string repositoryName, int? solutionId, CancellationToken ct)
+    {
+        var userId = RequireUserId();
 
         var name = (repositoryName ?? string.Empty).Trim();
         if (name.Length == 0)
@@ -319,27 +349,46 @@ public sealed class GitHubWorkspaceRepositoryService
             throw Refuse(RepositoryField, NotPermittedMessage(orgLogin));
         }
 
-        // Generate before creating anything: a generator failure now costs
-        // nothing, while the same failure after the repository exists would
-        // leave an empty one behind with no way to retry into it.
-        var (files, archiveName, archiveBytes) = await BuildFilesAsync(plan, ct);
+        return new RepositoryCreationGate(userId, name, orgLogin, installationId, solutionsEnabled);
+    }
 
-        var token = await _github.GetInstallationTokenAsync(installationId, ct);
+    /// <summary>
+    /// Creates the repository <paramref name="gate"/> cleared, has
+    /// <paramref name="fill"/> put its first content on the default branch, and
+    /// then does everything a new repository gets: the working branches, the
+    /// organisation's branch rules, the solution, its build pipelines (when
+    /// <paramref name="addPipelines"/>), and the audit entry.
+    ///
+    /// <para>The fill is the one step that differs between its two callers:
+    /// "Create repository" commits a generated workspace through the API, and
+    /// Migrate repositories (#1701) pushes a whole source tree with git, which
+    /// would take thousands of API calls. One caller each, so a delegate rather
+    /// than an interface.</para>
+    /// </summary>
+    internal async Task<GitHubWorkspaceRepository> CreateAndFillAsync(
+        RepositoryCreationGate gate, ProjectPlan plan, bool isPrivate, int? solutionId, bool addPipelines,
+        RepositoryFill fill, CancellationToken ct)
+    {
+        var token = await _github.GetInstallationTokenAsync(gate.InstallationId, ct);
         var created = await _github.CreateOrganizationRepositoryAsync(
-            token, orgLogin, name, isPrivate, string.IsNullOrWhiteSpace(plan.Brief) ? null : plan.Brief.Trim(), ct);
+            token, gate.OrgLogin, gate.RepositoryName, isPrivate, string.IsNullOrWhiteSpace(plan.Brief) ? null : plan.Brief.Trim(), ct);
         var repository = created.Outcome switch
         {
             GitHubRepositoryCreationOutcome.Created => created.Repository!,
             GitHubRepositoryCreationOutcome.NameTaken => throw Refuse(NameField,
-                $"{orgLogin} already has a repository called {name}. Pick a different name."),
-            _ => throw Refuse(RepositoryField, NotPermittedMessage(orgLogin)),
+                $"{gate.OrgLogin} already has a repository called {gate.RepositoryName}. Pick a different name."),
+            _ => throw Refuse(RepositoryField, NotPermittedMessage(gate.OrgLogin)),
         };
 
-        // The organisation's standards ride in the same commit as the generated
-        // files, so read them before the fill rather than after it.
+        // The organisation's standards ride in the same commit as the files,
+        // so read them before the fill rather than after it. Every commit names
+        // the same person: without an author the commit is credited to the app,
+        // so a new repository would open on a commit by a bot rather than by
+        // the consultant who asked for it.
         var standards = await _standards.GetAsync(ct);
-        var (standardsFileCount, headSha) = await FillAsync(
-            token, repository, orgLogin, plan, files, standards.Files, userId, ct);
+        var author = await ResolveAuthorAsync(gate.UserId, ct);
+        var filled = await fill(token, repository, standards.Files, author, ct);
+        var headSha = filled.HeadSha;
         // Before the ruleset, for the same reason the files are: a ruleset that
         // covers every branch would otherwise refuse the app its own branches.
         var branches = await CreateWorkingBranchesAsync(token, repository, headSha, ct);
@@ -348,25 +397,25 @@ public sealed class GitHubWorkspaceRepositoryService
         // Last, because a solution with no repository is the orphan the whole
         // ordering exists to avoid. Skipped entirely when the organisation does
         // not use Solutions.
-        var solution = solutionsEnabled
+        var solution = gate.SolutionsEnabled
             ? await RegisterSolutionAsync(plan, repository, solutionId, ct)
             : default((int? Id, string? Name, bool Created, string? Warning));
-        var pipelines = solution.Id is { } registeredOn && headSha is not null
+        var pipelines = addPipelines && solution.Id is { } registeredOn && headSha is not null
             ? await CreateBuildPipelinesAsync(
                 registeredOn, [repository.DefaultBranch, .. branches.Created], ct)
             : default((IReadOnlyList<string> Names, string? Warning));
-        await RecordAsync(repository, plan, files.Count, solution.Id, ct);
+        await RecordAsync(repository, plan, filled.FileCount, solution.Id, ct);
 
         _logger.LogInformation(
             "User {UserId} created the repository {RepoFullName} from workspace '{Workspace}' "
             + "(template '{Template}', {FileCount} files, {Visibility}, solution {SolutionId}, "
             + "{BranchCount} extra branches, {PipelineCount} build pipelines).",
-            userId, repository.FullName, plan.WorkspaceName, plan.TemplateKey, files.Count,
+            gate.UserId, repository.FullName, plan.WorkspaceName, plan.TemplateKey, filled.FileCount,
             isPrivate ? "private" : "public", solution.Id, branches.Created.Count, pipelines.Names?.Count ?? 0);
 
         return new GitHubWorkspaceRepository(
-            repository, files.Count, archiveName, archiveBytes,
-            standardsFileCount, rulesetWarning,
+            repository, filled.FileCount, string.Empty, [],
+            filled.StandardsFileCount, rulesetWarning,
             solution.Id, solution.Name, solution.Created, solution.Warning,
             branches.Created, branches.Warning,
             pipelines.Names ?? [], pipelines.Warning);
@@ -650,7 +699,7 @@ public sealed class GitHubWorkspaceRepositoryService
     private async Task<(int StandardsFileCount, string? HeadSha)> FillAsync(
         string token, GitHubRepositorySummary repository, string orgLogin, ProjectPlan plan,
         List<GitHubCommitFile> files, IReadOnlyList<GitHubRepositoryStandardFile> standardsFiles,
-        int userId, CancellationToken ct)
+        GitHubCommitAuthor? author, CancellationToken ct)
     {
         var owner = repository.Owner;
         var name = repository.Name;
@@ -664,11 +713,6 @@ public sealed class GitHubWorkspaceRepositoryService
                 plan.TemplateKey, repository.FullName);
             return (0, null);
         }
-
-        // Every commit names the same person: without an author the seed is
-        // credited to the app, so a new repository would open on a commit by a
-        // bot rather than by the consultant who asked for it.
-        var author = await ResolveAuthorAsync(userId, ct);
 
         string seedSha;
         try
@@ -915,3 +959,24 @@ public sealed class GitHubWorkspaceRepositoryService
     private static PlanValidationException Refuse(string field, string message) =>
         new(new Dictionary<string, string> { [field] = message });
 }
+
+/// <summary>What <see cref="GitHubWorkspaceRepositoryService.CheckCanCreateAsync"/> cleared: who asks, the name, and where it goes.</summary>
+internal sealed record RepositoryCreationGate(
+    int UserId, string RepositoryName, string OrgLogin, long InstallationId, bool SolutionsEnabled);
+
+/// <summary>What filling a new repository put on its default branch.</summary>
+/// <param name="HeadSha">The commit the default branch points at, or null when nothing was committed.</param>
+internal sealed record RepositoryFillResult(int FileCount, int StandardsFileCount, string? HeadSha);
+
+/// <summary>
+/// Puts a new, empty repository's first content on its default branch, with
+/// the organisation's standard files laid over it and credited to
+/// <paramref name="author"/>. Throws a <see cref="PlanValidationException"/> on
+/// <see cref="GitHubWorkspaceRepositoryService.RepositoryField"/> when it cannot.
+/// </summary>
+internal delegate Task<RepositoryFillResult> RepositoryFill(
+    string token,
+    GitHubRepositorySummary repository,
+    IReadOnlyList<GitHubRepositoryStandardFile> standards,
+    GitHubCommitAuthor? author,
+    CancellationToken ct);

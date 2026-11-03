@@ -1,4 +1,7 @@
+using ALDevToolbox.Data;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.GitHub;
+using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.Templates;
@@ -9,8 +12,8 @@ namespace ALDevToolbox.Services.Migration;
 /// Migrate Repositories (issue #1698): moving a customer's Azure DevOps
 /// repositories into one GitHub repository laid out by a workspace template.
 /// It lists a project's repositories (#1699) and previews what a migration of
-/// the chosen ones into a template would move and change (#1700); nothing is
-/// created yet.
+/// the chosen ones into a template would move and change (#1700), then
+/// creates the repository, the solution and its pipelines from a preview (#1701).
 ///
 /// <para>Admin only: the page carries <c>[Authorize(Roles = "Admin")]</c>, and
 /// every call acts with the Admin's own Azure DevOps token, so it can only read
@@ -33,6 +36,15 @@ public sealed class RepositoryMigrationService
     /// <summary>Field key for errors about the customer's short name.</summary>
     public const string ShortNameField = "ShortName";
 
+    /// <summary>Field key for errors about the solution that already has the customer's name.</summary>
+    public const string SolutionField = "ReplaceSolution";
+
+    /// <summary>Field key for errors about the new repository's name.</summary>
+    public const string RepositoryNameField = GitHubWorkspaceRepositoryService.NameField;
+
+    /// <summary>Field key for errors about GitHub, and about starting the migration.</summary>
+    public const string RepositoryField = GitHubWorkspaceRepositoryService.RepositoryField;
+
     private readonly AzureDevOpsClient _azureDevOps;
     private readonly UserRepositoryTokenService _tokens;
     private readonly RepositoryMigrationQueue _queue;
@@ -40,6 +52,8 @@ public sealed class RepositoryMigrationService
     private readonly TemplateService _templates;
     private readonly ApplicationVersionService _versions;
     private readonly GenerationService _generation;
+    private readonly RepositoryMigrationPublisher _publisher;
+    private readonly AppDbContext _db;
     private readonly ILogger<RepositoryMigrationService> _logger;
 
     public RepositoryMigrationService(
@@ -50,6 +64,8 @@ public sealed class RepositoryMigrationService
         TemplateService templates,
         ApplicationVersionService versions,
         GenerationService generation,
+        RepositoryMigrationPublisher publisher,
+        AppDbContext db,
         ILogger<RepositoryMigrationService> logger)
     {
         _azureDevOps = azureDevOps;
@@ -59,6 +75,8 @@ public sealed class RepositoryMigrationService
         _templates = templates;
         _versions = versions;
         _generation = generation;
+        _publisher = publisher;
+        _db = db;
         _logger = logger;
     }
 
@@ -130,6 +148,85 @@ public sealed class RepositoryMigrationService
         _org.CurrentOrganizationId is { } orgId && _org.CurrentUserId is { } userId
             ? _queue.Get(id, orgId, userId)
             : null;
+
+    /// <summary>
+    /// The solution that already has <paramref name="customerName"/>, and whether
+    /// a migration may replace it. Null when the name is free.
+    /// </summary>
+    public Task<MigrationSolutionClash?> FindSolutionClashAsync(string? customerName, CancellationToken ct = default) =>
+        _publisher.FindSolutionClashAsync(customerName ?? string.Empty, ct);
+
+    /// <summary>
+    /// Queues the migration of what the finished preview <paramref name="previewId"/>
+    /// read: the same repositories, template and customer. The run reads the
+    /// repositories again and stops if <c>main</c> moved since the preview, so what
+    /// is created is what the Admin looked at. Everything that would refuse the
+    /// creation before it starts (the name, GitHub, a solution of the same name) is
+    /// checked here, on the request.
+    /// </summary>
+    /// <exception cref="PlanValidationException">
+    /// Keyed to <see cref="RepositoryNameField"/>, <see cref="RepositoryField"/>,
+    /// <see cref="SolutionField"/> or the target's own fields.
+    /// </exception>
+    public async Task<MigrationPreview> StartMigrationAsync(Guid previewId, MigrationCreateInput input, CancellationToken ct = default)
+    {
+        var preview = GetPreview(previewId);
+        if (preview is null || preview.IsMigration || preview.Status != MigrationPreviewStatus.Done || !preview.CanMigrate)
+        {
+            throw Refuse(RepositoryField, "This preview can't be migrated any more. Preview again, then create the repository from the new preview.");
+        }
+
+        var project = ParseProject(preview.ProjectUrl);
+        var target = await BuildTargetAsync(
+            new MigrationTargetInput(preview.TemplateKey, preview.CustomerName, preview.ShortName, preview.AddTemplateExtensions), ct)
+            .ConfigureAwait(false);
+
+        var clash = await _publisher.FindSolutionClashAsync(target.CustomerName, ct).ConfigureAwait(false);
+        var request = new MigrationCreateRequest(
+            (input.RepositoryName ?? string.Empty).Trim(),
+            input.IsPrivate,
+            input.AddPipelines,
+            input.ReplaceExistingSolution && clash is { CanReplace: true } ? clash.Id : null,
+            preview.Repositories
+                .Where(r => r.Commit is not null)
+                .ToDictionary(r => r.Name, r => r.Commit!, StringComparer.Ordinal));
+        await _publisher.CheckAsync(target.CustomerName, request, ct).ConfigureAwait(false);
+
+        var token = await RequireTokenAsync(ct).ConfigureAwait(false);
+        var listed = await ListAsync(project, token, ct).ConfigureAwait(false);
+        var ids = preview.Repositories.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var repositories = listed.Where(r => ids.Contains(r.Id)).ToList();
+        if (repositories.Count != ids.Count)
+        {
+            throw Refuse(RepositoryField,
+                "Some of the previewed repositories are no longer in the Azure DevOps project. Preview again.");
+        }
+
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_org, "starting a migration");
+        var job = new MigrationPreviewJob(Guid.NewGuid(), identity, project, repositories, target, request);
+        var run = _queue.TryStart(job, project.DisplayName, project.WebUrl, out var refusal)
+            ?? throw Refuse(RepositoryField, refusal ?? "The migration could not be started. Try again in a few minutes.");
+
+        _logger.LogInformation(
+            "Queued migration {RunId} of {RepositoryCount} repositories from {Project} into {RepositoryName} for user {UserId}.",
+            run.Id, repositories.Count, project.DisplayName, request.RepositoryName, identity.UserId);
+        return run;
+    }
+
+    /// <summary>The organisation's latest migrations, newest first.</summary>
+    public async Task<List<RepositoryMigrationHistoryRow>> ListHistoryAsync(int take = 25, CancellationToken ct = default)
+    {
+        return await _db.RepositoryMigrations.AsNoTracking()
+            .OrderByDescending(m => m.CreatedAt)
+            .Take(take)
+            .Select(m => new RepositoryMigrationHistoryRow(
+                m.Id, m.CreatedAt, m.CustomerName, m.SourceProject, m.SourceProjectUrl,
+                m.RepositoryFullName, m.RepositoryUrl,
+                m.Project != null && m.Project.DeletedAt == null ? m.ProjectId : null,
+                m.CreatedByUser != null ? (m.CreatedByUser.DisplayName != "" ? m.CreatedByUser.DisplayName : m.CreatedByUser.Email) : null,
+                m.Succeeded, m.Message))
+            .ToListAsync(ct).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// The workspace plan a migration's template is generated from: the
@@ -240,6 +337,32 @@ public sealed class RepositoryMigrationService
 
 /// <summary>An Azure DevOps project and the repositories in it.</summary>
 public sealed record SourceProjectListing(AzureDevOpsProject Project, IReadOnlyList<AzureDevOpsRepository> Repositories);
+
+/// <summary>How the Admin wants the repository created, as the page sends it.</summary>
+/// <param name="ReplaceExistingSolution">
+/// Delete the solution that already has the customer's name first. Honoured only
+/// when that solution came from an earlier migration whose repository is gone.
+/// </param>
+public sealed record MigrationCreateInput(
+    string? RepositoryName,
+    bool IsPrivate = true,
+    bool AddPipelines = true,
+    bool ReplaceExistingSolution = false);
+
+/// <summary>One earlier migration, as the page lists it.</summary>
+/// <param name="SolutionId">The solution it created, while that solution still exists.</param>
+public sealed record RepositoryMigrationHistoryRow(
+    int Id,
+    DateTime CreatedAt,
+    string CustomerName,
+    string SourceProject,
+    string SourceProjectUrl,
+    string? RepositoryFullName,
+    string? RepositoryUrl,
+    int? SolutionId,
+    string? StartedBy,
+    bool Succeeded,
+    string? Message);
 
 /// <summary>What the Admin chose to move the repositories into, as the page sends it.</summary>
 /// <param name="ShortName">Optional short form of the customer's name, as on New Workspace.</param>

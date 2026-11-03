@@ -20,6 +20,7 @@ public static class MigrationRegistration
         .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         services.AddSingleton<RepositoryMigrationQueue>();
         services.AddScoped<MigrationWorkspaceBuilder>();
+        services.AddScoped<RepositoryMigrationPublisher>();
         services.AddScoped<RepositoryMigrationPreviewer>();
         services.AddScoped<RepositoryMigrationService>();
         services.AddHostedService<RepositoryMigrationWorker>();
