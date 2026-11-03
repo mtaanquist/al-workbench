@@ -41,6 +41,7 @@ builder.Services.AddBcQuality();
 builder.Services.AddGeneration();
 builder.Services.AddOrganizationServices();
 builder.Services.AddGitHub();
+builder.Services.AddRepositoryMigration();
 builder.Services.AddAccountServices(builder.Configuration);
 builder.Services.AddOAuthServer(builder.Environment);
 builder.Services.AddDeploymentIdentity();

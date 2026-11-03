@@ -34,6 +34,7 @@ internal static class LeftoverImportTempFiles
         ReleaseImportRequestService.FolderZipTempPrefix,
         ReleaseImportRequestService.CalTxtTempPrefix,
         ReleaseImportRequestService.AddModulesTempPrefix,
+        ALDevToolbox.Services.Migration.RepositoryMigrationPreviewer.TempPrefix,
     ];
 
     /// <summary>
