@@ -676,7 +676,6 @@ public sealed class TestDb : IDisposable
             NewProjectService(ctx, access),
             new ALDevToolbox.Services.ObjectExplorer.ProcessRunner(),
             ctx,
-            OrgContext,
             NullLogger<ALDevToolbox.Services.Migration.RepositoryMigrationPublisher>.Instance);
     }
 

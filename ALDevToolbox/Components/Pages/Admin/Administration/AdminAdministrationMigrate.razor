@@ -255,6 +255,13 @@
                             <Alert Tone="AlertTone.Danger"><span>@error</span></Alert>
                         }
 
+                        @if (_preview is { IsMigration: false, MigratedBy: { } runId })
+                        {
+                            <Alert Tone="AlertTone.Info">
+                                <span>A migration has already been started from this preview. <a href="@($"/admin/administration/repositories/migrate?preview={runId}")">See how it went</a>, or preview again to start another.</span>
+                            </Alert>
+                        }
+
                         @if (_preview.Outcome is { } outcome)
                         {
                             <Alert Tone="AlertTone.Success">
@@ -518,7 +525,7 @@
                         }
                         <div class="field">
                             <label class="field__label" for="mig-repo">Repository name</label>
-                            <input class="input" id="mig-repo" type="text" required maxlength="100"
+                            <input class="input" id="mig-repo" type="text" required maxlength="@GitHubWorkspaceRepositoryService.MaxNameLength"
                                    pattern="@GitHubWorkspaceRepositoryService.NamePattern"
                                    placeholder="e.g. cronus-as"
                                    @bind="_repositoryName" @bind:event="oninput" />
@@ -681,11 +688,15 @@
     private bool _replace;
     private IReadOnlyDictionary<string, string> _createErrors = new Dictionary<string, string>();
     private ConfirmDialog? _confirmReplace;
+
+    // The page's services share one database context, and the poll loop's reads
+    // can overlap a button's; a context allows one operation at a time.
+    private readonly SemaphoreSlim _dbGate = new(1, 1);
     private PeriodicTimer? _poll;
     private CancellationTokenSource? _pollCts;
 
     /// <summary>A finished preview that nothing stands in the way of: the repository can be created from it.</summary>
-    private bool ReadyToCreate => _preview is { IsMigration: false, Status: MigrationPreviewStatus.Done, CanMigrate: true };
+    private bool ReadyToCreate => _preview is { CanCreate: true };
 
     private bool AllChosen => _listed is { Repositories.Count: > 0 } listed
         && listed.Repositories.Where(r => !r.IsDisabled).All(r => _chosen.Contains(r.Id))
@@ -726,8 +737,9 @@
         _repositoryName = GitHubWorkspaceRepositoryService.SuggestName(_preview.CustomerName);
         _replace = false;
         _createErrors = new Dictionary<string, string>();
-        _clash = await Migration.FindSolutionClashAsync(_preview.CustomerName);
-        _github = await Migration.CheckGitHubAsync();
+        var customer = _preview.CustomerName;
+        _clash = await Db(() => Migration.FindSolutionClashAsync(customer));
+        _github = await Db(() => Migration.CheckGitHubAsync());
     }
 
     private async Task CreateAsync()
@@ -746,8 +758,9 @@
         _createErrors = new Dictionary<string, string>();
         try
         {
-            _preview = await Migration.StartMigrationAsync(_preview.Id,
-                new MigrationCreateInput(_repositoryName, _isPrivate, _addPipelines, _replace));
+            var input = new MigrationCreateInput(_repositoryName, _isPrivate, _addPipelines, _replace);
+            var previewId = _preview.Id;
+            _preview = await Db(() => Migration.StartMigrationAsync(previewId, input));
             Nav.NavigateTo($"/admin/administration/repositories/migrate?preview={_preview.Id}", replace: true);
             StartPoll();
         }
@@ -780,7 +793,8 @@
         _errors = new Dictionary<string, string>();
         try
         {
-            _listed = await Migration.ListRepositoriesAsync(_projectAddress);
+            var address = _projectAddress;
+            _listed = await Db(() => Migration.ListRepositoriesAsync(address));
             _projectAddress = _listed.Project.WebUrl;
             // One project is usually one customer, so every repository that can be
             // moved starts ticked.
@@ -838,7 +852,7 @@
         _againErrors = new Dictionary<string, string>();
         try
         {
-            _preview = await Migration.StartPreviewAsync(projectAddress, repositoryIds, target);
+            _preview = await Db(() => Migration.StartPreviewAsync(projectAddress, repositoryIds, target));
             // The preview's id in the address lets a reload, or a second tab, show it.
             Nav.NavigateTo($"/admin/administration/repositories/migrate?preview={_preview.Id}", replace: true);
             StartPoll();
@@ -851,6 +865,13 @@
         {
             _starting = false;
         }
+    }
+
+    private async Task<T> Db<T>(Func<Task<T>> read)
+    {
+        await _dbGate.WaitAsync();
+        try { return await read(); }
+        finally { _dbGate.Release(); }
     }
 
     private void StartPoll()
@@ -877,7 +898,7 @@
                     if (!keepGoing)
                     {
                         await PrepareCreateAsync();
-                        if (_preview.IsMigration) _history = await Migration.ListHistoryAsync();
+                        if (_preview.IsMigration) _history = await Db(() => Migration.ListHistoryAsync());
                     }
                     StateHasChanged();
                 });

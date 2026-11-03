@@ -45,6 +45,28 @@ public sealed class RepositoryMigrationQueueTests
     }
 
     [Fact]
+    public void A_ready_preview_starts_at_most_one_migration_until_it_is_given_back()
+    {
+        var queue = new RepositoryMigrationQueue(_clock);
+        var preview = Job(1);
+        queue.TryStart(preview, "p", "u", out _);
+        queue.TryClaim(preview.Id, Guid.NewGuid()).Should().BeFalse("a preview still running is not ready");
+
+        queue.MarkDone(preview.Id,
+            new MigrationSourceAnalysis([new MigrationExtension("r", "", "r", "id", "Ext", "CRONUS", "1.0.0.0")], []),
+            new MigrationWorkspace("T", [], [], [], [], [], 1));
+        var first = Guid.NewGuid();
+        queue.TryClaim(preview.Id, first).Should().BeTrue();
+        queue.TryClaim(preview.Id, Guid.NewGuid()).Should().BeFalse("a second tab cannot start another");
+        queue.Get(preview.Id, TestDb.DefaultOrgId, 1)!.MigratedBy.Should().Be(first);
+
+        queue.Release(preview.Id, Guid.NewGuid());
+        queue.Get(preview.Id, TestDb.DefaultOrgId, 1)!.CanCreate.Should().BeFalse("only the run that claimed it gives it back");
+        queue.Release(preview.Id, first);
+        queue.Get(preview.Id, TestDb.DefaultOrgId, 1)!.CanCreate.Should().BeTrue();
+    }
+
+    [Fact]
     public void Fail_if_active_fails_an_unfinished_preview_and_leaves_a_finished_one()
     {
         var queue = new RepositoryMigrationQueue(_clock);

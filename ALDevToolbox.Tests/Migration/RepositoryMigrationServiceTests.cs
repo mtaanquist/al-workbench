@@ -7,6 +7,7 @@ using ALDevToolbox.Services.Migration;
 using ALDevToolbox.Services.Templates;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Migration;
@@ -164,6 +165,24 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = owner;
         _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
         svc.GetPreview(preview.Id).Should().BeNull("nor does the same id in another organisation");
+    }
+
+    [Fact]
+    public async Task A_deleted_template_is_refused_under_the_template_field()
+    {
+        await SeedUserWithTokenAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var template = await ctx.RuntimeTemplates.SingleAsync(t => t.Key == MigrationTestServices.TemplateKey);
+            template.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        var act = () => NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
+            .StartPreviewAsync(Project, ["r1"], Cronus);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors[RepositoryMigrationService.TemplateField].Should().Contain("no longer exists");
     }
 
     [Fact]

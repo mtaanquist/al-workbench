@@ -38,10 +38,10 @@ public sealed class RepositoryMigrationWorker : QueueDrainWorker<MigrationPrevie
     // A job that ended without recording an outcome (it threw before it could)
     // must not leave the page showing "running" until the preview is evicted.
     protected override void OnJobFinished(MigrationPreviewJob job) =>
-        _queue.FailIfActive(job.Id, "The preview stopped unexpectedly. Try again. If it fails again, ask whoever runs AL Workbench for your company to look into it.");
+        _queue.FailIfActive(job.Id, RepositoryMigrationQueue.StoppedUnexpectedly(job));
 
     protected override void OnJobDropped(MigrationPreviewJob job) =>
-        _queue.MarkFailed(job.Id, "The server was restored from a backup while this preview waited. Start it again.");
+        _queue.MarkFailed(job.Id, RepositoryMigrationQueue.RestoredWhileWaiting(job));
 
     protected override string Describe(MigrationPreviewJob job) => $"MigrationPreview={job.Id}";
 }

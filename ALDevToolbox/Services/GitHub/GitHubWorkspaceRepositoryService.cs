@@ -134,6 +134,9 @@ public sealed class GitHubWorkspaceRepositoryService
     /// </summary>
     public const string NamePattern = @"^(?!\.{1,2}$)[A-Za-z0-9._\-]{1,100}$";
 
+    /// <summary>The longest name GitHub keeps; the same 100 as <see cref="NamePattern"/>, for a form's <c>maxlength</c>.</summary>
+    public const int MaxNameLength = 100;
+
     private static readonly Regex NameRegex = new(NamePattern, RegexOptions.Compiled);
 
     /// <summary>

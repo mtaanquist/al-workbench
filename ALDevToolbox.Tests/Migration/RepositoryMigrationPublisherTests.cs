@@ -112,6 +112,64 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
         var row = await check.RepositoryMigrations.AsNoTracking().SingleAsync();
         row.Succeeded.Should().BeFalse();
         row.Message.Should().Contain("could not be pushed");
+        row.RepositoryFullName.Should().Be(Repo, "the history names the half-made repository to delete");
+    }
+
+    [Fact]
+    public async Task A_replaced_solution_survives_a_run_github_refuses_before_the_code_is_in()
+    {
+        await ReadyAsync();
+        var oldId = await SeedSolutionAsync("CRONUS A/S");
+        await SeedHistoryAsync(oldId, $"{OrgLogin}/old-cronus");
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{OrgLogin}/old-cronus", HttpStatusCode.NotFound)
+            .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.UnprocessableEntity,
+                "{\"message\":\"Repository creation failed.\",\"errors\":[{\"resource\":\"Repository\","
+                + "\"field\":\"name\",\"message\":\"name already exists on this account\"}]}");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewPublisher(ctx, api, _temp.Path)
+                .PublishAsync(Job(), Request() with { ReplaceSolutionId = oldId }, _temp.Path, Commits, CancellationToken.None);
+            await act.Should().ThrowAsync<PlanValidationException>();
+        }
+
+        await using var check = _db.NewContext();
+        (await check.OeProjects.AsNoTracking().SingleAsync(p => p.Id == oldId)).DeletedAt.Should().BeNull();
+        (await check.RepositoryMigrations.AsNoTracking().CountAsync(m => !m.Succeeded)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_unexpected_github_failure_is_still_recorded()
+    {
+        await ReadyAsync();
+        var api = WritableApi().On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.InternalServerError, "{}");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewPublisher(ctx, api, _temp.Path)
+                .PublishAsync(Job(), Request(), _temp.Path, Commits, CancellationToken.None);
+            await act.Should().ThrowAsync<Exception>();
+        }
+
+        await using var check = _db.NewContext();
+        var row = await check.RepositoryMigrations.AsNoTracking().SingleAsync();
+        row.Succeeded.Should().BeFalse();
+        row.Message.Should().NotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task A_repository_in_another_github_organisation_is_never_taken_for_gone()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS A/S");
+        await SeedHistoryAsync(solutionId, "elsewhere/old-cronus");
+        var api = WritableApi().On(HttpMethod.Get, "/repos/elsewhere/old-cronus", HttpStatusCode.NotFound);
+
+        await using var ctx = _db.NewContext();
+        var clash = await NewPublisher(ctx, api, _temp.Path).FindSolutionClashAsync("CRONUS A/S", CancellationToken.None);
+
+        clash!.CanReplace.Should().BeFalse("out of this installation's sight is not the same as deleted");
     }
 
     [Fact]
