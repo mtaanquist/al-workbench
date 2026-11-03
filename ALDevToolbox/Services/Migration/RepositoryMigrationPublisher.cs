@@ -15,9 +15,10 @@ namespace ALDevToolbox.Services.Migration;
 /// it. Only ever one that came from an earlier migration whose repository is gone.
 /// </param>
 /// <param name="PinnedCommits">
-/// The commit of <c>main</c> the preview read in each repository, by name. A run
-/// that finds <c>main</c> has moved since stops, so what is pushed is what was
-/// previewed.
+/// The commit of <c>main</c> the preview read in each repository, by Azure
+/// DevOps repository id (a name can change in between). A run that finds
+/// <c>main</c> has moved since, or a repository the preview did not read, stops,
+/// so what is pushed is what was previewed.
 /// </param>
 public sealed record MigrationCreateRequest(
     string RepositoryName,
@@ -71,7 +72,6 @@ public sealed class RepositoryMigrationPublisher
     private readonly ProjectService _projects;
     private readonly IProcessRunner _processes;
     private readonly AppDbContext _db;
-    private readonly IOrganizationContext _org;
     private readonly ILogger<RepositoryMigrationPublisher> _logger;
 
     public RepositoryMigrationPublisher(
@@ -81,7 +81,6 @@ public sealed class RepositoryMigrationPublisher
         ProjectService projects,
         IProcessRunner processes,
         AppDbContext db,
-        IOrganizationContext org,
         ILogger<RepositoryMigrationPublisher> logger)
     {
         _repositories = repositories;
@@ -90,7 +89,6 @@ public sealed class RepositoryMigrationPublisher
         _projects = projects;
         _processes = processes;
         _db = db;
-        _org = org;
         _logger = logger;
     }
 
@@ -164,28 +162,35 @@ public sealed class RepositoryMigrationPublisher
         IReadOnlyDictionary<string, string> commits, CancellationToken ct)
     {
         var plan = job.Target.Plan;
-        var gate = await _repositories.CheckCanCreateAsync(request.RepositoryName, solutionId: null, ct).ConfigureAwait(false);
-        var replace = await CheckSolutionAsync(job.Target.CustomerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
-        if (replace is { } old)
-        {
-            await _projects.SoftDeleteProjectAsync(old.Id, ct).ConfigureAwait(false);
-            _logger.LogInformation(
-                "Migration {RunId} deleted solution {SolutionId} ({Name}), which came from an earlier migration whose repository is gone.",
-                job.Id, old.Id, old.Name);
-        }
-
-        var sources = string.Join("\n", job.Repositories.Select(r => $"{r.Name}@{commits.GetValueOrDefault(r.Name) ?? "?"}"));
+        var sources = Sources(job, commits);
+        GitHubRepositorySummary? made = null;
         GitHubWorkspaceRepository created;
         try
         {
+            var gate = await _repositories.CheckCanCreateAsync(request.RepositoryName, solutionId: null, ct).ConfigureAwait(false);
+            var replace = await CheckSolutionAsync(job.Target.CustomerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
             created = await _repositories.CreateAndFillAsync(
                 gate, plan, request.IsPrivate, solutionId: null, request.AddPipelines,
-                (token, repository, standards, author, fillCt) => PushAsync(job, workspace, commits, token, repository, standards, author, fillCt),
+                async (token, repository, standards, author, fillCt) =>
+                {
+                    made = repository;
+                    var filled = await PushAsync(job, workspace, commits, token, repository, standards, author, fillCt).ConfigureAwait(false);
+                    // Only once the new repository holds the code: a refusal before
+                    // this point (the name is taken, the push failed) leaves the old
+                    // solution where it was.
+                    if (replace is { } old) await DeleteReplacedAsync(job, old, fillCt).ConfigureAwait(false);
+                    return filled;
+                },
                 ct).ConfigureAwait(false);
         }
-        catch (PlanValidationException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await RecordAsync(job, sources, null, null, null, false, string.Join(" ", ex.Errors.Values), ct).ConfigureAwait(false);
+            var message = ex is PlanValidationException refusal
+                ? string.Join(" ", refusal.Errors.Values)
+                : made is null
+                    ? "The migration failed unexpectedly before the repository was created."
+                    : $"The migration failed unexpectedly after {made.FullName} was created. Check it on GitHub, and delete it before you try again.";
+            await RecordAsync(job, sources, made?.FullName, made?.HtmlUrl, null, false, message, ct).ConfigureAwait(false);
             throw;
         }
 
@@ -204,8 +209,27 @@ public sealed class RepositoryMigrationPublisher
     }
 
     /// <summary>
-    /// The solution to delete before the new one is made, when the Admin chose to
-    /// replace one; refuses a clash otherwise.
+    /// Records a migration run that stopped before it reached GitHub (main moved,
+    /// a repository could not be read again), so Earlier migrations shows every
+    /// run the Admin started.
+    /// </summary>
+    public Task RecordStoppedAsync(MigrationPreviewJob job, IReadOnlyDictionary<string, string> commits, string message, CancellationToken ct) =>
+        RecordAsync(job, Sources(job, commits), null, null, null, false, message, ct);
+
+    private static string Sources(MigrationPreviewJob job, IReadOnlyDictionary<string, string> commits) =>
+        string.Join("\n", job.Repositories.Select(r => $"{r.Name}@{commits.GetValueOrDefault(r.Name) ?? "?"}"));
+
+    private async Task DeleteReplacedAsync(MigrationPreviewJob job, MigrationSolutionClash old, CancellationToken ct)
+    {
+        await _projects.SoftDeleteProjectAsync(old.Id, ct).ConfigureAwait(false);
+        _logger.LogInformation(
+            "Migration {RunId} deleted solution {SolutionId} ({Name}), which came from an earlier migration whose repository is gone.",
+            job.Id, old.Id, old.Name);
+    }
+
+    /// <summary>
+    /// The solution to delete once the new repository holds the code, when the
+    /// Admin chose to replace one; refuses a clash otherwise.
     /// </summary>
     private async Task<MigrationSolutionClash?> CheckSolutionAsync(string customerName, int? replaceSolutionId, CancellationToken ct)
     {
@@ -216,7 +240,7 @@ public sealed class RepositoryMigrationPublisher
         {
             [RepositoryMigrationService.SolutionField] = clash.CanReplace
                 ? $"A solution called {clash.Name} already exists, from an earlier migration whose repository has since been deleted. "
-                  + "Tick Replace the existing solution to delete it and its pipelines, or use another customer name."
+                  + "Turn on Replace the existing solution to delete it and its pipelines, or use another customer name."
                 : $"A solution called {clash.Name} already exists. A migration creates a new solution, so use another customer name, "
                   + "or delete that solution first.",
         });
@@ -240,13 +264,17 @@ public sealed class RepositoryMigrationPublisher
             await File.WriteAllTextAsync(path, standard.Content, ct).ConfigureAwait(false);
         }
 
+        // --force on add: the preview already removed what the template's
+        // .gitignore leaves out of the moved extensions, and whatever is left is
+        // what the preview listed - including template files and standard files
+        // that a .gitignore (perhaps a standard one) would otherwise skip.
         var git = RepositoryMigrationPreviewer.GitPath();
         var name = author?.Name ?? "AL Workbench";
         var email = author?.Email ?? "noreply@users.noreply.github.com";
         string[] identity = ["-c", $"user.name={name}", "-c", $"user.email={email}", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"];
 
         await RunAsync(git, ["init", "--quiet", "--initial-branch", repository.DefaultBranch, workspace], workspace, null, token, repository, ct).ConfigureAwait(false);
-        await RunAsync(git, [.. identity, "-C", workspace, "add", "--all"], workspace, null, token, repository, ct).ConfigureAwait(false);
+        await RunAsync(git, [.. identity, "-C", workspace, "add", "--all", "--force"], workspace, null, token, repository, ct).ConfigureAwait(false);
         await RunAsync(git, [.. identity, "-C", workspace, "commit", "--quiet", "--no-verify", "-m", CommitMessage(job, commits)], workspace, null, token, repository, ct).ConfigureAwait(false);
         var listed = await RunAsync(git, ["-C", workspace, "ls-files", "-z"], workspace, null, token, repository, ct).ConfigureAwait(false);
         var fileCount = listed.Split('\0', StringSplitOptions.RemoveEmptyEntries).Length;
@@ -265,9 +293,20 @@ public sealed class RepositoryMigrationPublisher
         var result = await _processes.RunAsync(new ProcessRunRequest(git, args, workDir, env, GitTimeout), ct).ConfigureAwait(false);
         if (result.Succeeded) return result.StdOut;
 
-        var detail = ProjectBuildService.Sanitize((result.StdErr.Length > 0 ? result.StdErr : result.StdOut).Trim(), token);
-        if (detail.Length > 500) detail = detail[..500] + "...";
+        var detail = RepositoryMigrationPreviewer.GitDetail(result, token);
         _logger.LogWarning("git {Step} for {RepoFullName} failed (exit {Exit}): {Detail}", args.FirstOrDefault(a => !a.StartsWith('-') && !a.Contains('=') && a != workDir), repository.FullName, result.ExitCode, detail);
+        if (detail.Contains("GH013", StringComparison.Ordinal) || detail.Contains("protected branch", StringComparison.OrdinalIgnoreCase))
+        {
+            // The organisation's branch rules refused the push; running again
+            // fails the same way until an owner lets the app past them.
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                [GitHubWorkspaceRepositoryService.RepositoryField] =
+                    $"The branch rules in your GitHub organisation would not let AL Workbench push to {repository.DefaultBranch}. "
+                    + "An owner of the organisation can fix that under Repository → Rulesets: open the ruleset that covers "
+                    + $"{repository.DefaultBranch} and add AL Workbench to its bypass list. Then delete {repository.FullName} on GitHub and migrate again.",
+            });
+        }
         throw new PlanValidationException(new Dictionary<string, string>
         {
             [GitHubWorkspaceRepositoryService.RepositoryField] =
@@ -301,6 +340,9 @@ public sealed class RepositoryMigrationPublisher
         if (parts.Length != 2) return false;
         var connection = await _connection.GetStatusAsync(ct).ConfigureAwait(false);
         if (connection.InstallationId is not { } installationId) return false;
+        // Another GitHub organisation's repository is merely out of sight of this
+        // installation, not gone, so it never makes a solution replaceable.
+        if (!string.Equals(parts[0], connection.OrgLogin, StringComparison.OrdinalIgnoreCase)) return false;
         try
         {
             var token = await _github.GetInstallationTokenAsync(installationId, ct).ConfigureAwait(false);
@@ -320,11 +362,13 @@ public sealed class RepositoryMigrationPublisher
     {
         try
         {
+            // A failure inside the creation can leave unsaved entities behind on
+            // this run's own context; only the history row should be saved here.
             _db.ChangeTracker.Clear();
             _db.RepositoryMigrations.Add(new RepositoryMigration
             {
                 OrganizationId = job.Identity.OrganizationId,
-                CreatedByUserId = _org.CurrentUserId,
+                CreatedByUserId = job.Identity.UserId,
                 CreatedAt = DateTime.UtcNow,
                 SourceProject = job.Project.DisplayName,
                 SourceProjectUrl = job.Project.WebUrl,
@@ -341,6 +385,8 @@ public sealed class RepositoryMigrationPublisher
         }
         catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
         {
+            // InvalidOperationException: the context is unusable after a failed
+            // operation inside the creation.
             // The repository exists either way; a lost history row is not worth failing the run over.
             _logger.LogWarning(ex, "Could not record migration {RunId} in the history.", job.Id);
         }

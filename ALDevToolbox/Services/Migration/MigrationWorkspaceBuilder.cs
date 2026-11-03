@@ -146,8 +146,8 @@ public sealed class MigrationWorkspaceBuilder
         MigrationSourceAnalysis analysis,
         IReadOnlyDictionary<string, string> commits,
         string destination,
-        CancellationToken ct,
-        AzureDevOpsProject? project = null)
+        AzureDevOpsProject? project,
+        CancellationToken ct)
     {
         Directory.CreateDirectory(destination);
         var template = await ReadTemplateAsync(target.Plan, ct).ConfigureAwait(false);
@@ -206,7 +206,9 @@ public sealed class MigrationWorkspaceBuilder
                     .Where(e => e != extension && IsBelow(e.SourcePath, extension.SourcePath))
                     .Select(e => e.SourcePath)
                     .ToList();
-                var to = Path.Combine(destination, extension.Folder);
+                // Under() keeps a folder name from a source (a repository's name)
+                // inside the workspace whatever it holds.
+                var to = Under(destination, extension.Folder);
                 CopyExtension(from, to, extension.SourcePath, nested);
 
                 var manifestPath = Path.Combine(to, AppJsonManifestParser.FileName);

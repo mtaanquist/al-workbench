@@ -8,6 +8,7 @@ using ALDevToolbox.Services.Migration;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using static ALDevToolbox.Tests.Migration.MigrationTestFiles;
 
@@ -134,7 +135,7 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
         var job = Job(userId, Repo("r1", "cronus-base", origin)) with
         {
             Create = new MigrationCreateRequest("cronus-as", true, false, null,
-                new Dictionary<string, string> { ["cronus-base"] = "0000000000000000000000000000000000000000" }),
+                new Dictionary<string, string> { ["r1"] = "0000000000000000000000000000000000000000" }),
         };
         _queue.TryStart(job, "cronus/Sales", "https://dev.azure.com/cronus/Sales", out _).Should().NotBeNull();
         await using (var ctx = _db.NewContext())
@@ -152,6 +153,12 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
         run.Status.Should().Be(MigrationPreviewStatus.Failed);
         run.Error.Should().Contain("main has changed in cronus-base").And.Contain("Nothing was created");
         run.Outcome.Should().BeNull();
+
+        await using var check = _db.NewContext();
+        var row = await check.RepositoryMigrations.AsNoTracking().SingleAsync();
+        row.Succeeded.Should().BeFalse("a run that stopped is still listed under Earlier migrations");
+        row.RepositoryFullName.Should().BeNull();
+        row.Message.Should().Contain("main has changed");
     }
 
     [Fact]

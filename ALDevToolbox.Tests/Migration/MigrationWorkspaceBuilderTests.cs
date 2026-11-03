@@ -71,7 +71,7 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
             workspace = await MigrationTestServices.NewBuilder(_db, ctx).BuildAsync(
                 MigrationTestServices.Target(), sources, analysis,
                 new Dictionary<string, string> { ["cronus-base"] = "abc1234", ["cronus-sales"] = "def5678" },
-                destination, CancellationToken.None, new AzureDevOpsProject("cronus", "Sales"));
+                destination, new AzureDevOpsProject("cronus", "Sales"), CancellationToken.None);
         }
 
         Files(destination).Should().BeEquivalentTo(
@@ -149,7 +149,7 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
         {
             workspace = await MigrationTestServices.NewBuilder(_db, ctx).BuildAsync(
                 MigrationTestServices.Target(addTemplateExtensions: true), sources, analysis,
-                new Dictionary<string, string>(), destination, CancellationToken.None);
+                new Dictionary<string, string>(), destination, null, CancellationToken.None);
         }
 
         workspace.TemplateFolders.Should().Equal("Core");

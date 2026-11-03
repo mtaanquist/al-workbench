@@ -123,13 +123,15 @@ public sealed class RepositoryMigrationPreviewer
             if (job.Create is { } pinned)
             {
                 var moved = job.Repositories
-                    .Where(r => commits.TryGetValue(r.Name, out var now) && pinned.PinnedCommits.TryGetValue(r.Name, out var then) && now != then)
+                    .Where(r => !pinned.PinnedCommits.TryGetValue(r.Id, out var then)
+                        || (commits.TryGetValue(r.Name, out var now) && now != then))
                     .Select(r => r.Name)
                     .ToList();
                 if (moved.Count > 0)
                 {
-                    _queue.MarkFailed(job.Id,
-                        $"main has changed in {string.Join(", ", moved)} since the preview. Nothing was created. Preview again to see what would move now.");
+                    var message = $"main has changed in {string.Join(", ", moved)} since the preview. Nothing was created. Preview again to see what would move now.";
+                    _queue.MarkFailed(job.Id, message);
+                    await _publisher.RecordStoppedAsync(job, commits, message, ct).ConfigureAwait(false);
                     return;
                 }
             }
@@ -145,7 +147,7 @@ public sealed class RepositoryMigrationPreviewer
                 if (job.Create is not null) _queue.SetStage(job.Id, "Laying out the new repository");
                 try
                 {
-                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), ct, job.Project)
+                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), job.Project, ct)
                         .ConfigureAwait(false);
                 }
                 catch (PlanValidationException ex)
@@ -171,6 +173,12 @@ public sealed class RepositoryMigrationPreviewer
                 return;
             }
 
+            if (job.Create is not null)
+            {
+                // The sources no longer move cleanly; the page shows the findings.
+                await _publisher.RecordStoppedAsync(job, commits,
+                    "Nothing was created: the repositories no longer migrate cleanly. Preview again to see why.", ct).ConfigureAwait(false);
+            }
             _queue.MarkDone(job.Id, analysis, workspace);
             _logger.LogInformation(
                 "Migration preview {PreviewId} of {Project} read {RepositoryCount} repositories ({FailedCount} failed) and found {ExtensionCount} extensions in {Duration}.",
@@ -261,8 +269,14 @@ public sealed class RepositoryMigrationPreviewer
 
     private static string GitMessage(ProcessRunResult result, string token)
     {
+        var text = GitDetail(result, token);
+        return text.Length == 0 ? $"git stopped with exit code {result.ExitCode}." : text;
+    }
+
+    /// <summary>What git said, with the token removed and cut to a length a page can show.</summary>
+    internal static string GitDetail(ProcessRunResult result, string token)
+    {
         var text = ProjectBuildService.Sanitize((result.StdErr.Length > 0 ? result.StdErr : result.StdOut).Trim(), token);
-        if (text.Length == 0) return $"git stopped with exit code {result.ExitCode}.";
         return text.Length > 500 ? text[..500] + "..." : text;
     }
 

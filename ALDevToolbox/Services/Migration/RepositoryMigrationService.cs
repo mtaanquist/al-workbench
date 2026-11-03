@@ -115,20 +115,10 @@ public sealed class RepositoryMigrationService
         }
         var migrationTarget = await BuildTargetAsync(target, ct).ConfigureAwait(false);
 
-        var token = await RequireTokenAsync(ct).ConfigureAwait(false);
-        var listed = await ListAsync(project, token, ct).ConfigureAwait(false);
-        var repositories = listed.Where(r => chosen.Contains(r.Id)).ToList();
-        if (repositories.Count != chosen.Count)
-        {
-            throw Refuse(RepositoriesField,
-                "Some of the chosen repositories are no longer in this project. Show the repositories again and choose again.");
-        }
-
-        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_org, "starting a migration preview");
-        if (identity.UserId is null)
-        {
-            throw new InvalidOperationException("A migration preview needs a signed-in person.");
-        }
+        var repositories = await ListChosenAsync(project, chosen, RepositoriesField,
+            "Some of the chosen repositories are no longer in this project. Show the repositories again and choose again.", ct)
+            .ConfigureAwait(false);
+        var identity = RequireIdentity("starting a migration preview");
 
         var job = new MigrationPreviewJob(Guid.NewGuid(), identity, project, repositories, migrationTarget);
         var preview = _queue.TryStart(job, project.DisplayName, project.WebUrl, out var refusal);
@@ -175,7 +165,7 @@ public sealed class RepositoryMigrationService
     public async Task<MigrationPreview> StartMigrationAsync(Guid previewId, MigrationCreateInput input, CancellationToken ct = default)
     {
         var preview = GetPreview(previewId);
-        if (preview is null || preview.IsMigration || preview.Status != MigrationPreviewStatus.Done || !preview.CanMigrate)
+        if (preview is not { CanCreate: true })
         {
             throw Refuse(RepositoryField, "This preview can't be migrated any more. Preview again, then create the repository from the new preview.");
         }
@@ -193,23 +183,26 @@ public sealed class RepositoryMigrationService
             input.ReplaceExistingSolution && clash is { CanReplace: true } ? clash.Id : null,
             preview.Repositories
                 .Where(r => r.Commit is not null)
-                .ToDictionary(r => r.Name, r => r.Commit!, StringComparer.Ordinal));
+                .ToDictionary(r => r.Id, r => r.Commit!, StringComparer.OrdinalIgnoreCase));
         await _publisher.CheckAsync(target.CustomerName, request, ct).ConfigureAwait(false);
 
-        var token = await RequireTokenAsync(ct).ConfigureAwait(false);
-        var listed = await ListAsync(project, token, ct).ConfigureAwait(false);
-        var ids = preview.Repositories.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var repositories = listed.Where(r => ids.Contains(r.Id)).ToList();
-        if (repositories.Count != ids.Count)
-        {
-            throw Refuse(RepositoryField,
-                "Some of the previewed repositories are no longer in the Azure DevOps project. Preview again.");
-        }
+        var repositories = await ListChosenAsync(project, preview.Repositories.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase),
+            RepositoryField, "Some of the previewed repositories are no longer in the Azure DevOps project. Preview again.", ct)
+            .ConfigureAwait(false);
+        var identity = RequireIdentity("starting a migration");
 
-        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_org, "starting a migration");
         var job = new MigrationPreviewJob(Guid.NewGuid(), identity, project, repositories, target, request);
-        var run = _queue.TryStart(job, project.DisplayName, project.WebUrl, out var refusal)
-            ?? throw Refuse(RepositoryField, refusal ?? "The migration could not be started. Try again in a few minutes.");
+        // One preview creates at most one repository, even from two tabs.
+        if (!_queue.TryClaim(preview.Id, job.Id))
+        {
+            throw Refuse(RepositoryField, "This preview has already been used to start a migration. Preview again to start another.");
+        }
+        var run = _queue.TryStart(job, project.DisplayName, project.WebUrl, out var refusal);
+        if (run is null)
+        {
+            _queue.Release(preview.Id, job.Id);
+            throw Refuse(RepositoryField, refusal ?? "The migration could not be started. Try again in a few minutes.");
+        }
 
         _logger.LogInformation(
             "Queued migration {RunId} of {RepositoryCount} repositories from {Project} into {RepositoryName} for user {UserId}.",
@@ -295,6 +288,29 @@ public sealed class RepositoryMigrationService
         }
 
         return new MigrationTarget(template.Key, template.Name, customer, input.AddTemplateExtensions, plan);
+    }
+
+    /// <summary>
+    /// The repositories with ids <paramref name="ids"/>, listed from Azure DevOps
+    /// again rather than taken from the page, so only a repository that really is
+    /// in the project is ever cloned.
+    /// </summary>
+    private async Task<List<AzureDevOpsRepository>> ListChosenAsync(
+        AzureDevOpsProject project, IReadOnlySet<string> ids, string field, string missing, CancellationToken ct)
+    {
+        var token = await RequireTokenAsync(ct).ConfigureAwait(false);
+        var listed = await ListAsync(project, token, ct).ConfigureAwait(false);
+        var repositories = listed.Where(r => ids.Contains(r.Id)).ToList();
+        if (repositories.Count != ids.Count) throw Refuse(field, missing);
+        return repositories;
+    }
+
+    private AmbientOrganizationScope.OrganizationIdentity RequireIdentity(string what)
+    {
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_org, what);
+        return identity.UserId is null
+            ? throw new InvalidOperationException($"{what} needs a signed-in person.")
+            : identity;
     }
 
     private static AzureDevOpsProject ParseProject(string? projectAddress)

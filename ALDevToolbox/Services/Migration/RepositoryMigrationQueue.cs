@@ -65,13 +65,17 @@ public sealed record MigrationPreview(
     bool AddTemplateExtensions = false,
     MigrationCreateRequest? Create = null,
     MigrationOutcome? Outcome = null,
-    string? Stage = null)
+    string? Stage = null,
+    Guid? MigratedBy = null)
 {
     /// <summary>
     /// True for a migration run rather than a preview: it reads the sources again
     /// and then creates the repository (#1701).
     /// </summary>
     public bool IsMigration => Create is not null;
+
+    /// <summary>True when the repository can be created from this preview: it is ready and no run has used it yet.</summary>
+    public bool CanCreate => !IsMigration && Status == MigrationPreviewStatus.Done && CanMigrate && MigratedBy is null;
 
     /// <summary>True when the sources and the workspace built from them are both fit to move.</summary>
     public bool CanMigrate => Analysis is { CanMigrate: true } && Workspace is { CanMigrate: true };
@@ -177,6 +181,24 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
         }
     }
 
+    /// <summary>
+    /// Marks <paramref name="previewId"/> as used by the run <paramref name="runId"/>,
+    /// so one preview creates at most one repository. False when it is not
+    /// <see cref="MigrationPreview.CanCreate"/> any more.
+    /// </summary>
+    internal bool TryClaim(Guid previewId, Guid runId)
+    {
+        lock (_admit)
+        {
+            if (!_previews.TryGetValue(previewId, out var preview) || !preview.CanCreate) return false;
+            return _previews.TryUpdate(previewId, preview with { MigratedBy = runId }, preview);
+        }
+    }
+
+    /// <summary>Gives a claimed preview back when its run could not be queued.</summary>
+    internal void Release(Guid previewId, Guid runId) =>
+        Update(previewId, p => p.MigratedBy == runId ? p with { MigratedBy = null } : p);
+
     /// <summary>The preview, but only for the person in the organisation who started it.</summary>
     public MigrationPreview? Get(Guid id, int organizationId, int userId) =>
         _previews.TryGetValue(id, out var preview) && preview.OrganizationId == organizationId && preview.UserId == userId
@@ -214,7 +236,17 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
 
     /// <summary>A preview dropped because a restore replaced the database it was asked under.</summary>
     protected override void OnDiscarded(MigrationPreviewJob job, long epoch) =>
-        MarkFailed(job.Id, "The server was restored from a backup while this preview waited. Start it again.");
+        MarkFailed(job.Id, RestoredWhileWaiting(job));
+
+    /// <summary>Why a job that was waiting when the database was restored will not run.</summary>
+    internal static string RestoredWhileWaiting(MigrationPreviewJob job) => job.Create is null
+        ? "The server was restored from a backup while this preview waited. Start it again."
+        : "The server was restored from a backup while this migration waited. Nothing was created. Preview again.";
+
+    /// <summary>Why a job that stopped without an outcome shows as failed.</summary>
+    internal static string StoppedUnexpectedly(MigrationPreviewJob job) => job.Create is null
+        ? "The preview stopped unexpectedly. Try again. If it fails again, ask whoever runs AL Workbench for your company to look into it."
+        : "The migration stopped unexpectedly. Check Earlier migrations and GitHub for a half-made repository before you try again.";
 
     private void Update(Guid id, Func<MigrationPreview, MigrationPreview> change)
     {
