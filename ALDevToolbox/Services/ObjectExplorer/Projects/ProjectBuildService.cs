@@ -2892,7 +2892,7 @@ public sealed class ProjectBuildService
         return text;
     }
 
-    private static string Sanitize(string text, string secret)
+    internal static string Sanitize(string text, string secret)
     {
         if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(secret)) return text;
         text = text.Replace(secret, "***");

@@ -658,6 +658,28 @@ public sealed class TestDb : IDisposable
             logger ?? NullLogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>.Instance);
 
     /// <summary>
+    /// The last step of Migrate repositories (#1701) on this fixture's context.
+    /// With no <paramref name="client"/>, GitHub cannot be reached, which is all
+    /// a preview needs.
+    /// </summary>
+    public ALDevToolbox.Services.Migration.RepositoryMigrationPublisher NewRepositoryMigrationPublisher(
+        AppDbContext ctx,
+        ALDevToolbox.Services.GitHub.GitHubAppClient? client = null,
+        ALDevToolbox.Services.GitHub.GitHubAccessService? access = null)
+    {
+        client ??= NewGitHubAppClient(ctx, new UnreachableHandler());
+        access ??= NewGitHubAccessService(ctx, client);
+        return new(
+            NewGitHubWorkspaceRepositoryService(ctx, client, access),
+            NewGitHubConnectionService(ctx, access),
+            client,
+            NewProjectService(ctx, access),
+            new ALDevToolbox.Services.ObjectExplorer.ProcessRunner(),
+            ctx,
+            NullLogger<ALDevToolbox.Services.Migration.RepositoryMigrationPublisher>.Instance);
+    }
+
+    /// <summary>
     /// The "is this tool switched on for the acting organisation" service. There
     /// is no HttpContext in a test, so it answers from the organisation row -
     /// which is what an MCP request does too.
