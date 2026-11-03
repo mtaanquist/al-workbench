@@ -1,0 +1,504 @@
+@page "/admin/administration/repositories/migrate"
+@attribute [Authorize(Roles = "Admin")]
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject RepositoryMigrationService Migration
+@inject NavigationManager Nav
+@inject ILogger<AdminAdministrationMigrate> Log
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.Migration
+
+@*
+    Migrate repositories (issue #1698, part 1 #1699). Reached from the
+    "Migrate repositories" row on Administration -> Repositories.
+
+    Named user: an org Admin moving one customer at a time from Azure DevOps
+    to GitHub. They know Azure DevOps, GitHub and AL extensions; they know
+    nothing about this codebase. They have done this before for other
+    customers, or are about to do it for a hundred of them, so the page is a
+    short straight line: name the project, tick the repositories, look at
+    what would move.
+*@
+
+<PageTitle>Migrate repositories · Administration · AL Workbench</PageTitle>
+
+<EditPage Title="Migrate repositories"
+          IsLoading="@_loading" ShowActions="false"
+          Trail='@([new("Administration", "/admin/administration"), new("Repositories", "/admin/administration/repositories"), new("Migrate repositories")])'>
+    <SubtitleContent>
+        Move a customer's repositories from an Azure DevOps project into one new GitHub repository.
+        Only the newest commit on main is copied, without history. Nothing in Azure DevOps is changed.
+    </SubtitleContent>
+    <ChildContent>
+        <div class="u-stack mig">
+            @if (!_hasToken)
+            {
+                <Alert Tone="AlertTone.Warn">
+                    <span>
+                        You need an Azure DevOps token with the Code (Read) scope before you can start. Add one under
+                        <a href="/account/repos">Account → Repository access</a>, then come back.
+                    </span>
+                </Alert>
+            }
+
+            <section class="card">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">1. Azure DevOps project</h2>
+                        <p class="card__sub">The project the customer's repositories are in.</p>
+                    </div>
+                </div>
+                <div class="card__body form-sec">
+                    <div class="field">
+                        <label class="field__label" for="mig-project">Project address</label>
+                        <div class="u-row mig__address">
+                            <input class="input" id="mig-project" type="text" required
+                                   placeholder="e.g. https://dev.azure.com/cronus/Sales"
+                                   @bind="_projectAddress" @bind:event="oninput"
+                                   @onkeydown="OnAddressKeyAsync"
+                                   disabled="@(!_hasToken || _listing)" />
+                            <button type="button" class="btn" @onclick="ListAsync" disabled="@(!_hasToken || _listing)">
+                                <Icon Name="search" Width="16" Height="16" />
+                                <span>@(_listing ? "Looking..." : "Show repositories")</span>
+                            </button>
+                        </div>
+                        <span class="field__hint">Copy it from your browser while the project is open.</span>
+                        <FieldError Field="@RepositoryMigrationService.ProjectField" Errors="_errors" />
+                    </div>
+                </div>
+            </section>
+
+            @if (_listed is not null)
+            {
+                <section class="card">
+                    <div class="card__head">
+                        <div>
+                            <h2 class="card__title">2. Repositories to move</h2>
+                            <p class="card__sub">
+                                Tick every repository of this customer, including the ones the others depend on.
+                                They all end up in the same GitHub repository.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card__body">
+                        @if (_listed.Repositories.Count == 0)
+                        {
+                            <EmptyState Icon="folder-git-2" Title="This project has no repositories">
+                                <Text>Check that the address names the right project, then show the repositories again.</Text>
+                            </EmptyState>
+                        }
+                        else
+                        {
+                            <div class="mig__scroll">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th class="mig__pick">
+                                                <label class="check @(AllChosen ? "is-checked" : "")" title="Choose all">
+                                                    <input type="checkbox" checked="@AllChosen" @onchange="ToggleAll" aria-label="Choose all repositories" />
+                                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                </label>
+                                            </th>
+                                            <th>Repository</th>
+                                            <th>Default branch</th>
+                                            <th class="u-num">Size</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var repo in _listed.Repositories)
+                                        {
+                                            <tr>
+                                                <td class="mig__pick">
+                                                    <label class="check @(IsChosen(repo.Id) ? "is-checked" : "") @(repo.IsDisabled ? "is-disabled" : "")">
+                                                        <input type="checkbox" checked="@IsChosen(repo.Id)" disabled="@repo.IsDisabled"
+                                                               @onchange="e => Toggle(repo.Id, e)" aria-label="@($"Move {repo.Name}")" />
+                                                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                    </label>
+                                                </td>
+                                                <td>
+                                                    <a class="u-nowrap" href="@repo.WebUrl" target="_blank" rel="noopener">@repo.Name</a>
+                                                    @if (repo.IsDisabled)
+                                                    {
+                                                        <span class="u-muted"> · switched off in Azure DevOps</span>
+                                                    }
+                                                    else if (repo.DefaultBranch is not null && repo.DefaultBranch != RepositoryMigrationPreviewer.Branch)
+                                                    {
+                                                        <span class="u-muted"> · needs a main branch to be moved</span>
+                                                    }
+                                                </td>
+                                                <td>
+                                                    @if (repo.DefaultBranch is null)
+                                                    {
+                                                        <span class="u-muted">Empty</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @repo.DefaultBranch
+                                                    }
+                                                </td>
+                                                <td class="u-num u-nowrap">@FormatSize(repo.Size)</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="field__hint mig__note">
+                                Only the newest commit is copied, so large repositories still preview quickly.
+                            </p>
+                            <FieldError Field="@RepositoryMigrationService.RepositoriesField" Errors="_errors" />
+                            <div class="u-row mig__go">
+                                <button type="button" class="btn btn--primary" @onclick="PreviewAsync"
+                                        disabled="@(_chosen.Count == 0 || _starting || _preview?.IsActive == true)">
+                                    <Icon Name="eye" Width="16" Height="16" />
+                                    <span>@(_starting ? "Starting..." : $"Preview migration of {_chosen.Count} {(_chosen.Count == 1 ? "repository" : "repositories")}")</span>
+                                </button>
+                            </div>
+                        }
+                    </div>
+                </section>
+            }
+
+            @if (_preview is not null)
+            {
+                <section class="card" aria-live="polite">
+                    <div class="card__head">
+                        <div>
+                            <h2 class="card__title">3. Preview</h2>
+                            <p class="card__sub">
+                                From <a href="@_preview.ProjectUrl" target="_blank" rel="noopener">@_preview.ProjectName</a>.
+                                Nothing has been created on GitHub.
+                            </p>
+                        </div>
+                        <StatusPill Tone="@PreviewTone(_preview)">@PreviewLabel(_preview)</StatusPill>
+                    </div>
+                    <div class="card__body u-stack">
+                        @if (_preview.Error is { } error)
+                        {
+                            <Alert Tone="AlertTone.Danger"><span>@error</span></Alert>
+                        }
+
+                        <div class="mig__scroll">
+                            <table class="data-table">
+                                <thead>
+                                    <tr><th>Repository</th><th>Commit on main</th><th>Status</th></tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var repo in _preview.Repositories)
+                                    {
+                                        <tr>
+                                            <td><a class="u-nowrap" href="@repo.WebUrl" target="_blank" rel="noopener">@repo.Name</a></td>
+                                            <td class="u-nowrap">
+                                                @if (repo.Commit is { Length: >= 7 } sha)
+                                                {
+                                                    <a href="@($"{repo.WebUrl}/commit/{sha}")" target="_blank" rel="noopener"><code>@sha[..7]</code></a>
+                                                }
+                                                else
+                                                {
+                                                    <span class="u-muted">-</span>
+                                                }
+                                            </td>
+                                            <td><StatusPill Tone="@RepositoryTone(repo.Status)">@RepositoryLabel(repo.Status)</StatusPill></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+
+                        @if (_preview.Analysis is { } analysis)
+                        {
+                            @if (analysis.CanMigrate)
+                            {
+                                <Alert Tone="AlertTone.Success">
+                                    <span>Nothing stands in the way. @analysis.Extensions.Count @(analysis.Extensions.Count == 1 ? "extension" : "extensions") would be moved. Nothing has been moved yet.</span>
+                                </Alert>
+                            }
+                            else if (analysis.Findings.Any(f => f.Severity == MigrationFindingSeverity.Blocking))
+                            {
+                                <Alert Tone="AlertTone.Danger">
+                                    <span>Fix the problems below in Azure DevOps, then preview again.</span>
+                                </Alert>
+                            }
+
+                            @if (analysis.Findings.Count > 0)
+                            {
+                                <ul class="mig__findings">
+                                    @foreach (var finding in analysis.Findings)
+                                    {
+                                        <li class="mig__finding">
+                                            <StatusPill Tone="@(finding.Severity == MigrationFindingSeverity.Blocking ? "danger" : "warn")">
+                                                @(finding.Severity == MigrationFindingSeverity.Blocking ? "Problem" : "Note")
+                                            </StatusPill>
+                                            <span>
+                                                @if (finding.RepositoryName is { } name)
+                                                {
+                                                    <strong>@name:</strong>@(" ")
+                                                }
+                                                @finding.Message
+                                            </span>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+
+                            @if (analysis.Extensions.Count > 0)
+                            {
+                                <h3 class="mig__subhead">Extensions found</h3>
+                                <div class="mig__scroll">
+                                    <table class="data-table">
+                                        <thead>
+                                            <tr><th>Folder in the new repository</th><th>Extension</th><th>Publisher</th><th>Version</th><th>From</th></tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var ext in analysis.Extensions)
+                                            {
+                                                <tr>
+                                                    <td class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @ext.Folder</td>
+                                                    <td>@ext.Name</td>
+                                                    <td>@ext.Publisher</td>
+                                                    <td class="u-nowrap">@ext.Version</td>
+                                                    <td class="u-muted">@ext.RepositoryName@(ext.SourcePath.Length > 0 ? "/" + ext.SourcePath : "")</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                        }
+                        else if (_preview.IsActive)
+                        {
+                            <p class="u-muted">
+                                @(_preview.Status == MigrationPreviewStatus.Waiting
+                                    ? "Waiting for another preview on the server to finish."
+                                    : "Copying the newest commit of each repository. This page updates by itself.")
+                            </p>
+                        }
+
+                        @if (!_preview.IsActive)
+                        {
+                            <div class="u-row">
+                                <button type="button" class="btn" @onclick="PreviewAgainAsync" disabled="@_starting">
+                                    <Icon Name="refresh-cw" Width="16" Height="16" />
+                                    <span>@(_starting ? "Starting..." : "Preview again")</span>
+                                </button>
+                            </div>
+                            <FieldError Field="@RepositoryMigrationService.RepositoriesField" Errors="_againErrors" />
+                        }
+                    </div>
+                </section>
+            }
+        </div>
+    </ChildContent>
+</EditPage>
+
+@code {
+    [SupplyParameterFromQuery(Name = "preview")] public Guid? PreviewId { get; set; }
+
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
+
+    private bool _loading = true;
+    private bool _hasToken;
+    private bool _listing;
+    private bool _starting;
+    private string _projectAddress = string.Empty;
+    private SourceProjectListing? _listed;
+    private readonly HashSet<string> _chosen = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyDictionary<string, string> _errors = new Dictionary<string, string>();
+    private IReadOnlyDictionary<string, string> _againErrors = new Dictionary<string, string>();
+    private MigrationPreview? _preview;
+    private PeriodicTimer? _poll;
+    private CancellationTokenSource? _pollCts;
+
+    private bool AllChosen => _listed is { Repositories.Count: > 0 } listed
+        && listed.Repositories.Where(r => !r.IsDisabled).All(r => _chosen.Contains(r.Id))
+        && _chosen.Count > 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hasToken = await Migration.HasAzureDevOpsTokenAsync();
+        if (PreviewId is { } id)
+        {
+            _preview = Migration.GetPreview(id);
+        }
+        _loading = false;
+    }
+
+    // Not only on the first render: initialisation awaits a database read, so the
+    // first render can come before a reloaded preview has been read.
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (_preview?.IsActive == true && _poll is null) StartPoll();
+    }
+
+    private async Task OnAddressKeyAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await ListAsync();
+    }
+
+    private async Task ListAsync()
+    {
+        if (_listing) return;
+        _listing = true;
+        _errors = new Dictionary<string, string>();
+        try
+        {
+            _listed = await Migration.ListRepositoriesAsync(_projectAddress);
+            _projectAddress = _listed.Project.WebUrl;
+            // One project is usually one customer, so every repository that can be
+            // moved starts ticked.
+            _chosen.Clear();
+            foreach (var repo in _listed.Repositories.Where(r => !r.IsDisabled)) _chosen.Add(repo.Id);
+        }
+        catch (PlanValidationException ex)
+        {
+            _listed = null;
+            _errors = ex.Errors;
+        }
+        finally
+        {
+            _listing = false;
+        }
+    }
+
+    private bool IsChosen(string repositoryId) => _chosen.Contains(repositoryId);
+
+    private void Toggle(string id, ChangeEventArgs e)
+    {
+        if (e.Value is true) _chosen.Add(id); else _chosen.Remove(id);
+    }
+
+    private void ToggleAll(ChangeEventArgs e)
+    {
+        if (_listed is null) return;
+        if (e.Value is true)
+        {
+            foreach (var repo in _listed.Repositories.Where(r => !r.IsDisabled)) _chosen.Add(repo.Id);
+        }
+        else
+        {
+            _chosen.Clear();
+        }
+    }
+
+    private Task PreviewAsync() => StartAsync(_projectAddress, _chosen.ToList(), errors => _errors = errors);
+
+    /// <summary>Runs the same project and repositories again, also after a reload, when steps 1 and 2 are empty.</summary>
+    private Task PreviewAgainAsync() => _preview is null
+        ? Task.CompletedTask
+        : StartAsync(_preview.ProjectUrl, _preview.Repositories.Select(r => r.Id).ToList(), errors => _againErrors = errors);
+
+    private async Task StartAsync(string projectAddress, IReadOnlyCollection<string> repositoryIds, Action<IReadOnlyDictionary<string, string>> showErrors)
+    {
+        if (_starting) return;
+        _starting = true;
+        _errors = new Dictionary<string, string>();
+        _againErrors = new Dictionary<string, string>();
+        try
+        {
+            _preview = await Migration.StartPreviewAsync(projectAddress, repositoryIds);
+            // The preview's id in the address lets a reload, or a second tab, show it.
+            Nav.NavigateTo($"/admin/administration/repositories/migrate?preview={_preview.Id}", replace: true);
+            StartPoll();
+        }
+        catch (PlanValidationException ex)
+        {
+            showErrors(ex.Errors);
+        }
+        finally
+        {
+            _starting = false;
+        }
+    }
+
+    private void StartPoll()
+    {
+        if (_poll is not null) return;
+        _pollCts = new CancellationTokenSource();
+        _poll = new PeriodicTimer(PollInterval);
+        _ = PollLoopAsync(_poll, _pollCts.Token);
+    }
+
+    private async Task PollLoopAsync(PeriodicTimer timer, CancellationToken token)
+    {
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                var keepGoing = true;
+                // Reads an in-memory snapshot only, on the circuit's own dispatcher.
+                await InvokeAsync(() =>
+                {
+                    if (_preview is null) { keepGoing = false; return; }
+                    _preview = Migration.GetPreview(_preview.Id) ?? _preview;
+                    keepGoing = _preview.IsActive;
+                    StateHasChanged();
+                });
+                if (!keepGoing) break;
+            }
+        }
+        catch (OperationCanceledException) { /* navigated away */ }
+        catch (ObjectDisposedException) { /* torn down mid-poll */ }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Polling a migration preview failed.");
+        }
+        finally
+        {
+            StopPoll();
+        }
+    }
+
+    private void StopPoll()
+    {
+        var cts = Interlocked.Exchange(ref _pollCts, null);
+        var timer = Interlocked.Exchange(ref _poll, null);
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { }
+        cts?.Dispose();
+        timer?.Dispose();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        StopPoll();
+        return ValueTask.CompletedTask;
+    }
+
+    private static string FormatSize(long bytes) => bytes switch
+    {
+        < 1024 * 1024 => $"{Math.Max(1, bytes / 1024.0):0} KB",
+        < 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024):0.#} MB",
+        _ => $"{bytes / (1024.0 * 1024 * 1024):0.#} GB",
+    };
+
+    private static string PreviewTone(MigrationPreview p) => p.Status switch
+    {
+        MigrationPreviewStatus.Waiting => "queued",
+        MigrationPreviewStatus.Running => "running",
+        MigrationPreviewStatus.Failed => "failed",
+        _ => p.Analysis?.CanMigrate == true ? "succeeded" : "danger",
+    };
+
+    private static string PreviewLabel(MigrationPreview p) => p.Status switch
+    {
+        MigrationPreviewStatus.Waiting => "Waiting",
+        MigrationPreviewStatus.Running => "Reading repositories",
+        MigrationPreviewStatus.Failed => "Failed",
+        _ => p.Analysis?.CanMigrate == true ? "Ready to migrate" : "Needs fixing",
+    };
+
+    private static string RepositoryTone(MigrationRepositoryStatus s) => s switch
+    {
+        MigrationRepositoryStatus.Waiting => "queued",
+        MigrationRepositoryStatus.Cloning => "running",
+        MigrationRepositoryStatus.Cloned => "succeeded",
+        _ => "failed",
+    };
+
+    private static string RepositoryLabel(MigrationRepositoryStatus s) => s switch
+    {
+        MigrationRepositoryStatus.Waiting => "Waiting",
+        MigrationRepositoryStatus.Cloning => "Copying",
+        MigrationRepositoryStatus.Cloned => "Copied",
+        _ => "Failed",
+    };
+}
