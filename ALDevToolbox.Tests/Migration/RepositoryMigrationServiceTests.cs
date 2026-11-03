@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Migration;
+using ALDevToolbox.Services.Templates;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -26,6 +27,8 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
             { "id": "r2", "name": "cronus-payroll", "defaultBranch": "refs/heads/main", "size": 20 }
         ] }
         """;
+
+    private static readonly MigrationTargetInput Cronus = new(MigrationTestServices.TemplateKey, "CRONUS A/S");
 
     private readonly TestDb _db = new();
     private readonly RepositoryMigrationQueue _queue = new(TimeProvider.System);
@@ -91,7 +94,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         var userId = await SeedUserWithTokenAsync();
 
         var preview = await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
-            .StartPreviewAsync(Project, ["r2"]);
+            .StartPreviewAsync(Project, ["r2"], Cronus);
 
         preview.Status.Should().Be(MigrationPreviewStatus.Waiting);
         preview.OrganizationId.Should().Be(TestDb.DefaultOrgId);
@@ -111,7 +114,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         await SeedUserWithTokenAsync();
 
         var act = () => NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
-            .StartPreviewAsync(Project, []);
+            .StartPreviewAsync(Project, [], Cronus);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors[RepositoryMigrationService.RepositoriesField].Should().Contain("at least one");
@@ -123,7 +126,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         await SeedUserWithTokenAsync();
 
         var act = () => NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
-            .StartPreviewAsync(Project, ["r1", "somewhere-else"]);
+            .StartPreviewAsync(Project, ["r1", "somewhere-else"], Cronus);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors[RepositoryMigrationService.RepositoriesField].Should().Contain("no longer in this project");
@@ -135,15 +138,15 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
     {
         await SeedUserWithTokenAsync();
         var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
-        var first = await svc.StartPreviewAsync(Project, ["r1"]);
+        var first = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
 
-        var act = () => svc.StartPreviewAsync(Project, ["r2"]);
+        var act = () => svc.StartPreviewAsync(Project, ["r2"], Cronus);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors[RepositoryMigrationService.RepositoriesField].Should().Contain("still running");
 
         _queue.MarkDone(first.Id, new MigrationSourceAnalysis([], []));
-        (await svc.StartPreviewAsync(Project, ["r2"])).Id.Should().NotBe(first.Id, "a finished preview no longer holds the slot");
+        (await svc.StartPreviewAsync(Project, ["r2"], Cronus)).Id.Should().NotBe(first.Id, "a finished preview no longer holds the slot");
     }
 
     [Fact]
@@ -151,7 +154,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
     {
         var owner = await SeedUserWithTokenAsync();
         var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
-        var preview = await svc.StartPreviewAsync(Project, ["r1"]);
+        var preview = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
 
         svc.GetPreview(preview.Id).Should().NotBeNull();
 
@@ -163,11 +166,54 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         svc.GetPreview(preview.Id).Should().BeNull("nor does the same id in another organisation");
     }
 
+    [Fact]
+    public async Task The_job_carries_a_plan_for_the_template_and_customer_without_examples()
+    {
+        await SeedUserWithTokenAsync();
+
+        var preview = await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
+            .StartPreviewAsync(Project, ["r1"], new MigrationTargetInput(MigrationTestServices.TemplateKey, "  CRONUS A/S ", "CRO"));
+
+        preview.CustomerName.Should().Be("CRONUS A/S");
+        preview.TemplateName.Should().Be("Test Runtime");
+        _queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Target.Plan.Should().BeEquivalentTo(new
+        {
+            TemplateKey = MigrationTestServices.TemplateKey,
+            WorkspaceName = "CRONUS A/S",
+            ShortName = "CRO",
+            IncludeExamples = false,
+            CoreIdRangeFrom = 90000,
+            CoreIdRangeTo = 90999,
+        }, o => o.ExcludingMissingMembers());
+        job.Target.Plan.SelectedModuleKeys.Should().BeEmpty("the template's own extensions are left out unless asked for");
+        job.Target.AddTemplateExtensions.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("", "CRONUS A/S", RepositoryMigrationService.TemplateField)]
+    [InlineData("no-such-template", "CRONUS A/S", RepositoryMigrationService.TemplateField)]
+    [InlineData(MigrationTestServices.TemplateKey, "  ", RepositoryMigrationService.CustomerField)]
+    public async Task A_missing_template_or_customer_is_refused_under_its_field(string template, string customer, string field)
+    {
+        await SeedUserWithTokenAsync();
+        var handler = new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing);
+
+        var act = () => NewService(_db.NewContext(), handler)
+            .StartPreviewAsync(Project, ["r1"], new MigrationTargetInput(template, customer));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey(field);
+        _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued");
+    }
+
     private RepositoryMigrationService NewService(AppDbContext ctx, HttpMessageHandler handler) => new(
         AzureDevOpsClientTests.NewClient(handler),
         NewTokens(ctx),
         _queue,
         _db.OrgContext,
+        new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
+        new ApplicationVersionService(ctx, NullLogger<ApplicationVersionService>.Instance, _db.OrgContext),
+        _db.NewGenerationService(ctx),
         NullLogger<RepositoryMigrationService>.Instance);
 
     private UserRepositoryTokenService NewTokens(AppDbContext ctx) =>
@@ -193,6 +239,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
 
     private async Task<int> SeedUserWithTokenAsync(string token = "ado-pat")
     {
+        await MigrationTestServices.SeedTemplateAsync(_db);
         var id = await SeedUserAsync();
         await using var ctx = _db.NewContext();
         await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.AzureDevOps, token, clear: false);

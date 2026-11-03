@@ -908,6 +908,64 @@ public sealed class WorkspaceZipBuilder
     }
 
     /// <summary>
+    /// Swaps the extension folders listed in a generated <c>.code-workspace</c>
+    /// file: each folder in <paramref name="remove"/> leaves the list and the
+    /// root's <c>files.exclude</c>, and each in <paramref name="add"/> goes in
+    /// just before the workspace-root entry and is hidden under it, the way a
+    /// generated workspace lists its own. Migrate Repositories uses it to point
+    /// the template's file at the extensions moved in (#1700). Null when the
+    /// file is not a JSON object with a <c>folders</c> list.
+    /// </summary>
+    internal static string? ReplaceExtensionFolders(string json, IReadOnlyCollection<string> remove, IReadOnlyList<string> add)
+    {
+        JsonNode? parsed;
+        try
+        {
+            parsed = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        if (parsed is not JsonObject root || root["folders"] is not JsonArray folders) return null;
+
+        static string? PathOf(JsonNode? node) =>
+            node is JsonObject o && o["path"] is JsonValue v && v.TryGetValue<string>(out var path) ? path : null;
+
+        var removing = new HashSet<string>(remove, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in folders.Where(f => PathOf(f) is { } p && removing.Contains(p)).ToList())
+        {
+            folders.Remove(entry);
+        }
+        if (root["settings"] is JsonObject settings && settings["files.exclude"] is JsonObject exclude)
+        {
+            foreach (var key in exclude.Select(p => p.Key).Where(removing.Contains).ToList())
+            {
+                exclude.Remove(key);
+            }
+        }
+
+        var adding = add
+            .Where(a => !folders.Any(f => string.Equals(PathOf(f), a, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var rootEntry = folders.FirstOrDefault(f => PathOf(f) == ".");
+        var at = rootEntry is null ? folders.Count : folders.IndexOf(rootEntry);
+        foreach (var folder in adding)
+        {
+            folders.Insert(at++, new JsonObject { ["path"] = folder });
+        }
+        if (rootEntry is not null) ExcludeExtensionFoldersFromRoot(root, adding);
+        return SerializeIndented(root);
+    }
+
+    /// <summary>Writes <paramref name="node"/> the way every generated JSON file is written: two-space indents, no needless escaping.</summary>
+    internal static string WriteJson(JsonNode node) => SerializeIndented(node);
+
+    /// <summary>
     /// Display name of the workspace-root entry appended to the
     /// <c>folders</c> array, so the root files (README, <c>.gitignore</c>,
     /// <c>.assets</c>) are reachable from the explorer.

@@ -15,3 +15,10 @@
 .mig { min-width: 0; }
 .mig > .card { min-width: 0; }
 .mig__scroll { overflow-x: auto; max-width: 100%; }
+/* Part 2 (#1700): the short-name field, the app.json changes and the left-behind paths. */
+.mig__short { max-width: 14rem; }
+.mig__changes > summary { cursor: pointer; padding: var(--space-1) 0; }
+.mig__changes[open] > summary { margin-bottom: var(--space-2); }
+.mig__path { word-break: break-all; }
+.mig__changes { min-width: 0; max-width: 100%; }
+.mig__value { overflow-wrap: anywhere; min-width: 10rem; }

@@ -1,3 +1,12 @@
+using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Services.Generation;
+using ALDevToolbox.Services.Migration;
+using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Tests.Builders;
+using ALDevToolbox.Tests.Infrastructure;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace ALDevToolbox.Tests.Migration;
 
 /// <summary>A folder under the system temp folder, removed again on dispose.</summary>
@@ -52,4 +61,52 @@ internal static class MigrationTestFiles
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, content);
     }
+}
+
+/// <summary>The template and services a migration test builds a workspace with.</summary>
+internal static class MigrationTestServices
+{
+    public const string TemplateKey = "runtime-test";
+
+    /// <summary>Seeds the test template, opted into every organisation file the fixture has (.gitignore, README, ruleset, app.json).</summary>
+    public static async Task SeedTemplateAsync(TestDb db)
+    {
+        await using var ctx = db.NewContext();
+        var template = TemplateBuilder.Default(TemplateKey);
+        ctx.RuntimeTemplates.Add(template);
+        await ctx.SaveChangesAsync();
+        var fileIds = ctx.OrganizationFiles
+            .Where(f => f.OrganizationId == template.OrganizationId)
+            .OrderBy(f => f.Ordering)
+            .Select(f => f.Id)
+            .ToList();
+        for (var i = 0; i < fileIds.Count; i++)
+        {
+            ctx.Set<RuntimeTemplateIncludedFile>().Add(new RuntimeTemplateIncludedFile
+            {
+                OrganizationId = template.OrganizationId,
+                RuntimeTemplateId = template.Id,
+                OrganizationFileId = fileIds[i],
+                Ordering = i,
+            });
+        }
+        await ctx.SaveChangesAsync();
+    }
+
+    public static MigrationWorkspaceBuilder NewBuilder(TestDb db, AppDbContext ctx) => new(
+        db.NewGenerationService(ctx),
+        new WorkspaceConfigService(ctx),
+        new ProcessRunner(),
+        NullLogger<MigrationWorkspaceBuilder>.Instance);
+
+    /// <summary>A target on the test template for the customer "CRONUS A/S".</summary>
+    public static MigrationTarget Target(bool addTemplateExtensions = false) => new(
+        TemplateKey,
+        "Test Runtime",
+        "CRONUS A/S",
+        addTemplateExtensions,
+        PlanBuilder.WorkspacePlan(workspaceName: "CRONUS A/S", includeExamples: false) with
+        {
+            TenantId = Guid.NewGuid().ToString(),
+        });
 }

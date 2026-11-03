@@ -58,4 +58,50 @@ pipelines, and keep a history).
   extension, and about a dependency on an app by the same publisher that is not in the run,
   which usually means a repository was left unticked.
 
-Nothing is written to GitHub or the database in this part.
+Nothing is written to GitHub or the database in parts 1 and 2.
+
+## Part 2: the templated workspace (#1700)
+
+The page gains step 3, "New repository": the customer's name (it names the solution and the
+workspace, as on New Workspace), an optional short name, the template, and "Also add the
+template's own extensions" (off). `RepositoryMigrationService` turns these into a `ProjectPlan`
+at request time: the template's own id range and application version, no examples, a fresh
+tenant id, and the template's default modules only when its extensions are wanted. The plan is
+validated the way New Workspace validates it, so a bad template or name is refused before
+anything is cloned. The plan rides on the job.
+
+Once the sources are sound (`MigrationSourceAnalysis.CanMigrate`), the previewer hands the clones
+to `MigrationWorkspaceBuilder`, which writes the workspace into the preview's temporary folder:
+
+- **The template, generated as New Workspace generates it.** `GenerationService` builds the ZIP;
+  the builder unpacks it and drops the template's extension folders unless they were asked for.
+  A moved extension in the same folder as a kept template extension is a blocking problem.
+- **Each extension in its folder.** Copied without links, `.git`, `.alpackages`, or the folders
+  of extensions nested inside it (a test app inside its app's folder gets a folder of its own).
+  An extension at a repository's root also leaves behind that repository's own `.gitignore`,
+  `.code-workspace`, `azure-pipelines*.yml`, `.azuredevops/`, `.pipelines/` and `.github/`.
+- **Everything else in a source stays behind and is listed:** files outside every extension, as
+  whole folders where nothing inside moves. A source file the template has its own of (README,
+  `.code-workspace`) is listed as replaced.
+- **`app.json` rebuilt on the template's** (`MigrationAppJson`): the template's first extension's
+  `app.json`, as generated, is the base. Always the source's, and removed when the source has
+  none: `id`, `name`, `publisher`, `version`, `idRanges`/`idRange`, `dependencies`. The source's
+  when it has a value, otherwise the template's: `brief`, `description`, `logo`, `screenshots`,
+  `supportedLocales`, `target`, `internalsVisibleTo`, `propagateDependencies`,
+  `preprocessorSymbols`, `resourceFolders`, `applicationInsightsConnectionString`,
+  `applicationInsightsKey`, `keyVaultUrls`. The higher of the two: `application`, `platform`,
+  `runtime`. `features` is the union. Everything else is the template's, and a setting only the
+  source has is removed. The extra kept settings beyond Mads's list describe or configure one
+  app (an on-premises target, a telemetry key, a test app's `internalsVisibleTo`); overwriting
+  them would break the app rather than tidy it.
+- **The workspace files** point at the moved folders: the template's `.code-workspace` lists them
+  instead of its own extension folders, and `workspace.aldt.toml` records each moved extension
+  with kind `migrated`, its id, range, source repository and folder, and the commit read.
+- **The template's `.gitignore` decides the rest.** The builder runs `git init` and
+  `git ls-files --others --ignored --exclude-standard --directory` in the folder, removes what
+  git ignores inside the moved extensions and lists it, then removes the `.git` folder again.
+  Asking git means the preview and the later push agree exactly.
+
+The preview shows the template's root files, each extension's `app.json` changes (settings
+that only gain an empty value from the template are summarised in one line), and the list of
+what stays behind. The folder is deleted with the clones; part 3 builds it again and pushes it.
