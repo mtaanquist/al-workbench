@@ -384,11 +384,15 @@
                                 @if (workspace.RootFiles.Count > 0)
                                 {
                                     <p>
-                                        Added at the top of the repository, from the template:
+                                        Added at the top of the repository:
                                         @for (var i = 0; i < workspace.RootFiles.Count; i++)
                                         {
                                             <code>@workspace.RootFiles[i]</code>@(i < workspace.RootFiles.Count - 1 ? ", " : ".")
                                         }
+                                        @(" ")<span class="u-muted">
+                                            @MigrationWorkspaceBuilder.ArchiveFile links each Azure DevOps repository and the commit that was copied,
+                                            so the old history stays easy to find. The rest come from the template.
+                                        </span>
                                     </p>
                                 }
 
@@ -594,15 +598,15 @@
                                             <td>
                                                 @if (row.SolutionId is { } solutionId)
                                                 {
-                                                    <a href="@($"/solutions/{solutionId}")">@row.CustomerName</a>
+                                                    <a class="u-nowrap" href="@($"/solutions/{solutionId}")">@row.CustomerName</a>
                                                 }
                                                 else
                                                 {
-                                                    @row.CustomerName
+                                                    <span class="u-nowrap">@row.CustomerName</span>
                                                 }
                                                 @if (row.StartedBy is { } by)
                                                 {
-                                                    <div class="u-muted">by @by</div>
+                                                    <div class="field__hint">by @by</div>
                                                 }
                                             </td>
                                             <td><a href="@row.SourceProjectUrl" target="_blank" rel="noopener">@row.SourceProject</a></td>

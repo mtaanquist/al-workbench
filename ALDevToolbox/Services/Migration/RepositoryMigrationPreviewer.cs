@@ -117,7 +117,7 @@ public sealed class RepositoryMigrationPreviewer
                 _queue.SetRepository(job.Id, repository.Name, MigrationRepositoryStatus.Cloned, commit);
                 if (commit is not null) commits[repository.Name] = commit;
                 Cloned?.Invoke(dest);
-                cloned.Add(new ClonedSource(repository.Name, dest));
+                cloned.Add(new ClonedSource(repository.Name, dest, repository.WebUrl));
             }
 
             if (job.Create is { } pinned)
@@ -145,7 +145,7 @@ public sealed class RepositoryMigrationPreviewer
                 if (job.Create is not null) _queue.SetStage(job.Id, "Laying out the new repository");
                 try
                 {
-                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), ct)
+                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), ct, job.Project)
                         .ConfigureAwait(false);
                 }
                 catch (PlanValidationException ex)

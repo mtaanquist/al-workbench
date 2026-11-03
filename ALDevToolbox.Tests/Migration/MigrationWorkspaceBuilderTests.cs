@@ -56,7 +56,11 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
         WriteFile(Path.Combine(mono, "scripts", "deploy.ps1"), "Write-Host");
         WriteFile(Path.Combine(mono, "cronus.code-workspace"), "{}");
 
-        var sources = new[] { new ClonedSource("cronus-base", single), new ClonedSource("cronus-sales", mono) };
+        var sources = new[]
+        {
+            new ClonedSource("cronus-base", single, "https://dev.azure.com/cronus/Sales/_git/cronus-base"),
+            new ClonedSource("cronus-sales", mono, "https://dev.azure.com/cronus/Sales/_git/cronus-sales"),
+        };
         var analysis = MigrationSourceAnalyzer.Analyze(sources);
         analysis.CanMigrate.Should().BeTrue();
         var destination = Path.Combine(_temp.Path, "out");
@@ -67,11 +71,12 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
             workspace = await MigrationTestServices.NewBuilder(_db, ctx).BuildAsync(
                 MigrationTestServices.Target(), sources, analysis,
                 new Dictionary<string, string> { ["cronus-base"] = "abc1234", ["cronus-sales"] = "def5678" },
-                destination, CancellationToken.None);
+                destination, CancellationToken.None, new AzureDevOpsProject("cronus", "Sales"));
         }
 
         Files(destination).Should().BeEquivalentTo(
             ".gitignore",
+            "ARCHIVE.md",
             "README.md",
             ".assets/rulesets/Company.ruleset.json",
             "CRONUSAS.code-workspace",
@@ -84,11 +89,16 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
             "Sales/src/Sales.Codeunit.al",
             "Test/app.json",
             "Test/SalesTest.Codeunit.al");
-        workspace.FileCount.Should().Be(13);
+        workspace.FileCount.Should().Be(14);
         workspace.CanMigrate.Should().BeTrue();
         workspace.TemplateFolders.Should().BeEmpty("the template's own Core is only added when asked for");
         workspace.RootFiles.Should().Contain([".gitignore", "README.md", "CRONUSAS.code-workspace", "workspace.aldt.toml"]);
         File.ReadAllText(Path.Combine(destination, "README.md")).Should().NotContain("Old readme");
+        workspace.RootFiles.Should().Contain(MigrationWorkspaceBuilder.ArchiveFile);
+        File.ReadAllText(Path.Combine(destination, MigrationWorkspaceBuilder.ArchiveFile)).Should()
+            .Contain("[cronus/Sales](https://dev.azure.com/cronus/Sales)")
+            .And.Contain("| [cronus-base](https://dev.azure.com/cronus/Sales/_git/cronus-base) | [abc1234](https://dev.azure.com/cronus/Sales/_git/cronus-base/commit/abc1234) |")
+            .And.Contain("[cronus-sales](https://dev.azure.com/cronus/Sales/_git/cronus-sales)");
 
         workspace.LeftBehind.Select(l => (l.RepositoryName, l.Path, l.Reason, l.FileCount)).Should().BeEquivalentTo(new[]
         {

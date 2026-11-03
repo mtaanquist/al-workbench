@@ -99,6 +99,9 @@ to `MigrationWorkspaceBuilder`, which writes the workspace into the preview's te
 - **The workspace files** point at the moved folders: the template's `.code-workspace` lists them
   instead of its own extension folders, and `workspace.aldt.toml` records each moved extension
   with kind `migrated`, its id, range, source repository and folder, and the commit read.
+- **`ARCHIVE.md` at the root** (Mads): the date of the move, a link to the Azure DevOps project,
+  and a table linking each source repository and the commit copied from it, since the history
+  itself stays behind.
 - **The template's `.gitignore` decides the rest.** The builder runs `git init` and
   `git ls-files --others --ignored --exclude-standard --directory` in the folder, removes what
   git ignores inside the moved extensions and lists it, then removes the `.git` folder again.

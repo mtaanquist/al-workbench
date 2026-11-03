@@ -6,7 +6,7 @@ namespace ALDevToolbox.Services.Migration;
 /// <summary>One source repository after it was cloned, ready to be read.</summary>
 /// <param name="RepositoryName">The repository's name, used in messages and for an extension at its root.</param>
 /// <param name="Directory">Where the clone's working tree is on disk.</param>
-public sealed record ClonedSource(string RepositoryName, string Directory);
+public sealed record ClonedSource(string RepositoryName, string Directory, string? WebUrl = null);
 
 /// <summary>An extension found in a source repository, and where it would go.</summary>
 /// <param name="RepositoryName">The repository it came from.</param>

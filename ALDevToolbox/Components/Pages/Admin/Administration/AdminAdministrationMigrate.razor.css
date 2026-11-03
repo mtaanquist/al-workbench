@@ -26,4 +26,5 @@
 /* The result column of Earlier migrations carries a message under the pill. */
 .mig__result {
     min-width: 12rem;
+    max-width: 26rem;
 }
