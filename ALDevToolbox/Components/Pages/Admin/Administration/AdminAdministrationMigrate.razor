@@ -384,13 +384,13 @@
                                 @if (workspace.RootFiles.Count > 0)
                                 {
                                     <p>
-                                        Added at the top of the repository:
+                                        Added in the root folder of the repository:
                                         @for (var i = 0; i < workspace.RootFiles.Count; i++)
                                         {
                                             <code>@workspace.RootFiles[i]</code>@(i < workspace.RootFiles.Count - 1 ? ", " : ".")
                                         }
                                         @(" ")<span class="u-muted">
-                                            @MigrationWorkspaceBuilder.ArchiveFile links each Azure DevOps repository and the commit that was copied,
+                                            <code>@MigrationWorkspaceBuilder.ArchiveFile</code> links each Azure DevOps repository and the commit that was copied,
                                             so the old history stays easy to find. The rest come from the template.
                                         </span>
                                     </p>
@@ -506,19 +506,29 @@
                         <div>
                             <h2 class="card__title">5. Create the repository</h2>
                             <p class="card__sub">
-                                Creates the repository in your GitHub organisation with everything the preview showed,
-                                as one first commit, and a new solution for @_preview!.CustomerName.
+                                Creates the repository in your GitHub organisation with the files shown above in a single commit,
+                                and a new solution for @_preview!.CustomerName.
                             </p>
                         </div>
                     </div>
                     <div class="card__body form-sec">
+                        @if (_github?.Blocker is { } blocker)
+                        {
+                            <Alert Tone="AlertTone.Warn"><span>@blocker</span></Alert>
+                        }
                         <div class="field">
                             <label class="field__label" for="mig-repo">Repository name</label>
                             <input class="input" id="mig-repo" type="text" required maxlength="100"
                                    pattern="@GitHubWorkspaceRepositoryService.NamePattern"
                                    placeholder="e.g. cronus-as"
                                    @bind="_repositoryName" @bind:event="oninput" />
-                            <span class="field__hint">Letters, digits, hyphens, underscores and full stops.</span>
+                            <span class="field__hint">
+                                @if (_github?.OrgLogin is { } org)
+                                {
+                                    <text>Created as @org/@(_repositoryName.Trim().Length > 0 ? _repositoryName.Trim() : "..."). </text>
+                                }
+                                Letters, digits, hyphens, underscores and full stops.
+                            </span>
                             <FieldError Field="@RepositoryMigrationService.RepositoryNameField" Errors="_createErrors" />
                         </div>
                         <div class="field">
@@ -527,7 +537,7 @@
                         </div>
                         <div class="field">
                             <Switch Name="mig-pipelines" Label="Set up build pipelines" Checked="_addPipelines" CheckedChanged="v => _addPipelines = v" />
-                            <span class="field__hint">Adds the same build pipelines a new workspace's repository gets, so the solution builds straight away.</span>
+                            <span class="field__hint">Adds build pipelines to the new solution in AL Workbench, so it builds straight away.</span>
                         </div>
                         @if (_clash is { CanReplace: true } replaceable)
                         {
@@ -556,7 +566,7 @@
                         }
                         <div class="u-row mig__go">
                             <button type="button" class="btn btn--primary" @onclick="CreateAsync"
-                                    disabled="@(_starting || string.IsNullOrWhiteSpace(_repositoryName) || _clash is { CanReplace: false })">
+                                    disabled="@(_starting || string.IsNullOrWhiteSpace(_repositoryName) || _clash is { CanReplace: false } || _github?.Blocker is not null)">
                                 <Icon Name="folder-git-2" Width="16" Height="16" />
                                 <span>@(_starting ? "Starting..." : "Create repository")</span>
                             </button>
@@ -663,6 +673,7 @@
     private MigrationPreview? _preview;
     private List<RepositoryMigrationHistoryRow>? _history;
     private MigrationSolutionClash? _clash;
+    private MigrationGitHubReadiness? _github;
     private Guid? _preparedFor;
     private string _repositoryName = string.Empty;
     private bool _isPrivate = true;
@@ -716,6 +727,7 @@
         _replace = false;
         _createErrors = new Dictionary<string, string>();
         _clash = await Migration.FindSolutionClashAsync(_preview.CustomerName);
+        _github = await Migration.CheckGitHubAsync();
     }
 
     private async Task CreateAsync()

@@ -38,6 +38,9 @@ public sealed record MigrationOutcome(
     IReadOnlyList<string> PipelineNames,
     IReadOnlyList<string> Warnings);
 
+/// <summary>The GitHub organisation a migration would create the repository in, or why it can't.</summary>
+public sealed record MigrationGitHubReadiness(string? OrgLogin, string? Blocker);
+
 /// <summary>A solution that already has the customer's name.</summary>
 /// <param name="CanReplace">
 /// True when it came from an earlier migration and that migration's repository is
@@ -104,6 +107,26 @@ public sealed class RepositoryMigrationPublisher
     {
         await _repositories.CheckCanCreateAsync(request.RepositoryName, solutionId: null, ct).ConfigureAwait(false);
         await CheckSolutionAsync(customerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Where a repository would go, and what stops one being created at all
+    /// (GitHub not set up, the Admin not linked or not a member), asked when the
+    /// page offers step 5 rather than after the Admin presses the button.
+    /// </summary>
+    public async Task<MigrationGitHubReadiness> CheckGitHubAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Any legal name: only the refusals that do not depend on it can come back.
+            var gate = await _repositories.CheckCanCreateAsync("migration-check", solutionId: null, ct).ConfigureAwait(false);
+            return new MigrationGitHubReadiness(gate.OrgLogin, null);
+        }
+        catch (PlanValidationException ex)
+        {
+            var status = await _connection.GetStatusAsync(ct).ConfigureAwait(false);
+            return new MigrationGitHubReadiness(status.OrgLogin, string.Join(" ", ex.Errors.Values));
+        }
     }
 
     /// <summary>

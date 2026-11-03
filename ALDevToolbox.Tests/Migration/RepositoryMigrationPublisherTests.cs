@@ -178,6 +178,23 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
         (await check.OeProjects.AsNoTracking().SingleAsync(p => p.Id == oldId)).DeletedAt.Should().NotBeNull();
     }
 
+    [Fact]
+    public async Task The_page_is_told_up_front_why_a_repository_cannot_be_created()
+    {
+        await using var ctx = _db.NewContext();
+        var readiness = await NewPublisher(ctx, WritableApi(), _temp.Path).CheckGitHubAsync(CancellationToken.None);
+        readiness.Blocker.Should().Contain("GitHub is not set up");
+    }
+
+    [Fact]
+    public async Task The_page_is_told_up_front_which_github_organisation_the_repository_goes_to()
+    {
+        await ReadyAsync();
+        await using var ctx = _db.NewContext();
+        var readiness = await NewPublisher(ctx, WritableApi(), _temp.Path).CheckGitHubAsync(CancellationToken.None);
+        readiness.Should().Be(new MigrationGitHubReadiness(OrgLogin, null));
+    }
+
     // --- helpers ------------------------------------------------------------
 
     private static readonly IReadOnlyDictionary<string, string> Commits = new Dictionary<string, string> { ["cronus-base"] = "abc1234" };

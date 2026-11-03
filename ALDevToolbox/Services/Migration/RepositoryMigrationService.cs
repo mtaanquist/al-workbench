@@ -156,6 +156,10 @@ public sealed class RepositoryMigrationService
     public Task<MigrationSolutionClash?> FindSolutionClashAsync(string? customerName, CancellationToken ct = default) =>
         _publisher.FindSolutionClashAsync(customerName ?? string.Empty, ct);
 
+    /// <summary>Where the repository would go on GitHub, or what stops it being created.</summary>
+    public Task<MigrationGitHubReadiness> CheckGitHubAsync(CancellationToken ct = default) =>
+        _publisher.CheckGitHubAsync(ct);
+
     /// <summary>
     /// Queues the migration of what the finished preview <paramref name="previewId"/>
     /// read: the same repositories, template and customer. The run reads the
