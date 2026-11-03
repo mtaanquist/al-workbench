@@ -56,8 +56,17 @@ public sealed record MigrationPreview(
     DateTime StartedAt,
     DateTime UpdatedAt,
     MigrationSourceAnalysis? Analysis = null,
-    string? Error = null)
+    string? Error = null,
+    MigrationWorkspace? Workspace = null,
+    string TemplateKey = "",
+    string TemplateName = "",
+    string CustomerName = "",
+    string? ShortName = null,
+    bool AddTemplateExtensions = false)
 {
+    /// <summary>True when the sources and the workspace built from them are both fit to move.</summary>
+    public bool CanMigrate => Analysis is { CanMigrate: true } && Workspace is { CanMigrate: true };
+
     /// <summary>True while the worker may still change it.</summary>
     public bool IsActive => Status is MigrationPreviewStatus.Waiting or MigrationPreviewStatus.Running;
 }
@@ -65,13 +74,15 @@ public sealed record MigrationPreview(
 /// <summary>
 /// What the worker needs to run a preview: the snapshot's id, who asked (so the
 /// clone uses their Azure DevOps token, resolved under their identity off the
-/// request), and the repositories Azure DevOps listed for the project.
+/// request), the repositories Azure DevOps listed for the project, and the
+/// template and customer they move into.
 /// </summary>
 public sealed record MigrationPreviewJob(
     Guid Id,
     AmbientOrganizationScope.OrganizationIdentity Identity,
     AzureDevOpsProject Project,
-    IReadOnlyList<AzureDevOpsRepository> Repositories);
+    IReadOnlyList<AzureDevOpsRepository> Repositories,
+    MigrationTarget Target);
 
 /// <summary>
 /// The hand-off from the Migrate Repositories page to
@@ -135,7 +146,12 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
             var preview = new MigrationPreview(
                 job.Id, identity.OrganizationId, userId, projectName, projectUrl, MigrationPreviewStatus.Waiting,
                 job.Repositories.Select(r => new MigrationRepositoryProgress(r.Id, r.Name, r.WebUrl, MigrationRepositoryStatus.Waiting)).ToList(),
-                now, now);
+                now, now,
+                TemplateKey: job.Target.TemplateKey,
+                TemplateName: job.Target.TemplateName,
+                CustomerName: job.Target.CustomerName,
+                ShortName: job.Target.Plan.ShortName,
+                AddTemplateExtensions: job.Target.AddTemplateExtensions);
             _previews[job.Id] = preview;
             if (!TryWrite(job))
             {
@@ -166,8 +182,8 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
                 .ToList(),
         });
 
-    internal void MarkDone(Guid id, MigrationSourceAnalysis analysis) =>
-        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis });
+    internal void MarkDone(Guid id, MigrationSourceAnalysis analysis, MigrationWorkspace? workspace = null) =>
+        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis, Workspace = workspace });
 
     internal void MarkFailed(Guid id, string error) =>
         Update(id, p => p with { Status = MigrationPreviewStatus.Failed, Error = error });

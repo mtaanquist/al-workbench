@@ -520,6 +520,9 @@ public record WorkspaceExtensionIdentity(
 
     /// <summary>An extension added to the workspace after it was generated, from New Extension.</summary>
     public const string AddedKind = "added";
+
+    /// <summary>An extension moved in from another repository by Migrate Repositories (#1700).</summary>
+    public const string MigratedKind = "migrated";
 }
 
 /// <summary>

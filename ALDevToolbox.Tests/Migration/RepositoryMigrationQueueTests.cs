@@ -67,5 +67,6 @@ public sealed class RepositoryMigrationQueueTests
         new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, userId, false, false),
         new AzureDevOpsProject("cronus", "Sales"),
         [new AzureDevOpsRepository("r1", "cronus-base", "https://dev.azure.com/cronus/Sales/_git/cronus-base",
-            "https://dev.azure.com/cronus/Sales/_git/cronus-base", "main", 1, false)]);
+            "https://dev.azure.com/cronus/Sales/_git/cronus-base", "main", 1, false)],
+        MigrationTestServices.Target());
 }

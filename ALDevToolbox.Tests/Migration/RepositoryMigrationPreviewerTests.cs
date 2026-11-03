@@ -90,6 +90,38 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
     }
 
     [Fact]
+    public async Task Builds_the_templated_workspace_once_the_sources_can_move()
+    {
+        if (!GitAvailable()) return;
+        var userId = await SeedUserWithTokenAsync();
+        await MigrationTestServices.SeedTemplateAsync(_db);
+        var origin = _temp.Sub("origin-base");
+        WriteApp(origin, BaseId, "CRONUS Base");
+        WriteFile(Path.Combine(origin, "README.md"), "# Old");
+        CommitAll(origin, "main");
+
+        var job = Job(userId, Repo("r1", "cronus-base", origin));
+        _queue.TryStart(job, "cronus/Sales", "https://dev.azure.com/cronus/Sales", out _).Should().NotBeNull();
+        var workRoot = _temp.Sub("work");
+        await using (var ctx = _db.NewContext())
+        {
+            var previewer = NewPreviewer(ctx);
+            previewer.WorkRoot = workRoot;
+            using (AmbientOrganizationScope.Enter(job.Identity))
+            {
+                await previewer.RunAsync(job, CancellationToken.None);
+            }
+        }
+
+        var preview = _queue.Get(job.Id, TestDb.DefaultOrgId, userId)!;
+        preview.Status.Should().Be(MigrationPreviewStatus.Done);
+        preview.CanMigrate.Should().BeTrue();
+        preview.Workspace!.AppJson.Select(a => a.Folder).Should().Equal("cronus-base");
+        preview.Workspace.RootFiles.Should().Contain("README.md");
+        Directory.EnumerateFileSystemEntries(workRoot).Should().BeEmpty("the built workspace is removed with the clones");
+    }
+
+    [Fact]
     public async Task A_missing_token_fails_the_preview_with_where_to_add_one()
     {
         var userId = await SeedUserAsync();
@@ -113,13 +145,15 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
         new ProcessRunner(),
         new UserRepositoryTokenService(ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider),
         _queue,
+        MigrationTestServices.NewBuilder(_db, ctx),
         NullLogger<RepositoryMigrationPreviewer>.Instance);
 
     private static MigrationPreviewJob Job(int userId, params AzureDevOpsRepository[] repositories) => new(
         Guid.NewGuid(),
         new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, userId, false, false),
         new AzureDevOpsProject("cronus", "Sales"),
-        repositories);
+        repositories,
+        MigrationTestServices.Target());
 
     private static AzureDevOpsRepository Repo(string id, string name, string originDir) =>
         new(id, name, new Uri(originDir).AbsoluteUri, "https://dev.azure.com/cronus/Sales/_git/" + name, "main", 1, false);

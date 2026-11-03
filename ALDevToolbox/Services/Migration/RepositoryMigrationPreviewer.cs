@@ -6,9 +6,11 @@ using ALDevToolbox.Services.ObjectExplorer.Projects;
 namespace ALDevToolbox.Services.Migration;
 
 /// <summary>
-/// Runs one Migrate Repositories preview (issue #1699): clones <c>main</c> of
-/// each source repository with the Admin's own Azure DevOps token, reads what
-/// the clones hold, and records the outcome on <see cref="RepositoryMigrationQueue"/>.
+/// Runs one Migrate Repositories preview (issues #1699, #1700): clones <c>main</c>
+/// of each source repository with the Admin's own Azure DevOps token, reads what
+/// the clones hold, builds the new workspace from them with
+/// <see cref="MigrationWorkspaceBuilder"/>, and records the outcome on
+/// <see cref="RepositoryMigrationQueue"/>.
 /// Nothing is written anywhere but a temporary folder, which is removed at the end.
 ///
 /// <para><strong>The clone never downloads <c>.alpackages</c>.</strong> Some
@@ -40,17 +42,20 @@ public sealed class RepositoryMigrationPreviewer
     private readonly IProcessRunner _processes;
     private readonly UserRepositoryTokenService _tokens;
     private readonly RepositoryMigrationQueue _queue;
+    private readonly MigrationWorkspaceBuilder _workspace;
     private readonly ILogger<RepositoryMigrationPreviewer> _logger;
 
     public RepositoryMigrationPreviewer(
         IProcessRunner processes,
         UserRepositoryTokenService tokens,
         RepositoryMigrationQueue queue,
+        MigrationWorkspaceBuilder workspace,
         ILogger<RepositoryMigrationPreviewer> logger)
     {
         _processes = processes;
         _tokens = tokens;
         _queue = queue;
+        _workspace = workspace;
         _logger = logger;
     }
 
@@ -72,9 +77,7 @@ public sealed class RepositoryMigrationPreviewer
             return;
         }
 
-        var gitPath = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GIT_PATH"))
-            ? "git"
-            : Environment.GetEnvironmentVariable("GIT_PATH")!;
+        var gitPath = GitPath();
         var root = Path.Combine(WorkRoot, TempPrefix + job.Id.ToString("N"));
         Directory.CreateDirectory(root);
         var started = DateTime.UtcNow;
@@ -82,6 +85,7 @@ public sealed class RepositoryMigrationPreviewer
         {
             var env = ProjectBuildService.GitAuthEnv(RepositoryProvider.AzureDevOps, token);
             var cloned = new List<ClonedSource>();
+            var commits = new Dictionary<string, string>(StringComparer.Ordinal);
             var failed = new List<MigrationFinding>();
             var index = 0;
             foreach (var repository in job.Repositories)
@@ -105,13 +109,31 @@ public sealed class RepositoryMigrationPreviewer
                     continue;
                 }
                 _queue.SetRepository(job.Id, repository.Name, MigrationRepositoryStatus.Cloned, commit);
+                if (commit is not null) commits[repository.Name] = commit;
                 Cloned?.Invoke(dest);
                 cloned.Add(new ClonedSource(repository.Name, dest));
             }
 
             var analysis = MigrationSourceAnalyzer.Analyze(cloned);
             analysis = analysis with { Findings = failed.Concat(analysis.Findings).ToList() };
-            _queue.MarkDone(job.Id, analysis);
+
+            // The workspace is only worth building once the sources are sound:
+            // a folder clash or a duplicate id would make it wrong.
+            MigrationWorkspace? workspace = null;
+            if (analysis.CanMigrate)
+            {
+                try
+                {
+                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), ct)
+                        .ConfigureAwait(false);
+                }
+                catch (PlanValidationException ex)
+                {
+                    _queue.MarkFailed(job.Id, "The template can't be used: " + string.Join(" ", ex.Errors.Values));
+                    return;
+                }
+            }
+            _queue.MarkDone(job.Id, analysis, workspace);
             _logger.LogInformation(
                 "Migration preview {PreviewId} of {Project} read {RepositoryCount} repositories ({FailedCount} failed) and found {ExtensionCount} extensions in {Duration}.",
                 job.Id, job.Project.DisplayName, job.Repositories.Count, failed.Count, analysis.Extensions.Count, DateTime.UtcNow - started);
@@ -179,6 +201,12 @@ public sealed class RepositoryMigrationPreviewer
         var head = await _processes.RunAsync(new ProcessRunRequest(gitPath, ["-C", dest, "rev-parse", "HEAD"], dest, null, ProbeTimeout), ct).ConfigureAwait(false);
         return (head.Succeeded ? head.StdOut.Trim() : null, null);
     }
+
+    /// <summary>The git executable: <c>GIT_PATH</c> when set, else whatever <c>git</c> the path finds.</summary>
+    internal static string GitPath() =>
+        string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GIT_PATH"))
+            ? "git"
+            : Environment.GetEnvironmentVariable("GIT_PATH")!;
 
     /// <summary>A clone is not started with less free space than this under the work folder.</summary>
     internal const long MinFreeBytes = 2L * 1024 * 1024 * 1024;
