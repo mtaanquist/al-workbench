@@ -333,6 +333,7 @@ public sealed class UpgradeActionWorker : BackgroundService
 
             if (uploads)
             {
+                due = await WithoutInstallsHeldBehindAnEarlierBookingAsync(db, due, now, ct).ConfigureAwait(false);
                 (due, startedBatches) = await InEnvironmentTurnOrderAsync(db, due, now, ct).ConfigureAwait(false);
             }
         }
@@ -529,6 +530,50 @@ public sealed class UpgradeActionWorker : BackgroundService
             .OrderBy(a => UpgradeActionService.IsAppInstall(a.Kind))
             .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind) ? rank[a.BcEnvironment] : 0)
             .ToList(), started);
+    }
+
+    /// <summary>
+    /// Drops the due installs a window chose the time for that were booked after another
+    /// install on the same Business Central environment that has not been sent yet
+    /// (#1629): the earlier booking may be the base an add-on needs. When a window closes
+    /// on a base solution's batch it moves to the next opening, and an add-on booked after
+    /// it, under a window still open, would otherwise go now and be refused by Business
+    /// Central. So it waits until the base is sent - not only until the base is due again:
+    /// the add-on keeps its earlier time, which would sort it ahead of the base at the next
+    /// opening. Read from the rows each sweep, so it holds across sweeps and restarts. Which
+    /// bookings hold is <see cref="UpgradeActionService.EarlierBookingsThatHold"/>, which
+    /// the environment page reads too, to say what a held row waits for.
+    /// <para>A row whose time a person picked never waits, because nobody asked it to wait
+    /// for a window. A held row is not moved when its own window closes, so it keeps its
+    /// original time until it goes.</para>
+    /// </summary>
+    private static async Task<List<DueAction>> WithoutInstallsHeldBehindAnEarlierBookingAsync(
+        AppDbContext db, List<DueAction> due, DateTime now, CancellationToken ct)
+    {
+        var windowInstalls = due
+            .Where(a => UpgradeActionService.IsAppInstall(a.Kind) && a.ScheduledByWindow != null)
+            .ToList();
+        if (windowInstalls.Count == 0) return due;
+
+        // A shared environment's other solutions book on their own rows, so read by tenant.
+        var tenants = windowInstalls.Where(a => a.TenantId != null).Select(a => a.TenantId!.Value).Distinct().ToList();
+        var untenanted = windowInstalls.Where(a => a.TenantId == null).Select(a => a.ProjectId).Distinct().ToList();
+        var waiting = await UpgradeActionService.EarlierBookingsThatHold(db.OeEnvironmentUpgradeActions.AsNoTracking(), now)
+            .Where(a => (a.Project!.BcTenantId != null && tenants.Contains(a.Project.BcTenantId.Value))
+                        || (a.Project.BcTenantId == null && untenanted.Contains(a.ProjectId)))
+            .Select(a => new { a.Project!.BcTenantId, a.ProjectId, a.Environment!.Name, a.RequestedAt })
+            .ToListAsync(ct).ConfigureAwait(false);
+        if (waiting.Count == 0) return due;
+
+        var firstWaiting = waiting
+            .GroupBy(w => EnvironmentKey(w.BcTenantId, w.ProjectId, w.Name))
+            .ToDictionary(g => g.Key, g => g.Min(w => w.RequestedAt));
+        return due
+            .Where(a => !(UpgradeActionService.IsAppInstall(a.Kind)
+                          && a.ScheduledByWindow != null
+                          && firstWaiting.TryGetValue(a.BcEnvironment, out var bookedFirst)
+                          && bookedFirst < a.RequestedAt))
+            .ToList();
     }
 
     /// <summary>

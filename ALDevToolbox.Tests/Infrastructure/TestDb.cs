@@ -109,7 +109,8 @@ public sealed class TestDb : IDisposable
         if (CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10))) return true;
 
         var message = $"TestDb: {CommandTracker.InFlight} database command(s) still running after 10 s at teardown. "
-            + "A component query never finished; find the page or teardown step that leaves it open.";
+            + "A component query never finished; find the page or teardown step that leaves it open:"
+            + Environment.NewLine + CommandTracker.DescribeInFlight();
         TestContext.Current.TestOutputHelper?.WriteLine(message);
         TestContext.Current.SendDiagnosticMessage(message);
         return false;
@@ -217,7 +218,8 @@ public sealed class TestDb : IDisposable
 
     /// <summary>Org-admin actions on user accounts, wired to this fixture's clock and token manager.</summary>
     public ALDevToolbox.Services.Account.UserAdministrationService NewUserAdministrationService(AppDbContext ctx, TimeProvider clock) =>
-        new(ctx, clock, OpenIddictTokens, OrgContext);
+        new(ctx, clock, OpenIddictTokens, OrgContext,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ALDevToolbox.Services.Account.UserAdministrationService>.Instance);
 
     /// <summary>
     /// Builds the process-wide template database: migrate once, seed once. Every

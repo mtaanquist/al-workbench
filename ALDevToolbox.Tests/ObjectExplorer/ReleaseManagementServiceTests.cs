@@ -19,8 +19,11 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class ReleaseManagementServiceTests : IDisposable
 {
-    private readonly TestDb _db = new();
-    public void Dispose() => _db.Dispose();
+    // Created on first use, so a test that starts by seeding a release gets a
+    // clone of a seeded template instead of importing the app itself (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
+    public void Dispose() => _database?.Dispose();
 
     private static readonly string FixtureRoot =
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
@@ -34,8 +37,37 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     private ReleaseManagementService NewManagement(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
 
+    /// <summary>
+    /// Imports DK Core as a release. The first release of a test comes from a
+    /// template seeded once per kind and symbol choice, then renamed: the label
+    /// lives only on the release row, so the clone matches a fresh import. Later
+    /// releases in the same test, and children, import for real.
+    /// </summary>
     private async Task<int> SeedReleaseAsync(
         string label = "Test Release", int? parentId = null, string kind = "first_party", bool storeSymbolReference = false)
+    {
+        if (_database is null && parentId is null)
+        {
+            _database = TestDb.FromSeed(
+                $"release-management:{kind}:{storeSymbolReference}",
+                db => new ReleaseManagementServiceTests(db).ImportAsync("Seeded", null, kind, storeSymbolReference),
+                out var seededId);
+            await using var rename = _database.NewContext();
+            await rename.OeReleases.Where(r => r.Id == seededId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Label, label));
+            return seededId;
+        }
+        return await ImportAsync(label, parentId, kind, storeSymbolReference);
+    }
+
+    public ReleaseManagementServiceTests()
+    {
+    }
+
+    /// <summary>An instance over the template being seeded, so the seed runs the same importer.</summary>
+    private ReleaseManagementServiceTests(TestDb database) => _database = database;
+
+    private async Task<int> ImportAsync(string label, int? parentId, string kind, bool storeSymbolReference)
     {
         await using var ctx = _db.NewContext();
         var svc = NewImporter(ctx);

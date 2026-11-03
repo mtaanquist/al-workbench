@@ -226,6 +226,9 @@ else
             UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.SentAt is not null
                 => @<text>Installing now</text>,
             UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.ExecuteAfter <= DateTime.UtcNow
+                                             && entry.WaitingText is { } waiting
+                => @<text>@waiting</text>,
+            UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.ExecuteAfter <= DateTime.UtcNow
                 => @<text>Starting shortly</text>,
             UpgradeActionStatus.Pending => entry.ExecuteAfter <= DateTime.UtcNow
                 ? @<text>Was due at @SlotText(entry, entry.ExecuteAfter) - hasn't run yet.</text>

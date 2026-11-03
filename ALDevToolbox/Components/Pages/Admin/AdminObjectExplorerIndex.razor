@@ -227,11 +227,16 @@
     internal static string FormatBackfillQueued(string queued, string skipped)
     {
         var alreadyQueued = int.TryParse(skipped, out var n) && n > 0
-            ? $" {n} release(s) already had one waiting and were left alone."
+            ? n == 1
+                ? " 1 release was left alone: its backfill is still waiting, or has already run since it last changed."
+                : $" {n} releases were left alone: their backfill is still waiting, or has already run since they last changed."
             : string.Empty;
-        return queued == "0" && alreadyQueued.Length > 0
-            ? $"Nothing new to queue.{alreadyQueued}"
-            : $"Queued a system-reference backfill for {queued} ready release(s).{alreadyQueued} They run in the background - watch progress on the workers page.";
+        if (queued == "0" && alreadyQueued.Length > 0) return $"Nothing new to queue.{alreadyQueued}";
+        // "They" is the releases just queued, so the left-alone sentence follows it.
+        var queuedText = queued == "1"
+            ? "1 ready release. It runs"
+            : $"{queued} ready releases. They run";
+        return $"Queued a system-reference backfill for {queuedText} in the background - watch progress on the workers page.{alreadyQueued}";
     }
 
     private static string FormatKind(string kind) => kind switch

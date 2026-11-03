@@ -42,7 +42,11 @@ public sealed class AdminRecipeUpdateRepositoriesTests : IDisposable
     private const string FirstRepo = "cronus-dk/solution-a";
     private const string SecondRepo = "cronus-dk/solution-b";
     private const string BaseSha = "base-commit-sha";
-    private const string Branch = "aldt/recipe-doc-attachments";
+    // The fake matches routes by path prefix, so a NotFound on this root answers
+    // "no such branch" for every recipe branch, old-style names included, unless a
+    // test registers a longer route for one.
+    private const string BranchRoot = "aldt/recipe-";
+    private static string BranchFor(int recipeId) => $"aldt/recipe-{recipeId}-doc-attachments";
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -253,7 +257,7 @@ public sealed class AdminRecipeUpdateRepositoriesTests : IDisposable
             var number = repo == FirstRepo ? 11 : 12;
             api.On(HttpMethod.Get, $"/repos/{repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(repo))
                .On(HttpMethod.Get, $"/repos/{repo}/pulls", HttpStatusCode.OK, "[]")
-               .On(HttpMethod.Get, $"/repos/{repo}/git/ref/heads/{Branch}", HttpStatusCode.NotFound)
+               .On(HttpMethod.Get, $"/repos/{repo}/git/ref/heads/{BranchRoot}", HttpStatusCode.NotFound)
                .On(HttpMethod.Get, $"/repos/{repo}/git/ref/heads/main", HttpStatusCode.OK,
                     $"{{\"ref\":\"refs/heads/main\",\"object\":{{\"sha\":\"{BaseSha}\"}}}}")
                .On(HttpMethod.Get, $"/repos/{repo}/git/commits/{BaseSha}", HttpStatusCode.OK,

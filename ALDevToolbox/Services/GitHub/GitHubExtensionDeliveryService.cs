@@ -222,7 +222,9 @@ public sealed class GitHubExtensionDeliveryService
             sibling = sibling with
             {
                 CodeWorkspaceJson = codeWorkspace?.Text,
-                CodeWorkspaceFileName = codeWorkspace is null ? null : fileName,
+                // With no file found, the name the saved settings recorded still
+                // beats one derived from the folder style as it is now.
+                CodeWorkspaceFileName = codeWorkspace is null ? sibling.CodeWorkspaceFileName : fileName,
             };
         }
 
@@ -286,8 +288,8 @@ public sealed class GitHubExtensionDeliveryService
             return null;
         }
 
-        if (import.Workspace is not { } workspace) return null;
-        return SiblingWorkspaceContext.FromSavedWorkspace(workspace, import.Extensions);
+        if (import.Workspace is null) return null;
+        return SiblingWorkspaceContext.FromSavedWorkspace(import);
     }
 
     /// <summary>

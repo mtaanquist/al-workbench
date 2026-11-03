@@ -25,4 +25,10 @@ internal static class RouteConstants
     public const string OkQuery = "ok";
     public const string ErrQuery = "err";
     public const string MsgQuery = "msg";
+
+    /// <summary>
+    /// A code the page turns into its own sentence (<c>FormErrorReasons</c>),
+    /// used where a link must not be able to put text on the page (#1544).
+    /// </summary>
+    public const string ReasonQuery = "reason";
 }

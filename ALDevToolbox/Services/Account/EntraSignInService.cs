@@ -132,7 +132,7 @@ public sealed class EntraSignInService
     /// pre-check and the unique-index backstop below it - so it lives here
     /// rather than being written out twice and drifting.
     /// </summary>
-    private const string IdentityTakenMessage = "That Microsoft account is already connected to a different user.";
+    internal const string IdentityTakenMessage = "That Microsoft account is already connected to a different user.";
 
     private readonly AppDbContext _db;
     private readonly AuthService _auth;

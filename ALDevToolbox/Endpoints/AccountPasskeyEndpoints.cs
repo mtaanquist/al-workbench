@@ -189,7 +189,7 @@ internal static class AccountPasskeyEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.First();
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization();
 
@@ -299,7 +299,7 @@ internal static class AccountPasskeyEndpoints
             }
             if (!int.TryParse(ttlDaysRaw, out var ttlDays) || !AccessTokenTtlDays.Contains(ttlDays))
             {
-                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString("Choose one of the expiry options offered.")}");
+                ctx.Response.Redirect($"/account/ai?{RouteConstants.ErrQuery}=TtlDays&{RouteConstants.ReasonQuery}={FormErrorReasons.TokenExpiryChoice}");
                 return;
             }
             DateTime? expiresAt = ttlDays > 0 ? DateTime.UtcNow.AddDays(ttlDays) : null;
@@ -315,8 +315,7 @@ internal static class AccountPasskeyEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                var msg = string.IsNullOrEmpty(first.Value) ? "Invalid token request." : first.Value;
-                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString(msg)}");
+                ctx.Response.Redirect($"/account/ai?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key ?? "Token")}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization().RequireCurrentCredentials();
 

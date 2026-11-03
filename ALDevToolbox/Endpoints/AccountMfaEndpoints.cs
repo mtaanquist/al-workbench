@@ -181,12 +181,22 @@ internal static class AccountMfaEndpoints
         // --- TOTP self-service ----------------------------------------------
 
         app.MapPost("/auth/account/2fa/totp/confirm", async (
-            HttpContext ctx, TotpService totp, IOrganizationContext org, AppDbContext db,
+            HttpContext ctx, TotpService totp, StepUpService stepUp, IOrganizationContext org, AppDbContext db,
             IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin, TimeProvider clock,
             IDataProtectionProvider protection, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
+            // The same proof as adding a passkey: a recent second step, or the
+            // current password when the account has nothing to step up with
+            // (#1614). The page asks for it first; this is the backstop.
+            var refusal = await stepUp.TotpEnrollmentRefusalAsync(
+                ctx.User, org.CurrentUserId!.Value, form["Password"].ToString(), ResolveIp(ctx), ct);
+            if (refusal is not null)
+            {
+                ctx.Response.Redirect($"/account/2fa/totp/setup?{RouteConstants.ErrQuery}=Password&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(refusal)}");
+                return;
+            }
             try
             {
                 var codes = await totp.ConfirmEnrollmentAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct);
@@ -204,7 +214,7 @@ internal static class AccountMfaEndpoints
                 // itself (already on, never started) goes to the security page, which the setup
                 // page would bounce an already-on user to anyway, and which offers new codes.
                 var page = first.Key == "Totp" ? "/account/security" : "/account/2fa/totp/setup";
-                ctx.Response.Redirect($"{page}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{page}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization().RequireCurrentCredentials();
 
@@ -234,7 +244,7 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!await emailSvc.IsConfiguredAsync(ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Email isn't set up on this site yet. Ask a site administrator.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailNotConfigured}");
                 return;
             }
             try
@@ -242,7 +252,7 @@ internal static class AccountMfaEndpoints
                 var code = await mfa.IssueChallengeAsync(org.CurrentUserId!.Value, ct);
                 if (code is null)
                 {
-                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Several codes were sent recently. Wait a few minutes before asking for another one.")}");
+                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailCodeThrottled}");
                     return;
                 }
                 // Fence category 4 (explicitly scoped user-id lookup): pinned to the signed-in
@@ -258,7 +268,7 @@ internal static class AccountMfaEndpoints
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Email-MFA setup failed.");
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("We couldn't send the email code. Try again in a few minutes.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailCodeNotSent}");
             }
         }).RequireAuthorization();
 
@@ -270,7 +280,7 @@ internal static class AccountMfaEndpoints
             var form = await ctx.Request.ReadFormAsync(ct);
             if (!await mfa.VerifyAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Code&{RouteConstants.MsgQuery}={Uri.EscapeDataString("That code didn't match. Request a new one.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Code&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailCodeWrong}");
                 return;
             }
             await mfa.EnableAsync(org.CurrentUserId!.Value, ct);
@@ -302,7 +312,7 @@ internal static class AccountMfaEndpoints
             if (user is null) return;
             if (!user.TotpEnabled)
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Turn on the authenticator app first.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.ReasonQuery}={FormErrorReasons.TotpFirst}");
                 return;
             }
             var codes = await recovery.RegenerateAsync(user.Id, ct);

@@ -34,7 +34,11 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
     private const string Repo = "cronus-dk/solution-a";
     private const string BaseSha = "base-commit-sha";
     private const string BranchSha = "branch-commit-sha";
-    private const string Branch = "aldt/recipe-doc-attachments";
+    // The fake matches routes by path prefix, so a NotFound on this root answers
+    // "no such branch" for every recipe branch, old-style names included, unless a
+    // test registers a longer route for one.
+    private const string BranchRoot = "aldt/recipe-";
+    private static string BranchFor(int recipeId) => $"aldt/recipe-{recipeId}-doc-attachments";
 
     private readonly TestDb _db = new();
 
@@ -71,11 +75,11 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
 
         delivery.IsNewPullRequest.Should().BeTrue();
         delivery.PullRequest.Number.Should().Be(11);
-        delivery.PullRequest.HeadBranch.Should().Be(Branch);
+        delivery.PullRequest.HeadBranch.Should().Be(BranchFor(recipeId));
         delivery.FileCount.Should().Be(2);
 
         var pull = BodyOf(api, "POST", "/pulls");
-        pull.Should().Contain($"\"head\":\"{Branch}\"");
+        pull.Should().Contain($"\"head\":\"{BranchFor(recipeId)}\"");
         pull.Should().Contain("\"base\":\"main\"");
     }
 
@@ -110,7 +114,7 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
         await service.ApplyAsync(recipeId, Repo);
 
         api.Bodies.Should().NotContain(b => b.Body.Contains("refs/heads/main"));
-        BodyOf(api, "POST", "/git/refs").Should().Contain($"refs/heads/{Branch}");
+        BodyOf(api, "POST", "/git/refs").Should().Contain($"refs/heads/{BranchFor(recipeId)}");
 
         // The security decision this feature turns on: the commit, the branch
         // and the pull request all go out on the acting user's token, so GitHub
@@ -131,11 +135,11 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
         var api = WritableApi()
             .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK,
                 $"[{{\"number\":11,\"html_url\":\"https://github.com/{Repo}/pull/11\"}}]")
-            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}", HttpStatusCode.OK,
-                $"{{\"ref\":\"refs/heads/{Branch}\",\"object\":{{\"sha\":\"{BranchSha}\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{BranchFor(recipeId)}", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/{BranchFor(recipeId)}\",\"object\":{{\"sha\":\"{BranchSha}\"}}}}")
             .On(HttpMethod.Get, $"/repos/{Repo}/git/commits/{BranchSha}", HttpStatusCode.OK,
                 $"{{\"sha\":\"{BranchSha}\",\"tree\":{{\"sha\":\"branch-tree-sha\"}}}}")
-            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/{Branch}", HttpStatusCode.OK,
+            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/{BranchFor(recipeId)}", HttpStatusCode.OK,
                 FakeGitHubApi.ShaJson("new-commit-sha"));
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
@@ -159,17 +163,17 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
         // The first round's branch is still there, its pull request merged and
         // closed. Rewinding it would rewrite merged history.
         var api = WritableApi()
-            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}", HttpStatusCode.OK,
-                $"{{\"ref\":\"refs/heads/{Branch}\",\"object\":{{\"sha\":\"{BranchSha}\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{BranchFor(recipeId)}", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/{BranchFor(recipeId)}\",\"object\":{{\"sha\":\"{BranchSha}\"}}}}")
             // The fake matches routes by path prefix, and the stepped name is
             // one of the first name's - so say outright that -2 is free.
-            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}-2", HttpStatusCode.NotFound);
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{BranchFor(recipeId)}-2", HttpStatusCode.NotFound);
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
 
         var delivery = await service.ApplyAsync(recipeId, Repo);
 
-        delivery.PullRequest.HeadBranch.Should().Be($"{Branch}-2");
+        delivery.PullRequest.HeadBranch.Should().Be($"{BranchFor(recipeId)}-2");
         api.Calls.Should().NotContain(c => c.StartsWith("PATCH", StringComparison.Ordinal));
     }
 
@@ -332,6 +336,143 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
 
     // --- helpers ------------------------------------------------------------
 
+    /// <summary>
+    /// #1600: branch names carry the recipe id, but a pull request opened before
+    /// that under the old name (<c>aldt/recipe-&lt;slug&gt;</c>) keeps its name and
+    /// is still joined.
+    /// </summary>
+    [Fact]
+    public async Task A_pull_request_still_open_under_the_old_branch_name_is_joined()
+    {
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        await SeedRepositoryUseAsync(recipeId);
+        const string legacy = "aldt/recipe-doc-attachments";
+        // Its pull request is still open under the old name, titled as it opened it.
+        var api = LegacyOpenApi(legacy, "Apply the Doc attachments recipe");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeId, Repo);
+
+        delivery.IsNewPullRequest.Should().BeFalse();
+        delivery.PullRequest.Number.Should().Be(7);
+        delivery.PullRequest.HeadBranch.Should().Be(legacy);
+        api.Calls.Should().NotContain(c => c.Contains("POST") && c.EndsWith("/pulls", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The old name is the slug alone, so two recipes whose titles slug the same
+    /// shared it. Recipe A's pull request still open there is not recipe B's,
+    /// and B starts its own branch under the new name.
+    /// </summary>
+    [Fact]
+    public async Task Another_recipes_pull_request_open_under_the_shared_old_name_is_left_alone()
+    {
+        await ReadyAsync();
+        await SeedRecipeAsync();
+        var recipeB = await SeedRecipeAsync("Doc Attachments!");
+        const string legacy = "aldt/recipe-doc-attachments";
+        var api = LegacyOpenApi(legacy, "Apply the Doc attachments recipe")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{legacy}-2", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeB, Repo);
+
+        delivery.IsNewPullRequest.Should().BeTrue();
+        delivery.PullRequest.HeadBranch.Should().Be($"aldt/recipe-{recipeB}-doc-attachments");
+        api.Calls.Should().NotContain(c => c.Contains("PATCH") && c.Contains(legacy));
+    }
+
+    /// <summary>
+    /// Even a matching title is not enough on its own: two recipes can carry
+    /// the same title, so the recipe must also have been applied here before.
+    /// </summary>
+    [Fact]
+    public async Task An_old_name_pull_request_for_a_recipe_never_applied_here_is_left_alone()
+    {
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        const string legacy = "aldt/recipe-doc-attachments";
+        var api = LegacyOpenApi(legacy, "Apply the Doc attachments recipe")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{legacy}-2", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeId, Repo);
+
+        delivery.IsNewPullRequest.Should().BeTrue();
+        delivery.PullRequest.HeadBranch.Should().Be(BranchFor(recipeId));
+    }
+
+    /// <summary>
+    /// An old-style name for a title starting with a number can equal a
+    /// new-style one: recipe 7 "12 Setup" was <c>aldt/recipe-12-setup</c>, which
+    /// is what recipe 12 "Setup" is called now. A pull request there that
+    /// another recipe opened under its old name is stepped past rather than joined.
+    /// </summary>
+    [Fact]
+    public async Task A_new_style_name_whose_open_pull_request_is_another_recipes_is_stepped_past()
+    {
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        var taken = BranchFor(recipeId);
+        var api = LegacyOpenApi(taken, $"Apply the {recipeId} Doc attachments recipe")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{taken}-2", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeId, Repo);
+
+        delivery.IsNewPullRequest.Should().BeTrue();
+        delivery.PullRequest.HeadBranch.Should().Be($"{taken}-2");
+    }
+
+    /// <summary>
+    /// The id in a new-style name says whose branch it is, so this recipe's own
+    /// pull request is joined even when its title no longer matches word for
+    /// word: the recipe was retitled, or someone edited the title on GitHub.
+    /// </summary>
+    [Theory]
+    [InlineData("Apply the Doc Attachments recipe")]
+    [InlineData("[WIP] Apply the Doc attachments recipe")]
+    public async Task This_recipes_own_pull_request_is_joined_whatever_its_title_says_now(string title)
+    {
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        var api = LegacyOpenApi(BranchFor(recipeId), title);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeId, Repo);
+
+        delivery.IsNewPullRequest.Should().BeFalse();
+        delivery.PullRequest.Number.Should().Be(7);
+        delivery.PullRequest.HeadBranch.Should().Be(BranchFor(recipeId));
+    }
+
+    [Fact]
+    public async Task An_old_branch_name_with_no_open_pull_request_is_left_alone()
+    {
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        const string legacy = "aldt/recipe-doc-attachments";
+        // The old branch is still there, its pull request merged. The apply starts
+        // a branch under the new name rather than stepping the old one.
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{legacy}", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/{legacy}\",\"object\":{{\"sha\":\"{BranchSha}\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{legacy}-2", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var delivery = await service.ApplyAsync(recipeId, Repo);
+
+        delivery.IsNewPullRequest.Should().BeTrue();
+        delivery.PullRequest.HeadBranch.Should().Be(BranchFor(recipeId));
+    }
+
     private (GitHubRecipeDeliveryService Service, AppDbContext Context) NewService(FakeGitHubApi api)
     {
         var ctx = _db.NewContext();
@@ -357,7 +498,7 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson())
             .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Repo))
             .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
-            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{BranchRoot}", HttpStatusCode.NotFound)
             .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/main", HttpStatusCode.OK,
                 $"{{\"ref\":\"refs/heads/main\",\"object\":{{\"sha\":\"{BaseSha}\"}}}}")
             .On(HttpMethod.Get, $"/repos/{Repo}/git/commits/{BaseSha}", HttpStatusCode.OK,
@@ -369,10 +510,46 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
             .On(HttpMethod.Post, $"/repos/{Repo}/pulls", HttpStatusCode.Created,
                 $"{{\"number\":11,\"html_url\":\"https://github.com/{Repo}/pull/11\"}}");
 
-    private async Task<int> SeedRecipeAsync()
+    /// <summary>
+    /// A fake whose only open pull request is on <paramref name="branch"/>,
+    /// titled <paramref name="title"/>, with that branch present and movable.
+    /// </summary>
+    private FakeGitHubApi LegacyOpenApi(string branch, string title)
+    {
+        var head = Uri.EscapeDataString($"{OrgLogin}:{branch}");
+        return WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", request =>
+                request.RequestUri!.Query.EndsWith(head, StringComparison.Ordinal)
+                    ? (HttpStatusCode.OK,
+                        $"[{{\"number\":7,\"html_url\":\"https://github.com/{Repo}/pull/7\",\"title\":\"{title}\"}}]")
+                    : (HttpStatusCode.OK, "[]"))
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{branch}", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/{branch}\",\"object\":{{\"sha\":\"{BranchSha}\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/commits/{BranchSha}", HttpStatusCode.OK,
+                $"{{\"sha\":\"{BranchSha}\",\"tree\":{{\"sha\":\"branch-tree-sha\"}}}}")
+            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/{branch}", HttpStatusCode.OK,
+                FakeGitHubApi.ShaJson("new-commit-sha"));
+    }
+
+    /// <summary>An earlier apply of the recipe to <see cref="Repo"/>, as the history records it.</summary>
+    private async Task SeedRepositoryUseAsync(int recipeId)
     {
         await using var ctx = _db.NewContext();
-        var recipe = RecipeBuilder.Default("Doc attachments")
+        ctx.RecipeDownloads.Add(new ALDevToolbox.Domain.Entities.RecipeDownload
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            RecipeId = recipeId,
+            Source = RecipeUseSource.Repository,
+            Repository = Repo,
+            DownloadedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<int> SeedRecipeAsync(string title = "Doc attachments")
+    {
+        await using var ctx = _db.NewContext();
+        var recipe = RecipeBuilder.Default(title)
             .WithFile("Attach.Codeunit.al", "// attach")
             .WithFile("Setup.Table.al", "// setup", relativePath: "Setup");
         ctx.Recipes.Add(recipe);

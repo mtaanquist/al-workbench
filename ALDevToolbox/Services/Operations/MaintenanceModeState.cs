@@ -47,27 +47,70 @@ public sealed class MaintenanceModeState
     /// </remarks>
     public void Enter(string reason)
     {
+        _restoreGoingAhead = false;
         Interlocked.Exchange(ref _state, new(reason, DateTime.UtcNow, false));
+        // Cancels the token jobs that stop for a restore took before this, and gives
+        // the jobs that start after the next Exit a fresh one. The flag goes on first,
+        // so a job that reads the fresh token can see from the flag that it is too late.
+        // A callback that throws must not leave the flag on with the restore unaware.
+        var previous = Interlocked.Exchange(ref _entering, new CancellationTokenSource());
+        try { previous.Cancel(); }
+        catch (AggregateException) { }
         Entered?.Invoke();
     }
 
     /// <summary>Raised after <see cref="Enter"/> turns the flag on. Test seam.</summary>
     internal event Action? Entered;
 
+    private CancellationTokenSource _entering = new();
+
+    /// <summary>
+    /// Cancelled the next time <see cref="Enter"/> turns the flag on. A job that is
+    /// safe to stop and run again later (a system-reference backfill) links its token
+    /// to this, so a restore does not have to wait for it to finish (#1578, OEI2-4).
+    /// Read it when the job starts: a token read after <see cref="Enter"/> is the
+    /// next one, and is not cancelled.
+    /// </summary>
+    public CancellationToken EnteringToken => Volatile.Read(ref _entering).Token;
+
     /// <summary>
     /// Keeps the flag on after a restore failed once the database was dropped.
     /// Nothing calls <see cref="Exit"/> for it: it stays until a SiteAdmin
     /// restores another backup or the process restarts (#1321).
     /// </summary>
-    public void HoldAfterFailedRestore(string reason) => _state = new(reason, DateTime.UtcNow, true);
+    public void HoldAfterFailedRestore(string reason)
+    {
+        _restoreGoingAhead = false;
+        _state = new(reason, DateTime.UtcNow, true);
+    }
 
     /// <summary>The current state, to hand back to <see cref="Restore"/>.</summary>
     public Snapshot Capture() => _state;
 
     /// <summary>Puts back a state taken with <see cref="Capture"/>.</summary>
-    public void Restore(Snapshot snapshot) => _state = snapshot;
+    public void Restore(Snapshot snapshot)
+    {
+        _restoreGoingAhead = false;
+        _state = snapshot;
+    }
 
-    public void Exit() => _state = new(null, default, false);
+    public void Exit()
+    {
+        _restoreGoingAhead = false;
+        _state = new(null, default, false);
+    }
+
+    private volatile bool _restoreGoingAhead;
+
+    /// <summary>
+    /// True once the restore under way has stopped waiting for running work and is
+    /// going ahead with the drop. Cleared when the flag changes again. The database
+    /// guard stops holding commands from then on (#1599).
+    /// </summary>
+    public bool RestoreGoingAhead => _restoreGoingAhead;
+
+    /// <summary>Called by the restore once nothing is running and it is about to drop the schema.</summary>
+    public void MarkRestoreGoingAhead() => _restoreGoingAhead = true;
 
     // ---- Background jobs across a restore (#1538) ----------------------------------
 
@@ -98,6 +141,16 @@ public sealed class MaintenanceModeState
         Interlocked.Exchange(ref _epochAdvancedAtTicks, DateTime.UtcNow.Ticks);
         Interlocked.Increment(ref _epoch);
     }
+
+    private long _activeJobsWaitTicks;
+
+    /// <summary>
+    /// How long the last <see cref="WaitForActiveJobsAsync"/> was given: how long a
+    /// restore may wait, after turning the flag on, before it gives up and reopens the
+    /// site. The database guard holds a command for that long (plus a margin) rather
+    /// than refusing it (#1599).
+    /// </summary>
+    public TimeSpan ActiveJobsWait => TimeSpan.FromTicks(Interlocked.Read(ref _activeJobsWaitTicks));
 
     /// <summary>Background jobs that have started and not finished.</summary>
     public int ActiveJobs => Volatile.Read(ref _activeJobs);
@@ -223,6 +276,7 @@ public sealed class MaintenanceModeState
     /// </summary>
     public async Task<bool> WaitForActiveJobsAsync(TimeSpan timeout, CancellationToken ct)
     {
+        Interlocked.Exchange(ref _activeJobsWaitTicks, timeout.Ticks);
         var deadline = DateTime.UtcNow + timeout;
         while (ActiveJobs > 0)
         {

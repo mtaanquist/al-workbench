@@ -218,6 +218,28 @@ public sealed class NewExtensionRepositoryTests : IDisposable
         });
     }
 
+    /// <summary>
+    /// #1615: the solution's settings record the name its workspace file was
+    /// saved under, which is not the one today's folder style would give. The
+    /// page names and previews that file, the one the generator rewrites.
+    /// </summary>
+    [Fact]
+    public async Task The_workspace_file_is_named_as_the_settings_recorded_it()
+    {
+        await ReadyPageAsync(withSavedConfig: true, savedToml: SavedWorkspaceToml.Replace(
+            "tenant_id = \"\"", "tenant_id = \"\"\ncode_workspace = \"cronus_customer.code-workspace\""));
+        var cut = _ctx.Render<NewExtension>();
+        await PickTheRepositoryAsync(cut);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("cronus_customer.code-workspace")
+                .And.NotContain("CRONUSCustomer.code-workspace");
+            cut.FindAll("code").Select(c => c.TextContent)
+                .Should().Contain("cronus_customer.code-workspace", "the after-download step names the file to replace");
+        });
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -253,7 +275,7 @@ public sealed class NewExtensionRepositoryTests : IDisposable
     /// generate from, and a GitHub offering exactly one repository - which
     /// either carries saved settings or does not.
     /// </summary>
-    private async Task<FakeGitHubApi> ReadyPageAsync(bool withSavedConfig = false)
+    private async Task<FakeGitHubApi> ReadyPageAsync(bool withSavedConfig = false, string? savedToml = null)
     {
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
@@ -291,7 +313,7 @@ public sealed class NewExtensionRepositoryTests : IDisposable
         if (withSavedConfig)
         {
             api.On(HttpMethod.Get, $"/repos/{Repo}/contents/workspace.aldt.toml", HttpStatusCode.OK,
-                FakeGitHubApi.FileContentsJson("workspace.aldt.toml", SavedWorkspaceToml));
+                FakeGitHubApi.FileContentsJson("workspace.aldt.toml", savedToml ?? SavedWorkspaceToml));
         }
 
         await SeedTemplateAsync();

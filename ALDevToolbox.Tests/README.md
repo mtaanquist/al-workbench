@@ -150,7 +150,9 @@ private Task<int> SeedAsync()
 work factor and caches per password, and since bcrypt reads the factor back
 from the hash, the sign-in is cheap too. Call `AuthService.HashPassword` only
 in a test about hashing itself, or one that should start from the hash the app
-makes.
+makes. Recovery codes get the same shortcut without asking: a module
+initializer (`CheapHashDefaults`) sets `RecoveryCodeService.WorkFactor` to the
+minimum for the whole run.
 
 Every fixture database holds three organisations, and `TestDb.OrgContext`
 acts as an ordinary tenant unless a test says otherwise (#1441):
