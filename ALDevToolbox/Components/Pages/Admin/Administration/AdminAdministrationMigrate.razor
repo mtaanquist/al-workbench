@@ -10,11 +10,12 @@
 @using ALDevToolbox.Domain.Entities
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.Generation
+@using ALDevToolbox.Services.GitHub
 @using ALDevToolbox.Services.Migration
 @using ALDevToolbox.Services.Templates
 
 @*
-    Migrate repositories (issue #1698; parts #1699 and #1700). Reached from the
+    Migrate repositories (issue #1698; parts #1699, #1700 and #1701). Reached from the
     "Migrate repositories" row on Administration -> Repositories.
 
     Named user: an org Admin moving one customer at a time from Azure DevOps
@@ -22,7 +23,9 @@
     nothing about this codebase. They have done this before for other
     customers, or are about to do it for a hundred of them, so the page is a
     short straight line: name the project, tick the repositories, name the
-    customer and template, look at what would move and change.
+    customer and template, look at what would move and change, create the
+    repository. Earlier migrations are listed at the bottom, because with a
+    hundred customers to move the Admin needs to see which are done.
 *@
 
 <PageTitle>Migrate repositories · Administration · AL Workbench</PageTitle>
@@ -212,7 +215,8 @@
                                     <span class="field__hint">Adds the extensions a new workspace from this template would start with, next to the customer's own.</span>
                                 </div>
                                 <div class="u-row mig__go">
-                                    <button type="button" class="btn btn--primary" @onclick="PreviewAsync"
+                                    @* Once a preview is ready, Create repository is the page's one primary action. *@
+                                    <button type="button" class="btn @(ReadyToCreate ? "" : "btn--primary")" @onclick="PreviewAsync"
                                             disabled="@(_chosen.Count == 0 || _starting || _preview?.IsActive == true)">
                                         <Icon Name="eye" Width="16" Height="16" />
                                         <span>@(_starting ? "Starting..." : $"Preview migration of {_chosen.Count} {(_chosen.Count == 1 ? "repository" : "repositories")}")</span>
@@ -229,11 +233,18 @@
                 <section class="card" aria-live="polite">
                     <div class="card__head">
                         <div>
-                            <h2 class="card__title">4. Preview</h2>
+                            <h2 class="card__title">@(_preview.IsMigration ? "Migration" : "4. Preview")</h2>
                             <p class="card__sub">
                                 From <a href="@_preview.ProjectUrl" target="_blank" rel="noopener">@_preview.ProjectName</a>
                                 into @_preview.CustomerName, laid out by @_preview.TemplateName.
-                                Nothing has been created on GitHub.
+                                @if (!_preview.IsMigration)
+                                {
+                                    <text>Nothing has been created on GitHub.</text>
+                                }
+                                else if (_preview.Create is { } create)
+                                {
+                                    <text>New repository: @create.RepositoryName.</text>
+                                }
                             </p>
                         </div>
                         <StatusPill Tone="@PreviewTone(_preview)">@PreviewLabel(_preview)</StatusPill>
@@ -242,6 +253,32 @@
                         @if (_preview.Error is { } error)
                         {
                             <Alert Tone="AlertTone.Danger"><span>@error</span></Alert>
+                        }
+
+                        @if (_preview.Outcome is { } outcome)
+                        {
+                            <Alert Tone="AlertTone.Success">
+                                <span>
+                                    Created <a href="@outcome.RepositoryUrl" target="_blank" rel="noopener">@outcome.RepositoryFullName</a>
+                                    with @outcome.FileCount files.
+                                    @if (outcome.SolutionId is { } solutionId)
+                                    {
+                                        <text>The new solution is <a href="@($"/solutions/{solutionId}")">@(outcome.SolutionName ?? _preview.CustomerName)</a>.</text>
+                                    }
+                                    @if (outcome.PipelineNames.Count > 0)
+                                    {
+                                        <text> Build pipelines: @string.Join(", ", outcome.PipelineNames).</text>
+                                    }
+                                </span>
+                            </Alert>
+                            @foreach (var warning in outcome.Warnings)
+                            {
+                                <Alert Tone="AlertTone.Warn"><span>@warning</span></Alert>
+                            }
+                            <p class="field__hint">
+                                The repositories in Azure DevOps are unchanged. Once the team works in the new repository,
+                                you can archive or remove them there.
+                            </p>
                         }
 
                         <div class="mig__scroll">
@@ -274,16 +311,16 @@
                         @if (_preview.Analysis is { } analysis)
                         {
                             var findings = analysis.Findings.Concat(_preview.Workspace?.Findings ?? []).ToList();
-                            @if (_preview.CanMigrate)
+                            @if (_preview.CanMigrate && !_preview.IsMigration)
                             {
                                 <Alert Tone="AlertTone.Success">
-                                    <span>Nothing stands in the way. @analysis.Extensions.Count @(analysis.Extensions.Count == 1 ? "extension" : "extensions") would be moved, @_preview.Workspace!.FileCount files in all. Creating the repository from this preview is not available yet.</span>
+                                    <span>Nothing stands in the way. @analysis.Extensions.Count @(analysis.Extensions.Count == 1 ? "extension" : "extensions") would be moved, @_preview.Workspace!.FileCount files in all. Look through the details below, then create the repository.</span>
                                 </Alert>
                             }
                             else if (findings.Any(f => f.Severity == MigrationFindingSeverity.Blocking))
                             {
                                 <Alert Tone="AlertTone.Danger">
-                                    <span>Fix the problems below, then preview again.</span>
+                                    <span>@(_preview.IsMigration ? "Nothing was created. " : "")Fix the problems below, then preview again.</span>
                                 </Alert>
                             }
 
@@ -347,11 +384,15 @@
                                 @if (workspace.RootFiles.Count > 0)
                                 {
                                     <p>
-                                        Added at the top of the repository, from the template:
+                                        Added in the root folder of the repository:
                                         @for (var i = 0; i < workspace.RootFiles.Count; i++)
                                         {
                                             <code>@workspace.RootFiles[i]</code>@(i < workspace.RootFiles.Count - 1 ? ", " : ".")
                                         }
+                                        @(" ")<span class="u-muted">
+                                            <code>@MigrationWorkspaceBuilder.ArchiveFile</code> links each Azure DevOps repository and the commit that was copied,
+                                            so the old history stays easy to find. The rest come from the template.
+                                        </span>
                                     </p>
                                 }
 
@@ -434,14 +475,14 @@
                         {
                             <p class="u-muted">
                                 @(_preview.Status == MigrationPreviewStatus.Waiting
-                                    ? "Waiting for another preview on the server to finish."
-                                    : "Copying the newest commit of each repository. This page updates by itself.")
+                                    ? "Waiting for another preview or migration on the server to finish."
+                                    : $"{_preview.Stage ?? "Copying the newest commit of each repository"}. This page updates by itself.")
                             </p>
                         }
 
                         @* After a reload steps 1 to 3 are empty, so this is the way to run the same preview again.
                            With them on screen, the button in step 3 does that and takes the current ticks. *@
-                        @if (!_preview.IsActive && _listed is null)
+                        @if (!_preview.IsActive && _listed is null && _preview.Outcome is null)
                         {
                             <div class="u-row">
                                 <button type="button" class="btn" @onclick="PreviewAgainAsync" disabled="@_starting">
@@ -457,9 +498,158 @@
                     </div>
                 </section>
             }
+
+            @if (ReadyToCreate)
+            {
+                <section class="card">
+                    <div class="card__head">
+                        <div>
+                            <h2 class="card__title">5. Create the repository</h2>
+                            <p class="card__sub">
+                                Creates the repository in your GitHub organisation with the files shown above in a single commit,
+                                and a new solution for @_preview!.CustomerName.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card__body form-sec">
+                        @if (_github?.Blocker is { } blocker)
+                        {
+                            <Alert Tone="AlertTone.Warn"><span>@blocker</span></Alert>
+                        }
+                        <div class="field">
+                            <label class="field__label" for="mig-repo">Repository name</label>
+                            <input class="input" id="mig-repo" type="text" required maxlength="100"
+                                   pattern="@GitHubWorkspaceRepositoryService.NamePattern"
+                                   placeholder="e.g. cronus-as"
+                                   @bind="_repositoryName" @bind:event="oninput" />
+                            <span class="field__hint">
+                                @if (_github?.OrgLogin is { } org)
+                                {
+                                    <text>Created as @org/@(_repositoryName.Trim().Length > 0 ? _repositoryName.Trim() : "..."). </text>
+                                }
+                                Letters, digits, hyphens, underscores and full stops.
+                            </span>
+                            <FieldError Field="@RepositoryMigrationService.RepositoryNameField" Errors="_createErrors" />
+                        </div>
+                        <div class="field">
+                            <Switch Name="mig-private" Label="Private repository" Checked="_isPrivate" CheckedChanged="v => _isPrivate = v" />
+                            <span class="field__hint">Only people you give access to in GitHub can see it.</span>
+                        </div>
+                        <div class="field">
+                            <Switch Name="mig-pipelines" Label="Set up build pipelines" Checked="_addPipelines" CheckedChanged="v => _addPipelines = v" />
+                            <span class="field__hint">Adds build pipelines to the new solution in AL Workbench, so it builds straight away.</span>
+                        </div>
+                        @if (_clash is { CanReplace: true } replaceable)
+                        {
+                            <div class="field">
+                                <Switch Name="mig-replace" Label="Replace the existing solution" Checked="_replace" CheckedChanged="v => _replace = v" />
+                                <span class="field__hint">
+                                    A solution called @replaceable.Name came from an earlier migration, and its repository has since been
+                                    deleted from GitHub. Replacing it deletes that solution and its pipelines first.
+                                </span>
+                            </div>
+                        }
+                        else if (_clash is { } taken)
+                        {
+                            <Alert Tone="AlertTone.Warn">
+                                <span>
+                                    A solution called <a href="@($"/solutions/{taken.Id}")">@taken.Name</a> already exists, so this would be refused.
+                                    Change the customer name above and preview again, or delete that solution first.
+                                </span>
+                            </Alert>
+                        }
+                        <FieldError Field="@RepositoryMigrationService.SolutionField" Errors="_createErrors" />
+                        <FieldError Field="@RepositoryMigrationService.RepositoryField" Errors="_createErrors" />
+                        @foreach (var (field, message) in _createErrors.Where(e => e.Key is not (RepositoryMigrationService.SolutionField or RepositoryMigrationService.RepositoryField or RepositoryMigrationService.RepositoryNameField)))
+                        {
+                            <FieldError Message="@message" />
+                        }
+                        <div class="u-row mig__go">
+                            <button type="button" class="btn btn--primary" @onclick="CreateAsync"
+                                    disabled="@(_starting || string.IsNullOrWhiteSpace(_repositoryName) || _clash is { CanReplace: false } || _github?.Blocker is not null)">
+                                <Icon Name="folder-git-2" Width="16" Height="16" />
+                                <span>@(_starting ? "Starting..." : "Create repository")</span>
+                            </button>
+                        </div>
+                    </div>
+                </section>
+            }
+
+            <section class="card">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">Earlier migrations</h2>
+                        <p class="card__sub">Every migration run in your organisation, newest first.</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    @if (_history is null)
+                    {
+                        <LoadingBlock />
+                    }
+                    else if (_history.Count == 0)
+                    {
+                        <EmptyState Icon="history" Title="No migrations yet">
+                            <Text>When you create a repository from a preview above, it is listed here.</Text>
+                        </EmptyState>
+                    }
+                    else
+                    {
+                        <div class="mig__scroll">
+                            <table class="data-table">
+                                <thead>
+                                    <tr><th>When</th><th>Customer</th><th>From</th><th>Repository</th><th>Result</th></tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var row in _history)
+                                    {
+                                        <tr>
+                                            <td class="u-nowrap"><Timestamp Value="@row.CreatedAt" /></td>
+                                            <td>
+                                                @if (row.SolutionId is { } solutionId)
+                                                {
+                                                    <a class="u-nowrap" href="@($"/solutions/{solutionId}")">@row.CustomerName</a>
+                                                }
+                                                else
+                                                {
+                                                    <span class="u-nowrap">@row.CustomerName</span>
+                                                }
+                                                @if (row.StartedBy is { } by)
+                                                {
+                                                    <div class="field__hint">by @by</div>
+                                                }
+                                            </td>
+                                            <td><a href="@row.SourceProjectUrl" target="_blank" rel="noopener">@row.SourceProject</a></td>
+                                            <td>
+                                                @if (row.RepositoryUrl is { } url)
+                                                {
+                                                    <a class="u-nowrap" href="@url" target="_blank" rel="noopener">@row.RepositoryFullName</a>
+                                                }
+                                                else
+                                                {
+                                                    <span class="u-muted">-</span>
+                                                }
+                                            </td>
+                                            <td class="mig__result">
+                                                <StatusPill Tone="@(row.Succeeded ? "succeeded" : "failed")">@(row.Succeeded ? "Created" : "Failed")</StatusPill>
+                                                @if (row.Message is { } message)
+                                                {
+                                                    <div class="field__hint">@message</div>
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </div>
+            </section>
         </div>
     </ChildContent>
 </EditPage>
+
+<ConfirmDialog @ref="_confirmReplace" />
 
 @code {
     [SupplyParameterFromQuery(Name = "preview")] public Guid? PreviewId { get; set; }
@@ -481,8 +671,21 @@
     private IReadOnlyDictionary<string, string> _errors = new Dictionary<string, string>();
     private IReadOnlyDictionary<string, string> _againErrors = new Dictionary<string, string>();
     private MigrationPreview? _preview;
+    private List<RepositoryMigrationHistoryRow>? _history;
+    private MigrationSolutionClash? _clash;
+    private MigrationGitHubReadiness? _github;
+    private Guid? _preparedFor;
+    private string _repositoryName = string.Empty;
+    private bool _isPrivate = true;
+    private bool _addPipelines = true;
+    private bool _replace;
+    private IReadOnlyDictionary<string, string> _createErrors = new Dictionary<string, string>();
+    private ConfirmDialog? _confirmReplace;
     private PeriodicTimer? _poll;
     private CancellationTokenSource? _pollCts;
+
+    /// <summary>A finished preview that nothing stands in the way of: the repository can be created from it.</summary>
+    private bool ReadyToCreate => _preview is { IsMigration: false, Status: MigrationPreviewStatus.Done, CanMigrate: true };
 
     private bool AllChosen => _listed is { Repositories.Count: > 0 } listed
         && listed.Repositories.Where(r => !r.IsDisabled).All(r => _chosen.Contains(r.Id))
@@ -507,7 +710,55 @@
                 _addTemplateExtensions = _preview.AddTemplateExtensions;
             }
         }
+        _history = await Migration.ListHistoryAsync();
+        await PrepareCreateAsync();
         _loading = false;
+    }
+
+    /// <summary>
+    /// Once per ready preview: suggests the repository name from the customer's,
+    /// and looks for a solution that already has that name.
+    /// </summary>
+    private async Task PrepareCreateAsync()
+    {
+        if (!ReadyToCreate || _preparedFor == _preview!.Id) return;
+        _preparedFor = _preview.Id;
+        _repositoryName = GitHubWorkspaceRepositoryService.SuggestName(_preview.CustomerName);
+        _replace = false;
+        _createErrors = new Dictionary<string, string>();
+        _clash = await Migration.FindSolutionClashAsync(_preview.CustomerName);
+        _github = await Migration.CheckGitHubAsync();
+    }
+
+    private async Task CreateAsync()
+    {
+        if (_starting || _preview is null) return;
+        if (_replace && _clash is { CanReplace: true } clash && _confirmReplace is not null
+            && !await _confirmReplace.OpenAsync(
+                $"Replace {clash.Name}?",
+                $"The solution {clash.Name} and its pipelines are deleted, then the new repository and a new solution are created.",
+                "Replace and create", "btn--danger", "trash-2"))
+        {
+            return;
+        }
+
+        _starting = true;
+        _createErrors = new Dictionary<string, string>();
+        try
+        {
+            _preview = await Migration.StartMigrationAsync(_preview.Id,
+                new MigrationCreateInput(_repositoryName, _isPrivate, _addPipelines, _replace));
+            Nav.NavigateTo($"/admin/administration/repositories/migrate?preview={_preview.Id}", replace: true);
+            StartPoll();
+        }
+        catch (PlanValidationException ex)
+        {
+            _createErrors = ex.Errors;
+        }
+        finally
+        {
+            _starting = false;
+        }
     }
 
     // Not only on the first render: initialisation awaits a database read, so the
@@ -618,11 +869,16 @@
             {
                 var keepGoing = true;
                 // Reads an in-memory snapshot only, on the circuit's own dispatcher.
-                await InvokeAsync(() =>
+                await InvokeAsync(async () =>
                 {
                     if (_preview is null) { keepGoing = false; return; }
                     _preview = Migration.GetPreview(_preview.Id) ?? _preview;
                     keepGoing = _preview.IsActive;
+                    if (!keepGoing)
+                    {
+                        await PrepareCreateAsync();
+                        if (_preview.IsMigration) _history = await Migration.ListHistoryAsync();
+                    }
                     StateHasChanged();
                 });
                 if (!keepGoing) break;
@@ -667,14 +923,16 @@
         MigrationPreviewStatus.Waiting => "queued",
         MigrationPreviewStatus.Running => "running",
         MigrationPreviewStatus.Failed => "failed",
+        _ when p.IsMigration => p.Outcome is not null ? "succeeded" : "danger",
         _ => p.CanMigrate ? "succeeded" : "danger",
     };
 
     private static string PreviewLabel(MigrationPreview p) => p.Status switch
     {
         MigrationPreviewStatus.Waiting => "Waiting",
-        MigrationPreviewStatus.Running => "Reading repositories",
+        MigrationPreviewStatus.Running => p.IsMigration ? "Migrating" : "Reading repositories",
         MigrationPreviewStatus.Failed => "Failed",
+        _ when p.IsMigration => p.Outcome is not null ? "Migrated" : "Not migrated",
         _ => p.CanMigrate ? "Ready to migrate" : "Needs fixing",
     };
 

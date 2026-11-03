@@ -68,8 +68,8 @@ public static class MigrationAppJson
     /// <summary>
     /// The source's <c>app.json</c> rebuilt on <paramref name="template"/>, and
     /// every property that ends up different from the source's. Neither input
-    /// is changed. The result keeps the template's property order; properties
-    /// only the source has follow it.
+    /// is changed. The result follows the template's property order and
+    /// spelling; kept settings the template lacks follow it.
     /// </summary>
     public static (JsonObject AppJson, IReadOnlyList<MigrationAppJsonChange> Changes) Normalize(JsonObject template, JsonObject source)
     {
@@ -123,7 +123,32 @@ public static class MigrationAppJson
             result[key] = merged;
         }
 
+        result = InTemplateOrder(template, result);
         return (result, Diff(source, result));
+    }
+
+    /// <summary>
+    /// The same properties laid out as the template lays them out (Mads, #1700):
+    /// every property the template has sits where the template puts it, spelled
+    /// as the template spells it, and the source's kept settings that the
+    /// template lacks follow in the source's order. Sources written over the years put the same settings
+    /// in different places; after the move they all read alike.
+    /// </summary>
+    private static JsonObject InTemplateOrder(JsonObject template, JsonObject merged)
+    {
+        var ordered = new JsonObject();
+        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, _) in template)
+        {
+            if (Find(merged, key) is not { } found) continue;
+            ordered[key] = found.Value?.DeepClone();
+            placed.Add(key);
+        }
+        foreach (var (key, value) in merged)
+        {
+            if (placed.Add(key)) ordered[key] = value?.DeepClone();
+        }
+        return ordered;
     }
 
     private static List<MigrationAppJsonChange> Diff(JsonObject before, JsonObject after)

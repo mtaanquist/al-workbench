@@ -91,12 +91,17 @@ to `MigrationWorkspaceBuilder`, which writes the workspace into the preview's te
   `preprocessorSymbols`, `resourceFolders`, `applicationInsightsConnectionString`,
   `applicationInsightsKey`, `keyVaultUrls`. The higher of the two: `application`, `platform`,
   `runtime`. `features` is the union. Everything else is the template's, and a setting only the
-  source has is removed. The extra kept settings beyond Mads's list describe or configure one
+  source has is removed. The result is laid out like the template's `app.json`: every property
+  sits where the template puts it, spelled as the template spells it, and kept settings the
+  template lacks follow (Mads, so sources written over the years end up reading alike). The extra kept settings beyond Mads's list describe or configure one
   app (an on-premises target, a telemetry key, a test app's `internalsVisibleTo`); overwriting
   them would break the app rather than tidy it.
 - **The workspace files** point at the moved folders: the template's `.code-workspace` lists them
   instead of its own extension folders, and `workspace.aldt.toml` records each moved extension
   with kind `migrated`, its id, range, source repository and folder, and the commit read.
+- **`ARCHIVE.md` at the root** (Mads): the date of the move, a link to the Azure DevOps project,
+  and a table linking each source repository and the commit copied from it, since the history
+  itself stays behind.
 - **The template's `.gitignore` decides the rest.** The builder runs `git init` and
   `git ls-files --others --ignored --exclude-standard --directory` in the folder, removes what
   git ignores inside the moved extensions and lists it, then removes the `.git` folder again.
@@ -105,3 +110,51 @@ to `MigrationWorkspaceBuilder`, which writes the workspace into the preview's te
 The preview shows the template's root files, each extension's `app.json` changes (settings
 that only gain an empty value from the template are summarised in one line), and the list of
 what stays behind. The folder is deleted with the clones; part 3 builds it again and pushes it.
+
+## Part 3: create the repository (#1701)
+
+A ready preview (nothing blocking in the sources or the workspace) gets step 5, "Create the
+repository": the repository name (suggested from the customer's name in the organisation's
+repository style), private (on), and "Set up build pipelines" (on). "Create repository" is
+then the page's primary action; the preview button turns outline.
+
+`RepositoryMigrationService.StartMigrationAsync` takes the preview's id, never the page's copy of
+it. It rebuilds the target from what the preview recorded, lists the repositories from Azure
+DevOps again, and checks on the request everything that would refuse the creation before
+anything exists: the name, GitHub's readiness and the Admin's membership
+(`GitHubWorkspaceRepositoryService.CheckCanCreateAsync`, shared with New Workspace), and a
+solution of the same name. It then queues a **migration run**: the same job on the same queue,
+carrying a `MigrationCreateRequest` with the commit of `main` the preview read in each
+repository. The page shows the run in place of the preview, with a stage line.
+
+The run clones again, and stops with "main has changed ... preview again" if any repository's
+`main` moved since the preview, so what is pushed is what the Admin looked at. It builds the
+workspace again and hands it to `RepositoryMigrationPublisher`, which:
+
+- creates the repository through `GitHubWorkspaceRepositoryService.CreateAndFillAsync`, the same
+  sequence New Workspace runs (repository, standard files, branches, branch rules, solution,
+  pipelines), with a different fill;
+- **fills it with one git push**, not the Contents API: the organisation's standard files are
+  laid over the workspace, then one commit (author: the Admin's linked GitHub account; message:
+  the Azure DevOps project, each repository and the commit read, and the template) is pushed to
+  the default branch on the installation token. A customer's source is thousands of files, and
+  an API call each would spend the installation's hourly allowance that builds and webhooks
+  share;
+- records the run in `repository_migrations` (who, when, from where, which commits, into which
+  repository and solution, and the outcome), success or failure.
+
+A push that fails leaves an empty repository behind; the refusal says so and says to delete it
+and run again. Nothing else is undone automatically.
+
+**Running again.** Deleting the GitHub repository and the solution's pipelines is enough to run a
+customer again, except that the solution keeps its name. So when a solution of the customer's
+name exists, the page offers **"Replace the existing solution"** only if a successful earlier
+migration created that solution and GitHub says its repository is gone (asked with the
+installation token, which can see every repository the app created). Replacing soft-deletes the
+old solution and its pipelines after a confirmation, then creates the new one. Any other
+solution of that name is refused: the Admin picks another customer name or deletes it first.
+
+**Earlier migrations** lists the organisation's runs, newest first, below the steps, so with a
+hundred customers to move the Admin can see which are done. Run state itself stays in memory
+like a preview's. A restart in the middle of a run loses it without a history row, and may
+leave a half-made repository on GitHub; the run's failure message says to check for one.

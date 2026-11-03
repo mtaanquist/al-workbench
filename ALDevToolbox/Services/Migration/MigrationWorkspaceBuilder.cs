@@ -94,11 +94,50 @@ public sealed class MigrationWorkspaceBuilder
     }
 
     /// <summary>
+    /// The file at the new repository's root that points back at the Azure DevOps
+    /// repositories it came from (Mads, #1701): their history is not copied, so
+    /// this is where someone looking for it is sent.
+    /// </summary>
+    public const string ArchiveFile = "ARCHIVE.md";
+
+    private static string ArchiveText(
+        AzureDevOpsProject? project, IReadOnlyList<ClonedSource> sources, IReadOnlyDictionary<string, string> commits)
+    {
+        var text = new StringBuilder();
+        text.AppendLine("# Archive").AppendLine();
+        text.Append("This repository was moved from Azure DevOps on ")
+            .Append(DateTime.UtcNow.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
+            .AppendLine(" with AL Workbench.");
+        text.AppendLine("Only the newest commit on main of each repository below was copied, without its history.");
+        text.AppendLine("The full history is still in Azure DevOps.").AppendLine();
+        if (project is not null)
+        {
+            text.Append("Azure DevOps project: [").Append(project.DisplayName).Append("](").Append(project.WebUrl).AppendLine(")").AppendLine();
+        }
+        text.AppendLine("| Repository | Commit copied |");
+        text.AppendLine("| --- | --- |");
+        foreach (var source in sources)
+        {
+            var name = Escape(source.RepositoryName);
+            var commit = commits.GetValueOrDefault(source.RepositoryName);
+            var repository = source.WebUrl is { } url ? $"[{name}]({url})" : name;
+            var copied = commit is null ? "-"
+                : source.WebUrl is { } web ? $"[{commit[..Math.Min(7, commit.Length)]}]({web}/commit/{commit})"
+                : commit;
+            text.Append("| ").Append(repository).Append(" | ").Append(copied).AppendLine(" |");
+        }
+        return text.ToString();
+
+        static string Escape(string value) => value.Replace("|", "\\|").Replace("[", "\\[").Replace("]", "\\]");
+    }
+
+    /// <summary>
     /// Writes the workspace for <paramref name="target"/> into the empty folder
     /// <paramref name="destination"/>, from the extensions <paramref name="analysis"/>
     /// found in <paramref name="sources"/>. <paramref name="commits"/> maps each
     /// repository's name to the commit that was read, recorded in
-    /// <c>workspace.aldt.toml</c>.
+    /// <c>workspace.aldt.toml</c> and in <see cref="ArchiveFile"/>, which links
+    /// each source repository in <paramref name="project"/>.
     /// </summary>
     /// <exception cref="PlanValidationException">The template can no longer be generated (it was deleted, say).</exception>
     public async Task<MigrationWorkspace> BuildAsync(
@@ -107,7 +146,8 @@ public sealed class MigrationWorkspaceBuilder
         MigrationSourceAnalysis analysis,
         IReadOnlyDictionary<string, string> commits,
         string destination,
-        CancellationToken ct)
+        CancellationToken ct,
+        AzureDevOpsProject? project = null)
     {
         Directory.CreateDirectory(destination);
         var template = await ReadTemplateAsync(target.Plan, ct).ConfigureAwait(false);
@@ -179,6 +219,9 @@ public sealed class MigrationWorkspaceBuilder
 
             leftBehind.AddRange(OutsideExtensions(source, extensions.Select(e => e.SourcePath).ToList(), template));
         }
+
+        await File.WriteAllTextAsync(Path.Combine(destination, ArchiveFile), ArchiveText(project, sources, commits), ct).ConfigureAwait(false);
+        if (!rootFiles.Contains(ArchiveFile, StringComparer.OrdinalIgnoreCase)) rootFiles.Add(ArchiveFile);
 
         await WriteWorkspaceFilesAsync(destination, template, target, dropped, analysis.Extensions.Select(e => e.Folder).ToList(), identities, ct)
             .ConfigureAwait(false);

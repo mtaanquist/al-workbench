@@ -11,7 +11,10 @@ namespace ALDevToolbox.Services.Migration;
 /// the clones hold, builds the new workspace from them with
 /// <see cref="MigrationWorkspaceBuilder"/>, and records the outcome on
 /// <see cref="RepositoryMigrationQueue"/>.
-/// Nothing is written anywhere but a temporary folder, which is removed at the end.
+/// A preview writes nothing anywhere but a temporary folder, which is removed at
+/// the end. A migration run (#1701) does the same reading again, checks that
+/// <c>main</c> has not moved since the preview, and then hands the workspace to
+/// <see cref="RepositoryMigrationPublisher"/>.
 ///
 /// <para><strong>The clone never downloads <c>.alpackages</c>.</strong> Some
 /// source repositories are several gigabytes because <c>.alpackages</c> was
@@ -43,6 +46,7 @@ public sealed class RepositoryMigrationPreviewer
     private readonly UserRepositoryTokenService _tokens;
     private readonly RepositoryMigrationQueue _queue;
     private readonly MigrationWorkspaceBuilder _workspace;
+    private readonly RepositoryMigrationPublisher _publisher;
     private readonly ILogger<RepositoryMigrationPreviewer> _logger;
 
     public RepositoryMigrationPreviewer(
@@ -50,12 +54,14 @@ public sealed class RepositoryMigrationPreviewer
         UserRepositoryTokenService tokens,
         RepositoryMigrationQueue queue,
         MigrationWorkspaceBuilder workspace,
+        RepositoryMigrationPublisher publisher,
         ILogger<RepositoryMigrationPreviewer> logger)
     {
         _processes = processes;
         _tokens = tokens;
         _queue = queue;
         _workspace = workspace;
+        _publisher = publisher;
         _logger = logger;
     }
 
@@ -111,7 +117,21 @@ public sealed class RepositoryMigrationPreviewer
                 _queue.SetRepository(job.Id, repository.Name, MigrationRepositoryStatus.Cloned, commit);
                 if (commit is not null) commits[repository.Name] = commit;
                 Cloned?.Invoke(dest);
-                cloned.Add(new ClonedSource(repository.Name, dest));
+                cloned.Add(new ClonedSource(repository.Name, dest, repository.WebUrl));
+            }
+
+            if (job.Create is { } pinned)
+            {
+                var moved = job.Repositories
+                    .Where(r => commits.TryGetValue(r.Name, out var now) && pinned.PinnedCommits.TryGetValue(r.Name, out var then) && now != then)
+                    .Select(r => r.Name)
+                    .ToList();
+                if (moved.Count > 0)
+                {
+                    _queue.MarkFailed(job.Id,
+                        $"main has changed in {string.Join(", ", moved)} since the preview. Nothing was created. Preview again to see what would move now.");
+                    return;
+                }
             }
 
             var analysis = MigrationSourceAnalyzer.Analyze(cloned);
@@ -122,9 +142,10 @@ public sealed class RepositoryMigrationPreviewer
             MigrationWorkspace? workspace = null;
             if (analysis.CanMigrate)
             {
+                if (job.Create is not null) _queue.SetStage(job.Id, "Laying out the new repository");
                 try
                 {
-                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), ct)
+                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), ct, job.Project)
                         .ConfigureAwait(false);
                 }
                 catch (PlanValidationException ex)
@@ -133,6 +154,23 @@ public sealed class RepositoryMigrationPreviewer
                     return;
                 }
             }
+            if (job.Create is { } create && workspace is { CanMigrate: true })
+            {
+                _queue.SetStage(job.Id, "Creating the repository on GitHub");
+                MigrationOutcome outcome;
+                try
+                {
+                    outcome = await _publisher.PublishAsync(job, create, Path.Combine(root, "workspace"), commits, ct).ConfigureAwait(false);
+                }
+                catch (PlanValidationException ex)
+                {
+                    _queue.MarkFailed(job.Id, string.Join(" ", ex.Errors.Values));
+                    return;
+                }
+                _queue.MarkMigrated(job.Id, analysis, workspace, outcome);
+                return;
+            }
+
             _queue.MarkDone(job.Id, analysis, workspace);
             _logger.LogInformation(
                 "Migration preview {PreviewId} of {Project} read {RepositoryCount} repositories ({FailedCount} failed) and found {ExtensionCount} extensions in {Duration}.",
@@ -140,13 +178,17 @@ public sealed class RepositoryMigrationPreviewer
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            _queue.MarkFailed(job.Id, "The server stopped while this preview ran. Start it again.");
+            _queue.MarkFailed(job.Id, job.Create is null
+                ? "The server stopped while this preview ran. Start it again."
+                : "The server stopped while this migration ran. Check Earlier migrations and GitHub for a half-made repository before you start again.");
             throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Migration preview {PreviewId} of {Project} failed.", job.Id, job.Project.DisplayName);
-            _queue.MarkFailed(job.Id, "The preview failed unexpectedly. Try again. If it fails again, ask whoever runs AL Workbench for your company to look into it.");
+            _queue.MarkFailed(job.Id, job.Create is null
+                ? "The preview failed unexpectedly. Try again. If it fails again, ask whoever runs AL Workbench for your company to look into it."
+                : "The migration failed unexpectedly. Check GitHub for a half-made repository and delete it before you try again. If it fails again, ask whoever runs AL Workbench for your company to look into it.");
         }
         finally
         {

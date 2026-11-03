@@ -22,3 +22,9 @@
 .mig__path { word-break: break-all; }
 .mig__changes { min-width: 0; max-width: 100%; }
 .mig__value { overflow-wrap: anywhere; min-width: 10rem; }
+
+/* The result column of Earlier migrations carries a message under the pill. */
+.mig__result {
+    min-width: 12rem;
+    max-width: 26rem;
+}

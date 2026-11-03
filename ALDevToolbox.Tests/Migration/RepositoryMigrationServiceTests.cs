@@ -167,6 +167,69 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_preview_that_is_not_ready_cannot_be_migrated()
+    {
+        await SeedUserWithTokenAsync();
+        var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
+        var preview = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
+        _queue.Reader.TryRead(out _);
+
+        var running = () => svc.StartMigrationAsync(preview.Id, new MigrationCreateInput("cronus-as"));
+        (await running.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors[RepositoryMigrationService.RepositoryField].Should().Contain("Preview again");
+
+        _queue.MarkDone(preview.Id, new MigrationSourceAnalysis([], []));
+        var empty = () => svc.StartMigrationAsync(preview.Id, new MigrationCreateInput("cronus-as"));
+        (await empty.Should().ThrowAsync<PlanValidationException>()).Which.Errors
+            .Should().ContainKey(RepositoryMigrationService.RepositoryField, "a preview that found nothing to move is not ready");
+        _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued");
+    }
+
+    [Fact]
+    public async Task A_ready_preview_is_refused_on_the_request_while_github_is_not_set_up()
+    {
+        await SeedUserWithTokenAsync();
+        var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
+        var preview = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
+        _queue.Reader.TryRead(out _);
+        _queue.MarkDone(preview.Id,
+            new MigrationSourceAnalysis([new MigrationExtension("cronus-base", "", "cronus-base", "id", "CRONUS Base", "CRONUS", "1.0.0.0")], []),
+            new MigrationWorkspace("Test Runtime", [], [], [], [], [], 3));
+
+        var act = () => svc.StartMigrationAsync(preview.Id, new MigrationCreateInput("cronus-as"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors[RepositoryMigrationService.RepositoryField].Should().Contain("GitHub is not set up");
+        _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued before GitHub could take it");
+    }
+
+    [Fact]
+    public async Task The_history_is_the_organisations_own_newest_first()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var (org, customer, daysAgo) in new[] { (TestDb.DefaultOrgId, "CRONUS A/S", 2), (TestDb.DefaultOrgId, "CRONUS Sverige", 1), (TestDb.OtherOrgId, "Elsewhere", 0) })
+            {
+                ctx.RepositoryMigrations.Add(new RepositoryMigration
+                {
+                    OrganizationId = org,
+                    CreatedAt = DateTime.UtcNow.AddDays(-daysAgo),
+                    SourceProject = "cronus/Sales",
+                    SourceProjectUrl = Project,
+                    CustomerName = customer,
+                    TemplateKey = MigrationTestServices.TemplateKey,
+                    Succeeded = true,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        var rows = await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing)).ListHistoryAsync();
+
+        rows.Select(r => r.CustomerName).Should().Equal("CRONUS Sverige", "CRONUS A/S");
+    }
+
+    [Fact]
     public async Task The_job_carries_a_plan_for_the_template_and_customer_without_examples()
     {
         await SeedUserWithTokenAsync();
@@ -214,6 +277,8 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
         new ApplicationVersionService(ctx, NullLogger<ApplicationVersionService>.Instance, _db.OrgContext),
         _db.NewGenerationService(ctx),
+        _db.NewRepositoryMigrationPublisher(ctx),
+        ctx,
         NullLogger<RepositoryMigrationService>.Instance);
 
     private UserRepositoryTokenService NewTokens(AppDbContext ctx) =>

@@ -62,8 +62,17 @@ public sealed record MigrationPreview(
     string TemplateName = "",
     string CustomerName = "",
     string? ShortName = null,
-    bool AddTemplateExtensions = false)
+    bool AddTemplateExtensions = false,
+    MigrationCreateRequest? Create = null,
+    MigrationOutcome? Outcome = null,
+    string? Stage = null)
 {
+    /// <summary>
+    /// True for a migration run rather than a preview: it reads the sources again
+    /// and then creates the repository (#1701).
+    /// </summary>
+    public bool IsMigration => Create is not null;
+
     /// <summary>True when the sources and the workspace built from them are both fit to move.</summary>
     public bool CanMigrate => Analysis is { CanMigrate: true } && Workspace is { CanMigrate: true };
 
@@ -75,14 +84,16 @@ public sealed record MigrationPreview(
 /// What the worker needs to run a preview: the snapshot's id, who asked (so the
 /// clone uses their Azure DevOps token, resolved under their identity off the
 /// request), the repositories Azure DevOps listed for the project, and the
-/// template and customer they move into.
+/// template and customer they move into. <paramref name="Create"/> is set when
+/// the job is a migration run rather than a preview.
 /// </summary>
 public sealed record MigrationPreviewJob(
     Guid Id,
     AmbientOrganizationScope.OrganizationIdentity Identity,
     AzureDevOpsProject Project,
     IReadOnlyList<AzureDevOpsRepository> Repositories,
-    MigrationTarget Target);
+    MigrationTarget Target,
+    MigrationCreateRequest? Create = null);
 
 /// <summary>
 /// The hand-off from the Migrate Repositories page to
@@ -133,7 +144,7 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
             Evict();
             if (_previews.Values.Any(p => p.IsActive && p.UserId == userId && p.OrganizationId == identity.OrganizationId))
             {
-                refusal = "Your last preview is still running. Wait for it to finish, then try again.";
+                refusal = "Your last preview or migration is still running. Wait for it to finish, then try again.";
                 return null;
             }
             if (_previews.Values.Count(p => p.IsActive) >= Capacity)
@@ -151,7 +162,8 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
                 TemplateName: job.Target.TemplateName,
                 CustomerName: job.Target.CustomerName,
                 ShortName: job.Target.Plan.ShortName,
-                AddTemplateExtensions: job.Target.AddTemplateExtensions);
+                AddTemplateExtensions: job.Target.AddTemplateExtensions,
+                Create: job.Create);
             _previews[job.Id] = preview;
             if (!TryWrite(job))
             {
@@ -183,10 +195,18 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
         });
 
     internal void MarkDone(Guid id, MigrationSourceAnalysis analysis, MigrationWorkspace? workspace = null) =>
-        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis, Workspace = workspace });
+        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis, Workspace = workspace, Stage = null });
+
+    /// <summary>What a migration run is doing now, for the page's status line.</summary>
+    internal void SetStage(Guid id, string stage) =>
+        Update(id, p => p with { Stage = stage });
+
+    /// <summary>A migration run that created the repository.</summary>
+    internal void MarkMigrated(Guid id, MigrationSourceAnalysis analysis, MigrationWorkspace workspace, MigrationOutcome outcome) =>
+        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis, Workspace = workspace, Outcome = outcome, Stage = null });
 
     internal void MarkFailed(Guid id, string error) =>
-        Update(id, p => p with { Status = MigrationPreviewStatus.Failed, Error = error });
+        Update(id, p => p with { Status = MigrationPreviewStatus.Failed, Error = error, Stage = null });
 
     /// <summary>Marks the preview failed unless it already finished.</summary>
     internal void FailIfActive(Guid id, string error) =>
