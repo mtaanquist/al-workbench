@@ -37,6 +37,14 @@ public class OeEnvironmentUpgrade
     /// <summary>Free text for the team: what was agreed, who to ring.</summary>
     public string? Note { get; set; }
 
+    /// <summary>
+    /// Whether an update started from this upgrade, once it has finished, has the
+    /// environment's next update moved out to the latest date Business Central allows -
+    /// the date move the ops team otherwise does by hand after a wave. On by default.
+    /// See <c>.design/environment-updates.md</c>, "Following a started update".
+    /// </summary>
+    public bool MoveDateAfterUpdate { get; set; } = true;
+
     /// <summary>Who created the upgrade. Nullable (<c>ON DELETE SET NULL</c>) so the record outlives the account.</summary>
     public int? CreatedByUserId { get; set; }
     public User? CreatedByUser { get; set; }

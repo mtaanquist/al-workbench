@@ -57,6 +57,8 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.UpdateResult).HasColumnName("update_result")
             .HasConversion<string>().HasMaxLength(20);
         entity.Property(e => e.UpdateCheckedAt).HasColumnName("update_checked_at");
+        // Booked by the workbench itself (the date move after a finished update), not a person.
+        entity.Property(e => e.Automatic).HasColumnName("automatic").HasDefaultValue(false);
         // A booked AppSource update (#1001): the app's name for the lists, and the
         // prerequisites the person agreed to, which the worker holds Business Central to.
         entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);

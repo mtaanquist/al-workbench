@@ -382,6 +382,36 @@ the start was booked or made on the spot. A succeeded one notifies nobody: the "
 notice already covers it. A start whose update has ended is no longer **Booked**: one that went
 to an earlier release than the upgrade's target falls back to Planned.
 
+### Moving the next update out after an update
+
+> **Status: built.** `UpgradeActionWorker.Follow.cs`, `BookDateMoveAsync`.
+
+Once a customer is updated, the ops team used to move the environment's next update out to the
+latest date Microsoft allows, by hand, so the next release does not land on them early. A planned
+upgrade now does that itself: the option "Move the next update to the latest date once each
+environment is updated" sits on the New upgrade and Edit details dialogs, ticked by default
+(`oe_environment_upgrades.move_date_after_update`, default true, so upgrades made before the option
+existed have it on too).
+
+When the follower records a `Succeeded` update for a start from such an upgrade, and the
+environment's re-read version is on the upgrade's target or later, it books an ordinary `Pending`
+date move (`PushDateToLatest`, marked `automatic`) on the same upgrade, as the person who started
+the update, due 5 minutes later. The wait is because Business Central's `SYSTEM` writes the next
+version and its date just after an update ends; moved before that, there is nothing to move, or the
+move is overwritten. Being an ordinary booking, it runs through the same path as one a person
+booked (grant re-checked at run time), shows in the history, and can be cancelled until it runs.
+
+Nothing is booked when the update failed, when it stopped short of the target (the next update is
+then the target itself, which must stay where it is), or when something else is already pending on
+the environment, since whoever booked that has a plan of their own. The move does not wait for
+`SYSTEM` beyond those minutes: it runs regardless, and if it finds nothing to move (no next update
+yet, no latest date, or already on the latest date) it ends quietly as `Cancelled` with the reason
+as its outcome, since nobody asked for it. A date move a person booked still fails in that case.
+If the upgrade is marked done during the wait, the move is not sent and ends the same quiet way.
+A second pass made from the leftovers keeps the option as the first pass had it.
+An automatic move that works notifies nobody; one that fails for any other reason tells the person
+who started the update, as any failed booking does.
+
 ## Planned upgrades: a header with lines
 
 > **Status: engine and the upgrade's own page** ([#984](https://github.com/mtaanquist/al-workbench/issues/984), sub-issues B, D and E).

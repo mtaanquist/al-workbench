@@ -258,7 +258,197 @@ public sealed class UpgradeActionFollowTests : IDisposable
             "the update went to 28.3, so the upgrade to 28.5 still has to happen");
     }
 
+    // ── The date move after a finished update ───────────────────────────
+
+    [Fact]
+    public async Task A_finished_update_books_the_next_date_out_a_little_later_as_the_starter()
+    {
+        var (projectId, envId, actionId, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+
+        await FollowAsync();
+
+        var move = (await AutomaticMovesAsync(envId)).Should().ContainSingle().Subject;
+        move.Status.Should().Be(UpgradeActionStatus.Pending);
+        move.UpgradeId.Should().Be(_upgradeId);
+        move.ProjectId.Should().Be(projectId);
+        move.RequestedByUserId.Should().Be(UpgradeActionTestFixture.FlagUserId);
+        move.ExecuteAfter.Should().Be(_f.Clock.GetUtcNow().UtcDateTime + UpgradeActionWorker.DateMoveAfterUpdate,
+            "Business Central sets the next update just after this one ends, so the move waits for that");
+    }
+
+    [Fact]
+    public async Task The_booked_date_move_runs_when_due_and_announces_nothing()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+
+        // Business Central's next update after the one that finished, read back as moved once written.
+        _f.Admin.OnUpdates = () => [UpgradeActionTestFixture.Update(
+            _f.Admin.SelectedDateTime ?? UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate)];
+        _f.Clock.Advance(UpgradeActionWorker.DateMoveAfterUpdate + TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(1);
+        (await AutomaticMovesAsync(envId)).Single().Status.Should().Be(UpgradeActionStatus.Sent);
+        _f.Emails.Sent.Should().BeEmpty("nobody asked for it, so only a failure would be news");
+    }
+
+    [Fact]
+    public async Task A_booked_date_move_with_nothing_to_move_ends_quietly()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+
+        // Business Central never set a next update.
+        _f.Admin.OnUpdates = Array.Empty<BcEnvironmentUpdate>;
+        _f.Clock.Advance(UpgradeActionWorker.DateMoveAfterUpdate + TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var move = (await AutomaticMovesAsync(envId)).Single();
+        move.Status.Should().Be(UpgradeActionStatus.Cancelled, "finding nothing to move is an answer, not a failure");
+        move.Outcome.Should().Be("Nothing to move: No update is available to reschedule.");
+        _f.Admin.Writes.Should().Be(0);
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_date_move_a_person_booked_still_fails_when_there_is_nothing_to_move()
+    {
+        var (projectId, envId, _, _) = await StartAsync();
+        int id;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            var booked = new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.PushDateToLatest, Status = UpgradeActionStatus.Pending,
+                RequestedByUserId = UpgradeActionTestFixture.FlagUserId, RequestedBy = "Anna Jensen <upgrade@example.com>",
+                RequestedAt = now, ExecuteAfter = now,
+            };
+            ctx.OeEnvironmentUpgradeActions.Add(booked);
+            await ctx.SaveChangesAsync();
+            id = booked.Id;
+        }
+        _f.Admin.OnUpdates = Array.Empty<BcEnvironmentUpdate>;
+
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await _f.ReadActionAsync(id)).Status.Should().Be(UpgradeActionStatus.Failed, "the person who booked it expected a move");
+    }
+
+    [Fact]
+    public async Task A_booked_date_move_for_an_upgrade_marked_done_meanwhile_is_not_sent()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).CloseAsync(_upgradeId);
+        }
+
+        _f.Clock.Advance(UpgradeActionWorker.DateMoveAfterUpdate + TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var move = (await AutomaticMovesAsync(envId)).Single();
+        move.Status.Should().Be(UpgradeActionStatus.Cancelled);
+        move.Outcome.Should().Be("Not moved: the upgrade was marked done first.");
+        _f.Admin.Writes.Should().Be(0);
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_booked_date_move_that_fails_tells_the_person_who_started_the_update()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+
+        // Business Central takes the write but keeps the old date.
+        _f.Admin.OnUpdates = () => [UpgradeActionTestFixture.Update(
+            UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate)];
+        _f.Clock.Advance(UpgradeActionWorker.DateMoveAfterUpdate + TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await AutomaticMovesAsync(envId)).Single().Status.Should().Be(UpgradeActionStatus.Failed);
+        _f.Emails.Sent.Should().ContainSingle("a real failure is news, even for a move nobody asked for");
+    }
+
+    [Fact]
+    public async Task No_date_move_is_booked_when_the_upgrade_has_the_option_off()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).UpdateDetailsAsync(_upgradeId, "28.5 in November 2026", "28.5", null, null,
+                moveDateAfterUpdate: false);
+        }
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+
+        await FollowAsync();
+
+        (await AutomaticMovesAsync(envId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task No_date_move_is_booked_after_a_failed_update()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Failed", sent.AddMinutes(5), error: "No.")];
+
+        await FollowAsync();
+
+        (await AutomaticMovesAsync(envId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task No_date_move_is_booked_when_the_update_stopped_short_of_the_target()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5), toVersion: "28.3.54977.56391")];
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Active", Version = "28.3.54977.56391" };
+
+        await FollowAsync();
+
+        (await AutomaticMovesAsync(envId)).Should().BeEmpty("the next update is the target itself, which must not be pushed away");
+    }
+
+    [Fact]
+    public async Task No_date_move_is_booked_over_something_already_waiting_on_the_environment()
+    {
+        var (projectId, envId, _, sent) = await StartAsync();
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.PushDateToLatest, Status = UpgradeActionStatus.Pending,
+                RequestedByUserId = UpgradeActionTestFixture.FlagUserId, RequestedBy = "Anna Jensen <upgrade@example.com>",
+                RequestedAt = now, ExecuteAfter = now.AddDays(1),
+            });
+            await ctx.SaveChangesAsync();
+        }
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+
+        await FollowAsync();
+
+        (await AutomaticMovesAsync(envId)).Should().BeEmpty();
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    private async Task<List<OeEnvironmentUpgradeAction>> AutomaticMovesAsync(int envId)
+    {
+        await using var ctx = _f.Db.NewContext();
+        return await ctx.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == envId && a.Automatic)
+            .ToListAsync();
+    }
 
     private int _upgradeId;
 

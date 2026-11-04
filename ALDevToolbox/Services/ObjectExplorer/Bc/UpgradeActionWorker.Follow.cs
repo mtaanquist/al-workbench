@@ -30,6 +30,13 @@ public sealed partial class UpgradeActionWorker
     /// </summary>
     internal static readonly TimeSpan OperationClockSlack = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// How long after a finished update the next update's date is moved out. Just after the
+    /// update, Business Central's own <c>SYSTEM</c> write sets the next version and its
+    /// date; moving it before that would move nothing, or be overwritten.
+    /// </summary>
+    internal static readonly TimeSpan DateMoveAfterUpdate = TimeSpan.FromMinutes(5);
+
     /// <summary>The most starts one organisation has asked about per sweep, so a fleet-wide wave spreads over sweeps.</summary>
     internal const int FollowPerSweep = 20;
 
@@ -176,6 +183,78 @@ public sealed partial class UpgradeActionWorker
             await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
                 .NotifyUpdateEndedAsync(start.Id, CancellationToken.None).ConfigureAwait(false);
         }
+        else if (result == PlatformUpdateResult.Succeeded)
+        {
+            // The ending is already recorded, so a failed booking can't be retried by
+            // following again; it is logged, and the rest of the sweep carries on.
+            try
+            {
+                await BookDateMoveAsync(db, orgId, start, now, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Couldn't book the date move on environment {EnvironmentId} after the update started by action {ActionId} finished.",
+                    start.EnvironmentId, start.Id);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Books the next update's date out to the latest Business Central allows, a little
+    /// after an update started from a planned upgrade has finished, when the upgrade asks
+    /// for it (<see cref="OeEnvironmentUpgrade.MoveDateAfterUpdate"/>, on by default): the
+    /// date move the ops team otherwise does by hand once a customer is updated. An ordinary
+    /// pending <see cref="UpgradeActionKind.PushDateToLatest"/> row, marked
+    /// <see cref="OeEnvironmentUpgradeAction.Automatic"/>, so it fires through the same path
+    /// as a booked one - as the person who started the update, with the grant re-checked
+    /// then - shows in the history, and can be cancelled until it runs. Not booked when
+    /// something else is already waiting on the environment (whoever booked that has a
+    /// plan), or when the update ended short of the upgrade's release.
+    /// </summary>
+    private async Task BookDateMoveAsync(AppDbContext db, int orgId, FollowedStart start, DateTime now, CancellationToken ct)
+    {
+        var started = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Id == start.Id && a.Upgrade != null && a.Upgrade.ClosedAt == null && a.Upgrade.MoveDateAfterUpdate)
+            .Select(a => new { a.RequestedBy, a.UpgradeId, a.Upgrade!.TargetVersion })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (started is null) return;
+
+        // An update that stopped short of the upgrade's release (28.3 on the way to 28.5)
+        // leaves the target as the next update; moving that out would undo the plan.
+        var version = await db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == start.EnvironmentId)
+            .Select(e => e.Version)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (!EnvironmentUpgradeLineState.IsOnTarget(version, started.TargetVersion)) return;
+
+        var waiting = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .AnyAsync(a => a.EnvironmentId == start.EnvironmentId && a.Status == UpgradeActionStatus.Pending, ct)
+            .ConfigureAwait(false);
+        if (waiting) return;
+
+        db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        {
+            OrganizationId = orgId,
+            ProjectId = start.ProjectId,
+            EnvironmentId = start.EnvironmentId,
+            Kind = UpgradeActionKind.PushDateToLatest,
+            Status = UpgradeActionStatus.Pending,
+            Automatic = true,
+            UpgradeId = started.UpgradeId,
+            RequestedByUserId = start.RequestedByUserId,
+            RequestedBy = started.RequestedBy,
+            RequestedAt = now,
+            ExecuteAfter = now + DateMoveAfterUpdate,
+        });
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        _logger.LogInformation(
+            "Booked the next update's date on environment {EnvironmentId} out to the latest allowed, after the update started by action {ActionId}.",
+            start.EnvironmentId, start.Id);
     }
 
     /// <summary>

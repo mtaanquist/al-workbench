@@ -93,13 +93,16 @@ public sealed class UpgradeActionNotifier
                 a.PackageFileName,
                 a.Outcome,
                 a.UpgradeId,
+                a.Automatic,
                 SolutionName = a.Project!.Name,
                 EnvironmentName = a.Environment!.Name,
             })
             .FirstOrDefaultAsync(ct);
         if (action is null
             || action.ConfirmationDue
-            || action.Status is not (UpgradeActionStatus.Sent or UpgradeActionStatus.Failed))
+            || action.Status is not (UpgradeActionStatus.Sent or UpgradeActionStatus.Failed)
+            // Nobody asked for an automatic one, so only its failure is news.
+            || (action.Automatic && action.Status == UpgradeActionStatus.Sent))
         {
             return;
         }

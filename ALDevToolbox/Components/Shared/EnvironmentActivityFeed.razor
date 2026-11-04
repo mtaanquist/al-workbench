@@ -52,7 +52,15 @@ else
                         @* The name alone in the sentence, the address on hover: a feed of
                            twenty entries reads as people, and "name <email>" on every line
                            is a log format, not a sentence. *@
-                        <span class="u-muted" title="@entry.RequestedByEmail">@entry.RequestedByName</span>
+                        @if (entry.Automatic)
+                        {
+                            @* Booked by the workbench, not by the person: theirs was the update. *@
+                            <span class="u-muted" title="@entry.RequestedByEmail">after the update @entry.RequestedByName started</span>
+                        }
+                        else
+                        {
+                            <span class="u-muted" title="@entry.RequestedByEmail">@entry.RequestedByName</span>
+                        }
                         <span class="u-muted"><Timestamp Value="@entry.RequestedAt" Relative="true" /></span>
                         @* Which wave it belonged to (#984): the upgrade page is where the rest
                            of that evening's customers are, so the name is the way there. An
@@ -185,6 +193,19 @@ else
         if (entry.Kind == UpgradeActionKind.RecoverEnvironment) return "Recovered the environment";
         if (entry.Kind == UpgradeActionKind.CopyEnvironment) return "Copied the environment";
         if (entry.Kind == UpgradeActionKind.CancelSession) return "Ended a signed-in session";
+        if (entry.Kind == UpgradeActionKind.PushDateToLatest && entry.Automatic)
+        {
+            // Booked by the workbench once the update finished, not by the person named.
+            return entry.Status switch
+            {
+                UpgradeActionStatus.Pending => "Will move the next update date out",
+                UpgradeActionStatus.Failed => "Tried to move the next update date out",
+                // Ran, and found nothing to move: ended by the worker, not by a person.
+                UpgradeActionStatus.Cancelled when entry.SentAt is not null => "Left the next update date as it was",
+                UpgradeActionStatus.Cancelled => "Was to move the next update date out",
+                _ => "Moved the next update date out",
+            };
+        }
         if (entry.Kind == UpgradeActionKind.PushDateToLatest)
         {
             return entry.IsBooking
@@ -237,6 +258,8 @@ else
                 : @<text>Runs at @SlotText(entry, entry.ExecuteAfter)</text>,
             UpgradeActionStatus.Sent => @<text>Done <Timestamp Value="@sent" Relative="true" /></text>,
             UpgradeActionStatus.Failed => @<text>Didn't work (<Timestamp Value="@sent" Relative="true" />)</text>,
+            UpgradeActionStatus.Cancelled when entry.Automatic && entry.SentAt is not null
+                => @<text>Ended <Timestamp Value="@sent" Relative="true" /></text>,
             _ => entry.CancelledByName is { Length: > 0 } who
                 ? @<text>Cancelled by @who <Timestamp Value="@cancelled" Relative="true" /></text>
                 : @<text>Cancelled <Timestamp Value="@cancelled" Relative="true" /></text>,

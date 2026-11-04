@@ -502,7 +502,7 @@ public sealed class UpgradeActionService
             a.CancelledBy, a.CancelledAt, a.TargetVersion,
             a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder,
             a.AppName, a.Kind == UpgradeActionKind.UpdateApp ? a.BcAppId : null, a.PrerequisiteAppIds,
-            null, false, a.UpdateResult, a.UpdateCheckedAt);
+            null, false, a.UpdateResult, a.UpdateCheckedAt, a.Automatic);
 
     // ── Shared with the worker ──────────────────────────────────────────
 
@@ -752,7 +752,9 @@ public sealed record UpgradeActionRow(
     /// <summary>How a sent start's platform update ended, once the worker saw it end (#1711). Null otherwise.</summary>
     PlatformUpdateResult? UpdateResult = null,
     /// <summary>When the worker last asked about a sent start's update: with <see cref="UpdateResult"/>, when it saw the update end.</summary>
-    DateTime? UpdateCheckedAt = null)
+    DateTime? UpdateCheckedAt = null,
+    /// <summary>True for an action the workbench booked itself (the date move after a finished update).</summary>
+    bool Automatic = false)
 {
     /// <summary>What a held booking says instead of "Starting shortly"; null when it is not held.</summary>
     public string? WaitingText => !WaitsForEarlierBooking ? null
@@ -808,7 +810,7 @@ public sealed record UpgradeActionRow(
         a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
         a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
         a.CancelledBy, a.CancelledAt, a.TargetVersion, a.UpgradeId, a.Upgrade?.Name,
-        UpdateResult: a.UpdateResult, UpdateCheckedAt: a.UpdateCheckedAt);
+        UpdateResult: a.UpdateResult, UpdateCheckedAt: a.UpdateCheckedAt, Automatic: a.Automatic);
 
     /// <summary>
     /// When the thing this row records went wrong or finished: for a start whose update the

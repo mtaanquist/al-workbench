@@ -198,6 +198,7 @@ public sealed class EnvironmentUpgradeService
             counts, lines.Count)
         {
             AnythingStarted = anythingStarted,
+            MoveDateAfterUpdate = h.MoveDateAfterUpdate,
         };
     }
 
@@ -293,8 +294,10 @@ public sealed class EnvironmentUpgradeService
     /// </summary>
     /// <param name="targetVersion">The release the wave goes to, as Major.Minor (<c>28.5</c>).</param>
     /// <param name="plannedAt">The slot the team has in mind, if any. Advisory.</param>
+    /// <param name="moveDateAfterUpdate">Whether a finished update from this upgrade moves the next update's date out (on by default).</param>
     public async Task<int> CreateAsync(
-        string? name, string? targetVersion, DateTimeOffset? plannedAt, string? note, CancellationToken ct = default)
+        string? name, string? targetVersion, DateTimeOffset? plannedAt, string? note,
+        bool moveDateAfterUpdate = true, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         var details = ValidateDetails(name, targetVersion, note);
@@ -308,6 +311,7 @@ public sealed class EnvironmentUpgradeService
             TargetVersion = details.TargetVersion,
             PlannedAt = plannedAt?.UtcDateTime,
             Note = details.Note,
+            MoveDateAfterUpdate = moveDateAfterUpdate,
             CreatedByUserId = _orgContext.CurrentUserId,
             CreatedBy = createdBy,
             CreatedAt = now,
@@ -322,10 +326,11 @@ public sealed class EnvironmentUpgradeService
         return upgrade.Id;
     }
 
-    /// <summary>Changes the name, target release, planned slot and note. Same rules as <see cref="CreateAsync"/>; refused once the upgrade is done.</summary>
+    /// <summary>Changes the name, target release, planned slot, note and the date-move option. Same rules as <see cref="CreateAsync"/>; refused once the upgrade is done.</summary>
+    /// <param name="moveDateAfterUpdate">The date-move option; null leaves it as it is, so a caller that doesn't show it can't turn it back on.</param>
     public async Task UpdateDetailsAsync(
         int upgradeId, string? name, string? targetVersion, DateTimeOffset? plannedAt, string? note,
-        CancellationToken ct = default)
+        bool? moveDateAfterUpdate = null, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var details = ValidateDetails(name, targetVersion, note);
@@ -348,6 +353,7 @@ public sealed class EnvironmentUpgradeService
         upgrade.TargetVersion = details.TargetVersion;
         upgrade.PlannedAt = plannedAt?.UtcDateTime;
         upgrade.Note = details.Note;
+        upgrade.MoveDateAfterUpdate = moveDateAfterUpdate ?? upgrade.MoveDateAfterUpdate;
         upgrade.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         await SaveAsync(ct).ConfigureAwait(false);
         await transaction.CommitAsync(ct).ConfigureAwait(false);
@@ -491,6 +497,8 @@ public sealed class EnvironmentUpgradeService
             Name = trimmedName,
             TargetVersion = source.TargetVersion,
             Note = source.Note,
+            // The second pass keeps the team's choice; it is the same wave.
+            MoveDateAfterUpdate = source.MoveDateAfterUpdate,
             CreatedByUserId = _orgContext.CurrentUserId,
             CreatedBy = createdBy,
             CreatedAt = now,
@@ -1184,6 +1192,9 @@ public sealed record EnvironmentUpgradeSummary(
     /// refuses on, so the list can hold Delete back before the click.
     /// </summary>
     public bool AnythingStarted { get; init; }
+
+    /// <summary>Whether a finished update from this upgrade has the next update's date moved out to the latest allowed.</summary>
+    public bool MoveDateAfterUpdate { get; init; } = true;
 }
 
 /// <summary>The open upgrade an environment is on, for the picker's lock.</summary>

@@ -20,6 +20,8 @@ internal sealed class EnvironmentUpgradeConfiguration : IEntityTypeConfiguration
         entity.Property(e => e.TargetVersion).HasColumnName("target_version").HasMaxLength(50).IsRequired();
         entity.Property(e => e.PlannedAt).HasColumnName("planned_at");
         entity.Property(e => e.Note).HasColumnName("note");
+        // On by default, and for every upgrade made before the option existed.
+        entity.Property(e => e.MoveDateAfterUpdate).HasColumnName("move_date_after_update").HasDefaultValue(true);
         entity.Property(e => e.CreatedByUserId).HasColumnName("created_by_user_id");
         entity.Property(e => e.CreatedBy).HasColumnName("created_by").HasMaxLength(320).IsRequired();
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
