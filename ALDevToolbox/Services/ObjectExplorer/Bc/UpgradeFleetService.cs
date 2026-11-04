@@ -445,6 +445,32 @@ public sealed class UpgradeFleetService
             row, back ? SelectVersionGroup.ChangeBack : SelectVersionGroup.ChangeForward, from, offerUnknown, detail);
     }
 
+    /// <summary>
+    /// Why "Start update" from a planned upgrade can't start <paramref name="target"/> (the
+    /// upgrade's release) on <paramref name="row"/>, or null when it can: the release is
+    /// already the next update, or it is on offer and the start will select it. A row whose
+    /// offer list has never been read is let through, because the start re-reads it live
+    /// and refuses there. From the mirror only, like the version preview.
+    /// </summary>
+    public static string? WhyNoUpgradeStart(UpgradeFleetRow row, string target)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        target = MajorMinor(target);
+        if (!string.IsNullOrWhiteSpace(row.Version)
+            && VersionOrder.Compare(MajorMinor(row.Version), target) is var compared and >= 0)
+        {
+            return compared == 0 ? $"already on {target}" : $"already on {MajorMinor(row.Version)}, past {target}";
+        }
+        if (row.HasUpdate && VersionOrder.Compare(MajorMinor(row.NextUpdateVersion!), target) == 0) return null;
+        if (row.OfferedVersions is null)
+        {
+            return row.HasUpdate ? null : "no update is waiting";
+        }
+        return row.OfferedVersions.Any(v => VersionOrder.Compare(MajorMinor(v), target) == 0)
+            ? null
+            : $"Business Central does not offer {target} to this environment yet";
+    }
+
     /// <summary>The mirror's own numeric-per-segment rule, so the preview and the selection rule agree.</summary>
     private static readonly IComparer<string> VersionOrder =
         Comparer<string>.Create(ProjectConnectionService.CompareVersions);

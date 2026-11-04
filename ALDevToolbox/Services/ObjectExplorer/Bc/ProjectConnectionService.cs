@@ -1475,22 +1475,38 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <paramref name="expectedVersion"/>, and is refused when the next update has become
     /// another one since: the person agreed to start that version, not whatever is next
     /// when the slot arrives (#1234).</para>
+    /// <para>A start from a planned upgrade passes the upgrade's target release as
+    /// <paramref name="upgradeVersion"/> instead, and starts the update to that release
+    /// even when Business Central has another one lined up next: the one write selects it
+    /// and starts it. An upgrade "to 28.5" that started the 28.3 the environment happened
+    /// to have selected is what this guards against. Refused when that release isn't on
+    /// offer to the environment, and verified on the re-read like a version change.</para>
     /// </summary>
     public async Task RunUpdateNowAsync(
-        int projectId, int environmentId, CancellationToken ct = default, string? expectedVersion = null)
+        int projectId, int environmentId, CancellationToken ct = default, string? expectedVersion = null,
+        string? upgradeVersion = null)
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, EnvironmentGate.UpdateOps);
-        var next = await ReadNextUpdateAsync(env, ct)
-            ?? throw Validation("Update", "No update is available to run.");
-        if (expectedVersion is not null
-            && !string.Equals(next.TargetVersion, expectedVersion, StringComparison.OrdinalIgnoreCase))
+        BcEnvironmentUpdate next;
+        if (upgradeVersion is not null)
         {
-            throw Validation("Update",
-                $"The next update had become {next.TargetVersion}, not the {expectedVersion} that was booked.");
+            next = await ReadUpgradeTargetAsync(env, upgradeVersion, ct);
+        }
+        else
+        {
+            next = await ReadNextUpdateAsync(env, ct)
+                ?? throw Validation("Update", "No update is available to run.");
+            if (expectedVersion is not null
+                && !string.Equals(next.TargetVersion, expectedVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                throw Validation("Update",
+                    $"The next update had become {next.TargetVersion}, not the {expectedVersion} that was booked.");
+            }
         }
 
         var now = _clock.GetUtcNow();
-        await WriteUpdateScheduleAsync(env, next, now, ignoreUpdateWindow: true, ct);
+        await WriteUpdateScheduleAsync(env, next, now, ignoreUpdateWindow: true, ct,
+            verifyVersion: upgradeVersion is null ? null : next.TargetVersion);
         await RecordUpdateActionAsync(
             projectId, env, next, "Started the update now, ignoring the environment's update window", ct);
         _panelCache.Invalidate(projectId, environmentId);
@@ -1602,6 +1618,48 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     }
 
     /// <summary>
+    /// The update to a planned upgrade's target release (Major.Minor, so "28.5" matches an
+    /// offer of "28.5" or "28.5.12345.0"), read live: the one already lined up when it is
+    /// that release, else the newest offer of it. Refused when an update is already
+    /// running, and when Business Central doesn't offer the release to this environment.
+    /// </summary>
+    private async Task<BcEnvironmentUpdate> ReadUpgradeTargetAsync(
+        (string Token, string Family, string Name, int Id) env, string upgradeVersion, CancellationToken ct)
+    {
+        IReadOnlyList<BcEnvironmentUpdate> updates;
+        try
+        {
+            updates = await _adminClient.ListEnvironmentUpdatesAsync(env.Token, env.Family, env.Name, ct);
+        }
+        catch (BcApiException ex)
+        {
+            throw Validation("Update", "Couldn't read the updates for this environment. " + ex.Message);
+        }
+
+        if (updates.Any(u => IsUpdateUnderWay(u.UpdateStatus)))
+        {
+            throw Validation("Update", $"An update is already running on {env.Name}.");
+        }
+
+        var target = UpgradeFleetService.MajorMinor(upgradeVersion);
+        bool IsTarget(BcEnvironmentUpdate u) =>
+            CompareVersions(UpgradeFleetService.MajorMinor(u.TargetVersion), target) == 0;
+
+        if (PickNextUpdate(updates) is { } next && IsTarget(next)) return next;
+
+        BcEnvironmentUpdate? offered = null;
+        foreach (var candidate in updates.Where(u => u.Available && IsTarget(u)))
+        {
+            if (offered is null || CompareVersions(candidate.TargetVersion, offered.TargetVersion) > 0)
+            {
+                offered = candidate;
+            }
+        }
+        return offered ?? throw Validation("Update",
+            $"Business Central doesn't offer {target} to {env.Name}, so the update wasn't started.");
+    }
+
+    /// <summary>
     /// Sends the date write and re-mirrors the row from a fresh read, so the fleet page
     /// shows the new date without waiting for the nightly sweep. The PATCH also selects
     /// the update, which matters when the picked one was merely available: setting a date
@@ -1623,7 +1681,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         DateTimeOffset selectedDateTime,
         bool? ignoreUpdateWindow,
         CancellationToken ct,
-        bool verifyDateMoved = false)
+        bool verifyDateMoved = false,
+        string? verifyVersion = null)
     {
         try
         {
@@ -1657,6 +1716,18 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 "The update date on {Environment} was changed, but re-reading it failed: {Message}. The cached row stays stale until the next refresh.",
                 env.Name, ex.Message);
             return;
+        }
+
+        // A write that also switched the version is proved the way a version change is:
+        // a re-read that still shows another version next fails the action (#804).
+        if (verifyVersion is not null && (stored is null || CompareVersions(stored.TargetVersion, verifyVersion) != 0))
+        {
+            _logger.LogWarning(
+                "Business Central kept {Environment} on {StoredVersion} after being asked to start {TargetVersion}, so the start was not recorded as done.",
+                env.Name, stored?.TargetVersion, verifyVersion);
+            throw Validation("Update", stored is not null
+                ? $"Business Central did not switch to {verifyVersion}. Its next update is still {stored.TargetVersion}."
+                : $"Business Central did not switch to {verifyVersion}. It has no next update chosen.");
         }
 
         if (!verifyDateMoved) return;

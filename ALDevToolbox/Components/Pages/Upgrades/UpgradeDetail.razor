@@ -666,8 +666,28 @@
         _selection.Prune(IsDone ? [] : _detail.Lines.Where(l => l.Environment.CanAct).Select(l => l.Environment.EnvironmentId));
         ApplyFilters();
         if (restartStopped) _watch?.ForgetStopped();
-        if (!IsDone) _watch?.JoinUnderWay(_detail.Lines.Select(l => l.Environment));
+        if (!IsDone && _watch is not null)
+        {
+            _watch.JoinUnderWay(_detail.Lines.Select(l => l.Environment));
+            _watch.WatchStarted(SentStartsToFollow());
+        }
     }
+
+    /// <summary>
+    /// Lines whose start Business Central accepted but which the page did not start itself:
+    /// started from another browser, or before this page was opened. The mirror is not
+    /// re-read after a start, so it still shows the old version and an update not yet under
+    /// way, and <c>JoinUnderWay</c> cannot see these. Without a watch the line reads Booked
+    /// until the nightly refresh. One that has already ended here is left alone, so a line
+    /// that stays Booked after its update does not start a new watch on every re-read.
+    /// </summary>
+    private Dictionary<int, DateTime> SentStartsToFollow() =>
+        _detail!.Lines
+            .Where(l => l.State == UpgradeLineState.Booked && l.Environment.CanAct && !l.Environment.IsSoftDeleted
+                        && l.LastAction is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, SentAt: not null }
+                        && !_watch!.Watching.ContainsKey(l.Environment.EnvironmentId)
+                        && !_watch.Ended.ContainsKey(l.Environment.EnvironmentId))
+            .ToDictionary(l => l.Environment.EnvironmentId, l => l.LastAction!.SentAt!.Value);
 
     // ── Filters and the selection ───────────────────────────────────────
 

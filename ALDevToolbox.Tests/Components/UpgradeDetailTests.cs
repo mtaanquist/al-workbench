@@ -563,6 +563,35 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
     // ── The watch and the page's writes ─────────────────────────────────
 
+    /// <summary>
+    /// A start sent before the page was opened (another browser, or an earlier visit) left
+    /// the mirror on the old version, so nothing showed the update under way and the line
+    /// read Booked until the nightly refresh. Opening the page now follows it.
+    /// </summary>
+    [Fact]
+    public async Task A_start_sent_before_the_page_opened_is_followed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddMinutes(-17);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent,
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Updating... started"));
+    }
+
     [Fact]
     public async Task A_watch_tick_skips_while_the_page_holds_its_gate_and_reads_once_it_is_free()
     {

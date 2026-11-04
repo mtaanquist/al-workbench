@@ -328,7 +328,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
                     a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow,
-                    a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt))
+                    a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt, a.Upgrade != null ? a.Upgrade.TargetVersion : null))
                 .ToListAsync(ct).ConfigureAwait(false);
 
             if (uploads)
@@ -931,7 +931,15 @@ public sealed class UpgradeActionWorker : BackgroundService
             }
             else
             {
-                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
+                // A start runs as the upgrade's own only when it was booked for the upgrade's
+                // release. A booking made before starts honoured the release carries the
+                // update that was next at the time, and keeps that booking's rule (#1234):
+                // start that one or nothing, never switch the environment back to it.
+                var fromUpgrade = action.UpgradeTargetVersion is { } release && action.TargetVersion is { } booked
+                    && ProjectConnectionService.CompareVersions(
+                        UpgradeFleetService.MajorMinor(booked), UpgradeFleetService.MajorMinor(release)) == 0;
+                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct,
+                    fromUpgrade).ConfigureAwait(false);
                 status = UpgradeActionStatus.Sent;
                 outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label);
             }
@@ -1281,7 +1289,7 @@ public sealed class UpgradeActionWorker : BackgroundService
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
         string? Label, Guid? BatchId, int? BatchOrder, UploadAppTiming? ScheduledByWindow,
-        Guid? TenantId, string EnvironmentName, DateTime RequestedAt)
+        Guid? TenantId, string EnvironmentName, DateTime RequestedAt, string? UpgradeTargetVersion)
     {
         /// <summary>The environment in Business Central this row installs into (see <see cref="EnvironmentKey"/>).</summary>
         public (string Tenant, string Environment) BcEnvironment => EnvironmentKey(TenantId, ProjectId, EnvironmentName);

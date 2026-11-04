@@ -117,27 +117,37 @@ public sealed class UpgradeActionService
             });
         }
 
+        string? upgradeVersion = null;
         if (upgradeId is { } fromUpgrade)
         {
             // An action run from an upgrade must be for one of its lines, and the upgrade
             // must still be open: a closed one is the record of a finished wave, and
             // crediting it with a new action would rewrite that record.
             var onOpenUpgrade = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
-                .AnyAsync(l => l.UpgradeId == fromUpgrade && l.EnvironmentId == environmentId
-                               && l.Upgrade!.ClosedAt == null, ct).ConfigureAwait(false);
-            if (!onOpenUpgrade)
+                .Where(l => l.UpgradeId == fromUpgrade && l.EnvironmentId == environmentId
+                            && l.Upgrade!.ClosedAt == null)
+                .Select(l => new { l.Upgrade!.TargetVersion })
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            if (onOpenUpgrade is null)
             {
                 throw new PlanValidationException(new Dictionary<string, string>
                 {
                     ["Upgrade"] = "This environment isn't on that upgrade any more, or the upgrade has been marked done. Reload the upgrade and try again.",
                 });
             }
+            upgradeVersion = onOpenUpgrade.TargetVersion;
         }
 
-        // A booked start remembers the update it was booked for - the one the person was
-        // shown - so the slot starts that one or nothing, never whatever is next by then (#1234).
-        if (kind == UpgradeActionKind.RunNow && executeAt is not null)
+        if (kind == UpgradeActionKind.RunNow && upgradeVersion is not null)
         {
+            // A start from an upgrade starts the upgrade's release, whatever the environment
+            // has lined up next: an upgrade to 28.5 that starts 28.3 is the wrong update.
+            targetVersion = upgradeVersion;
+        }
+        else if (kind == UpgradeActionKind.RunNow && executeAt is not null)
+        {
+            // A booked start remembers the update it was booked for - the one the person was
+            // shown - so the slot starts that one or nothing, never whatever is next by then (#1234).
             targetVersion = await _db.OeProjectEnvironments.AsNoTracking()
                 .Where(e => e.Id == environmentId)
                 .Select(e => e.BcNextUpdateVersion)
@@ -189,7 +199,7 @@ public sealed class UpgradeActionService
         action.SentAt = now;
         try
         {
-            await RunAsync(projectId, environmentId, kind, targetVersion, ct).ConfigureAwait(false);
+            await RunAsync(projectId, environmentId, kind, targetVersion, ct, fromUpgrade: upgradeId is not null).ConfigureAwait(false);
             action.Status = UpgradeActionStatus.Sent;
             action.Outcome = SuccessOutcome(kind, targetVersion, environmentName);
         }
@@ -501,9 +511,13 @@ public sealed class UpgradeActionService
     /// audit entry. Used by both the immediate path here and
     /// <see cref="UpgradeActionWorker"/>, so a slot fired tonight does exactly what
     /// pressing the button would have done.
+    /// <para>With <paramref name="fromUpgrade"/>, a start's <paramref name="targetVersion"/>
+    /// is the upgrade's release, which the start selects if another update is next;
+    /// otherwise it is the update a booking was made for, and anything else is refused.</para>
     /// </summary>
     internal async Task RunAsync(
-        int projectId, int environmentId, UpgradeActionKind kind, string? targetVersion, CancellationToken ct)
+        int projectId, int environmentId, UpgradeActionKind kind, string? targetVersion, CancellationToken ct,
+        bool fromUpgrade = false)
     {
         switch (kind)
         {
@@ -512,7 +526,15 @@ public sealed class UpgradeActionService
                 break;
             case UpgradeActionKind.RunNow:
                 // A booked start carries the version it was booked for, and refuses another (#1234).
-                await _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion).ConfigureAwait(false);
+                // One run from an upgrade starts the upgrade's release instead (see above).
+                if (fromUpgrade && targetVersion is not null)
+                {
+                    await _connections.RunUpdateNowAsync(projectId, environmentId, ct, upgradeVersion: targetVersion).ConfigureAwait(false);
+                }
+                else
+                {
+                    await _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion).ConfigureAwait(false);
+                }
                 break;
             case UpgradeActionKind.SelectVersion:
                 // The write itself also lets a solution manager through, which suits the

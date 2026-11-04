@@ -874,6 +874,7 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var id = await CreateAsync();
         await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: "28.5");
         var actionId = await BookFromUpgradeAsync(projectId, envId, id);
 
         _f.Clock.Advance(TimeSpan.FromHours(13));
@@ -882,6 +883,109 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var stored = await _f.ReadActionAsync(actionId);
         stored.Status.Should().Be(UpgradeActionStatus.Sent);
         stored.UpgradeId.Should().Be(id);
+    }
+
+    /// <summary>The 28.3 the environment has lined up, and the 28.5 Business Central also offers it.</summary>
+    private static IReadOnlyList<BcEnvironmentUpdate> OnOffer(string selected) =>
+    [
+        new("28.3", true, selected == "28.3", "scheduled", "GA",
+            UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate, false, "Active", null, null),
+        new("28.5", true, selected == "28.5", "scheduled", "GA",
+            UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate, false, "Active", null, null),
+    ];
+
+    /// <summary>
+    /// The reported bug: an upgrade to 28.5 started on an environment that had 28.3 lined
+    /// up sent 28.3. Start update from an upgrade starts the upgrade's release.
+    /// </summary>
+    [Fact]
+    public async Task Starting_from_an_upgrade_sends_the_upgrades_release_not_the_one_lined_up()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: _f.Admin.Writes == 0 ? "28.3" : "28.5");
+
+        await using var ctx = _f.Db.NewContext();
+        var row = await _f.Svc(ctx).ScheduleUpgradeActionAsync(
+            projectId, envId, UpgradeActionKind.RunNow, executeAt: null, upgradeId: id);
+
+        row.Status.Should().Be(UpgradeActionStatus.Sent);
+        row.TargetVersion.Should().Be("28.5");
+        _f.Admin.Writes.Should().Be(1);
+        _f.Admin.SelectedTargetVersion.Should().Be("28.5");
+        _f.Admin.SelectedIgnoreUpdateWindow.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_start_booked_from_an_upgrade_sends_the_upgrades_release_when_it_fires()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: _f.Admin.Writes == 0 ? "28.3" : "28.5");
+        var actionId = await BookFromUpgradeAsync(projectId, envId, id);
+        (await _f.ReadActionAsync(actionId)).TargetVersion.Should().Be("28.5");
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await _f.ReadActionAsync(actionId)).Status.Should().Be(UpgradeActionStatus.Sent);
+        _f.Admin.SelectedTargetVersion.Should().Be("28.5");
+    }
+
+    /// <summary>
+    /// A start booked from an upgrade before starts honoured the upgrade's release carries
+    /// the update that was next at the time (28.3). When someone has since lined up 28.5,
+    /// the slot must refuse as any booking does (#1234), not switch the environment back.
+    /// </summary>
+    [Fact]
+    public async Task An_older_booking_for_another_release_keeps_the_booked_version_rule()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: "28.5");
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            var action = new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId, UpgradeId = id,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Pending, TargetVersion = "28.3",
+                RequestedBy = "Anna Jensen", RequestedByUserId = UpgradeActionTestFixture.FlagUserId,
+                RequestedAt = now, ExecuteAfter = now.AddHours(1),
+            };
+            ctx.OeEnvironmentUpgradeActions.Add(action);
+            await ctx.SaveChangesAsync();
+            actionId = action.Id;
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("not the 28.3 that was booked");
+        _f.Admin.Writes.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Starting_from_an_upgrade_is_refused_when_its_release_is_not_offered()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => [OnOffer(selected: "28.3")[0]];
+
+        await using var ctx = _f.Db.NewContext();
+        var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
+            projectId, envId, UpgradeActionKind.RunNow, executeAt: null, upgradeId: id);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Update"]
+            .Should().Contain("doesn't offer 28.5");
+        _f.Admin.Writes.Should().Be(0);
     }
 
     /// <summary>
