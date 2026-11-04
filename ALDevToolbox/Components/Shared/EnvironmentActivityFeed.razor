@@ -185,6 +185,19 @@ else
         if (entry.Kind == UpgradeActionKind.RecoverEnvironment) return "Recovered the environment";
         if (entry.Kind == UpgradeActionKind.CopyEnvironment) return "Copied the environment";
         if (entry.Kind == UpgradeActionKind.CancelSession) return "Ended a signed-in session";
+        if (entry.Kind == UpgradeActionKind.PushDateToLatest && entry.Automatic)
+        {
+            // Booked by the workbench once the update finished, not by the person named.
+            return entry.Status switch
+            {
+                UpgradeActionStatus.Pending => "Will move the next update date out, after the update",
+                UpgradeActionStatus.Failed => "Tried to move the next update date out, after the update",
+                // Ran, and found nothing to move: ended by the worker, not by a person.
+                UpgradeActionStatus.Cancelled when entry.SentAt is not null => "Left the next update date as it was, after the update",
+                UpgradeActionStatus.Cancelled => "Was to move the next update date out, after the update",
+                _ => "Moved the next update date out, after the update",
+            };
+        }
         if (entry.Kind == UpgradeActionKind.PushDateToLatest)
         {
             return entry.IsBooking
@@ -237,6 +250,8 @@ else
                 : @<text>Runs at @SlotText(entry, entry.ExecuteAfter)</text>,
             UpgradeActionStatus.Sent => @<text>Done <Timestamp Value="@sent" Relative="true" /></text>,
             UpgradeActionStatus.Failed => @<text>Didn't work (<Timestamp Value="@sent" Relative="true" />)</text>,
+            UpgradeActionStatus.Cancelled when entry.Automatic && entry.SentAt is not null
+                => @<text>Nothing to move (<Timestamp Value="@sent" Relative="true" />)</text>,
             _ => entry.CancelledByName is { Length: > 0 } who
                 ? @<text>Cancelled by @who <Timestamp Value="@cancelled" Relative="true" /></text>
                 : @<text>Cancelled <Timestamp Value="@cancelled" Relative="true" /></text>,

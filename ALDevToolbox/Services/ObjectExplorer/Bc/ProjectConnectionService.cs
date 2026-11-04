@@ -1438,11 +1438,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, EnvironmentGate.UpdateOps);
         var next = await ReadNextUpdateAsync(env, ct)
-            ?? throw Validation("Update", "No update is available to reschedule.");
+            ?? throw new NothingToMoveException("No update is available to reschedule.");
 
         if (BcUpdateSchedule.EffectiveLatest(next.LatestSelectableDateTime) is not { } latest)
         {
-            throw Validation("Update", "Business Central hasn't given this update a last possible date, so it can't be moved.");
+            throw new NothingToMoveException("Business Central hasn't given this update a last possible date, so it can't be moved.");
         }
         // On or after, by calendar day in UTC rather than by tick: Business Central stores
         // the date at the start of the environment's own update window, so an update that
@@ -1452,7 +1452,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // move it to, and re-sending would only fail against the bound.
         if (next.SelectedDateTime?.UtcDateTime.Date >= latest.UtcDateTime.Date)
         {
-            throw Validation("Update", "This update's date is already the latest Microsoft allows.");
+            throw new NothingToMoveException("This update's date is already the latest Microsoft allows.");
         }
 
         await WriteUpdateScheduleAsync(env, next, latest, ignoreUpdateWindow: null, ct, verifyDateMoved: true);

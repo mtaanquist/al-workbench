@@ -92,6 +92,22 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task The_date_move_after_an_update_is_on_by_default_and_can_be_turned_off()
+    {
+        var id = await CreateAsync();
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.OeEnvironmentUpgrades.AsNoTracking().SingleAsync(u => u.Id == id)).MoveDateAfterUpdate
+                .Should().BeTrue();
+            await _f.Upgrades(ctx).UpdateDetailsAsync(id, "28.5 in December", "28.5", null, null, moveDateAfterUpdate: false);
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await _f.Upgrades(ctx).GetAsync(id))!.Upgrade.MoveDateAfterUpdate.Should().BeFalse();
+        }
+    }
+
     // ── Adding lines ────────────────────────────────────────────────────
 
     [Fact]

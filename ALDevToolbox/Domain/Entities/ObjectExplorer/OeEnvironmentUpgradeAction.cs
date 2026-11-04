@@ -105,6 +105,14 @@ public class OeEnvironmentUpgradeAction
     /// </summary>
     public PlatformUpdateResult? UpdateResult { get; set; }
 
+    /// <summary>
+    /// True for an action the workbench booked itself rather than a person: the date move
+    /// booked once an update started from an upgrade has finished
+    /// (<see cref="OeEnvironmentUpgrade.MoveDateAfterUpdate"/>). It runs as the person who
+    /// started the update, and only tells them if it fails.
+    /// </summary>
+    public bool Automatic { get; set; }
+
     /// <summary>When the worker last read the environment's operations for this start, so each start is asked about every few minutes rather than every sweep.</summary>
     public DateTime? UpdateCheckedAt { get; set; }
 

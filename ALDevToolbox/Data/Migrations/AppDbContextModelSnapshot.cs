@@ -1391,6 +1391,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("created_by_user_id");
 
+                    b.Property<bool>("MoveDateAfterUpdate")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("move_date_after_update");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -1444,6 +1450,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(250)
                         .HasColumnType("character varying(250)")
                         .HasColumnName("app_name");
+
+                    b.Property<bool>("Automatic")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("automatic");
 
                     b.Property<Guid?>("BatchId")
                         .HasColumnType("uuid")

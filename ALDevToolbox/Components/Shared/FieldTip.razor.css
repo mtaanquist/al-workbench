@@ -1,0 +1,19 @@
+.field-tip {
+    display: inline-flex;
+    align-items: center;
+    margin-left: var(--space-1);
+    color: var(--ink-3);
+    cursor: help;
+    vertical-align: -2px;
+    border-radius: 50%;
+}
+
+.field-tip:hover,
+.field-tip:focus-visible {
+    color: var(--ink-2);
+}
+
+.field-tip:focus-visible {
+    outline: 2px solid var(--focus-color);
+    outline-offset: 2px;
+}
