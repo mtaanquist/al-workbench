@@ -276,7 +276,7 @@ public sealed class DeliverTools
                     r.CanAct,
                     r.CanPushDate,
                     pending[r.EnvironmentId]
-                        .Select(a => new PendingUpgradeAction(a.Kind.ToString(), a.ExecuteAfter, a.RequestedByName))
+                        .Select(a => new PendingUpgradeAction(a.Kind.ToString(), a.ExecuteAfter, a.RequestedByName, a.Automatic))
                         .ToList(),
                     r.FetchedAt)).ToList()))
             .ToList();
@@ -630,7 +630,7 @@ public sealed class DeliverTools
         a.Id, a.Kind.ToString(), a.Status.ToString(), a.IsBooking, a.RequestedByName, a.RequestedAt,
         a.ExecuteAfter, a.SentAt,
         McpListLimit.ShortenFailure(a.Outcome, "the environment's History page in the workbench"),
-        a.CancelledByName, a.CancelledAt);
+        a.CancelledByName, a.CancelledAt, a.Automatic);
 
     private static CustomerModuleRow ToModuleRow(SolutionModule m, int projectId, string projectName, SolutionModules held) => new(
         m.ModuleId, m.Name, m.Publisher, null, projectId, projectName, m.Version,
@@ -789,6 +789,7 @@ public sealed record InstalledApp(Guid AppId, string Name, string Publisher, str
 /// <summary>One line of an environment's Workbench history.</summary>
 /// <param name="Action">'PushDateToLatest', 'RunNow', 'UpdateApp', 'UploadApp', 'RecoverEnvironment', 'CopyEnvironment' or 'CancelSession'.</param>
 /// <param name="IsBooking">True when it was booked for a later slot (ExecuteAfter) rather than done there and then.</param>
+/// <param name="Automatic">True for a date move the workbench booked itself after an update it started finished; RequestedBy is then whoever started that update. One that ends 'Cancelled' with no CancelledBy found nothing to move, or its upgrade was marked done first - Outcome says which.</param>
 public sealed record EnvironmentHistoryEntry(
     int Id,
     string Action,
@@ -800,7 +801,8 @@ public sealed record EnvironmentHistoryEntry(
     DateTime? SentAt,
     string? Outcome,
     string? CancelledBy,
-    DateTime? CancelledAt);
+    DateTime? CancelledAt,
+    bool Automatic = false);
 
 /// <summary>The Upgrades list, for <c>list_upgrades</c>, with whether the limit cut it.</summary>
 public sealed record UpgradeListResult(IReadOnlyList<UpgradeSolutionGroup> Solutions, bool Truncated, string? Note);
@@ -824,7 +826,8 @@ public sealed record UpgradeEnvironmentRow(
     DateTime? NextUpdateReadAt);
 
 /// <summary>An update move booked from this workbench that has not run yet.</summary>
-public sealed record PendingUpgradeAction(string Action, DateTime RunsAt, string RequestedBy);
+/// <param name="Automatic">True for a date move the workbench booked itself after an update finished; RequestedBy is whoever started that update.</param>
+public sealed record PendingUpgradeAction(string Action, DateTime RunsAt, string RequestedBy, bool Automatic = false);
 
 /// <summary>A planned upgrade's header, for <c>list_planned_upgrades</c> and <c>get_upgrade</c>.</summary>
 /// <param name="TargetVersion">The Business Central release the wave goes to, as Major.Minor.</param>

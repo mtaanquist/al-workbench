@@ -341,6 +341,44 @@ public sealed class UpgradeActionFollowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_booked_date_move_for_an_upgrade_marked_done_meanwhile_is_not_sent()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).CloseAsync(_upgradeId);
+        }
+
+        _f.Clock.Advance(UpgradeActionWorker.DateMoveAfterUpdate + TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var move = (await AutomaticMovesAsync(envId)).Single();
+        move.Status.Should().Be(UpgradeActionStatus.Cancelled);
+        move.Outcome.Should().Be("Not moved: the upgrade was marked done first.");
+        _f.Admin.Writes.Should().Be(0);
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_booked_date_move_that_fails_tells_the_person_who_started_the_update()
+    {
+        var (_, envId, _, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+
+        // Business Central takes the write but keeps the old date.
+        _f.Admin.OnUpdates = () => [UpgradeActionTestFixture.Update(
+            UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate)];
+        _f.Clock.Advance(UpgradeActionWorker.DateMoveAfterUpdate + TimeSpan.FromMinutes(1));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await AutomaticMovesAsync(envId)).Single().Status.Should().Be(UpgradeActionStatus.Failed);
+        _f.Emails.Sent.Should().ContainSingle("a real failure is news, even for a move nobody asked for");
+    }
+
+    [Fact]
     public async Task No_date_move_is_booked_when_the_upgrade_has_the_option_off()
     {
         var (_, envId, _, sent) = await StartAsync();

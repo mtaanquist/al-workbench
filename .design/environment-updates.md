@@ -407,6 +407,8 @@ the environment, since whoever booked that has a plan of their own. The move doe
 `SYSTEM` beyond those minutes: it runs regardless, and if it finds nothing to move (no next update
 yet, no latest date, or already on the latest date) it ends quietly as `Cancelled` with the reason
 as its outcome, since nobody asked for it. A date move a person booked still fails in that case.
+If the upgrade is marked done during the wait, the move is not sent and ends the same quiet way.
+A second pass made from the leftovers keeps the option as the first pass had it.
 An automatic move that works notifies nobody; one that fails for any other reason tells the person
 who started the update, as any failed booking does.
 

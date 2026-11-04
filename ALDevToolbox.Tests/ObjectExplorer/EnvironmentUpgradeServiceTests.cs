@@ -105,6 +105,12 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         await using (var ctx = _f.Db.NewContext())
         {
             (await _f.Upgrades(ctx).GetAsync(id))!.Upgrade.MoveDateAfterUpdate.Should().BeFalse();
+            // A caller that doesn't show the option leaves it alone.
+            await _f.Upgrades(ctx).UpdateDetailsAsync(id, "28.5 in January", "28.5", null, null);
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await _f.Upgrades(ctx).GetAsync(id))!.Upgrade.MoveDateAfterUpdate.Should().BeFalse();
         }
     }
 
@@ -604,6 +610,11 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var checkedEnv = await SeedEnvironmentAsync(projectId, "Test");
         var id = await CreateAsync("28.5 in November 2026", "28.5", note: "Ring first");
         await AddAsync(id, updated, failed, planned, checkedEnv);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).UpdateDetailsAsync(id, "28.5 in November 2026", "28.5", null, "Ring first",
+                moveDateAfterUpdate: false);
+        }
 
         await SetVersionAsync(updated, "28.5.40000.0");
         await AddActionAsync(id, projectId, failed, UpgradeActionKind.RunNow, UpgradeActionStatus.Failed);
@@ -623,6 +634,7 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var created = await verify.OeEnvironmentUpgrades.AsNoTracking().Include(u => u.Lines).SingleAsync(u => u.Id == next);
         created.TargetVersion.Should().Be("28.5");
         created.Note.Should().Be("Ring first");
+        created.MoveDateAfterUpdate.Should().BeFalse("the second pass is the same wave, so it keeps the team's choice");
         created.ClosedAt.Should().BeNull();
         created.Lines.Select(l => l.EnvironmentId).Should().BeEquivalentTo([failed, planned]);
         created.Lines.Should().OnlyContain(l => l.IsOpen);

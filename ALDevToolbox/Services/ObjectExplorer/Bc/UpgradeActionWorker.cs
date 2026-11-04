@@ -333,7 +333,7 @@ public sealed partial class UpgradeActionWorker : BackgroundService
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
                     a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow,
                     a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt, a.Upgrade != null ? a.Upgrade.TargetVersion : null,
-                    a.Automatic))
+                    a.Automatic, a.Upgrade != null && a.Upgrade.ClosedAt != null))
                 .ToListAsync(ct).ConfigureAwait(false);
 
             if (uploads)
@@ -934,6 +934,13 @@ public sealed partial class UpgradeActionWorker : BackgroundService
                             result.Message ?? "Business Central didn't finish the update.", action.TargetVersion, action.Label));
                 confirmationDue = result.IsUnconfirmed;
             }
+            else if (action.Automatic && action.UpgradeClosed)
+            {
+                // Booked by the workbench for an upgrade somebody has since marked done:
+                // the wave is over, so its housekeeping is too.
+                status = UpgradeActionStatus.Cancelled;
+                outcome = "Not moved: the upgrade was marked done first.";
+            }
             else
             {
                 // A start runs as the upgrade's own only when it was booked for the upgrade's
@@ -1302,7 +1309,8 @@ public sealed partial class UpgradeActionWorker : BackgroundService
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
         string? Label, Guid? BatchId, int? BatchOrder, UploadAppTiming? ScheduledByWindow,
-        Guid? TenantId, string EnvironmentName, DateTime RequestedAt, string? UpgradeTargetVersion, bool Automatic = false)
+        Guid? TenantId, string EnvironmentName, DateTime RequestedAt, string? UpgradeTargetVersion, bool Automatic = false,
+        bool UpgradeClosed = false)
     {
         /// <summary>The environment in Business Central this row installs into (see <see cref="EnvironmentKey"/>).</summary>
         public (string Tenant, string Environment) BcEnvironment => EnvironmentKey(TenantId, ProjectId, EnvironmentName);

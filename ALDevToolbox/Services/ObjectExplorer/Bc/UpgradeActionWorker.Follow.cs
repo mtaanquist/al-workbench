@@ -185,7 +185,22 @@ public sealed partial class UpgradeActionWorker
         }
         else if (result == PlatformUpdateResult.Succeeded)
         {
-            await BookDateMoveAsync(db, orgId, start, now, ct).ConfigureAwait(false);
+            // The ending is already recorded, so a failed booking can't be retried by
+            // following again; it is logged, and the rest of the sweep carries on.
+            try
+            {
+                await BookDateMoveAsync(db, orgId, start, now, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Couldn't book the date move on environment {EnvironmentId} after the update started by action {ActionId} finished.",
+                    start.EnvironmentId, start.Id);
+            }
         }
     }
 
