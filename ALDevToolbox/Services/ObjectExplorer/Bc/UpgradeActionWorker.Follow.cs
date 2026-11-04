@@ -1,0 +1,231 @@
+using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Domain.ValueObjects;
+using Microsoft.EntityFrameworkCore;
+
+namespace ALDevToolbox.Services.ObjectExplorer.Bc;
+
+/// <summary>
+/// Following a started platform update to its end (#1711). Business Central accepting
+/// "start the update" says nothing about how the update goes: that is a separate
+/// operation, created by Microsoft's scheduler only once it picks the update up, with no
+/// link back to our request. Without this, a failure was only seen by somebody who had
+/// the Upgrades page open at the time. See <c>.design/environment-updates.md</c>,
+/// "Following a started update".
+/// </summary>
+public sealed partial class UpgradeActionWorker
+{
+    /// <summary>How long a start is followed. Past it the row is left as it is, untouched and unannounced.</summary>
+    internal static readonly TimeSpan FollowFor = TimeSpan.FromDays(2);
+
+    /// <summary>A start with no update operation after this long was never picked up, and is reported as such.</summary>
+    internal static readonly TimeSpan NeverStartedAfter = TimeSpan.FromHours(24);
+
+    /// <summary>How often one start's environment is asked about: an update takes tens of minutes, not seconds.</summary>
+    internal static readonly TimeSpan FollowEvery = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Slack on "created after we sent it", for the gap between our clock and Microsoft's.
+    /// Small, because the operation is only created once the scheduler picks the update up.
+    /// </summary>
+    internal static readonly TimeSpan OperationClockSlack = TimeSpan.FromMinutes(2);
+
+    /// <summary>The most starts one organisation has asked about per sweep, so a fleet-wide wave spreads over sweeps.</summary>
+    internal const int FollowPerSweep = 20;
+
+    /// <summary>
+    /// One pass for one organisation: every sent start whose update has not been seen to
+    /// end, not asked about in the last <see cref="FollowEvery"/>, is checked against its
+    /// environment's operations. Internal so a test can drive one pass. Returns how many
+    /// were asked about.
+    /// </summary>
+    internal async Task<int> FollowStartedUpdatesAsync(int orgId, bool isSystem, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        List<FollowedStart> due;
+        using (AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
+        await using (var scope = _services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var since = now - FollowFor;
+            var askedBefore = now - FollowEvery;
+            due = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.Kind == UpgradeActionKind.RunNow && a.Status == UpgradeActionStatus.Sent
+                            && a.UpdateResult == null && a.SentAt != null && a.SentAt >= since
+                            && (a.UpdateCheckedAt == null || a.UpdateCheckedAt <= askedBefore))
+                .OrderBy(a => a.UpdateCheckedAt ?? DateTime.MinValue)
+                .ThenBy(a => a.Id)
+                .Take(FollowPerSweep)
+                .Select(a => new FollowedStart(a.Id, a.ProjectId, a.EnvironmentId, a.RequestedByUserId, a.TargetVersion, a.SentAt!.Value))
+                .ToListAsync(ct).ConfigureAwait(false);
+        }
+
+        foreach (var start in due)
+        {
+            _heartbeat.Tick();
+            await FollowOneAsync(orgId, isSystem, start, now, ct).ConfigureAwait(false);
+        }
+        return due.Count;
+    }
+
+    private async Task FollowOneAsync(int orgId, bool isSystem, FollowedStart start, DateTime now, CancellationToken ct)
+    {
+        // As the person who started it, as the start was: the read is gated on seeing the solution.
+        using var ambient = AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem, start.RequestedByUserId));
+        await using var scope = _services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var unsettled = db.OeEnvironmentUpgradeActions.Where(a => a.Id == start.Id && a.UpdateResult == null);
+
+        BcEnvironmentOperation? operation = null;
+        var read = false;
+        try
+        {
+            if (await IsRequesterActiveAsync(db, start.RequestedByUserId, ct).ConfigureAwait(false))
+            {
+                var connections = scope.ServiceProvider.GetRequiredService<ProjectConnectionService>();
+                var operations = await connections.ListEnvironmentOperationsAsync(start.ProjectId, start.EnvironmentId, ct)
+                    .ConfigureAwait(false);
+                operation = MatchUpdateOperation(operations, start.SentAt, start.TargetVersion);
+                read = true;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is PlanValidationException or ProjectAccessDeniedException)
+        {
+            // The connection or the person's access is gone. That says nothing about the
+            // update, so nothing is recorded; the row is asked about again later.
+            _logger.LogInformation("Couldn't follow the update started by action {ActionId}: {Reason}",
+                start.Id, ex is PlanValidationException pve ? pve.Errors.Values.FirstOrDefault() : "no access");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Following the update started by action {ActionId} on environment {EnvironmentId} threw.",
+                start.Id, start.EnvironmentId);
+        }
+
+        var ending = Settle(operation, read, start, now);
+        if (ending is null)
+        {
+            await unsettled.ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdateCheckedAt, now), ct).ConfigureAwait(false);
+            return;
+        }
+
+        var (result, status, outcome) = ending.Value;
+        Guid? operationId = Guid.TryParse(operation?.Id, out var parsed) ? parsed : null;
+        var settled = await unsettled.ExecuteUpdateAsync(s => s
+            .SetProperty(a => a.UpdateResult, result)
+            .SetProperty(a => a.UpdateCheckedAt, now)
+            .SetProperty(a => a.Status, status)
+            .SetProperty(a => a.Outcome, outcome)
+            .SetProperty(a => a.BcOperationId, a => operationId ?? a.BcOperationId), ct).ConfigureAwait(false);
+        if (settled == 0) return;
+
+        _logger.LogInformation("The update started by action {ActionId} on environment {EnvironmentId} ended: {Result}.",
+            start.Id, start.EnvironmentId, result);
+
+        // Re-read the environment so its version and next update say what the update did,
+        // which is what turns the upgrade's line Updated and tells whoever checks it. A
+        // failure here only costs that freshness; the nightly refresh catches up.
+        if (read)
+        {
+            try
+            {
+                await scope.ServiceProvider.GetRequiredService<ProjectConnectionService>()
+                    .RefreshEnvironmentAsync(start.ProjectId, start.EnvironmentId, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInformation("Couldn't re-read environment {EnvironmentId} after its update ended: {Message}",
+                    start.EnvironmentId, ex.Message);
+            }
+        }
+
+        if (result != PlatformUpdateResult.Succeeded)
+        {
+            await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
+                .NotifyUpdateEndedAsync(start.Id, CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// What one look at the operations settles, or null when the update is still to end:
+    /// no operation yet (and the day not up), one still running, or no answer at all.
+    /// </summary>
+    internal static (PlatformUpdateResult Result, UpgradeActionStatus Status, string Outcome)? Settle(
+        BcEnvironmentOperation? operation, bool read, FollowedStart start, DateTime now)
+    {
+        if (operation is null)
+        {
+            // Only an answer that found nothing counts towards "never picked up": a day of
+            // failed reads says nothing about the update.
+            if (!read || now - start.SentAt < NeverStartedAfter) return null;
+            return (PlatformUpdateResult.NeverStarted, UpgradeActionStatus.Failed,
+                $"Business Central accepted the start, but hadn't begun the update{To(start.TargetVersion)} a day later. "
+                + "Check the environment's update in the admin centre, then start it again if it is still waiting.");
+        }
+
+        if (BcEnvironmentOperationDisplay.IsOpen(operation)) return null;
+
+        var to = To(UpdateOperationVersion(operation) ?? start.TargetVersion);
+        switch (operation.Status.Trim().ToLowerInvariant())
+        {
+            case "succeeded":
+                return (PlatformUpdateResult.Succeeded, UpgradeActionStatus.Sent,
+                    $"Business Central finished the update{to}.");
+            case "canceled" or "cancelled" or "skipped":
+                return (PlatformUpdateResult.Failed, UpgradeActionStatus.Failed,
+                    $"Business Central {(operation.Status.StartsWith("skip", StringComparison.OrdinalIgnoreCase) ? "skipped" : "cancelled")} the update{to}.");
+            default:
+                var reason = string.IsNullOrWhiteSpace(operation.ErrorMessage) ? null : operation.ErrorMessage.Trim();
+                return (PlatformUpdateResult.Failed, UpgradeActionStatus.Failed, reason is null
+                    ? $"The update{to} failed in Business Central. See the environment's operations for details."
+                    : $"The update{to} failed in Business Central. Reason given at the time: {reason}");
+        }
+    }
+
+    private static string To(string? version) => string.IsNullOrWhiteSpace(version) ? string.Empty : $" to {version}";
+
+    /// <summary>
+    /// The update operation a start set off, out of the environment's operations: an
+    /// <c>Update</c> created after the start was sent (less <see cref="OperationClockSlack"/>),
+    /// going to the version that was started, the earliest such. Only one update runs on an
+    /// environment at a time, so that is specific enough without an id to match on. An
+    /// operation that names no version is taken on time alone, and so is every one when the
+    /// start recorded no version (an ad hoc start from the fleet table).
+    /// </summary>
+    internal static BcEnvironmentOperation? MatchUpdateOperation(
+        IEnumerable<BcEnvironmentOperation> operations, DateTime sentAtUtc, string? targetVersion)
+    {
+        var after = new DateTimeOffset(DateTime.SpecifyKind(sentAtUtc, DateTimeKind.Utc)) - OperationClockSlack;
+        var target = string.IsNullOrWhiteSpace(targetVersion) ? null : UpgradeFleetService.MajorMinor(targetVersion);
+        return operations
+            .Where(o => string.Equals(o.Type?.Trim(), "Update", StringComparison.OrdinalIgnoreCase)
+                        && o.CreatedOn is { } created && created >= after)
+            .Where(o => target is null || UpdateOperationVersion(o) is not { } version
+                        || ProjectConnectionService.CompareVersions(UpgradeFleetService.MajorMinor(version), target) == 0)
+            .OrderBy(o => o.CreatedOn)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// The version an update operation goes to. Microsoft documents no fixed name for it,
+    /// so the names seen on update operations are tried in turn; null when none is there.
+    /// </summary>
+    internal static string? UpdateOperationVersion(BcEnvironmentOperation operation) =>
+        new[] { "destinationVersion", "targetVersion", "toVersion", "newVersion" }
+            .Select(operation.Parameter)
+            .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+
+    /// <summary>A sent start still being followed, read outside the scope that asks about it.</summary>
+    internal sealed record FollowedStart(
+        int Id, int ProjectId, int EnvironmentId, int? RequestedByUserId, string? TargetVersion, DateTime SentAt);
+}

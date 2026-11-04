@@ -96,6 +96,19 @@ public class OeEnvironmentUpgradeAction
     public bool ConfirmationDue { get; set; }
 
     /// <summary>
+    /// How the platform update a sent <see cref="UpgradeActionKind.RunNow"/> started
+    /// ended in Business Central, once the worker has seen it end (#1711). Null while it is
+    /// still being followed, and for every other kind. Business Central gives no link
+    /// between our request and the update operation it later creates, so the worker
+    /// matches the operation by environment, type, time and version; see
+    /// <c>UpgradeActionWorker.MatchUpdateOperation</c>.
+    /// </summary>
+    public PlatformUpdateResult? UpdateResult { get; set; }
+
+    /// <summary>When the worker last read the environment's operations for this start, so each start is asked about every few minutes rather than every sweep.</summary>
+    public DateTime? UpdateCheckedAt { get; set; }
+
+    /// <summary>
     /// Groups the rows of one multi-app upload: several apps booked together, one row
     /// each, sent one after another in <see cref="BatchOrder"/>. The worker waits for
     /// each install to finish before starting the next, because two installs running at
@@ -267,6 +280,17 @@ public enum UpgradeActionKind
 /// immediate action skips <c>Pending</c> and is written in its terminal state. Stored as
 /// text, like <see cref="UpgradeActionKind"/>.
 /// </summary>
+/// <summary>How a started platform update ended in Business Central (#1711).</summary>
+public enum PlatformUpdateResult
+{
+    /// <summary>Business Central's update operation succeeded.</summary>
+    Succeeded,
+    /// <summary>The update operation failed, or was cancelled or skipped.</summary>
+    Failed,
+    /// <summary>No update operation appeared within a day of the start: Business Central never picked it up.</summary>
+    NeverStarted,
+}
+
 public enum UpgradeActionStatus
 {
     /// <summary>Scheduled for a future slot and not yet claimed by the worker. The only cancellable state.</summary>

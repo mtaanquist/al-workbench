@@ -389,8 +389,17 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         /// <summary>The version the last write selected.</summary>
         public string? SelectedTargetVersion;
 
+        /// <summary>What the environment's operations read returns; unset, the read throws as the rest of the unused surface does.</summary>
+        public Func<IReadOnlyList<BcEnvironmentOperation>>? OnOperations;
+
+        /// <summary>How many times the operations were read.</summary>
+        public int OperationReads;
+
         public Task<IReadOnlyList<BcEnvironmentOperation>> ListEnvironmentOperationsAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default)
-            => throw new NotSupportedException();
+        {
+            OperationReads++;
+            return OnOperations is { } read ? Task.FromResult(read()) : throw new NotSupportedException();
+        }
         public Task<BcTenantStorage> GetTenantStorageAsync(string accessToken, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task<IReadOnlyList<BcEnvironmentUpdate>> ListEnvironmentUpdatesAsync(

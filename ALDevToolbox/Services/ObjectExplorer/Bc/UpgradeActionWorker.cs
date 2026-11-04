@@ -29,7 +29,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Bc;
 /// <para>One row's failure never stops the sweep: a customer whose credentials expired
 /// lands as failed with the reason in the feed, and the next environment is tried.</para>
 /// </summary>
-public sealed class UpgradeActionWorker : BackgroundService
+public sealed partial class UpgradeActionWorker : BackgroundService
 {
     /// <summary>How often the table is swept for due rows. A slot is a time of day, not a stopwatch.</summary>
     internal static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
@@ -197,6 +197,9 @@ public sealed class UpgradeActionWorker : BackgroundService
                 // Whoever checks an environment after its update hears when it is on
                 // the target version (#1047). A read, cheap when nothing is new.
                 await ForEachOrgAsync(NotifyReadyToCheckAsync, ct).ConfigureAwait(false);
+                // Every start sent is followed until Business Central's update ends, so a
+                // failure reaches somebody with the page closed (#1711).
+                await ForEachOrgAsync(FollowStartedUpdatesAsync, ct).ConfigureAwait(false);
                 await RunOneUploadAsync(ct).ConfigureAwait(false);
             }
             finally { _heartbeat.EndActive(); }

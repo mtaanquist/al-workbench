@@ -53,6 +53,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.BcOperationId).HasColumnName("package_bc_operation_id");
         // An accepted install nobody saw finish, still to be asked about once (#1002).
         entity.Property(e => e.ConfirmationDue).HasColumnName("package_confirmation_due");
+        // How a started platform update ended, and when it was last asked about (#1711).
+        entity.Property(e => e.UpdateResult).HasColumnName("update_result")
+            .HasConversion<string>().HasMaxLength(20);
+        entity.Property(e => e.UpdateCheckedAt).HasColumnName("update_checked_at");
         // A booked AppSource update (#1001): the app's name for the lists, and the
         // prerequisites the person agreed to, which the worker holds Business Central to.
         entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);
@@ -109,5 +113,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // The worker's due-scan (status-scoped).
         entity.HasIndex(e => new { e.Status, e.ExecuteAfter })
             .HasDatabaseName("ix_oe_env_upgrade_actions_status_due");
+        // The worker's follow-scan: sent starts whose update has not been seen to end.
+        // Partial, so it holds only the handful in flight rather than the whole history.
+        entity.HasIndex(e => e.SentAt)
+            .HasDatabaseName("ix_oe_env_upgrade_actions_follow")
+            .HasFilter("kind = 'RunNow' AND status = 'Sent' AND update_result IS NULL");
     }
 }
