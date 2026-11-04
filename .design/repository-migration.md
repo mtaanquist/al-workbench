@@ -19,10 +19,13 @@ pipelines, and keep a history).
 - Each extension keeps its source folder name. An extension at a repository's root takes the
   repository's name.
 - `app.json` is normalised to the template, but keeps `id`, `name`, `publisher`, `version`,
-  `idRanges` and `dependencies`, plus `application`/`platform` when they are higher than the
-  template's.
+  `idRanges` and `dependencies`. `application`, `platform` and `runtime` are never the
+  template's: they follow the customer's production environment when the solution already
+  knows it, and stay as they are otherwise (Mads, 2026-11-04).
 - The template's own extensions are added only when the Admin asks for them.
-- The run creates a new solution, and refuses a name that already exists.
+- The run adds the repository to the customer's existing solution when that solution has no
+  GitHub repository yet (most customers were set up before their code moved; Mads, 2026-11-04),
+  creates a new solution when there is none, and refuses a solution that already has one.
 - The Admin's own Azure DevOps token is used, the one stored under Account → Repository access.
 
 ## Part 1: preview (#1699)
@@ -89,8 +92,12 @@ to `MigrationWorkspaceBuilder`, which writes the workspace into the preview's te
   when it has a value, otherwise the template's: `brief`, `description`, `logo`, `screenshots`,
   `supportedLocales`, `target`, `internalsVisibleTo`, `propagateDependencies`,
   `preprocessorSymbols`, `resourceFolders`, `applicationInsightsConnectionString`,
-  `applicationInsightsKey`, `keyVaultUrls`. The higher of the two: `application`, `platform`,
-  `runtime`. `features` is the union. Everything else is the template's, and a setting only the
+  `applicationInsightsKey`, `keyVaultUrls`. `application`, `platform` and `runtime`: when a
+  solution of the customer's name has a production environment, any of them on a different
+  major version from production's (the lowest, if there are several) is set to that wave's first
+  release (`26.0.0.0`, runtime `15.0`), and one on the same major is left alone; with no
+  production version they stay the source's, and the template's is used only where the source
+  has none. `features` is the union. Everything else is the template's, and a setting only the
   source has is removed. The result is laid out like the template's `app.json`: every property
   sits where the template puts it, spelled as the template spells it, and kept settings the
   template lacks follow (Mads, so sources written over the years end up reading alike).
@@ -164,8 +171,13 @@ installation token, which can see every repository the app created, and only for
 the GitHub organisation connected now: one elsewhere is out of sight, not gone). After a
 confirmation, the old solution and its pipelines are soft-deleted once the new repository holds
 the code and before the new solution is registered, so a run refused earlier (the name is taken,
-the push failed) leaves the old solution as it was. Any other
-solution of that name is refused: the Admin picks another customer name or deletes it first.
+the push failed) leaves the old solution as it was.
+
+**An existing solution.** A solution of the customer's name with no GitHub repository is joined
+rather than duplicated: the new repository is registered on it, and build pipelines are added
+as New Workspace adds them to a solution it is given (only when it is the solution's sole
+repository). Any other solution of that name, one that already has a GitHub repository, is
+refused: the Admin picks another customer name or removes that repository first.
 
 **Earlier migrations** lists the organisation's runs, newest first, below the steps, so with a
 hundred customers to move the Admin can see which are done. Run state itself stays in memory

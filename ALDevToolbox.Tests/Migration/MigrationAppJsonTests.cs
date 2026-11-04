@@ -7,7 +7,8 @@ namespace ALDevToolbox.Tests.Migration;
 /// <summary>
 /// A moved extension's app.json is rebuilt on the template's (#1700): the
 /// template wins on house style, the source keeps what makes the app itself,
-/// and versions only go up.
+/// and the Business Central versions follow the customer's production
+/// environment, or stay the source's when that is not known.
 /// </summary>
 public sealed class MigrationAppJsonTests
 {
@@ -94,15 +95,52 @@ public sealed class MigrationAppJsonTests
         result["url"]!.GetValue<string>().Should().Be("https://partner.example");
         result["resourceExposurePolicy"]!["allowDebugging"]!.GetValue<bool>().Should().BeTrue();
         result.ContainsKey("showMyCode").Should().BeFalse("a setting only the source has is house style the template leaves out");
-        result["application"]!.GetValue<string>().Should().Be("26.0.0.0", "a lower version is raised to the template's");
-        result["runtime"]!.GetValue<string>().Should().Be("15.0");
+        result["application"]!.GetValue<string>().Should().Be("24.0.0.0", "the template's version never replaces the source's");
+        result["runtime"]!.GetValue<string>().Should().Be("12.0");
+        result["platform"]!.GetValue<string>().Should().Be("1.0.0.0", "the template's is the fallback when the source has none");
         result["features"]!.AsArray().Select(f => f!.GetValue<string>())
             .Should().Equal("NoImplicitWith", "TranslationFile", "GenerateCaptions");
 
         changes.Select(c => c.Property).Should().BeEquivalentTo(
-            "url", "logo", "platform", "application", "resourceExposurePolicy", "runtime", "features", "showMyCode");
+            "url", "logo", "platform", "resourceExposurePolicy", "features", "showMyCode");
         changes.Single(c => c.Property == "showMyCode").After.Should().BeNull();
         changes.Single(c => c.Property == "logo").Before.Should().BeNull();
+    }
+
+    [Fact]
+    public void Versions_follow_the_production_environments_wave_when_it_is_known()
+    {
+        var source = Parse("""{ "id": "x", "application": "24.0.0.0", "platform": "24.0.0.0", "runtime": "12.0" }""");
+
+        var (result, changes) = MigrationAppJson.Normalize(Parse(Template), source, productionMajor: 27);
+
+        result["application"]!.GetValue<string>().Should().Be("27.0.0.0");
+        result["platform"]!.GetValue<string>().Should().Be("27.0.0.0");
+        result["runtime"]!.GetValue<string>().Should().Be("16.0");
+        changes.Select(c => c.Property).Should().Contain(["application", "platform", "runtime"]);
+    }
+
+    [Fact]
+    public void A_version_already_on_the_production_wave_is_left_alone()
+    {
+        var source = Parse("""{ "id": "x", "application": "27.1.0.0", "platform": "27.0.0.0", "runtime": "16.1" }""");
+
+        var (result, changes) = MigrationAppJson.Normalize(Parse(Template), source, productionMajor: 27);
+
+        result["application"]!.GetValue<string>().Should().Be("27.1.0.0");
+        result["runtime"]!.GetValue<string>().Should().Be("16.1");
+        changes.Should().NotContain(c => c.Property == "application" || c.Property == "platform" || c.Property == "runtime");
+    }
+
+    [Fact]
+    public void A_source_ahead_of_production_is_brought_back_to_what_production_runs()
+    {
+        var source = Parse("""{ "id": "x", "application": "28.0.0.0", "runtime": "17.0" }""");
+
+        var (result, _) = MigrationAppJson.Normalize(Parse(Template), source, productionMajor: 26);
+
+        result["application"]!.GetValue<string>().Should().Be("26.0.0.0", "the app has to install where the customer runs");
+        result["runtime"]!.GetValue<string>().Should().Be("15.0");
     }
 
     [Fact]

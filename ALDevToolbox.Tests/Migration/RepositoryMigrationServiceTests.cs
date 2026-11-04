@@ -1,6 +1,7 @@
 using System.Net;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Migration;
@@ -270,6 +271,52 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         }, o => o.ExcludingMissingMembers());
         job.Target.Plan.SelectedModuleKeys.Should().BeEmpty("the template's own extensions are left out unless asked for");
         job.Target.AddTemplateExtensions.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_target_carries_the_lowest_production_version_of_the_customers_existing_solution()
+    {
+        await SeedUserWithTokenAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var now = DateTime.UtcNow;
+            var project = new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS A/S", Visibility = ProjectVisibility.Public,
+                DefaultArtifactCountry = "dk", CreatedAt = now, UpdatedAt = now,
+            };
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            OeProjectEnvironment Env(string name, string type, string version, DateTime? missing = null) => new()
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = name, Type = type,
+                Version = version, FetchedAt = now, MissingSince = missing,
+            };
+            ctx.OeProjectEnvironments.AddRange(
+                Env("Production", "Production", "27.2.41000.0"),
+                Env("ProductionSE", "Production", "26.5.39000.0"),
+                Env("Sandbox", "Sandbox", "25.0.1.0"),
+                Env("Gone", "Production", "24.0.1.0", missing: now));
+            await ctx.SaveChangesAsync();
+        }
+
+        await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
+            .StartPreviewAsync(Project, ["r1"], Cronus);
+
+        _queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Target.ProductionVersion.Should().Be("26.5.39000.0", "every app has to install on each production environment");
+    }
+
+    [Fact]
+    public async Task A_new_customer_has_no_production_version_so_the_sources_versions_stay()
+    {
+        await SeedUserWithTokenAsync();
+
+        await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
+            .StartPreviewAsync(Project, ["r1"], Cronus);
+
+        _queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Target.ProductionVersion.Should().BeNull();
     }
 
     [Theory]

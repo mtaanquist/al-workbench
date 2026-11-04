@@ -13,6 +13,7 @@
 @using ALDevToolbox.Services.GitHub
 @using ALDevToolbox.Services.Migration
 @using ALDevToolbox.Services.Templates
+@using ALDevToolbox.Services.ObjectExplorer.Projects
 
 @*
     Migrate repositories (issue #1698; parts #1699, #1700 and #1701). Reached from the
@@ -182,7 +183,7 @@
                                     <input class="input" id="mig-customer" type="text" required
                                            maxlength="@CustomerNaming.MaxLength" placeholder="e.g. CRONUS A/S"
                                            @bind="_customerName" @bind:event="oninput" />
-                                    <span class="field__hint">Names the new solution and the workspace. The migration creates a new solution for this customer.</span>
+                                    <span class="field__hint">Names the workspace and the solution. If a solution of this name has no GitHub repository yet, the repository is added to it; otherwise a new solution is created.</span>
                                     <FieldError Field="@RepositoryMigrationService.CustomerField" Errors="_errors" />
                                 </div>
                                 <div class="field">
@@ -270,7 +271,7 @@
                                     with @outcome.FileCount files.
                                     @if (outcome.SolutionId is { } solutionId)
                                     {
-                                        <text>The new solution is <a href="@($"/solutions/{solutionId}")">@(outcome.SolutionName ?? _preview.CustomerName)</a>.</text>
+                                        <text>The solution is <a href="@SolutionLinks.Solution(outcome.SolutionSlug, solutionId)">@(outcome.SolutionName ?? _preview.CustomerName)</a>.</text>
                                     }
                                     @if (outcome.PipelineNames.Count > 0)
                                     {
@@ -514,7 +515,7 @@
                             <h2 class="card__title">5. Create the repository</h2>
                             <p class="card__sub">
                                 Creates the repository in your GitHub organisation with the files shown above in a single commit,
-                                and a new solution for @_preview!.CustomerName.
+                                and @(_clash is { CanJoin: true } ? "adds it to the existing solution" : "a new solution") for @_preview!.CustomerName.
                             </p>
                         </div>
                     </div>
@@ -544,7 +545,7 @@
                         </div>
                         <div class="field">
                             <Switch Name="mig-pipelines" Label="Set up build pipelines" Checked="_addPipelines" CheckedChanged="v => _addPipelines = v" />
-                            <span class="field__hint">Adds build pipelines to the new solution in AL Workbench, so it builds straight away.</span>
+                            <span class="field__hint">Adds build pipelines to the solution in AL Workbench, so it builds straight away.</span>
                         </div>
                         @if (_clash is { CanReplace: true } replaceable)
                         {
@@ -556,12 +557,21 @@
                                 </span>
                             </div>
                         }
+                        else if (_clash is { CanJoin: true } joined)
+                        {
+                            <Alert Tone="AlertTone.Info">
+                                <span>
+                                    The repository is added to the existing solution
+                                    <a href="@SolutionLinks.Solution(joined.Slug, joined.Id)">@joined.Name</a>, which has no GitHub repository yet.
+                                </span>
+                            </Alert>
+                        }
                         else if (_clash is { } taken)
                         {
                             <Alert Tone="AlertTone.Warn">
                                 <span>
-                                    A solution called <a href="@($"/solutions/{taken.Id}")">@taken.Name</a> already exists, so this would be refused.
-                                    Change the customer name above and preview again, or delete that solution first.
+                                    A solution called <a href="@SolutionLinks.Solution(taken.Slug, taken.Id)">@taken.Name</a> already has a GitHub repository, so this would be refused.
+                                    Change the customer name above and preview again, or remove that repository from the solution first.
                                 </span>
                             </Alert>
                         }
@@ -615,7 +625,7 @@
                                             <td>
                                                 @if (row.SolutionId is { } solutionId)
                                                 {
-                                                    <a class="u-nowrap" href="@($"/solutions/{solutionId}")">@row.CustomerName</a>
+                                                    <a class="u-nowrap" href="@SolutionLinks.Solution(row.SolutionSlug, solutionId)">@row.CustomerName</a>
                                                 }
                                                 else
                                                 {

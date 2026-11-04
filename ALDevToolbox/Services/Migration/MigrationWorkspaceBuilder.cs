@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Import;
+using ALDevToolbox.Services.Templates;
 
 namespace ALDevToolbox.Services.Migration;
 
@@ -12,12 +13,18 @@ namespace ALDevToolbox.Services.Migration;
 /// <param name="TemplateName">The template's name, as the page shows it.</param>
 /// <param name="AddTemplateExtensions">Whether the template's own extensions and modules come along (off by default, #1698).</param>
 /// <param name="Plan">The workspace plan the template is generated from, built and validated when the preview was asked for.</param>
+/// <param name="ProductionVersion">
+/// The Business Central version of the customer's production environment, when a
+/// solution of the customer's name already knows one. Each <c>app.json</c>'s
+/// application, platform and runtime follow it; without it they stay the source's.
+/// </param>
 public sealed record MigrationTarget(
     string TemplateKey,
     string TemplateName,
     string CustomerName,
     bool AddTemplateExtensions,
-    ProjectPlan Plan);
+    ProjectPlan Plan,
+    string? ProductionVersion = null);
 
 /// <summary>Why a source file is not in the new workspace.</summary>
 public enum MigrationLeftBehindReason
@@ -213,7 +220,8 @@ public sealed class MigrationWorkspaceBuilder
 
                 var manifestPath = Path.Combine(to, AppJsonManifestParser.FileName);
                 var sourceJson = MigrationAppJson.Parse(await File.ReadAllTextAsync(manifestPath, ct).ConfigureAwait(false)) ?? new JsonObject();
-                var (normalized, changes) = MigrationAppJson.Normalize(template.AppJson, sourceJson);
+                var (normalized, changes) = MigrationAppJson.Normalize(
+                    template.AppJson, sourceJson, BusinessCentralWaves.MajorOf(target.ProductionVersion));
                 await File.WriteAllTextAsync(manifestPath, WorkspaceZipBuilder.WriteJson(normalized) + "\n", ct).ConfigureAwait(false);
                 appJson.Add(new MigrationAppJsonReport(extension.Folder, extension.RepositoryName, changes));
                 identities.Add(Identity(extension, normalized, commits.GetValueOrDefault(extension.RepositoryName)));

@@ -220,6 +220,7 @@ public sealed class RepositoryMigrationService
                 m.Id, m.CreatedAt, m.CustomerName, m.SourceProject, m.SourceProjectUrl,
                 m.RepositoryFullName, m.RepositoryUrl,
                 m.Project != null && m.Project.DeletedAt == null ? m.ProjectId : null,
+                m.Project != null && m.Project.DeletedAt == null ? m.Project.Slug : null,
                 m.CreatedByUser != null ? (m.CreatedByUser.DisplayName != "" ? m.CreatedByUser.DisplayName : m.CreatedByUser.Email) : null,
                 m.Succeeded, m.Message))
             .ToListAsync(ct).ConfigureAwait(false);
@@ -287,7 +288,30 @@ public sealed class RepositoryMigrationService
             throw new PlanValidationException(mapped);
         }
 
-        return new MigrationTarget(template.Key, template.Name, customer, input.AddTemplateExtensions, plan);
+        return new MigrationTarget(template.Key, template.Name, customer, input.AddTemplateExtensions, plan,
+            await ProductionVersionAsync(customer, ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The Business Central version the customer runs in production, when a
+    /// solution of their name already exists and has seen its environments: the
+    /// lowest, if it has several, since every app has to install on all of them.
+    /// Null when there is no such solution or no production environment.
+    /// </summary>
+    private async Task<string?> ProductionVersionAsync(string customer, CancellationToken ct)
+    {
+        var lower = customer.ToLowerInvariant();
+        var versions = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Project!.DeletedAt == null && e.Project.Name.ToLower() == lower
+                && e.Type.ToLower() == "production" && e.MissingSince == null && e.SoftDeletedOn == null && e.Version != null)
+            .Select(e => e.Version!)
+            .ToListAsync(ct).ConfigureAwait(false);
+        return versions
+            .Select(v => (Text: v, Parsed: Version.TryParse(v, out var parsed) ? parsed : null))
+            .Where(v => v.Parsed is not null)
+            .OrderBy(v => v.Parsed)
+            .Select(v => v.Text)
+            .FirstOrDefault();
     }
 
     /// <summary>
@@ -380,6 +404,7 @@ public sealed record RepositoryMigrationHistoryRow(
     string? RepositoryFullName,
     string? RepositoryUrl,
     int? SolutionId,
+    string? SolutionSlug,
     string? StartedBy,
     bool Succeeded,
     string? Message);

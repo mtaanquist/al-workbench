@@ -34,6 +34,7 @@ public sealed record MigrationOutcome(
     string RepositoryUrl,
     int? SolutionId,
     string? SolutionName,
+    string? SolutionSlug,
     int FileCount,
     IReadOnlyList<string> Branches,
     IReadOnlyList<string> PipelineNames,
@@ -43,11 +44,18 @@ public sealed record MigrationOutcome(
 public sealed record MigrationGitHubReadiness(string? OrgLogin, string? Blocker);
 
 /// <summary>A solution that already has the customer's name.</summary>
-/// <param name="CanReplace">
-/// True when it came from an earlier migration and that migration's repository is
-/// gone from GitHub, which is what makes deleting it safe to offer (Mads, #1701).
+/// <param name="Slug">Its web address key, for a link to it; null on a row that predates slugs.</param>
+/// <param name="CanJoin">
+/// True when it has no GitHub repository yet: the migration adds the new repository
+/// (and its pipelines) to it instead of creating a second solution. Most customers
+/// were set up as solutions before their code moved to GitHub (Mads, 2026-11-04).
 /// </param>
-public sealed record MigrationSolutionClash(int Id, string Name, bool CanReplace);
+/// <param name="CanReplace">
+/// True when it already has a GitHub repository, came from an earlier migration, and
+/// that migration's repository is gone from GitHub, which is what makes deleting it
+/// safe to offer (Mads, #1701).
+/// </param>
+public sealed record MigrationSolutionClash(int Id, string Name, string? Slug, bool CanJoin, bool CanReplace);
 
 /// <summary>
 /// The last step of a migration (issue #1701): creates the GitHub repository and
@@ -103,8 +111,8 @@ public sealed class RepositoryMigrationPublisher
     /// <exception cref="PlanValidationException">Keyed to the repository-name, repository or solution field.</exception>
     public async Task CheckAsync(string customerName, MigrationCreateRequest request, CancellationToken ct)
     {
-        await _repositories.CheckCanCreateAsync(request.RepositoryName, solutionId: null, ct).ConfigureAwait(false);
-        await CheckSolutionAsync(customerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
+        var solution = await CheckSolutionAsync(customerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
+        await _repositories.CheckCanCreateAsync(request.RepositoryName, solution.JoinId, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -129,7 +137,7 @@ public sealed class RepositoryMigrationPublisher
 
     /// <summary>
     /// The solution that already has <paramref name="customerName"/>, if any, and
-    /// whether it may be replaced. Null when the name is free.
+    /// whether the migration joins it or may replace it. Null when the name is free.
     /// </summary>
     public async Task<MigrationSolutionClash?> FindSolutionClashAsync(string customerName, CancellationToken ct)
     {
@@ -138,17 +146,24 @@ public sealed class RepositoryMigrationPublisher
         var lower = name.ToLowerInvariant();
         var existing = await _db.OeProjects.AsNoTracking()
             .Where(p => p.DeletedAt == null && p.Name.ToLower() == lower)
-            .Select(p => new { p.Id, p.Name })
+            .Select(p => new
+            {
+                p.Id,
+                p.Name,
+                p.Slug,
+                HasGitHub = p.Repositories.Any(r => r.Provider == RepositoryProvider.GitHub),
+            })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (existing is null) return null;
+        if (!existing.HasGitHub) return new MigrationSolutionClash(existing.Id, existing.Name, existing.Slug, CanJoin: true, CanReplace: false);
 
         var migrated = await _db.RepositoryMigrations.AsNoTracking()
             .Where(m => m.ProjectId == existing.Id && m.Succeeded && m.RepositoryFullName != null)
             .OrderByDescending(m => m.CreatedAt)
             .Select(m => m.RepositoryFullName)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return new MigrationSolutionClash(existing.Id, existing.Name,
-            migrated is not null && await RepositoryIsGoneAsync(migrated, ct).ConfigureAwait(false));
+        return new MigrationSolutionClash(existing.Id, existing.Name, existing.Slug, CanJoin: false,
+            CanReplace: migrated is not null && await RepositoryIsGoneAsync(migrated, ct).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -167,10 +182,10 @@ public sealed class RepositoryMigrationPublisher
         GitHubWorkspaceRepository created;
         try
         {
-            var gate = await _repositories.CheckCanCreateAsync(request.RepositoryName, solutionId: null, ct).ConfigureAwait(false);
-            var replace = await CheckSolutionAsync(job.Target.CustomerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
+            var (joinId, replace) = await CheckSolutionAsync(job.Target.CustomerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
+            var gate = await _repositories.CheckCanCreateAsync(request.RepositoryName, joinId, ct).ConfigureAwait(false);
             created = await _repositories.CreateAndFillAsync(
-                gate, plan, request.IsPrivate, solutionId: null, request.AddPipelines,
+                gate, plan, request.IsPrivate, joinId, request.AddPipelines,
                 async (token, repository, standards, author, fillCt) =>
                 {
                     made = repository;
@@ -203,8 +218,11 @@ public sealed class RepositoryMigrationPublisher
         _logger.LogInformation(
             "Migration {RunId} moved {RepositoryCount} repositories from {Project} into {RepoFullName} ({FileCount} files, solution {SolutionId}).",
             job.Id, job.Repositories.Count, job.Project.DisplayName, created.Repository.FullName, created.FileCount, created.SolutionId);
+        var slug = created.SolutionId is { } solutionId
+            ? await _db.OeProjects.AsNoTracking().Where(p => p.Id == solutionId).Select(p => p.Slug).FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            : null;
         return new MigrationOutcome(
-            created.Repository.FullName, created.Repository.HtmlUrl, created.SolutionId, created.SolutionName,
+            created.Repository.FullName, created.Repository.HtmlUrl, created.SolutionId, created.SolutionName, slug,
             created.FileCount, created.Branches ?? [], created.PipelineNames ?? [], warnings);
     }
 
@@ -228,21 +246,25 @@ public sealed class RepositoryMigrationPublisher
     }
 
     /// <summary>
-    /// The solution to delete once the new repository holds the code, when the
-    /// Admin chose to replace one; refuses a clash otherwise.
+    /// Where the repository goes: <c>JoinId</c> is an existing solution with no
+    /// GitHub repository to add it to, <c>Replace</c> the solution to delete once
+    /// the new repository holds the code when the Admin chose to replace one, and
+    /// neither means a new solution. Refuses any other clash.
     /// </summary>
-    private async Task<MigrationSolutionClash?> CheckSolutionAsync(string customerName, int? replaceSolutionId, CancellationToken ct)
+    private async Task<(int? JoinId, MigrationSolutionClash? Replace)> CheckSolutionAsync(
+        string customerName, int? replaceSolutionId, CancellationToken ct)
     {
         var clash = await FindSolutionClashAsync(customerName, ct).ConfigureAwait(false);
-        if (clash is null) return null;
-        if (clash.CanReplace && replaceSolutionId == clash.Id) return clash;
+        if (clash is null) return (null, null);
+        if (clash.CanJoin) return (clash.Id, null);
+        if (clash.CanReplace && replaceSolutionId == clash.Id) return (null, clash);
         throw new PlanValidationException(new Dictionary<string, string>
         {
             [RepositoryMigrationService.SolutionField] = clash.CanReplace
                 ? $"A solution called {clash.Name} already exists, from an earlier migration whose repository has since been deleted. "
                   + "Turn on Replace the existing solution to delete it and its pipelines, or use another customer name."
-                : $"A solution called {clash.Name} already exists. A migration creates a new solution, so use another customer name, "
-                  + "or delete that solution first.",
+                : $"A solution called {clash.Name} already exists and already has a GitHub repository. Use another customer name, "
+                  + "or remove that repository from the solution first.",
         });
     }
 
