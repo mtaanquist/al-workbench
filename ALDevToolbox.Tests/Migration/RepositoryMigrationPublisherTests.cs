@@ -18,7 +18,8 @@ namespace ALDevToolbox.Tests.Migration;
 /// <summary>
 /// The last step of Migrate repositories (#1701): the workspace a preview built
 /// is pushed into a new GitHub repository as one commit, the customer becomes a
-/// solution, and every run is recorded. A solution of the same name is refused,
+/// solution, and every run is recorded. A solution of the same name with no
+/// GitHub repository yet is joined; one that has a GitHub repository is refused,
 /// unless it came from an earlier migration whose repository is gone and the
 /// Admin chose to replace it.
 /// </summary>
@@ -173,15 +174,45 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
     }
 
     [Fact]
-    public async Task A_solution_of_the_same_name_that_no_migration_made_is_refused_before_anything_is_created()
+    public async Task A_solution_without_a_github_repository_is_joined_rather_than_duplicated()
+    {
+        if (!GitAvailable()) return;
+        await ReadyAsync();
+        var existingId = await SeedSolutionAsync("CRONUS A/S", slug: "cronus");
+        var (workspace, bare) = Workspace();
+        var api = WritableApi();
+
+        MigrationOutcome outcome;
+        await using (var ctx = _db.NewContext())
+        {
+            var publisher = NewPublisher(ctx, api, bare);
+            var clash = await publisher.FindSolutionClashAsync("cronus a/s", CancellationToken.None);
+            clash!.CanJoin.Should().BeTrue();
+            clash.Slug.Should().Be("cronus");
+            outcome = await publisher.PublishAsync(Job(), Request(), workspace, Commits, CancellationToken.None);
+        }
+
+        outcome.SolutionId.Should().Be(existingId);
+        outcome.SolutionSlug.Should().Be("cronus", "the page links the solution by its address, not its number");
+        await using var check = _db.NewContext();
+        (await check.OeProjects.AsNoTracking().CountAsync(p => p.DeletedAt == null)).Should().Be(1);
+        (await check.OeProjectRepositories.AsNoTracking().SingleAsync(r => r.ProjectId == existingId))
+            .Provider.Should().Be(RepositoryProvider.GitHub);
+    }
+
+    [Fact]
+    public async Task A_solution_of_the_same_name_that_already_has_a_github_repository_is_refused_before_anything_is_created()
     {
         await ReadyAsync();
-        await SeedSolutionAsync("CRONUS A/S");
+        var solutionId = await SeedSolutionAsync("CRONUS A/S");
+        await SeedGitHubRepositoryAsync(solutionId, $"{OrgLogin}/cronus-existing");
         var api = WritableApi();
 
         await using var ctx = _db.NewContext();
         var publisher = NewPublisher(ctx, api, _temp.Path);
-        (await publisher.FindSolutionClashAsync("cronus a/s", CancellationToken.None))!.CanReplace.Should().BeFalse();
+        var clash = (await publisher.FindSolutionClashAsync("cronus a/s", CancellationToken.None))!;
+        clash.CanJoin.Should().BeFalse();
+        clash.CanReplace.Should().BeFalse();
 
         var act = () => publisher.CheckAsync("CRONUS A/S", Request(), CancellationToken.None);
 
@@ -318,13 +349,14 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
         await MigrationTestServices.SeedTemplateAsync(_db);
     }
 
-    private async Task<int> SeedSolutionAsync(string name)
+    private async Task<int> SeedSolutionAsync(string name, string? slug = null)
     {
         await using var ctx = _db.NewContext();
         var project = new OeProject
         {
             OrganizationId = TestDb.DefaultOrgId,
             Name = name,
+            Slug = slug,
             Visibility = ProjectVisibility.Public,
             DefaultArtifactCountry = "dk",
             CreatedByUserId = UserId,
@@ -336,8 +368,24 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
         return project.Id;
     }
 
+    private async Task SeedGitHubRepositoryAsync(int solutionId, string repository)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = solutionId,
+            Provider = RepositoryProvider.GitHub,
+            Url = $"https://github.com/{repository}.git",
+            DisplayName = repository.Split('/')[1],
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>An earlier migration's run, and the repository row it registered on the solution.</summary>
     private async Task SeedHistoryAsync(int solutionId, string repository)
     {
+        await SeedGitHubRepositoryAsync(solutionId, repository);
         await using var ctx = _db.NewContext();
         ctx.RepositoryMigrations.Add(new RepositoryMigration
         {

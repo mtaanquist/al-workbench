@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ALDevToolbox.Services.Templates;
 
 namespace ALDevToolbox.Services.Migration;
 
@@ -41,8 +42,13 @@ public static class MigrationAppJson
         "applicationInsightsConnectionString", "applicationInsightsKey", "keyVaultUrls",
     ];
 
-    /// <summary>Versions the source keeps when they are higher than the template's.</summary>
-    internal static readonly string[] HigherWins = ["application", "platform", "runtime"];
+    /// <summary>
+    /// The Business Central versions the app targets. Never the template's: they
+    /// follow the customer's production environment when it is known, and stay
+    /// the source's otherwise (Mads, 2026-11-04). The template's is used only when
+    /// the source has none and production is not known.
+    /// </summary>
+    internal static readonly string[] Versions = ["application", "platform", "runtime"];
 
     private const string Features = "features";
 
@@ -71,7 +77,14 @@ public static class MigrationAppJson
     /// is changed. The result follows the template's property order and
     /// spelling; kept settings the template lacks follow it.
     /// </summary>
-    public static (JsonObject AppJson, IReadOnlyList<MigrationAppJsonChange> Changes) Normalize(JsonObject template, JsonObject source)
+    /// <param name="productionMajor">
+    /// The major version of the customer's production environment, when known. A
+    /// version whose major differs from it is set to that wave's first release
+    /// (26 gives application and platform 26.0.0.0, runtime 15.0); one on the same
+    /// major is left alone, so a source on runtime 15.1 keeps it.
+    /// </param>
+    public static (JsonObject AppJson, IReadOnlyList<MigrationAppJsonChange> Changes) Normalize(
+        JsonObject template, JsonObject source, int? productionMajor = null)
     {
         var result = (JsonObject)template.DeepClone();
         var sourceProps = new Dictionary<string, (string Key, JsonNode? Value)>(StringComparer.OrdinalIgnoreCase);
@@ -95,14 +108,26 @@ public static class MigrationAppJson
             }
         }
 
-        foreach (var name in HigherWins)
+        var wave = productionMajor is >= BusinessCentralWaves.MinimumMajor and var major
+            ? BusinessCentralWaves.ForMajor(major)
+            : null;
+        foreach (var name in Versions)
         {
-            if (!sourceProps.TryGetValue(name, out var p) || !TryVersion(p.Value, out var sourceVersion)) continue;
-            var current = Find(result, name);
-            if (current is null || !TryVersion(current.Value.Value, out var templateVersion) || sourceVersion > templateVersion)
+            var hasSource = sourceProps.TryGetValue(name, out var p);
+            if (wave is not null)
+            {
+                var wanted = name == "runtime" ? wave.Runtime : wave.Application;
+                var wantedMajor = name == "runtime" ? wave.Major - 11 : wave.Major;
+                var key = Find(result, name)?.Key ?? (hasSource ? p.Key : name);
+                Remove(result, name);
+                result[key] = hasSource && TryVersion(p.Value, out var sourceVersion) && sourceVersion.Major == wantedMajor
+                    ? p.Value!.DeepClone()
+                    : wanted;
+            }
+            else if (hasSource)
             {
                 Remove(result, name);
-                result[p.Key] = p.Value!.DeepClone();
+                result[p.Key] = p.Value?.DeepClone();
             }
         }
 
