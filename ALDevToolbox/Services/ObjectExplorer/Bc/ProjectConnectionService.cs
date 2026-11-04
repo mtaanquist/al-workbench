@@ -1641,7 +1641,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             throw Validation("Update", $"An update is already running on {env.Name}.");
         }
 
-        var target = upgradeVersion.Trim();
+        var target = UpgradeFleetService.MajorMinor(upgradeVersion);
         bool IsTarget(BcEnvironmentUpdate u) =>
             CompareVersions(UpgradeFleetService.MajorMinor(u.TargetVersion), target) == 0;
 
@@ -1656,7 +1656,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             }
         }
         return offered ?? throw Validation("Update",
-            $"Business Central doesn't offer {target} to {env.Name} yet, so the update wasn't started.");
+            $"Business Central doesn't offer {target} to {env.Name}, so the update wasn't started.");
     }
 
     /// <summary>

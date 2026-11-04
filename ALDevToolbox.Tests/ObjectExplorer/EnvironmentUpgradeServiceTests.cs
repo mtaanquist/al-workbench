@@ -934,6 +934,43 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         _f.Admin.SelectedTargetVersion.Should().Be("28.5");
     }
 
+    /// <summary>
+    /// A start booked from an upgrade before starts honoured the upgrade's release carries
+    /// the update that was next at the time (28.3). When someone has since lined up 28.5,
+    /// the slot must refuse as any booking does (#1234), not switch the environment back.
+    /// </summary>
+    [Fact]
+    public async Task An_older_booking_for_another_release_keeps_the_booked_version_rule()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: "28.5");
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            var action = new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId, UpgradeId = id,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Pending, TargetVersion = "28.3",
+                RequestedBy = "Anna Jensen", RequestedByUserId = UpgradeActionTestFixture.FlagUserId,
+                RequestedAt = now, ExecuteAfter = now.AddHours(1),
+            };
+            ctx.OeEnvironmentUpgradeActions.Add(action);
+            await ctx.SaveChangesAsync();
+            actionId = action.Id;
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("not the 28.3 that was booked");
+        _f.Admin.Writes.Should().Be(0);
+    }
+
     [Fact]
     public async Task Starting_from_an_upgrade_is_refused_when_its_release_is_not_offered()
     {

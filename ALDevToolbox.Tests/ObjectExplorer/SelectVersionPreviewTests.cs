@@ -225,4 +225,9 @@ public sealed class SelectVersionPreviewTests
     public void An_upgrade_start_passes_over_a_row_not_offered_its_release() =>
         UpgradeFleetService.WhyNoUpgradeStart(Row(next: "28.3", offered: ["28.3"]), "28.5")
             .Should().Be("Business Central does not offer 28.5 to this environment yet");
+
+    [Fact]
+    public void An_upgrade_start_passes_over_a_row_already_on_its_release() =>
+        UpgradeFleetService.WhyNoUpgradeStart(Row(next: null, current: "28.5.2000.0", offered: []), "28.5")
+            .Should().Be("already on 28.5");
 }

@@ -456,6 +456,11 @@ public sealed class UpgradeFleetService
     {
         ArgumentNullException.ThrowIfNull(row);
         target = MajorMinor(target);
+        if (!string.IsNullOrWhiteSpace(row.Version)
+            && VersionOrder.Compare(MajorMinor(row.Version), target) is var compared and >= 0)
+        {
+            return compared == 0 ? $"already on {target}" : $"already on {MajorMinor(row.Version)}, past {target}";
+        }
         if (row.HasUpdate && VersionOrder.Compare(MajorMinor(row.NextUpdateVersion!), target) == 0) return null;
         if (row.OfferedVersions is null)
         {
