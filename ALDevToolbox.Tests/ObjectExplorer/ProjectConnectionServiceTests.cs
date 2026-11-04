@@ -3598,6 +3598,68 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         row.BcNextUpdateFetchedAt.Should().NotBeNull();
     }
 
+    private static BcEnvironmentUpdate VersionUpdate(string version, bool selected, DateTimeOffset? date = null, bool ignoresWindow = false) =>
+        new(version, true, selected, "scheduled", "GA", date ?? ScheduledDate, Latest, ignoresWindow, "Active", null, null);
+
+    [Fact]
+    public async Task Starting_an_upgrades_release_selects_it_when_another_update_is_next()
+    {
+        // The environment has 28.3 lined up and 28.5 on offer; the upgrade is to 28.5.
+        // Starting it must send 28.5, not the 28.3 that happened to be selected.
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SeedUpdateOpsTeamAsync(projectId);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        var admin = new FakeAdminClient();
+        admin.OnEnvironmentUpdates = _ => admin.SelectWrites == 0
+            ? new[] { VersionUpdate("28.3", selected: true), VersionUpdate("28.5", selected: false) }
+            : new[] { VersionUpdate("28.3", selected: false), VersionUpdate("28.5", selected: true, DateTimeOffset.UtcNow, ignoresWindow: true) };
+
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk(), admin).RunUpdateNowAsync(projectId, envId, upgradeVersion: "28.5");
+
+        admin.SelectWrites.Should().Be(1, "selecting the release and starting it is one write");
+        admin.SelectedVersion.Should().Be("28.5");
+        admin.SelectedIgnoreUpdateWindow.Should().BeTrue();
+        admin.SelectedDateTime!.Value.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromMinutes(1));
+
+        await using var verify = _db.NewContext();
+        var row = await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId);
+        row.BcNextUpdateVersion.Should().Be("28.5");
+    }
+
+    [Fact]
+    public async Task Starting_an_upgrades_release_is_refused_when_it_is_not_offered()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SeedUpdateOpsTeamAsync(projectId);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        var admin = new FakeAdminClient();
+        admin.OnEnvironmentUpdates = _ => new[] { VersionUpdate("28.3", selected: true) };
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), admin).RunUpdateNowAsync(projectId, envId, upgradeVersion: "28.5");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Update"]
+            .Should().Contain("doesn't offer 28.5");
+        admin.SelectWrites.Should().Be(0, "starting 28.3 for an upgrade to 28.5 is the bug this guards against");
+    }
+
+    [Fact]
+    public async Task Starting_an_upgrades_release_fails_when_Business_Central_keeps_another_version()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SeedUpdateOpsTeamAsync(projectId);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        var admin = new FakeAdminClient();
+        admin.OnEnvironmentUpdates = _ => new[] { VersionUpdate("28.3", selected: true), VersionUpdate("28.5", selected: false) };
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), admin).RunUpdateNowAsync(projectId, envId, upgradeVersion: "28.5");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Update"]
+            .Should().Contain("Its next update is still 28.3");
+    }
+
     [Fact]
     public async Task Pushing_the_date_records_an_audit_row_naming_the_action_and_the_environment()
     {

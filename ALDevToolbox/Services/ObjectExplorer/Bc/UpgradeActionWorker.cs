@@ -328,7 +328,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
                     a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow,
-                    a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt))
+                    a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt, a.UpgradeId))
                 .ToListAsync(ct).ConfigureAwait(false);
 
             if (uploads)
@@ -931,7 +931,8 @@ public sealed class UpgradeActionWorker : BackgroundService
             }
             else
             {
-                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
+                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct,
+                    fromUpgrade: action.UpgradeId is not null).ConfigureAwait(false);
                 status = UpgradeActionStatus.Sent;
                 outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label);
             }
@@ -1281,7 +1282,7 @@ public sealed class UpgradeActionWorker : BackgroundService
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
         string? Label, Guid? BatchId, int? BatchOrder, UploadAppTiming? ScheduledByWindow,
-        Guid? TenantId, string EnvironmentName, DateTime RequestedAt)
+        Guid? TenantId, string EnvironmentName, DateTime RequestedAt, int? UpgradeId)
     {
         /// <summary>The environment in Business Central this row installs into (see <see cref="EnvironmentKey"/>).</summary>
         public (string Tenant, string Environment) BcEnvironment => EnvironmentKey(TenantId, ProjectId, EnvironmentName);
