@@ -150,6 +150,17 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
    slid up, leaving a dead band under the sidebar and the content. */
 .app__content { position: relative; }
 
+/* The same escape one level down, inside a dialog. .confirm-dialog is the
+   positioned ancestor there, so in a list that scrolls inside a dialog the
+   hidden inputs stayed where their rows first laid out instead of scrolling
+   with them. Ticking a row far down the Add environments picker focused an
+   input that sat below the dialog, and the browser scrolled the whole dialog
+   (overflow: hidden, so no scrollbar) to show it: the head and filters went
+   off the top and a blank band opened under the footer. Making each control
+   the containing block of its own input keeps the input on its row, in any
+   scroller. :where() so any rule that positions a .check or .switch wins. */
+:where(.check, .switch) { position: relative; }
+
 /* Full-height tools (Compare, Translator, the Object Explorer source viewer)
    size themselves with `height: 100%`. That used to resolve against `.content`,
    which was a flex item with a definite height. The hand-off's
