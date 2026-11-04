@@ -1551,6 +1551,15 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(32)")
                         .HasColumnName("target_version");
 
+                    b.Property<DateTime?>("UpdateCheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("update_checked_at");
+
+                    b.Property<string>("UpdateResult")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("update_result");
+
                     b.Property<int?>("UpgradeId")
                         .HasColumnType("integer")
                         .HasColumnName("upgrade_id");
@@ -1564,6 +1573,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId");
 
                     b.HasIndex("RequestedByUserId");
+
+                    b.HasIndex("SentAt")
+                        .HasDatabaseName("ix_oe_env_upgrade_actions_follow")
+                        .HasFilter("kind = 'RunNow' AND status = 'Sent' AND update_result IS NULL");
 
                     b.HasIndex("UpgradeId")
                         .HasDatabaseName("ix_oe_env_upgrade_actions_upgrade");

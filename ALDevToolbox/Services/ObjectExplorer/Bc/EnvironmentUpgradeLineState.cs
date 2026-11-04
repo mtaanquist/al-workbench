@@ -74,7 +74,9 @@ public static class EnvironmentUpgradeLineState
     /// cannot tell it from an update that has not started.</item>
     /// <item><b>Booked</b> when a start is waiting for its slot (a <c>Pending</c> Start
     /// update), or the latest action from this upgrade is a Start update Business Central
-    /// accepted and the environment has not picked up yet.</item>
+    /// accepted and the environment has not picked up yet. A start whose update the worker
+    /// has seen end is no longer booked (#1711): one that went to an earlier release than
+    /// the target falls through to Planned, and one that failed is Failed above.</item>
     /// <item><b>DateMoved</b> when the latest action this upgrade sent was a date move that
     /// worked.</item>
     /// <item>Otherwise <b>Planned</b> - including a line whose only booking was cancelled.</item>
@@ -112,7 +114,7 @@ public static class EnvironmentUpgradeLineState
         }
 
         if (ordered.Any(a => a.Kind == UpgradeActionKind.RunNow && a.Status == UpgradeActionStatus.Pending)
-            || latest is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent })
+            || latest is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, UpdateResult: null })
         {
             return UpgradeLineState.Booked;
         }

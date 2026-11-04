@@ -1541,7 +1541,7 @@
                 <text>Update to @target failed</text>
                 if (last is { Status: UpgradeActionStatus.Failed } failed)
                 {
-                    <text> at <Timestamp Value="@(failed.SentAt ?? failed.RequestedAt)" Format="HH:mm" /></text>
+                    <text> at <Timestamp Value="@failed.SettledAt" Format="HH:mm" /></text>
                 }
                 return;
             case UpgradeLineState.Booked when BookingFor(line) is { } booking:
