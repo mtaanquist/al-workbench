@@ -583,7 +583,7 @@
                         }
                         <div class="u-row mig__go">
                             <button type="button" class="btn btn--primary" @onclick="CreateAsync"
-                                    disabled="@(_starting || string.IsNullOrWhiteSpace(_repositoryName) || _clash is { CanReplace: false } || _github?.Blocker is not null)">
+                                    disabled="@(_starting || string.IsNullOrWhiteSpace(_repositoryName) || _clash is { CanJoin: false, CanReplace: false } || _github?.Blocker is not null)">
                                 <Icon Name="folder-git-2" Width="16" Height="16" />
                                 <span>@(_starting ? "Starting..." : "Create repository")</span>
                             </button>
