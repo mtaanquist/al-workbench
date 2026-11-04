@@ -355,10 +355,15 @@ time.
 So every sweep also follows each sent start whose update has not been seen to end
 (`update_result` null, sent in the last two days), asking about each one at most every two
 minutes, as the person who started it, by reading the environment's operations. The operation is
-matched on what we do know: type `Update`, created after the start was sent (two minutes of slack
-for the clocks), going to the version the start recorded (Major.Minor; any version when the start
-recorded none, or when the operation names none), the earliest such. One update runs on an
-environment at a time, so that is enough.
+matched on what we do know: type `Update`, going to the version the start recorded (Major.Minor;
+any version when the start recorded none, or when the operation names none), that began after the
+start was sent (two minutes of slack for the clocks) - created then, or started running then, which
+covers an update Business Central had already queued before the start pulled it forward - and
+before the next start on the same environment, the earliest such. One update runs on an
+environment at a time, so that is enough. A start sent again before Business Central began the
+update is `Superseded`: the row stays `Sent`, nobody is told, and the later start is the one
+followed, so one failed update is one notice. Only `Succeeded`, `Failed`, `Canceled` and `Skipped`
+settle anything; any other status is read as still going.
 
 - **Succeeded**: `update_result = Succeeded`, the row stays `Sent`, and the outcome says Business
   Central finished the update to that version.
@@ -369,7 +374,9 @@ environment at a time, so that is enough.
   nothing about the update.
 
 On an ending the environment is re-read, so its version and next update are fresh (which is what
-turns the line Updated and tells whoever checks it). A failed or never-started update notifies
+turns the line Updated and tells whoever checks it). A success is only recorded once that re-read
+has worked; recorded without it, the line would stop reading Booked while still showing the old
+version. A failed or never-started update notifies
 the person who started it and the line's assignee on the planned upgrade it came from, whether
 the start was booked or made on the spot. A succeeded one notifies nobody: the "ready to check"
 notice already covers it. A start whose update has ended is no longer **Booked**: one that went

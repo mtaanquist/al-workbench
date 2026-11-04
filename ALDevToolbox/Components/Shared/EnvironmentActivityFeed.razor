@@ -202,7 +202,9 @@ else
                 : $"Set the next version to {version}";
         }
         if (entry.IsBooking) return "Booked the update";
-        return entry.Status == UpgradeActionStatus.Failed
+        // A start Business Central accepted whose update then failed did start it: the
+        // outcome below says what became of the update (#1711).
+        return entry.Status == UpgradeActionStatus.Failed && entry.UpdateResult is null
             ? "Tried to start the update"
             : "Started the update";
     }
@@ -214,7 +216,7 @@ else
     /// </summary>
     private RenderFragment StatusText(UpgradeActionRow entry)
     {
-        var sent = entry.SentAt ?? entry.RequestedAt;
+        var sent = entry.SettledAt;
         var cancelled = entry.CancelledAt ?? entry.RequestedAt;
         return entry.Status switch
         {

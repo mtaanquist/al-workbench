@@ -289,6 +289,8 @@ public enum PlatformUpdateResult
     Failed,
     /// <summary>No update operation appeared within a day of the start: Business Central never picked it up.</summary>
     NeverStarted,
+    /// <summary>Started again before Business Central began the update: the later start is the one followed.</summary>
+    Superseded,
 }
 
 public enum UpgradeActionStatus

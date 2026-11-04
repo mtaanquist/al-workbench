@@ -197,10 +197,11 @@ public sealed partial class UpgradeActionWorker : BackgroundService
                 // Whoever checks an environment after its update hears when it is on
                 // the target version (#1047). A read, cheap when nothing is new.
                 await ForEachOrgAsync(NotifyReadyToCheckAsync, ct).ConfigureAwait(false);
-                // Every start sent is followed until Business Central's update ends, so a
-                // failure reaches somebody with the page closed (#1711).
-                await ForEachOrgAsync(FollowStartedUpdatesAsync, ct).ConfigureAwait(false);
                 await RunOneUploadAsync(ct).ConfigureAwait(false);
+                // Every start sent is followed until Business Central's update ends, so a
+                // failure reaches somebody with the page closed (#1711). Last, so its reads
+                // never hold up an install's agreed slot.
+                await ForEachOrgAsync(FollowStartedUpdatesAsync, ct).ConfigureAwait(false);
             }
             finally { _heartbeat.EndActive(); }
         }

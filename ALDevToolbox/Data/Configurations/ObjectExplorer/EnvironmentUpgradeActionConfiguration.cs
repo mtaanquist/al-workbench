@@ -114,7 +114,9 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.HasIndex(e => new { e.Status, e.ExecuteAfter })
             .HasDatabaseName("ix_oe_env_upgrade_actions_status_due");
         // The worker's follow-scan: sent starts whose update has not been seen to end.
-        // Partial, so it holds only the handful in flight rather than the whole history.
+        // Partial, so it leaves out every other kind and every settled start; starts that
+        // aged out unsettled (and those sent before #1711) stay in it, which the scan's
+        // sent_at range skips past.
         entity.HasIndex(e => e.SentAt)
             .HasDatabaseName("ix_oe_env_upgrade_actions_follow")
             .HasFilter("kind = 'RunNow' AND status = 'Sent' AND update_result IS NULL");

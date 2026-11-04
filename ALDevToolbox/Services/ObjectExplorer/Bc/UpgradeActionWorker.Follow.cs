@@ -57,7 +57,13 @@ public sealed partial class UpgradeActionWorker
                 .OrderBy(a => a.UpdateCheckedAt ?? DateTime.MinValue)
                 .ThenBy(a => a.Id)
                 .Take(FollowPerSweep)
-                .Select(a => new FollowedStart(a.Id, a.ProjectId, a.EnvironmentId, a.RequestedByUserId, a.TargetVersion, a.SentAt!.Value))
+                .Select(a => new FollowedStart(a.Id, a.ProjectId, a.EnvironmentId, a.RequestedByUserId, a.TargetVersion, a.SentAt!.Value,
+                    // The next start sent on the same environment, if any: an update that
+                    // began after it is that start's, not this one's.
+                    db.OeEnvironmentUpgradeActions
+                        .Where(n => n.EnvironmentId == a.EnvironmentId && n.Kind == UpgradeActionKind.RunNow
+                                    && n.SentAt != null && n.SentAt > a.SentAt && n.Id != a.Id)
+                        .Min(n => n.SentAt)))
                 .ToListAsync(ct).ConfigureAwait(false);
         }
 
@@ -87,8 +93,14 @@ public sealed partial class UpgradeActionWorker
                 var connections = scope.ServiceProvider.GetRequiredService<ProjectConnectionService>();
                 var operations = await connections.ListEnvironmentOperationsAsync(start.ProjectId, start.EnvironmentId, ct)
                     .ConfigureAwait(false);
-                operation = MatchUpdateOperation(operations, start.SentAt, start.TargetVersion);
+                operation = MatchUpdateOperation(operations, start.SentAt, start.TargetVersion, start.NextStartAt);
                 read = true;
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Not following the update started by action {ActionId}: the person who started it no longer has an active account.",
+                    start.Id);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -116,6 +128,37 @@ public sealed partial class UpgradeActionWorker
         }
 
         var (result, status, outcome) = ending.Value;
+
+        // Re-read the environment so its version and next update say what the update did,
+        // which is what turns the upgrade's line Updated and tells whoever checks it. A
+        // success is only recorded once that read has worked: recorded without it, the
+        // line would stop reading Booked while the mirror still showed the old version,
+        // and read as if nothing had happened. A failure is recorded either way.
+        if (result != PlatformUpdateResult.Superseded)
+        {
+            var refreshed = false;
+            try
+            {
+                await scope.ServiceProvider.GetRequiredService<ProjectConnectionService>()
+                    .RefreshEnvironmentAsync(start.ProjectId, start.EnvironmentId, ct).ConfigureAwait(false);
+                refreshed = true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInformation("Couldn't re-read environment {EnvironmentId} after its update ended: {Message}",
+                    start.EnvironmentId, ex.Message);
+            }
+            if (!refreshed && result == PlatformUpdateResult.Succeeded)
+            {
+                await unsettled.ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdateCheckedAt, now), ct).ConfigureAwait(false);
+                return;
+            }
+        }
+
         Guid? operationId = Guid.TryParse(operation?.Id, out var parsed) ? parsed : null;
         var settled = await unsettled.ExecuteUpdateAsync(s => s
             .SetProperty(a => a.UpdateResult, result)
@@ -128,28 +171,7 @@ public sealed partial class UpgradeActionWorker
         _logger.LogInformation("The update started by action {ActionId} on environment {EnvironmentId} ended: {Result}.",
             start.Id, start.EnvironmentId, result);
 
-        // Re-read the environment so its version and next update say what the update did,
-        // which is what turns the upgrade's line Updated and tells whoever checks it. A
-        // failure here only costs that freshness; the nightly refresh catches up.
-        if (read)
-        {
-            try
-            {
-                await scope.ServiceProvider.GetRequiredService<ProjectConnectionService>()
-                    .RefreshEnvironmentAsync(start.ProjectId, start.EnvironmentId, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogInformation("Couldn't re-read environment {EnvironmentId} after its update ended: {Message}",
-                    start.EnvironmentId, ex.Message);
-            }
-        }
-
-        if (result != PlatformUpdateResult.Succeeded)
+        if (result is PlatformUpdateResult.Failed or PlatformUpdateResult.NeverStarted)
         {
             await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
                 .NotifyUpdateEndedAsync(start.Id, CancellationToken.None).ConfigureAwait(false);
@@ -165,30 +187,41 @@ public sealed partial class UpgradeActionWorker
     {
         if (operation is null)
         {
-            // Only an answer that found nothing counts towards "never picked up": a day of
-            // failed reads says nothing about the update.
-            if (!read || now - start.SentAt < NeverStartedAfter) return null;
+            // Only an answer that found nothing counts: failed reads say nothing about the update.
+            if (!read) return null;
+            // Started again before Business Central began this one: whatever runs now is
+            // the later start's, and that one is followed and reported in its own right.
+            if (start.NextStartAt is not null)
+            {
+                return (PlatformUpdateResult.Superseded, UpgradeActionStatus.Sent,
+                    "Started again before Business Central began the update, so the later start is the one followed.");
+            }
+            if (now - start.SentAt < NeverStartedAfter) return null;
             return (PlatformUpdateResult.NeverStarted, UpgradeActionStatus.Failed,
                 $"Business Central accepted the start, but hadn't begun the update{To(start.TargetVersion)} a day later. "
                 + "Check the environment's update in the admin centre, then start it again if it is still waiting.");
         }
 
-        if (BcEnvironmentOperationDisplay.IsOpen(operation)) return null;
-
         var to = To(UpdateOperationVersion(operation) ?? start.TargetVersion);
-        switch (operation.Status.Trim().ToLowerInvariant())
+        // Only the statuses known to be final settle anything. Any other - running,
+        // queued, scheduled, or one Microsoft adds later - is read as still going: a live
+        // update reported as failed would be worse than one reported late.
+        switch (operation.Status?.Trim().ToLowerInvariant())
         {
             case "succeeded":
                 return (PlatformUpdateResult.Succeeded, UpgradeActionStatus.Sent,
                     $"Business Central finished the update{to}.");
-            case "canceled" or "cancelled" or "skipped":
-                return (PlatformUpdateResult.Failed, UpgradeActionStatus.Failed,
-                    $"Business Central {(operation.Status.StartsWith("skip", StringComparison.OrdinalIgnoreCase) ? "skipped" : "cancelled")} the update{to}.");
-            default:
+            case "canceled" or "cancelled":
+                return (PlatformUpdateResult.Failed, UpgradeActionStatus.Failed, $"Business Central cancelled the update{to}.");
+            case "skipped":
+                return (PlatformUpdateResult.Failed, UpgradeActionStatus.Failed, $"Business Central skipped the update{to}.");
+            case "failed":
                 var reason = string.IsNullOrWhiteSpace(operation.ErrorMessage) ? null : operation.ErrorMessage.Trim();
                 return (PlatformUpdateResult.Failed, UpgradeActionStatus.Failed, reason is null
                     ? $"The update{to} failed in Business Central. See the environment's operations for details."
                     : $"The update{to} failed in Business Central. Reason given at the time: {reason}");
+            default:
+                return null;
         }
     }
 
@@ -196,24 +229,41 @@ public sealed partial class UpgradeActionWorker
 
     /// <summary>
     /// The update operation a start set off, out of the environment's operations: an
-    /// <c>Update</c> created after the start was sent (less <see cref="OperationClockSlack"/>),
-    /// going to the version that was started, the earliest such. Only one update runs on an
-    /// environment at a time, so that is specific enough without an id to match on. An
-    /// operation that names no version is taken on time alone, and so is every one when the
-    /// start recorded no version (an ad hoc start from the fleet table).
+    /// <c>Update</c> going to the version that was started, that began after the start was
+    /// sent (less <see cref="OperationClockSlack"/>) - created then, or started then, which
+    /// covers an update Business Central had already queued before the start pulled it
+    /// forward - and before the next start on the environment, if there is one; the
+    /// earliest such. Without a next start, an update still waiting to begin counts
+    /// whenever it was created. One update runs on an environment at a time, so that is
+    /// specific enough without an id to match on. An operation that names no version is
+    /// taken on time alone, and so is every one when the start recorded no version (an ad
+    /// hoc start from the fleet table).
     /// </summary>
     internal static BcEnvironmentOperation? MatchUpdateOperation(
-        IEnumerable<BcEnvironmentOperation> operations, DateTime sentAtUtc, string? targetVersion)
+        IEnumerable<BcEnvironmentOperation> operations, DateTime sentAtUtc, string? targetVersion, DateTime? nextStartUtc = null)
     {
-        var after = new DateTimeOffset(DateTime.SpecifyKind(sentAtUtc, DateTimeKind.Utc)) - OperationClockSlack;
+        var after = Utc(sentAtUtc) - OperationClockSlack;
+        DateTimeOffset? before = nextStartUtc is { } next ? Utc(next) - OperationClockSlack : null;
         var target = string.IsNullOrWhiteSpace(targetVersion) ? null : UpgradeFleetService.MajorMinor(targetVersion);
         return operations
-            .Where(o => string.Equals(o.Type?.Trim(), "Update", StringComparison.OrdinalIgnoreCase)
-                        && o.CreatedOn is { } created && created >= after)
+            .Where(o => string.Equals(o.Type?.Trim(), "Update", StringComparison.OrdinalIgnoreCase))
             .Where(o => target is null || UpdateOperationVersion(o) is not { } version
                         || ProjectConnectionService.CompareVersions(UpgradeFleetService.MajorMinor(version), target) == 0)
-            .OrderBy(o => o.CreatedOn)
+            .Select(o => (Operation: o, Began: Began(o, after)))
+            .Where(o => o.Began is { } began
+                ? began >= after && (before is null || began < before)
+                : before is null && o.Operation.StartedOn is null && BcEnvironmentOperationDisplay.IsOpen(o.Operation))
+            .OrderBy(o => o.Began ?? DateTimeOffset.MaxValue)
+            .Select(o => o.Operation)
             .FirstOrDefault();
+
+        static DateTimeOffset Utc(DateTime value) => new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+
+        // When the operation began for our purposes: when it was created, if that was
+        // after the start; else when it started running. Null for one created earlier
+        // that hasn't started, which only an open, unstarted update can match.
+        static DateTimeOffset? Began(BcEnvironmentOperation o, DateTimeOffset after) =>
+            o.CreatedOn is { } created && created >= after ? created : o.StartedOn;
     }
 
     /// <summary>
@@ -227,5 +277,6 @@ public sealed partial class UpgradeActionWorker
 
     /// <summary>A sent start still being followed, read outside the scope that asks about it.</summary>
     internal sealed record FollowedStart(
-        int Id, int ProjectId, int EnvironmentId, int? RequestedByUserId, string? TargetVersion, DateTime SentAt);
+        int Id, int ProjectId, int EnvironmentId, int? RequestedByUserId, string? TargetVersion, DateTime SentAt,
+        DateTime? NextStartAt = null);
 }

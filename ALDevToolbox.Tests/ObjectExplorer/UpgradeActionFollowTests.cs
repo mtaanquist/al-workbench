@@ -17,6 +17,12 @@ public sealed class UpgradeActionFollowTests : IDisposable
 {
     private readonly UpgradeActionTestFixture _f = new();
 
+    public UpgradeActionFollowTests()
+    {
+        // The re-read after an update ends: the environment is running again.
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Active", Version = "28.5.12345.0" };
+    }
+
     public void Dispose() => _f.Dispose();
 
     private static BcEnvironmentOperation Op(
@@ -54,6 +60,37 @@ public sealed class UpgradeActionFollowTests : IDisposable
         UpgradeActionWorker.MatchUpdateOperation([unnamed], sent, "28.5").Should().BeSameAs(unnamed);
         var other = Op("Running", sent.AddMinutes(3), toVersion: "28.3.1.0");
         UpgradeActionWorker.MatchUpdateOperation([other], sent, targetVersion: null).Should().BeSameAs(other);
+    }
+
+    [Fact]
+    public void An_update_queued_before_the_start_and_run_after_it_is_matched()
+    {
+        // Business Central had the update scheduled already; the start pulled it forward.
+        var sent = new DateTime(2026, 11, 4, 12, 51, 0, DateTimeKind.Utc);
+        var queued = Op("Running", sent.AddDays(-3)) with { StartedOn = sent.AddMinutes(4) };
+        var waiting = Op("Scheduled", sent.AddDays(-3)) with { StartedOn = null };
+
+        UpgradeActionWorker.MatchUpdateOperation([queued], sent, "28.5").Should().BeSameAs(queued);
+        UpgradeActionWorker.MatchUpdateOperation([waiting], sent, "28.5").Should().BeSameAs(waiting);
+    }
+
+    [Fact]
+    public void An_update_that_began_after_the_next_start_belongs_to_that_one()
+    {
+        var first = new DateTime(2026, 11, 4, 9, 0, 0, DateTimeKind.Utc);
+        var second = first.AddHours(3);
+        var operations = new[] { Op("Failed", second.AddMinutes(5)) };
+
+        UpgradeActionWorker.MatchUpdateOperation(operations, first, "28.5", nextStartUtc: second).Should().BeNull();
+        UpgradeActionWorker.MatchUpdateOperation(operations, second, "28.5").Should().NotBeNull();
+    }
+
+    [Fact]
+    public void A_status_not_known_to_be_final_settles_nothing()
+    {
+        var start = new UpgradeActionWorker.FollowedStart(1, 1, 1, 1, "28.5", DateTime.UtcNow);
+        UpgradeActionWorker.Settle(Op("NotStarted", DateTimeOffset.UtcNow), read: true, start, DateTime.UtcNow).Should().BeNull();
+        UpgradeActionWorker.Settle(Op("", DateTimeOffset.UtcNow), read: true, start, DateTime.UtcNow).Should().BeNull();
     }
 
     // ── What each ending records ────────────────────────────────────────
@@ -157,6 +194,54 @@ public sealed class UpgradeActionFollowTests : IDisposable
         (await _f.ReadActionAsync(actionId)).UpdateResult.Should().BeNull();
     }
 
+    [Fact]
+    public async Task A_success_waits_for_the_environment_to_be_read_again()
+    {
+        var (_, _, actionId, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        _f.Admin.OnEnvironment = null; // the re-read fails
+
+        await FollowAsync();
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().BeNull(
+            "recorded without a fresh mirror, the line would leave Booked and read as if nothing had happened");
+
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Active", Version = "28.5.12345.0" };
+        _f.Clock.Advance(UpgradeActionWorker.FollowEvery);
+        await FollowAsync();
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().Be(PlatformUpdateResult.Succeeded);
+    }
+
+    [Fact]
+    public async Task A_start_sent_again_is_superseded_and_only_the_later_one_reports()
+    {
+        var (projectId, envId, firstId, first) = await StartAsync();
+        _f.Clock.Advance(TimeSpan.FromHours(3));
+        var second = _f.Clock.GetUtcNow().UtcDateTime;
+        int secondId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var again = new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId, UpgradeId = _upgradeId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent, TargetVersion = "28.5",
+                RequestedByUserId = UpgradeActionTestFixture.FlagUserId, RequestedBy = "Anna Jensen <upgrade@example.com>",
+                RequestedAt = second, ExecuteAfter = second, SentAt = second,
+            };
+            ctx.OeEnvironmentUpgradeActions.Add(again);
+            await ctx.SaveChangesAsync();
+            secondId = again.Id;
+        }
+        _f.Admin.OnOperations = () => [Op("Failed", second.AddMinutes(5), error: "Out of disk.")];
+
+        await FollowAsync();
+
+        var older = await _f.ReadActionAsync(firstId);
+        older.UpdateResult.Should().Be(PlatformUpdateResult.Superseded);
+        older.Status.Should().Be(UpgradeActionStatus.Sent);
+        (await _f.ReadActionAsync(secondId)).UpdateResult.Should().Be(PlatformUpdateResult.Failed);
+        _f.Emails.Sent.Should().ContainSingle("one failed update is one notice, not one per start");
+    }
+
     // ── The line ────────────────────────────────────────────────────────
 
     [Fact]
@@ -164,6 +249,7 @@ public sealed class UpgradeActionFollowTests : IDisposable
     {
         var (projectId, envId, _, sent) = await StartAsync(targetVersion: "28.3");
         _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5), toVersion: "28.3.54977.56391")];
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Active", Version = "28.3.54977.56391" };
         await FollowAsync();
 
         await using var ctx = _f.Db.NewContext();
