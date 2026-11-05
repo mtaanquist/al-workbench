@@ -643,7 +643,9 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".upk-table tbody tr").Should().HaveCount(4);
+            // CRONUS Norge is on 28.5 already, so the default view leaves it out.
+            cut.FindAll(".upk-table tbody tr").Should().HaveCount(3);
+            cut.FindAll(".upk-sol").Select(e => e.TextContent.Trim()).Should().NotContain("CRONUS Norge");
             var mine = PickerBox(cut, "CRONUS Danmark");
             mine.HasAttribute("checked").Should().BeTrue();
             mine.HasAttribute("disabled").Should().BeTrue();
@@ -664,10 +666,14 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         {
             // Only the one that is free and still behind 28.5.
             PickerBox(cut, "CRONUS Sverige").HasAttribute("checked").Should().BeTrue();
-            PickerBox(cut, "CRONUS Norge").HasAttribute("checked").Should().BeFalse("it is on 28.5 already");
             cut.Find(".upk-foot__selected").TextContent.Should().Be("1 selected");
             cut.FindAll(".upk-foot .btn--primary").Single().TextContent.Trim().Should().Be("Add 1 environment");
         });
+
+        // The fill skips it in the whole fleet too, not only because it is hidden.
+        cut.Find(".upk-dialog select[aria-label=View]").Change("active");
+        cut.WaitForAssertion(() =>
+            PickerBox(cut, "CRONUS Norge").HasAttribute("checked").Should().BeFalse("it is on 28.5 already"));
 
         cut.WaitForAssertion(() => cut.FindAll(".upk-foot .btn--primary").Single().Click());
 

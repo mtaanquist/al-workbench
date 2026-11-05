@@ -3,6 +3,7 @@ using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Builders;
 using ALDevToolbox.Tests.Infrastructure;
@@ -237,7 +238,7 @@ public sealed class AuditInterceptorTests : IDisposable
     }
 
     [Fact]
-    public async Task Unauthenticated_save_records_unknown_actor()
+    public async Task A_save_with_no_request_is_attributed_to_the_system()
     {
         await using (var ctx = _db.NewContextWithAudit(NewInterceptor(name: null)))
         {
@@ -249,8 +250,117 @@ public sealed class AuditInterceptorTests : IDisposable
         // TemplateBuilder.Default seeds both the RuntimeTemplate row and its
         // required Core WorkspaceExtension (the unified-extensions model
         // requires at least one extension); pick the parent row to assert on.
+        var row = await read.AuditLog.Where(r => r.EntityType == AuditEntityType.RuntimeTemplate).SingleAsync();
+        row.ChangedBy.Should().Be("System");
+        row.ChangedByUserId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_save_inside_a_background_worker_names_the_worker()
+    {
+        using (AuditActor.EnterBackground("BackupScheduler"))
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor(name: null)))
+        {
+            ctx.RuntimeTemplates.Add(TemplateBuilder.Default("runtime-worker"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
         (await read.AuditLog.Where(r => r.EntityType == AuditEntityType.RuntimeTemplate).SingleAsync())
-            .ChangedBy.Should().Be("unknown");
+            .ChangedBy.Should().Be("System (BackupScheduler)");
+        AuditActor.CurrentBackground.Should().BeNull("the scope restores what was there before");
+    }
+
+    [Fact]
+    public async Task A_worker_acting_for_a_user_names_that_user_not_the_worker()
+    {
+        var userId = await SeedUserAsync();
+        await ClearAuditAsync();
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+
+        // A queued job re-installs the identity of the person who asked for it
+        // (a repository migration, a release import), so its writes are theirs.
+        using (AuditActor.EnterBackground("RepositoryMigrationWorker"))
+        using (AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false, userId: userId)))
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor(name: null)))
+        {
+            ctx.RuntimeTemplates.Add(TemplateBuilder.Default("runtime-for-user"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = await read.AuditLog.Where(r => r.EntityType == AuditEntityType.RuntimeTemplate).SingleAsync();
+        row.ChangedBy.Should().Be("CRONUS User <signs-in@cronus.example>");
+        row.ChangedByUserId.Should().Be(userId);
+    }
+
+    [Fact]
+    public async Task A_request_from_someone_not_signed_in_says_so()
+    {
+        var http = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+        await using (var ctx = _db.NewContextWithAudit(new AuditInterceptor(http)))
+        {
+            ctx.RuntimeTemplates.Add(TemplateBuilder.Default("runtime-visitor"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.AuditLog.Where(r => r.EntityType == AuditEntityType.RuntimeTemplate).SingleAsync())
+            .ChangedBy.Should().Be("Not signed in");
+    }
+
+    [Fact]
+    public async Task Stamping_the_auto_import_last_run_alone_writes_no_audit_row()
+    {
+        var settingsId = await SeedOrganizationSettingsAsync();
+        await ClearAuditAsync();
+
+        // What the release auto-import sweep does after each visit, and all it does.
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor(name: null)))
+        {
+            var s = await ctx.OrganizationSettings.IgnoreQueryFilters().SingleAsync(x => x.Id == settingsId);
+            s.AutoImportLastRunAt = DateTime.UtcNow;
+            s.UpdatedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.AuditLog.IgnoreQueryFilters().CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_real_settings_edit_alongside_the_auto_import_stamp_is_still_audited()
+    {
+        var settingsId = await SeedOrganizationSettingsAsync();
+        await ClearAuditAsync();
+
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("alice")))
+        {
+            var s = await ctx.OrganizationSettings.IgnoreQueryFilters().SingleAsync(x => x.Id == settingsId);
+            s.AutoImportLastRunAt = DateTime.UtcNow;
+            s.CookbookGuidance = "Prefer events over modifications.";
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = await read.AuditLog.IgnoreQueryFilters()
+            .SingleAsync(r => r.EntityType == AuditEntityType.OrganizationSettings);
+        row.ChangedBy.Should().Be("alice");
+    }
+
+    private async Task<int> SeedOrganizationSettingsAsync()
+    {
+        await using var seed = _db.NewContext();
+        var settings = await seed.OrganizationSettings.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+        if (settings is null)
+        {
+            settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+            seed.OrganizationSettings.Add(settings);
+            await seed.SaveChangesAsync();
+        }
+        return settings.Id;
     }
 
     // ── SaaS-delivery: release pipelines are audited; projects only for their

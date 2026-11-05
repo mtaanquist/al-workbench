@@ -187,7 +187,7 @@ Every mutation to a template, template_folder, template_file, template_module_fo
 
 An `organizations` row is audited only for its security policy and quota: the step-up tools and window, the MCP opt-out, the switched-off tools, and the SiteAdmin's storage quota override (`AuditEntityType.Organization`). Each changes what members can do, so who changed it and when has to be answerable afterwards, as it already was for the comparable switches on `organization_settings` (#1337). The row is filed under the organisation itself, so a SiteAdmin's quota change on another organisation shows on that organisation's audit page. Renames, the pending flag flipping on approval, and creation leave no row.
 
-`audit_log.changed_by` is now `"display_name <email>"` of the acting user (or `"unknown"` for seed-time inserts that pre-date a signed-in user). `changed_by_user_id` and `organization_id` are stored as separate columns for queryability — `(organization_id, timestamp)` is the index that powers `/admin/audit`.
+`audit_log.changed_by` is now `"display_name <email>"` of the acting user. With no signed-in user it names who did act: `"System (<worker>)"` for a write made inside a background worker's tick or job (the worker base classes set this; see `AuditActor`), `"System"` for any other write with no request (startup, seeding), and `"Not signed in"` for a request made before sign-in (sign-up, password reset, invite acceptance). Rows written before that distinction say `"unknown"`; the audit pages show those as `"System"`, or `"Not signed in"` for a sign-up, user or invite row, without rewriting them. `changed_by_user_id` and `organization_id` are stored as separate columns for queryability — `(organization_id, timestamp)` is the index that powers `/admin/audit`.
 
 Snapshot rules unchanged from the original implementation:
 
@@ -200,7 +200,7 @@ Snapshot rules unchanged from the original implementation:
 
 - Workspace / extension generations — `ILogger` at Info level is enough.
 - Reads.
-- Login attempts (they go to `login_attempts`, which is not the audit log). This includes the `users.last_login_at` stamp a successful sign-in writes: `AuditInterceptor` skips a `User` save whose only modified column is that one, so a sign-in leaves no audit row. The gate is narrow — a save that also changes the account is audited in full. Until PR 10 the stamp *was* audited, as an `Updated` row attributed to `"unknown"` (the interceptor runs before the auth cookie exists), which made sign-in churn most of a busy org's audit log.
+- Login attempts (they go to `login_attempts`, which is not the audit log). This includes the `users.last_login_at` stamp a successful sign-in writes: `AuditInterceptor` skips a `User` save whose only modified column is that one, so a sign-in leaves no audit row. The gate is narrow — a save that also changes the account is audited in full. Until PR 10 the stamp *was* audited, as an `Updated` row attributed to `"unknown"` (the interceptor runs before the auth cookie exists), which made sign-in churn most of a busy org's audit log. The release auto-import sweep's "last checked" stamp on `organization_settings.auto_import_last_run_at` is skipped the same way: a save that changes only that column (and `updated_at`) writes no row.
 
 ## Error handling
 

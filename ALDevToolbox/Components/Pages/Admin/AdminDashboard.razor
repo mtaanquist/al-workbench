@@ -184,10 +184,10 @@
                         @foreach (var e in _recent)
                         {
                             <a class="activity__row" href="@($"/admin/audit/{e.Id}/diff")">
-                                <span class="activity__avatar" aria-hidden="true">@Avatar.Initials(e.ChangedBy)</span>
+                                <span class="activity__avatar" aria-hidden="true">@Avatar.Initials(AuditActor.Display(e))</span>
                                 <span class="activity__body">
                                     <span class="activity__text">
-                                        <b>@ActorName(e.ChangedBy)</b>
+                                        <b>@ActorName(AuditActor.Display(e))</b>
                                         @AuditVerb(e.Action) <AuditSubjectText EntityType="e.EntityType" EntityId="e.EntityId" EntityName="@e.EntityName" SnapshotJson="@e.SnapshotJson" />
                                     </span>
                                     @if (ActorEmail(e.ChangedBy) is { } email)

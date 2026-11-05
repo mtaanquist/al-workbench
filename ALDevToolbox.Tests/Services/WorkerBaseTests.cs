@@ -209,6 +209,41 @@ public sealed class WorkerBaseTests
     }
 
     [Fact]
+    public async Task QueueDrainWorker_names_itself_as_the_audit_actor_while_a_job_runs()
+    {
+        var queue = new TestQueue();
+        string? seen = null;
+        var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry())
+        {
+            Body = _ => { seen = AuditActor.CurrentBackground; return Task.CompletedTask; },
+        };
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await queue.EnqueueAsync(new TestJob(1));
+        var loop = worker.RunLoopAsync(cts.Token);
+        await worker.Finished.Reader.ReadAsync(cts.Token);
+
+        seen.Should().Be(nameof(TestDrainWorker));
+        await cts.CancelAsync();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task PolledScheduler_names_itself_as_the_audit_actor_during_a_tick()
+    {
+        string? seen = null;
+        var scheduler = new TestScheduler(new WorkerHeartbeatRegistry(), "DISABLE_UNUSED_" + Guid.NewGuid().ToString("N"))
+        {
+            OnTick = () => { seen = AuditActor.CurrentBackground; return Task.CompletedTask; },
+        };
+
+        (await scheduler.RunTickAsync(TestContext.Current.CancellationToken)).Should().BeTrue();
+
+        seen.Should().Be(nameof(TestScheduler));
+        AuditActor.CurrentBackground.Should().BeNull("the name does not outlive the tick");
+    }
+
+    [Fact]
     public async Task PolledScheduler_skips_the_loop_when_its_disable_variable_is_set()
     {
         // Unique per test run so a parallel test never sees this variable.

@@ -85,7 +85,7 @@ public sealed class AuditService
             // Escaped, so "_" and "%" in an address match themselves rather than
             // any character (#1550). Same as the other search boxes.
             var pattern = "%" + ObjectSearchService.EscapeLike(filter.Actor.Trim()) + "%";
-            q = q.Where(e => EF.Functions.ILike(e.ChangedBy, pattern, "\\"));
+            q = AuditActor.WhereActorMatches(q, filter.Actor, pattern);
         }
         if (filter.From is { } from)
         {

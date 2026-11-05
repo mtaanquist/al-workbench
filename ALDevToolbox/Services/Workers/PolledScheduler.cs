@@ -125,6 +125,8 @@ public abstract class PolledScheduler : BackgroundService
 
         // The restore waits for a counted tick, so it may finish on the database (#1571).
         using var allowDatabase = _maintenance?.AllowDatabase();
+        // The audit log names this scheduler for whatever the tick writes.
+        using var actor = AuditActor.EnterBackground(GetType().Name);
         try
         {
             Heartbeat.BeginActive();
