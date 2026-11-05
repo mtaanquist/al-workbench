@@ -108,15 +108,15 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.102.14",
-        "contentHash": "pRYOOIyj40UdQ6G9iq8AOU30sFPqWS/umM/sFTmAl4n1S6AVbVa67DJpJTxD+9qJFqweHPcyVW7Qb4BbUBLJdg=="
+        "resolved": "4.0.102.13",
+        "contentHash": "vaYs/kwfB+Lv9PeVKYE4g2mQlzVtHImXLWgfTG8UgeCybUAPkew5kwb8GS6RhuzwvImbolyLHT+IM34WoM9lJg=="
       },
       "AWSSDK.S3": {
         "type": "Transitive",
-        "resolved": "4.0.104.8",
-        "contentHash": "ER6j94bekBn/YWpcUFArckk+JSObzMZHqHvj1djy5KAMeaG71BBDOJvEQNGFRvc4CUITfJmD/9T87t8b+xnlkg==",
+        "resolved": "4.0.104.6",
+        "contentHash": "fSqAOkftU8jKemilzLGZDU0zLEJXHjAemU+8Nd29+sUwRxVK04w6/GY3O4f9S1+JIYwEnHDGcW66VK4AZ2kx6g==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.14, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.13, 5.0.0)"
         }
       },
       "Azure.Core": {
@@ -224,27 +224,27 @@
       },
       "Fido2": {
         "type": "Transitive",
-        "resolved": "4.3.2",
-        "contentHash": "HcMs7cmzy+pvhUZr/LkJiLZzJHFKUrT4Ky5QH320phEHjukKxvTozC4FK7fAbwmcg3oe4naUUYaG7FkgUzm1GQ==",
+        "resolved": "4.3.1",
+        "contentHash": "maWrkMwX1YUfKF9lsNRT3fVW6QaTjsTLYi7vN01wYGj3hE8jQsbeC0iQAbKMc8etVLAQg7Ui3S8wiaOe/mWJLA==",
         "dependencies": {
-          "Fido2.Models": "4.3.2",
+          "Fido2.Models": "4.3.1",
           "Microsoft.IdentityModel.JsonWebTokens": "8.2.0",
           "NSec.Cryptography": "25.4.0"
         }
       },
       "Fido2.AspNet": {
         "type": "Transitive",
-        "resolved": "4.3.2",
-        "contentHash": "+umwqTHdfXPcefIK7pqRFE8N3fiu1SV5uf/9roLaS2TIl3eLEWXWoQ9MPmvVWyW9D42E9Rw2jKMqMVtuljKT4w==",
+        "resolved": "4.3.1",
+        "contentHash": "tPafvfUQDdTXm5fyqLEMaBjeAwYYzne9+seMrbv95tKDlZI+HkMF6tNExQG/VqiGvZGecG3jXKC3OLt4wOn2Qg==",
         "dependencies": {
-          "Fido2": "4.3.2",
-          "Fido2.Models": "4.3.2"
+          "Fido2": "4.3.1",
+          "Fido2.Models": "4.3.1"
         }
       },
       "Fido2.Models": {
         "type": "Transitive",
-        "resolved": "4.3.2",
-        "contentHash": "N9kvnuAtRXhezfs3cOo+eqI6MeQDr///s75NQUHPizM1/RkPahY9HmHbEzmr8B9gVESo9uyVorjvtrAqVeUz/w==",
+        "resolved": "4.3.1",
+        "contentHash": "dshL6l+3yTE3H0XLhzBfUNSC8h2y92ud4ezdgwYg/GJWjKF7m1gosZVuCCz4IYxOlARg2O+w0I+ZKSYrgmSl5w==",
         "dependencies": {
           "Microsoft.Bcl.Memory": "9.0.14"
         }
@@ -264,8 +264,8 @@
       },
       "Markdig": {
         "type": "Transitive",
-        "resolved": "1.5.1",
-        "contentHash": "NtHwU5t5yKr6Gnylhs8/hlR0mOAftTFQURDz2ID8bkunxps1neOzKw0dYKKlwNuwiYIGLHjJTXK91f809Ko1ww=="
+        "resolved": "1.5.0",
+        "contentHash": "oEm6N4PYFPUZiJ5e89993AE6hfC8EWRGD5M8nyoSJbwD4GgW818mjlQCk++SdTV4godaN50Ybcmm4j2Dp76oIQ=="
       },
       "Microsoft.ApplicationInsights": {
         "type": "Transitive",
@@ -929,13 +929,13 @@
       "aldevtoolbox": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.S3": "[4.0.104.8, )",
+          "AWSSDK.S3": "[4.0.104.6, )",
           "Azure.Storage.Blobs": "[12.30.1, )",
           "BCrypt.Net-Next": "[4.2.0, )",
           "DiffPlex": "[1.9.0, )",
-          "Fido2.AspNet": "[4.3.2, )",
+          "Fido2.AspNet": "[4.3.1, )",
           "MailKit": "[4.18.2, )",
-          "Markdig": "[1.5.1, )",
+          "Markdig": "[1.5.0, )",
           "Microsoft.AspNetCore.Authentication.OpenIdConnect": "[10.0.14, )",
           "Microsoft.EntityFrameworkCore": "[10.0.14, )",
           "MimeKit": "[4.18.2, )",
