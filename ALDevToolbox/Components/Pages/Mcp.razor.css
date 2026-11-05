@@ -58,8 +58,8 @@
    The design system has no disclosure component; this borrows its card
    surface rather than inventing a second one. */
 
-/* No max-width: the page is .steps--wide now, and a 82ch reference under a
-   full-width step list is the ragged edge this page just lost. */
+/* No max-width: the step list above is full width, and a 82ch reference under
+   it would leave a ragged edge. */
 .mcp-tools {
     background: var(--surface);
     border: 1px solid var(--border);
