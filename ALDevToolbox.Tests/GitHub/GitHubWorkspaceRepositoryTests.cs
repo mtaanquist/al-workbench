@@ -943,7 +943,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
-        created.PipelineNames.Should().Equal("main", "test");
+        created.PipelineNames.Should().Equal("Default branch", "test");
         created.PipelinesWarning.Should().BeNull();
 
         await using var read = _db.NewContext();
@@ -951,9 +951,8 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             .Where(p => p.ProjectId == created.SolutionId)
             .OrderBy(p => p.Id)
             .ToListAsync();
-        pipelines.Select(p => p.Branch).Should().Equal("main", "test");
-        // Named after the default branch rather than left blank, so a deployment
-        // pipeline to production, which wants a named branch, accepts it.
+        // The default branch's pipeline follows it, like one a person adds by hand.
+        pipelines.Select(p => p.Branch).Should().Equal(null, "test");
         pipelines.Should().OnlyContain(p =>
             p.RequestedAppIdsJson == null && p.AutoVersion && !p.PreviewCheck
             && p.CreatedByUserId == UserId && !p.NameIsCustom
@@ -1019,7 +1018,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         var created = await service.CreateAsync(
             WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
 
-        created.PipelineNames.Should().Equal("main");
+        created.PipelineNames.Should().Equal("Default branch");
         created.PipelinesWarning.Should().Contain("not all of its build pipelines");
     }
 
@@ -1047,7 +1046,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         var created = await service.CreateAsync(
             WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
 
-        created.PipelineNames.Should().Equal("main");
+        created.PipelineNames.Should().Equal("Default branch");
         created.PipelinesWarning.Should().BeNull();
         await using var read = _db.NewContext();
         (await read.OePipelines.AsNoTracking().CountAsync(p => p.ProjectId == solutionId)).Should().Be(2);
@@ -1081,7 +1080,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task A_default_branch_other_than_main_names_its_own_pipeline()
+    public async Task A_default_branch_other_than_main_still_gets_the_default_branch_pipeline()
     {
         await ReadyAsync();
         var api = WritableApi()
@@ -1093,7 +1092,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
         created.Branches.Should().Equal("test");
-        created.PipelineNames.Should().Equal("master", "test");
+        created.PipelineNames.Should().Equal("Default branch", "test");
     }
 
     [Fact]
@@ -1112,7 +1111,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         created.Branches.Should().BeEmpty();
         created.BranchesWarning.Should().Contain("test branch");
         // The default branch is there either way, so its pipeline still is too.
-        created.PipelineNames.Should().Equal("main");
+        created.PipelineNames.Should().Equal("Default branch");
     }
 
     [Fact]

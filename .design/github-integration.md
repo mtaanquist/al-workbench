@@ -384,7 +384,7 @@ the workspace, `test` is created at that same commit (`staging` was dropped
 (`POST /git/refs`, installation token), before the ruleset so a ruleset over
 every branch cannot refuse them. After the repository is registered on a
 solution, the solution gets one build pipeline per branch - the default branch
-by name, then `test` - each building every extension, with the
+(with no branch, so it follows the default branch and is named "Default branch", like one added by hand; Mads 2026-11-05), then `test` - each building every extension, with the
 pipeline defaults (build numbers on, preview check off). Pipelines are only
 added when the new repository is the solution's only one, because a pipeline
 checks its branch out in every repository of the solution and older
