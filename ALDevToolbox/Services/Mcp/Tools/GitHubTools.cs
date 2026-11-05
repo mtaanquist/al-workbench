@@ -137,7 +137,7 @@ public sealed partial class GitHubTools
         "not connected its GitHub account, is refused and nothing is created. A name the organisation " +
         "already uses is refused too. The repository is registered on a solution only when the " +
         "organisation has Solutions enabled. The files are committed straight to the default branch, " +
-        "and test and staging branches are created at the same commit; when the repository is the only " +
+        "and a test branch is created at the same commit; when the repository is the only " +
         "one on its solution, that solution also gets a build pipeline per branch. " +
         "If the GitHub organisation's branch rules refuse the commit, the call is refused with what an owner " +
         "of the organisation has to allow. Use generate_workspace instead when you want the workspace " +

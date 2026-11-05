@@ -198,7 +198,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         // default branch is simply moved forward. The only refs created are the
         // working branches, after the workspace is in.
         api.Bodies.Where(b => b.Call.StartsWith("POST") && b.Call.Contains("/git/refs"))
-            .Should().HaveCount(2)
+            .Should().HaveCount(GitHubWorkspaceRepositoryService.WorkingBranches.Count)
             .And.OnlyContain(b => b.Body.Contains("\"sha\":\"new-commit-sha\""));
         api.Calls.Should().NotContain(c => c.StartsWith("DELETE"));
         api.Calls.Should().NotContain(c => c.StartsWith("PATCH") && c.EndsWith($"/repos/{Repo}"));
@@ -912,7 +912,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
     // --- Working branches and their build pipelines ------------------------
 
     [Fact]
-    public async Task Test_and_staging_branches_are_created_at_the_workspace_commit()
+    public async Task A_test_branch_is_created_at_the_workspace_commit()
     {
         await ReadyAsync();
         var api = WritableApi();
@@ -921,13 +921,11 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
-        created.Branches.Should().Equal("test", "staging");
+        created.Branches.Should().Equal("test");
         created.BranchesWarning.Should().BeNull();
         var refs = api.Bodies.Where(b => b.Call.StartsWith("POST") && b.Call.Contains($"/repos/{Repo}/git/refs"))
             .Select(b => b.Body).ToList();
-        refs.Should().HaveCount(2);
-        refs[0].Should().Contain("refs/heads/test").And.Contain("new-commit-sha");
-        refs[1].Should().Contain("refs/heads/staging").And.Contain("new-commit-sha");
+        refs.Should().ContainSingle().Which.Should().Contain("refs/heads/test").And.Contain("new-commit-sha");
         // The app makes them, like every other write into the new repository.
         TokenFor(api, "POST", $"/repos/{Repo}/git/refs").Should().Be(InstallationToken);
         // Before the branch rules, so a ruleset over every branch cannot refuse them.
@@ -945,7 +943,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
-        created.PipelineNames.Should().Equal("main", "test", "staging");
+        created.PipelineNames.Should().Equal("Default branch", "test");
         created.PipelinesWarning.Should().BeNull();
 
         await using var read = _db.NewContext();
@@ -953,9 +951,8 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             .Where(p => p.ProjectId == created.SolutionId)
             .OrderBy(p => p.Id)
             .ToListAsync();
-        pipelines.Select(p => p.Branch).Should().Equal("main", "test", "staging");
-        // Named after the default branch rather than left blank, so a deployment
-        // pipeline to production, which wants a named branch, accepts it.
+        // The default branch's pipeline follows it, like one a person adds by hand.
+        pipelines.Select(p => p.Branch).Should().Equal(null, "test");
         pipelines.Should().OnlyContain(p =>
             p.RequestedAppIdsJson == null && p.AutoVersion && !p.PreviewCheck
             && p.CreatedByUserId == UserId && !p.NameIsCustom
@@ -986,7 +983,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
 
         // The branches are the repository's own, so they are still made.
-        created.Branches.Should().Equal("test", "staging");
+        created.Branches.Should().Equal("test");
         // A pipeline checks its branch out in every repository of the solution,
         // and the older one has no test branch.
         created.PipelineNames.Should().BeEmpty();
@@ -1021,7 +1018,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         var created = await service.CreateAsync(
             WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
 
-        created.PipelineNames.Should().Equal("main", "staging");
+        created.PipelineNames.Should().Equal("Default branch");
         created.PipelinesWarning.Should().Contain("not all of its build pipelines");
     }
 
@@ -1049,10 +1046,10 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         var created = await service.CreateAsync(
             WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
 
-        created.PipelineNames.Should().Equal("main", "staging");
+        created.PipelineNames.Should().Equal("Default branch");
         created.PipelinesWarning.Should().BeNull();
         await using var read = _db.NewContext();
-        (await read.OePipelines.AsNoTracking().CountAsync(p => p.ProjectId == solutionId)).Should().Be(3);
+        (await read.OePipelines.AsNoTracking().CountAsync(p => p.ProjectId == solutionId)).Should().Be(2);
     }
 
     [Fact]
@@ -1079,11 +1076,11 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         var created = await service.CreateAsync(
             WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
 
-        created.PipelineNames.Should().Equal("test", "staging");
+        created.PipelineNames.Should().Equal("test");
     }
 
     [Fact]
-    public async Task A_default_branch_other_than_main_names_its_own_pipeline()
+    public async Task A_default_branch_other_than_main_still_gets_the_default_branch_pipeline()
     {
         await ReadyAsync();
         var api = WritableApi()
@@ -1094,8 +1091,8 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
-        created.Branches.Should().Equal("test", "staging");
-        created.PipelineNames.Should().Equal("master", "test", "staging");
+        created.Branches.Should().Equal("test");
+        created.PipelineNames.Should().Equal("Default branch", "test");
     }
 
     [Fact]
@@ -1112,9 +1109,9 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         created.Repository.FullName.Should().Be(Repo);
         created.Branches.Should().BeEmpty();
-        created.BranchesWarning.Should().Contain("test and staging branches");
+        created.BranchesWarning.Should().Contain("test branch");
         // The default branch is there either way, so its pipeline still is too.
-        created.PipelineNames.Should().Equal("main");
+        created.PipelineNames.Should().Equal("Default branch");
     }
 
     [Fact]
@@ -1132,7 +1129,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
-        created.Branches.Should().Equal("test", "staging");
+        created.Branches.Should().Equal("test");
         created.PipelineNames.Should().BeEmpty();
         created.PipelinesWarning.Should().BeNull();
         await using var read = _db.NewContext();
@@ -1261,7 +1258,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             // installation bypasses the organisation's branch rules, so GitHub
             // lets it.
             .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", HttpStatusCode.OK, FakeGitHubApi.ShaJson("new-commit-sha"))
-            // The test and staging branches, created at the workspace commit.
+            // The test branch, created at the workspace commit.
             .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Created, """{"ref":"refs/heads/x"}""")
             // GitHub refuses the Git Data API until a repository has a commit,
             // which is what the Contents write above is for.

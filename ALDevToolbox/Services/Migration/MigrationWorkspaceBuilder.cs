@@ -221,7 +221,8 @@ public sealed class MigrationWorkspaceBuilder
                 var manifestPath = Path.Combine(to, AppJsonManifestParser.FileName);
                 var sourceJson = MigrationAppJson.Parse(await File.ReadAllTextAsync(manifestPath, ct).ConfigureAwait(false)) ?? new JsonObject();
                 var (normalized, changes) = MigrationAppJson.Normalize(
-                    template.AppJson, sourceJson, BusinessCentralWaves.MajorOf(target.ProductionVersion));
+                    TemplateAppJsonFor(template, destination, to), sourceJson, BusinessCentralWaves.MajorOf(target.ProductionVersion),
+                    relative => FileInWorkspace(destination, to, relative));
                 await File.WriteAllTextAsync(manifestPath, WorkspaceZipBuilder.WriteJson(normalized) + "\n", ct).ConfigureAwait(false);
                 appJson.Add(new MigrationAppJsonReport(extension.Folder, extension.RepositoryName, changes));
                 identities.Add(Identity(extension, normalized, commits.GetValueOrDefault(extension.RepositoryName)));
@@ -264,7 +265,8 @@ public sealed class MigrationWorkspaceBuilder
         IReadOnlyList<WorkspaceExtensionIdentity> Extensions,
         ProjectPlan Plan,
         string? CodeWorkspaceFile,
-        JsonObject AppJson);
+        JsonObject AppJson,
+        string? AppJsonFolder);
 
     /// <summary>
     /// Generates the template for <paramref name="plan"/> and reads the result
@@ -309,7 +311,7 @@ public sealed class MigrationWorkspaceBuilder
         var appJson = first is not null && files.TryGetValue($"{first.Folder}/{AppJsonManifestParser.FileName}", out var bytes)
             ? MigrationAppJson.Parse(Encoding.UTF8.GetString(bytes)) ?? new JsonObject()
             : new JsonObject();
-        return new TemplateFiles(files, directories, config.Extensions, config.Workspace ?? plan, config.CodeWorkspaceFileName, appJson);
+        return new TemplateFiles(files, directories, config.Extensions, config.Workspace ?? plan, config.CodeWorkspaceFileName, appJson, first?.Folder);
     }
 
     private async Task WriteWorkspaceFilesAsync(
@@ -539,6 +541,38 @@ public sealed class MigrationWorkspaceBuilder
     private static string Join(string relative, string name) => relative.Length == 0 ? name : $"{relative}/{name}";
 
     /// <summary>A path below <paramref name="root"/>, refusing one that would land outside it.</summary>
+    /// <summary>
+    /// The template's <c>app.json</c> as it would read from <paramref name="extensionDir"/>:
+    /// its logo points at the workspace's asset from the template's own extension
+    /// folder, so it is re-aimed from wherever this extension sits.
+    /// </summary>
+    private static JsonObject TemplateAppJsonFor(TemplateFiles template, string destination, string extensionDir)
+    {
+        if (template.AppJsonFolder is null
+            || template.AppJson["logo"] is not JsonValue logo
+            || !logo.TryGetValue<string>(out var path)
+            || string.IsNullOrWhiteSpace(path))
+        {
+            return template.AppJson;
+        }
+        var target = Path.GetFullPath(Path.Combine(destination, template.AppJsonFolder, path));
+        var copy = (JsonObject)template.AppJson.DeepClone();
+        copy["logo"] = Path.GetRelativePath(extensionDir, target).Replace(Path.DirectorySeparatorChar, '/');
+        return copy;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="relative"/>, read from <paramref name="extensionDir"/>,
+    /// names a file that made it into the new workspace. A source's logo often sits
+    /// beside its extensions in the old repository, which is left behind.
+    /// </summary>
+    private static bool FileInWorkspace(string destination, string extensionDir, string relative)
+    {
+        var full = Path.GetFullPath(Path.Combine(extensionDir, relative.Replace('\\', '/')));
+        var prefix = Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return full.StartsWith(prefix, StringComparison.Ordinal) && File.Exists(full);
+    }
+
     private static string Under(string root, string relative)
     {
         var full = Path.GetFullPath(Path.Combine(root, relative));
