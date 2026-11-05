@@ -189,6 +189,7 @@ public class AppDbContext : DbContext
     // found it — see .design/github-integration-phase2.md.
     public DbSet<GitHubRepositoryDrift> GitHubRepositoryDrift => Set<GitHubRepositoryDrift>();
     public DbSet<GitHubRepositoryCheck> GitHubRepositoryChecks => Set<GitHubRepositoryCheck>();
+    public DbSet<GitHubRepositoryFileCheck> GitHubRepositoryFileChecks => Set<GitHubRepositoryFileCheck>();
     // Every Business Central update pull request the workbench opened, so the
     // automatic run never offers a closed one again (#1104).
     public DbSet<GitHubUpdatePullRequest> GitHubUpdatePullRequests => Set<GitHubUpdatePullRequest>();
@@ -338,6 +339,7 @@ public class AppDbContext : DbContext
         ScopeToOrganization<GitHubRepositoryCandidate>(modelBuilder);
         ScopeToOrganization<GitHubRepositoryDrift>(modelBuilder);
         ScopeToOrganization<GitHubRepositoryCheck>(modelBuilder);
+        ScopeToOrganization<GitHubRepositoryFileCheck>(modelBuilder);
         ScopeToOrganization<GitHubUpdatePullRequest>(modelBuilder);
         ScopeToOrganization<OeRelease>(modelBuilder);
         ScopeToOrganization<OeReleaseDependency>(modelBuilder);

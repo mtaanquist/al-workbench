@@ -863,7 +863,7 @@ public sealed class DependencyDriftService
     /// reading a repository somewhere else, and could not open a pull request on
     /// one either.
     /// </summary>
-    private async Task<IReadOnlyList<string>> TrackedRepositoryNamesAsync(string orgLogin, CancellationToken ct)
+    internal async Task<IReadOnlyList<string>> TrackedRepositoryNamesAsync(string orgLogin, CancellationToken ct)
     {
         var urls = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == RepositoryProvider.GitHub)
@@ -1008,7 +1008,7 @@ public sealed class DependencyDriftService
         BcEnvironmentTypes.IsProduction(type) ? BcEnvironmentTypes.Production : BcEnvironmentTypes.Sandbox;
 
     /// <summary>The repositories of the solutions this viewer may see, as <c>owner/name</c>.</summary>
-    private async Task<HashSet<string>> VisibleRepositoryNamesAsync(CancellationToken ct)
+    internal async Task<HashSet<string>> VisibleRepositoryNamesAsync(CancellationToken ct)
     {
         var snapshot = await _projectAccess.GetSnapshotAsync(ct);
         var urls = await _db.OeProjects.AsNoTracking()
@@ -1391,7 +1391,7 @@ public sealed class DependencyDriftService
     /// everywhere else: "that is not a repository we can offer you" is a poor way to
     /// say "connect your GitHub account".
     /// </summary>
-    private async Task<(string? Token, GitHubRepositoryReadiness Readiness)> ResolveWriteTokenAsync(
+    internal async Task<(string? Token, GitHubRepositoryReadiness Readiness)> ResolveWriteTokenAsync(
         int userId, CancellationToken ct)
     {
         var access = await _repositories.GetAccessAsync(ct);
@@ -1827,7 +1827,7 @@ public sealed class DependencyDriftService
         return parts.Length >= 3 ? $"{parts[0]}:{parts[^1]}".ToLowerInvariant() : null;
     }
 
-    private static string ReadinessRefusal(GitHubRepositoryReadiness readiness) => readiness switch
+    internal static string ReadinessRefusal(GitHubRepositoryReadiness readiness) => readiness switch
     {
         GitHubRepositoryReadiness.NotConfigured =>
             "GitHub is not set up on this server yet, so a pull request cannot be opened. Ask whoever runs "
