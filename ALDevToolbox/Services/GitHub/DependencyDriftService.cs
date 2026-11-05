@@ -89,6 +89,28 @@ public sealed record DependencyDriftPullRequest(
     bool IsUpToDate = false,
     bool IsRateLimited = false);
 
+/// <summary>The environment a solution's repositories are measured against.</summary>
+/// <param name="Type"><c>Production</c> or <c>Sandbox</c>.</param>
+/// <param name="Version">Its full Business Central version, as Business Central reported it.</param>
+public sealed record YardstickEnvironment(int Id, string Name, string Type, string Version);
+
+/// <summary>What a row's "Check again" on the Repositories list came to (issue #1719).</summary>
+public enum RepositoryCheckOutcome
+{
+    /// <summary>Read again; what is stored now is what GitHub has.</summary>
+    Checked,
+    /// <summary>No solution tracking it has an environment with a known version, so there is nothing to compare with.</summary>
+    NoEnvironment,
+    /// <summary>The organisation has not connected GitHub.</summary>
+    NotConnected,
+    /// <summary>No Business Central release has been imported yet.</summary>
+    NoRelease,
+    /// <summary>Not a repository on a solution this person may see, or nobody confirmed it can be read.</summary>
+    NotTracked,
+    /// <summary>The GitHub App cannot read it.</summary>
+    NotReadable,
+}
+
 /// <summary>What one solution's automatic run did (issue #1104).</summary>
 /// <param name="Opened">How many pull requests it opened.</param>
 /// <param name="Blocked">
@@ -293,6 +315,7 @@ public sealed class DependencyDriftService
         if (tracked.Count == 0)
         {
             await ReplaceFindingsAsync([], releaseId, ct);
+            await ReplaceChecksAsync([], repository: null, ct);
             return 0;
         }
         var targets = await EnvironmentTargetsAsync(ct);
@@ -302,6 +325,7 @@ public sealed class DependencyDriftService
         var installed = listing.Repositories.ToDictionary(r => r.FullName, StringComparer.OrdinalIgnoreCase);
 
         var findings = new List<GitHubRepositoryDrift>();
+        var checks = new List<GitHubRepositoryCheck>();
         foreach (var fullName in tracked)
         {
             ct.ThrowIfCancellationRequested();
@@ -334,8 +358,9 @@ public sealed class DependencyDriftService
             try
             {
                 var target = new DriftTarget(environment.Version, PlatformFor(environment.Version), environment.Id);
-                findings.AddRange(
-                    await ScanRepositoryAsync(orgId, token, repo, release, target, catalogue, ct));
+                var scanned = await ScanRepositoryAsync(orgId, token, repo, release, target, catalogue, ct);
+                findings.AddRange(scanned.Findings);
+                checks.Add(scanned.Check);
             }
             catch (Exception ex) when (ex is GitHubApiException or HttpRequestException or TaskCanceledException)
             {
@@ -346,6 +371,7 @@ public sealed class DependencyDriftService
         }
 
         var stored = await ReplaceFindingsAsync(findings, releaseId, ct);
+        await ReplaceChecksAsync(checks, repository: null, ct);
         _logger.LogInformation(
             "Dependency drift for organisation {OrgId} after release {ReleaseId} ({BcVersion}): {CheckedCount} of {TrackedCount} repositories had an environment to measure against; {FindingCount} findings across {RepositoryCount} repositories.",
             orgId, releaseId, release.BcVersion, tracked.Count(targets.ContainsKey), tracked.Count, stored,
@@ -406,21 +432,8 @@ public sealed class DependencyDriftService
         if (tracking.Count == 0) return new Dictionary<string, EnvironmentTarget>();
 
         var projectIds = tracking.Select(t => t.ProjectId).Distinct().ToList();
-        var environments = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(EnvironmentQueries.NotSoftDeleted)
-            .Where(e => projectIds.Contains(e.ProjectId) && e.MissingSince == null && e.Version != null)
-            .Select(e => new { e.Id, e.ProjectId, e.Name, e.Type, e.Version })
-            .ToListAsync(ct);
-
-        var perProject = environments
-            .Where(e => IsKnownVersion(e.Version) && BcEnvironmentTypes.Normalize(e.Type) is not null)
-            .GroupBy(e => e.ProjectId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.OrderByDescending(e => BcEnvironmentTypes.IsProduction(e.Type))
-                    .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id)
-                    .Select(e => new EnvironmentTarget(e.Id, e.Version!.Trim()))
-                    .First());
+        var perProject = (await YardstickEnvironmentsAsync(projectIds, ct))
+            .ToDictionary(kv => kv.Key, kv => new EnvironmentTarget(kv.Value.Id, kv.Value.Version));
 
         var result = new Dictionary<string, EnvironmentTarget>(StringComparer.OrdinalIgnoreCase);
         // A solution with automatic update pull requests on goes first: the automatic run
@@ -432,6 +445,35 @@ public sealed class DependencyDriftService
             if (perProject.TryGetValue(row.ProjectId, out var target)) result[name] = target;
         }
         return result;
+    }
+
+    /// <summary>
+    /// The environment each solution's repositories are measured against, keyed by
+    /// solution id: its first production environment by name that is not deleted and
+    /// has a version, else its first such sandbox. A solution missing from the result
+    /// has none, and its repositories are not checked (issue #1081). The Repositories
+    /// list shows the same environment, so the two cannot disagree about what a
+    /// customer runs.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<int, YardstickEnvironment>> YardstickEnvironmentsAsync(
+        IReadOnlyCollection<int> projectIds, CancellationToken ct = default)
+    {
+        if (projectIds.Count == 0) return new Dictionary<int, YardstickEnvironment>();
+        var environments = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(EnvironmentQueries.NotSoftDeleted)
+            .Where(e => projectIds.Contains(e.ProjectId) && e.MissingSince == null && e.Version != null)
+            .Select(e => new { e.Id, e.ProjectId, e.Name, e.Type, e.Version })
+            .ToListAsync(ct);
+
+        return environments
+            .Where(e => IsKnownVersion(e.Version) && BcEnvironmentTypes.Normalize(e.Type) is not null)
+            .GroupBy(e => e.ProjectId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(e => BcEnvironmentTypes.IsProduction(e.Type))
+                    .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id)
+                    .Select(e => new YardstickEnvironment(e.Id, e.Name, EnvironmentTypeLabel(e.Type), e.Version!.Trim()))
+                    .First());
     }
 
     /// <summary>A version with at least a numeric major and minor - anything less says nothing a manifest can be behind.</summary>
@@ -449,8 +491,11 @@ public sealed class DependencyDriftService
     private static string PlatformFor(string applicationVersion) =>
         applicationVersion.Trim().Split('.')[0] + ".0";
 
-    /// <summary>One repository's manifests, and what each of them is behind on.</summary>
-    private async Task<List<GitHubRepositoryDrift>> ScanRepositoryAsync(
+    /// <summary>
+    /// One repository's manifests, what each of them is behind on, and what the
+    /// repository is on (the oldest application its manifests ask for).
+    /// </summary>
+    private async Task<(List<GitHubRepositoryDrift> Findings, GitHubRepositoryCheck Check)> ScanRepositoryAsync(
         int orgId,
         string installationToken,
         GitHubRepositorySummary repo,
@@ -461,6 +506,7 @@ public sealed class DependencyDriftService
     {
         var now = _clock.GetUtcNow().UtcDateTime;
         var findings = new List<GitHubRepositoryDrift>();
+        string? oldestApplication = null;
 
         var tree = await _github.ListTreeAsync(
             installationToken, repo.Owner, repo.Name, repo.DefaultBranch, ct);
@@ -496,6 +542,12 @@ public sealed class DependencyDriftService
             // it targets, so there is nothing to say it is behind.
             if (string.IsNullOrWhiteSpace(manifest.Application)) continue;
 
+            var application = BcArtifactIndex.ToMajorMinor(manifest.Application);
+            if (oldestApplication is null || BcVersionComparer.Instance.Compare(application, oldestApplication) < 0)
+            {
+                oldestApplication = application;
+            }
+
             foreach (var change in Changes(manifest, target.Application, target.Platform, catalogue))
             {
                 findings.Add(new GitHubRepositoryDrift
@@ -513,7 +565,14 @@ public sealed class DependencyDriftService
             }
         }
 
-        return findings;
+        var check = new GitHubRepositoryCheck
+        {
+            OrganizationId = orgId,
+            Repository = repo.FullName.ToLowerInvariant(),
+            Application = oldestApplication is null ? null : Trim(oldestApplication, 40),
+            CheckedAt = now,
+        };
+        return (findings, check);
     }
 
     /// <summary>
@@ -662,6 +721,98 @@ public sealed class DependencyDriftService
         _logger.LogInformation("Stored {StoredCount} of {FindingCount} drift findings one repository at a time.",
             stored, findings.Count);
         return stored;
+    }
+
+    /// <summary>
+    /// Makes the stored checks say what this scan read: every row of the organisation
+    /// when <paramref name="repository"/> is null (a whole scan), else only that
+    /// repository's row.
+    /// </summary>
+    private async Task ReplaceChecksAsync(
+        IReadOnlyList<GitHubRepositoryCheck> checks, string? repository, CancellationToken ct)
+    {
+        var key = repository?.ToLowerInvariant();
+        var existing = await _db.GitHubRepositoryChecks
+            .Where(c => key == null || c.Repository == key)
+            .ToListAsync(ct);
+        if (existing.Count > 0) _db.GitHubRepositoryChecks.RemoveRange(existing);
+        // Two spellings of one repository tracked by two solutions read once each.
+        _db.GitHubRepositoryChecks.AddRange(checks
+            .GroupBy(c => c.Repository, StringComparer.Ordinal)
+            .Select(g => g.First()));
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Reads one repository again and replaces what is stored about it - its findings
+    /// and its check - leaving every other repository as the last scan saw it. What the
+    /// Repositories list's "Check again" on a row does (issue #1719).
+    ///
+    /// <para>Only a repository on a solution this person may see: the answer names
+    /// what the repository is on, and a Private solution's repository is not theirs
+    /// to ask about.</para>
+    /// </summary>
+    public async Task<RepositoryCheckOutcome> CheckRepositoryAsync(string repository, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        var fullName = ToFullName($"https://github.com/{repository}") ?? repository;
+        if (!(await VisibleRepositoryNamesAsync(ct)).Contains(fullName)) return RepositoryCheckOutcome.NotTracked;
+
+        using var scanning = await ScanGate.EnterAsync(orgId, ct);
+        var status = await _connection.GetStatusAsync(ct);
+        if (status.InstallationId is not { } installationId || string.IsNullOrWhiteSpace(status.OrgLogin))
+        {
+            return RepositoryCheckOutcome.NotConnected;
+        }
+        var tracked = await TrackedRepositoryNamesAsync(status.OrgLogin!, ct);
+        if (!tracked.Contains(fullName, StringComparer.OrdinalIgnoreCase)) return RepositoryCheckOutcome.NotTracked;
+
+        var releaseId = await NewestFirstPartyReleaseIdAsync(ct);
+        var release = releaseId is null
+            ? null
+            : await _db.OeReleases.AsNoTracking().FirstOrDefaultAsync(r => r.Id == releaseId, ct);
+        if (release is null) return RepositoryCheckOutcome.NoRelease;
+
+        var key = fullName.ToLowerInvariant();
+        var oldFindings = await _db.GitHubRepositoryDrift
+            .Where(d => d.Repository.ToLower() == key)
+            .ToListAsync(ct);
+
+        var targets = await EnvironmentTargetsAsync(ct);
+        if (!targets.TryGetValue(fullName, out var environment))
+        {
+            _db.GitHubRepositoryDrift.RemoveRange(oldFindings);
+            await _db.SaveChangesAsync(ct);
+            await ReplaceChecksAsync([], fullName, ct);
+            return RepositoryCheckOutcome.NoEnvironment;
+        }
+
+        var token = await _github.GetInstallationTokenAsync(installationId, ct);
+        var parts = fullName.Split('/');
+        if (await _github.GetRepositoryAsync(token, parts[0], parts[1], ct) is not { } repo)
+        {
+            return RepositoryCheckOutcome.NotReadable;
+        }
+
+        var catalogue = (await _catalog.GetAllAsync(ct))
+            .Where(w => !string.IsNullOrWhiteSpace(w.DepId) && !string.IsNullOrWhiteSpace(w.DepVersionDefault))
+            .GroupBy(w => AppJsonValueEditor.NormaliseId(w.DepId))
+            .ToDictionary(g => g.Key, g => g.First());
+        var target = new DriftTarget(environment.Version, PlatformFor(environment.Version), environment.Id);
+        var scanned = await ScanRepositoryAsync(orgId, token, repo, release, target, catalogue, ct);
+
+        _db.GitHubRepositoryDrift.RemoveRange(oldFindings);
+        await _db.SaveChangesAsync(ct);
+        _db.GitHubRepositoryDrift.AddRange(scanned.Findings
+            .GroupBy(f => (f.Path, f.Field))
+            .Select(g => g.First()));
+        await _db.SaveChangesAsync(ct);
+        await ReplaceChecksAsync([scanned.Check], fullName, ct);
+
+        _logger.LogInformation(
+            "Checked {RepoFullName} again for organisation {OrgId}: {FindingCount} findings.",
+            repo.FullName, orgId, scanned.Findings.Count);
+        return RepositoryCheckOutcome.Checked;
     }
 
     /// <summary>
@@ -833,7 +984,7 @@ public sealed class DependencyDriftService
     }
 
     /// <summary>What a field is called in front of a person.</summary>
-    private static string FieldLabel(string field, IReadOnlyDictionary<string, string> dependencyNames)
+    internal static string FieldLabel(string field, IReadOnlyDictionary<string, string> dependencyNames)
     {
         if (field == ApplicationField) return "Business Central application";
         if (field == PlatformField) return "Business Central platform";

@@ -42,19 +42,6 @@
             <span>New solution</span>
         </a>
     </Actions>
-    <Notices>
-        @* The one interactive island on an otherwise static page: it asks GitHub
-           what this person can see, which a GET-rendered page cannot do. It renders
-           nothing at all unless the organisation has connected GitHub and the
-           viewer has linked their account. See .design/github-integration-phase2.md. *@
-        <UntrackedRepositoriesPanel @rendermode="InteractiveServer" />
-
-        @* The second island: which tracked repositories still target an older
-           Business Central than the newest release imported here, and the pull
-           requests that move them on. Silent when nothing is behind.
-           See .design/github-integration-phase2.md. *@
-        <DependencyDriftPanel @rendermode="InteractiveServer" />
-    </Notices>
     <Search>
         <input type="search" name="q" value="@_search" class="input"
                placeholder="Search by name, short name, owner, or repository..."

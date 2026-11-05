@@ -188,6 +188,7 @@ public class AppDbContext : DbContext
     // What a tracked repository's app.json is behind on, as the last drift scan
     // found it — see .design/github-integration-phase2.md.
     public DbSet<GitHubRepositoryDrift> GitHubRepositoryDrift => Set<GitHubRepositoryDrift>();
+    public DbSet<GitHubRepositoryCheck> GitHubRepositoryChecks => Set<GitHubRepositoryCheck>();
     // Every Business Central update pull request the workbench opened, so the
     // automatic run never offers a closed one again (#1104).
     public DbSet<GitHubUpdatePullRequest> GitHubUpdatePullRequests => Set<GitHubUpdatePullRequest>();
@@ -336,6 +337,7 @@ public class AppDbContext : DbContext
         ScopeToOrganization<OrganizationEmailDomain>(modelBuilder);
         ScopeToOrganization<GitHubRepositoryCandidate>(modelBuilder);
         ScopeToOrganization<GitHubRepositoryDrift>(modelBuilder);
+        ScopeToOrganization<GitHubRepositoryCheck>(modelBuilder);
         ScopeToOrganization<GitHubUpdatePullRequest>(modelBuilder);
         ScopeToOrganization<OeRelease>(modelBuilder);
         ScopeToOrganization<OeReleaseDependency>(modelBuilder);

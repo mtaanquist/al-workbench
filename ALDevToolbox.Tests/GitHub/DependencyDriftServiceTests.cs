@@ -1246,6 +1246,85 @@ public sealed class DependencyDriftServiceTests : IDisposable
             .Should().Be(DependencyDriftService.AutomaticNoAccessMessage);
     }
 
+    // ── What each repository is on (#1719) ───────────────────────────────
+
+    [Fact]
+    public async Task A_scan_records_what_every_repository_is_on_including_the_ones_that_are_not_behind()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        await SeedSolutionAsync(RepoB, name: "CRONUS A/S warehouse");
+        var releaseId = await SeedReleaseAsync();
+        var (service, ctx) = NewService(ScannableApi(RepoA, RepoB));
+        await using var _ = ctx;
+
+        await service.ScanForReleaseAsync(releaseId);
+
+        await using var read = _db.NewContext();
+        var checks = await read.GitHubRepositoryChecks.AsNoTracking().OrderBy(c => c.Repository).ToListAsync();
+        checks.Select(c => (c.Repository, c.Application)).Should().Equal(
+            (RepoA, "27.0"), (RepoB, "28.2"));
+    }
+
+    [Fact]
+    public async Task Checking_one_repository_again_replaces_only_what_was_stored_about_it()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectA = await SeedSolutionAsync(RepoA);
+        var projectB = await SeedSolutionAsync(RepoB, name: "CRONUS A/S warehouse");
+        var releaseId = await SeedReleaseAsync();
+        await SeedDriftAsync(RepoA, releaseId, await EnvironmentOfAsync(projectA));
+        await SeedDriftAsync(RepoB, releaseId, await EnvironmentOfAsync(projectB));
+
+        // RepoA has been bumped by hand since the last scan.
+        var api = BaseApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", CurrentManifest))
+            .On(HttpMethod.Get, $"/repos/{RepoA}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(RepoA));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.Checked);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubRepositoryDrift.Where(d => d.Repository == RepoA).CountAsync()).Should().Be(0);
+        (await read.GitHubRepositoryDrift.Where(d => d.Repository == RepoB).CountAsync())
+            .Should().Be(3, "the other repository keeps what the last scan said about it");
+        (await read.GitHubRepositoryChecks.SingleAsync()).Application.Should().Be("28.2");
+    }
+
+    [Fact]
+    public async Task A_repository_of_a_solution_the_viewer_cannot_see_is_not_checked_for_them()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync(RepoA, visibility: ProjectVisibility.Private);
+        await SeedReleaseAsync();
+        var api = BaseApi();
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.NotTracked);
+        api.Calls.Should().NotContain(c => c.Contains($"/repos/{RepoA}"));
+    }
+
+    [Fact]
+    public async Task Checking_a_repository_whose_solution_has_no_environment_clears_what_it_used_to_say()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync(RepoA, withProduction: false);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var (service, ctx) = NewService(BaseApi());
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.NoEnvironment);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubRepositoryDrift.CountAsync()).Should().Be(0);
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private (DependencyDriftService Service, AppDbContext Context) NewService(FakeGitHubApi api, TimeProvider? clock = null)

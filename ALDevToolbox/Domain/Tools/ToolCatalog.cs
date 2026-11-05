@@ -99,7 +99,7 @@ public static class ToolCatalog
         // the gate still covers the legacy one.
         new ToolDescriptor(ToolKey.Projects, "Solutions",
             "Set up customer solutions and point them at their repositories.",
-            new[] { "/solutions", "/projects", "/environments" }),
+            new[] { "/solutions", "/projects", "/environments", "/repositories" }),
         // Deployment pipelines live under /pipelines/deployments, inside the build
         // pipelines' own prefix. ToolAccessGate takes the longest prefix that matches,
         // so they stay behind their own toggle. The keys keep their old names for the

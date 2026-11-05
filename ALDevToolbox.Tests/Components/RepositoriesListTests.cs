@@ -1,11 +1,15 @@
 using System.Net;
-using System.Security.Cryptography;
-using ALDevToolbox.Components.Pages.Projects;
+using ALDevToolbox.Components.Pages.Repositories;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.Templates;
+using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.GitHub;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -14,31 +18,23 @@ using Bunit.TestDoubles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using ALDevToolbox.Services.Operations;
-using ALDevToolbox.Services.Organizations;
-using ALDevToolbox.Services.Templates;
 
 namespace ALDevToolbox.Tests.Components;
 
 /// <summary>
-/// The dependency-drift panel on the Solutions page (issue #630).
-///
-/// <para>The named user is a consultant who has just imported a new Business
-/// Central release. What matters is that the panel is silent for everybody it
-/// cannot help - nothing behind, or no GitHub connection, and the Solutions page
-/// looks exactly as it did - and that when it can help, it says how many
-/// repositories are behind, what would change in each of them, and opens the
-/// pull requests.</para>
-///
-/// <para>A screenshot is not possible in this environment, so these renders are
-/// the evidence for how the panel's states look.</para>
+/// The Repositories list (issue #1719). The named user is a lead developer keeping
+/// customer repositories current: they need to see which repositories are behind
+/// their customer's Business Central, and open the pull requests that move them on
+/// from the row - while somebody without a GitHub link still gets the list, just
+/// without actions they cannot use.
 /// </summary>
-public sealed class DependencyDriftPanelTests : IDisposable
+public sealed class RepositoriesListTests : IDisposable
 {
-    private const int UserId = 6320;
+    private const int UserId = 6340;
     private const long InstallationId = 42;
     private const string OrgLogin = "cronus-dk";
     private const string RepoA = "cronus-dk/payment-import";
+    private const string RepoB = "cronus-dk/warehouse-ext";
 
     private const string BehindManifest = """
         {"id":"1c0ffee0-0000-4000-8000-000000000001","name":"Payment Import","publisher":"CRONUS",
@@ -50,19 +46,26 @@ public sealed class DependencyDriftPanelTests : IDisposable
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
 
-    public DependencyDriftPanelTests()
+    public RepositoriesListTests()
     {
         var auth = _ctx.AddAuthorization();
-        auth.SetAuthorized("consultant@cronus.example");
+        auth.SetAuthorized("lead@cronus.example");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
+        _ctx.Services.AddDisplayTimeZone(_db);
         _ctx.Services.AddDbContext<ALDevToolbox.Data.AppDbContext>(opts =>
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddScoped<RepositoryProviderPolicyService>();
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<CatalogService>();
+        _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
+        _ctx.Services.AddScoped<ProjectDiscoveryService>();
+        _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _db.AddStorageServices(_ctx.Services);
+        _ctx.JSInterop.Mode = JSRuntimeMode.Loose;
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(
@@ -74,8 +77,8 @@ public sealed class DependencyDriftPanelTests : IDisposable
         {
             Id = UserId,
             OrganizationId = TestDb.DefaultOrgId,
-            Email = "consultant@cronus.example",
-            DisplayName = "consultant@cronus.example",
+            Email = "lead@cronus.example",
+            DisplayName = "lead@cronus.example",
             PasswordHash = "x",
             Role = UserRole.User,
             Status = UserStatus.Active,
@@ -93,92 +96,61 @@ public sealed class DependencyDriftPanelTests : IDisposable
     }
 
     [Fact]
-    public async Task An_organisation_with_no_github_connection_sees_nothing_at_all()
+    public async Task No_repositories_says_where_to_add_one()
     {
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
-        var cut = _ctx.Render<DependencyDriftPanel>();
-        // The panel draws nothing while it loads too, so wait for it to have drawn
-        // what its load decided before reading the absence.
-        await cut.Instance.Settled.WaitAsync(WaitTimeout);
+        var cut = _ctx.Render<RepositoriesList>();
 
-        cut.Markup.Trim().Should().BeEmpty("someone who cannot use this must not be shown machinery explaining it");
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("No repositories yet"), WaitTimeout);
+        cut.FindAll("a[href='/solutions']").Should().Contain(a => a.TextContent.Contains("Go to solutions"));
+        await Task.CompletedTask;
     }
 
     [Fact]
-    public async Task Nothing_behind_is_silent_rather_than_an_empty_box()
+    public async Task A_repository_behind_its_customer_shows_a_warning_next_to_its_version()
     {
         await ReadyAsync();
+        await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, WritableApi());
 
-        var cut = _ctx.Render<DependencyDriftPanel>();
-        // Empty while it loads as well, so wait for the drift to have been read.
-        await cut.Instance.Settled.WaitAsync(WaitTimeout);
-
-        cut.Markup.Trim().Should().BeEmpty();
-    }
-
-    [Fact]
-    public async Task A_repository_that_is_behind_is_listed_with_what_would_change()
-    {
-        await ReadyAsync();
-        await SeedDriftAsync();
-        _db.AddGitHubServices(_ctx.Services, WritableApi());
-
-        var cut = _ctx.Render<DependencyDriftPanel>();
+        var cut = _ctx.Render<RepositoriesList>();
         cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
 
-        cut.Markup.Should().Contain("1 repository is still on Business Central 27.0");
-        cut.Markup.Should().Contain("Business Central application");
-        cut.Markup.Should().Contain("27.0.0.0");
-        cut.Markup.Should().Contain("28.2.0.0");
-        cut.FindAll("button").Select(b => b.TextContent.Trim())
-            .Should().Contain("Open update pull requests").And.Contain("Check again");
-        // The Solutions page's one primary action is New solution; nothing here
-        // competes with it.
+        var row = cut.FindAll("tbody tr").Single(r => r.TextContent.Contains("payment-import"));
+        row.TextContent.Should().Contain("CRONUS A/S payments").And.Contain("28.2").And.Contain("27.0");
+        row.QuerySelector(".repos__warn")!.GetAttribute("title")
+            .Should().Contain("Business Central application 27.0.0.0 to 28.2.0.0");
+        var upToDate = cut.FindAll("tbody tr").Single(r => r.TextContent.Contains("warehouse-ext"));
+        upToDate.QuerySelector(".repos__warn").Should().BeNull();
+        // Generate is the app's one primary action; nothing here competes with it.
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
 
     [Fact]
-    public async Task A_finding_from_before_environments_were_the_yardstick_asks_for_a_fresh_check()
+    public async Task Updates_available_shows_only_the_repositories_that_are_behind()
     {
         await ReadyAsync();
-        await SeedDriftAsync();
+        await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, WritableApi());
 
-        var cut = _ctx.Render<DependencyDriftPanel>();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+        var cut = _ctx.Render<RepositoriesList>();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoB), WaitTimeout);
+        await cut.Find("button.pill-tab:contains('Updates available')").ClickAsync(new());
 
-        cut.Find(".drift__sub").TextContent.Should().Contain("Check again to compare them with their solution's production environment");
-        cut.Find(".drift__on").TextContent.Should().Contain("Compared with the newest imported release, Business Central 28.2.");
+        cut.FindAll("tbody tr").Should().ContainSingle().Which.TextContent.Should().Contain("payment-import");
     }
 
     [Fact]
-    public async Task A_repository_measured_against_production_names_the_environment()
+    public async Task Opening_the_update_pull_request_from_the_row_shows_the_link_it_got_back()
     {
         await ReadyAsync();
-        await SeedDriftAsync(againstProduction: true);
+        await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, WritableApi());
 
-        var cut = _ctx.Render<DependencyDriftPanel>();
+        var cut = _ctx.Render<RepositoriesList>();
         cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
-
-        cut.Find(".drift__sub").TextContent.Should().Contain("than their solution's production environment runs")
-            .And.NotContain("imported");
-        cut.Find(".drift__on").TextContent
-            .Should().Contain("The production environment of CRONUS A/S payments (\"Production\") is on Business Central 28.2.");
-    }
-
-    [Fact]
-    public async Task Opening_the_pull_requests_shows_the_link_it_got_back()
-    {
-        await ReadyAsync();
-        await SeedDriftAsync();
-        _db.AddGitHubServices(_ctx.Services, WritableApi());
-
-        var cut = _ctx.Render<DependencyDriftPanel>();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
-        await cut.Find("button:contains('Open update pull requests')").ClickAsync(new());
+        await cut.Find("button.menu__item:contains('Create update pull request')").ClickAsync(new());
 
         cut.WaitForAssertion(
             () => cut.Markup.Should().Contain("Pull request opened").And.Contain($"https://github.com/{RepoA}/pull/77"),
@@ -186,32 +158,25 @@ public sealed class DependencyDriftPanelTests : IDisposable
     }
 
     [Fact]
-    public async Task A_repository_the_person_cannot_open_says_so_where_it_is_listed()
+    public async Task Somebody_without_a_github_link_sees_the_list_without_the_github_actions()
     {
-        await ReadyAsync();
-        await SeedDriftAsync();
-        // GitHub answers 404 for every repository, which is what it says about
-        // one this person cannot see.
-        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi()
-            .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
-                HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson())
-            .On(HttpMethod.Get, "/repos/", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}"));
+        await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
-        var cut = _ctx.Render<DependencyDriftPanel>();
+        var cut = _ctx.Render<RepositoriesList>();
         cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
-        await cut.Find("button:contains('Open pull request')").ClickAsync(new());
 
-        cut.WaitForAssertion(
-            () => cut.Markup.Should().Contain("not one the workbench can offer you"), WaitTimeout);
+        cut.FindAll("button.menu__item").Select(b => b.TextContent).Should()
+            .NotContain(t => t.Contains("pull request") || t.Contains("Check again"));
+        cut.Markup.Should().NotContain("Check all again");
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────
 
-    /// <summary>A GitHub the acting person can open the repository on and commit to.</summary>
     private static FakeGitHubApi WritableApi()
     {
         const string branch = "aldt/bump-bc-28.2";
-        var api = new FakeGitHubApi()
+        return new FakeGitHubApi()
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson())
             .On(HttpMethod.Get, "/repos/", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}")
@@ -225,25 +190,20 @@ public sealed class DependencyDriftPanelTests : IDisposable
                 FakeGitHubApi.FileContentsJson("app.json", BehindManifest))
             .On(HttpMethod.Get, $"/repos/{RepoA}/git/commits/", HttpStatusCode.OK,
                 "{\"sha\":\"parent\",\"tree\":{\"sha\":\"base-tree\"}}")
-            .On(HttpMethod.Post, $"/repos/{RepoA}/git/blobs", HttpStatusCode.Created,
-                FakeGitHubApi.ShaJson("new-blob"))
-            .On(HttpMethod.Post, $"/repos/{RepoA}/git/trees", HttpStatusCode.Created,
-                FakeGitHubApi.ShaJson("new-tree"))
-            .On(HttpMethod.Post, $"/repos/{RepoA}/git/commits", HttpStatusCode.Created,
-                FakeGitHubApi.ShaJson("new-commit"))
-            .On(HttpMethod.Post, $"/repos/{RepoA}/git/refs", HttpStatusCode.Created,
-                FakeGitHubApi.ShaJson("new-ref"))
+            .On(HttpMethod.Post, $"/repos/{RepoA}/git/blobs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-blob"))
+            .On(HttpMethod.Post, $"/repos/{RepoA}/git/trees", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-tree"))
+            .On(HttpMethod.Post, $"/repos/{RepoA}/git/commits", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-commit"))
+            .On(HttpMethod.Post, $"/repos/{RepoA}/git/refs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-ref"))
             .On(HttpMethod.Post, $"/repos/{RepoA}/pulls", HttpStatusCode.Created,
                 $"{{\"number\":77,\"html_url\":\"https://github.com/{RepoA}/pull/77\"}}");
-        return api;
     }
 
-    /// <summary>A solution tracking the repository, and one finding against it.</summary>
-    private async Task SeedDriftAsync(bool againstProduction = false)
+    /// <summary>Two live solutions on 28.2: one repository a wave behind, one up to date.</summary>
+    private async Task SeedAsync()
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
-        var release = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeRelease
+        var release = new OeRelease
         {
             OrganizationId = TestDb.DefaultOrgId,
             Label = "Business Central 28.2 (DK)",
@@ -254,47 +214,49 @@ public sealed class DependencyDriftPanelTests : IDisposable
             UpdatedAt = now,
         };
         ctx.OeReleases.Add(release);
-        ctx.OeProjects.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
+        foreach (var (name, repo) in new[] { ("CRONUS A/S payments", RepoA), ("CRONUS A/S warehouse", RepoB) })
         {
-            OrganizationId = TestDb.DefaultOrgId,
-            Name = "CRONUS A/S payments",
-            DefaultArtifactCountry = "dk",
-            CreatedByUserId = UserId,
-            CreatedAt = now,
-            UpdatedAt = now,
-            Repositories =
-            [
-                new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository
-                {
-                    OrganizationId = TestDb.DefaultOrgId,
-                    Provider = RepositoryProvider.GitHub,
-                    Url = $"https://github.com/{RepoA}.git",
-                    DisplayName = "payment-import",
-                },
-            ],
-        });
-        await ctx.SaveChangesAsync();
-
-        int? environmentId = null;
-        if (againstProduction)
-        {
-            var environment = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment
+            ctx.OeProjects.Add(new OeProject
             {
                 OrganizationId = TestDb.DefaultOrgId,
-                ProjectId = await ctx.OeProjects.Select(p => p.Id).SingleAsync(),
+                Name = name,
+                DefaultArtifactCountry = "dk",
+                CreatedByUserId = UserId,
+                CreatedAt = now,
+                UpdatedAt = now,
+                Repositories =
+                [
+                    new OeProjectRepository
+                    {
+                        OrganizationId = TestDb.DefaultOrgId,
+                        Provider = RepositoryProvider.GitHub,
+                        Url = $"https://github.com/{repo}.git",
+                        DisplayName = repo.Split('/')[^1],
+                        AccessConfirmedAt = now,
+                    },
+                ],
+            });
+        }
+        await ctx.SaveChangesAsync();
+
+        foreach (var project in await ctx.OeProjects.ToListAsync())
+        {
+            ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = project.Id,
                 Name = "Production",
                 Type = "Production",
                 Version = "28.2.45123.0",
                 FetchedAt = now,
-            };
-            ctx.OeProjectEnvironments.Add(environment);
-            await ctx.SaveChangesAsync();
-            environmentId = environment.Id;
+            });
         }
-
+        ctx.GitHubRepositoryChecks.AddRange(
+            new GitHubRepositoryCheck { OrganizationId = TestDb.DefaultOrgId, Repository = RepoA, Application = "27.0", CheckedAt = now },
+            new GitHubRepositoryCheck { OrganizationId = TestDb.DefaultOrgId, Repository = RepoB, Application = "28.2", CheckedAt = now });
+        await ctx.SaveChangesAsync();
         ctx.GitHubRepositoryDrift.Add(new GitHubRepositoryDrift
         {
-            EnvironmentId = environmentId,
             OrganizationId = TestDb.DefaultOrgId,
             Repository = RepoA,
             Path = "app.json",
@@ -302,6 +264,7 @@ public sealed class DependencyDriftPanelTests : IDisposable
             Current = "27.0.0.0",
             Proposed = "28.2.0.0",
             ReleaseId = release.Id,
+            EnvironmentId = await ctx.OeProjectEnvironments.Where(e => e.Project!.Name == "CRONUS A/S payments").Select(e => e.Id).SingleAsync(),
             DetectedAt = now,
         });
         await ctx.SaveChangesAsync();

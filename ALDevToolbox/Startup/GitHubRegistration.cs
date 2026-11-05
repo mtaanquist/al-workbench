@@ -41,6 +41,7 @@ public static class GitHubRegistration
         // (#630). Scoped: the release import enters an organisation scope and
         // calls the scan; the Solutions panel opens one per read.
         services.AddScoped<DependencyDriftService>();
+        services.AddScoped<RepositoryListService>();
         // The pull-request compile gate (#627): the check-run half is scoped
         // because it reads the build rows, the queue is a singleton because the
         // anonymous webhook endpoint and the worker both hold it, and the worker
