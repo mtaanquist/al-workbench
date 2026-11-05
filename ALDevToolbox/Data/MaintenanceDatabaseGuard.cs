@@ -108,6 +108,17 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     // once the site reopens (#1599).
     private volatile bool _workOutlivedItsDatabase;
 
+    private int _heldCommands;
+
+    /// <summary>
+    /// How many of this scope's commands are being held right now. Each one read
+    /// <see cref="MaintenanceModeState.Epoch"/> before it was counted here, so a
+    /// test that waits for this before replacing the database knows the command
+    /// saw the old one (#1707); a fixed delay could not tell a held command from
+    /// one still opening its connection.
+    /// </summary>
+    internal int HeldCommands => Volatile.Read(ref _heldCommands);
+
     private void Begin(DbCommand command)
     {
         if (_workOutlivedItsDatabase || !TryPass(command)) throw new DatabaseClosedForMaintenanceException();
@@ -129,6 +140,26 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
 
         // Work that was already running when the restore began: hold it until the
         // site reopens, so a refused restore lets it carry on (#1599).
+        Interlocked.Increment(ref _heldCommands);
+        try
+        {
+            await HoldAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _heldCommands);
+        }
+        // A restore replaced the database meanwhile: whatever this was part of is gone.
+        if (_maintenance.Epoch != epoch)
+        {
+            _workOutlivedItsDatabase = true;
+            throw new DatabaseClosedForMaintenanceException();
+        }
+        if (!TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+    }
+
+    private async Task HoldAsync(CancellationToken ct)
+    {
         while (_maintenance.IsActive)
         {
             // Not once the restore has gone ahead (or is held closed after failing):
@@ -144,13 +175,6 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
             }
             await Task.Delay(HoldPoll, ct).ConfigureAwait(false);
         }
-        // A restore replaced the database meanwhile: whatever this was part of is gone.
-        if (_maintenance.Epoch != epoch)
-        {
-            _workOutlivedItsDatabase = true;
-            throw new DatabaseClosedForMaintenanceException();
-        }
-        if (!TryPass(command)) throw new DatabaseClosedForMaintenanceException();
     }
 
     /// <summary>
