@@ -61,16 +61,17 @@
 
         @if (_rows is { Count: > 0 } && GitHubNotice() is { } notice)
         {
-            <p class="note note--info">
-                <span class="note__icon"><Icon Name="info" Width="17" Height="17" /></span>
-                <span class="note__body">
+            @* An alert, not a .note: a note is the docs pages' reading-width callout and
+               stops at 82 characters, where a list page's notices span the table. *@
+            <Alert Tone="AlertTone.Info" Role="">
+                <span>
                     @notice.Text
                     @if (notice.Href is { } href)
                     {
                         <text> </text><a href="@href">@notice.LinkText</a>
                     }
                 </span>
-            </p>
+            </Alert>
         }
 
         @if (_error is { } error)
