@@ -653,7 +653,7 @@ public sealed partial class GitHubAppClient
     /// <para>The repository is created empty - no README, no licence, no
     /// .gitignore. Whatever the template says belongs in it arrives in the
     /// first commit, and an auto-initialised commit would have to be worked
-    /// around rather than used.</para>
+    /// around rather than used. Merged branches are deleted automatically.</para>
     ///
     /// <para>Two refusals are answers rather than failures, because the caller
     /// can word both of them for the user: the name is already taken, and the
@@ -673,6 +673,10 @@ public sealed partial class GitHubAppClient
                 description = string.IsNullOrWhiteSpace(description) ? null : description,
                 @private = isPrivate,
                 auto_init = false,
+                // Merged pull-request branches tidy themselves away. GitHub has
+                // no organisation-wide default for this, only the per-repository
+                // setting, so the workbench sets it on every repository it creates.
+                delete_branch_on_merge = true,
             });
         using var response = await SendRawAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);

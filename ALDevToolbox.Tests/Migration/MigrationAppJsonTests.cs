@@ -156,6 +156,19 @@ public sealed class MigrationAppJsonTests
     }
 
     [Fact]
+    public void A_logo_that_did_not_come_along_is_the_templates()
+    {
+        var source = Parse("""{ "id": "x", "logo": "../.assets/images/logo.png" }""");
+
+        var (missing, changes) = MigrationAppJson.Normalize(Parse(Template), source, fileExists: _ => false);
+        var (present, _) = MigrationAppJson.Normalize(Parse(Template), source, fileExists: _ => true);
+
+        missing["logo"]!.GetValue<string>().Should().Be("../.assets/logo.png");
+        changes.Should().Contain(c => c.Property == "logo");
+        present["logo"]!.GetValue<string>().Should().Be("../.assets/images/logo.png");
+    }
+
+    [Fact]
     public void An_old_idRange_replaces_the_templates_idRanges()
     {
         var source = Parse("""{ "id": "x", "idRange": { "from": 50000, "to": 50099 } }""");

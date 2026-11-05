@@ -252,6 +252,46 @@ readiness - one more database read, no call to GitHub, so the card still renders
 GitHub is down. The success card names the second commit and shows the ruleset warning as a
 warning beside the success rather than instead of it.
 
+### Default standards: keeping test up to date with main
+
+New repositories get a `test` branch beside the default branch, and keeping it current by
+hand is the chore teams kept skipping. The fix lives in the customer's repository, not in
+the workbench: a GitHub Actions workflow, `.github/workflows/refresh-test.yml`, seeded as a
+**default repository standard**. The workbench only puts it there; it never runs, watches or
+re-applies it.
+
+- **A row, not code.** It is an ordinary `github_repository_standard_files` row, so an Admin
+  edits or deletes it on the Repository standards page like any file they added. New
+  organisations get it when they are created (signup, and the system org on a fresh
+  database); existing ones got it from the `SeedRefreshTestWorkflow` migration, which keeps
+  an Admin's own file at the same path. It is never re-seeded on boot, so a delete sticks.
+  The body is `DefaultRepositoryStandardFiles.RefreshTestWorkflowContent`.
+- **Merge, never reset.** On every push to `main` (and on demand) the workflow merges `main`
+  into `test` through the merges API. A force-reset would be simpler and would throw away
+  work that is on `test` but not yet on `main`, which is what `test` is for.
+- **When it cannot merge, it opens a pull request instead of failing quietly.** A conflict,
+  branch rules on `test`, or a change to a workflow file (the built-in token may not push
+  those) all end in a pull request into `test`. It comes from a branch of its own,
+  `refresh-test-from-main`, so resolving a conflict in the browser commits there rather than
+  to `main`. An open pull request is fast-forwarded, never reset, so a half-finished
+  resolution survives the next push to `main`.
+- **Needs one repository setting** for that pull request: "Allow GitHub Actions to create
+  and approve pull requests". Without it the run fails with a message saying so, so
+  somebody gets the failure email. Any other refusal it does not expect (a 5xx, an
+  unreadable `test`) also fails the run rather than reporting success.
+- **Merge the pull request with a merge commit.** A squash leaves `main`'s commits out of
+  `test`'s history and the next run meets the same conflicts. The workflow's header and the
+  pull request body both say so. Pull requests opened by the built-in token start no other
+  workflows, so required Actions checks on `test` need a push or a reopen; the header says
+  that too.
+- Merges pushed by the built-in token do not start other workflows, but the workbench's own
+  build pipelines listen to the GitHub App's push webhook, so the `test` pipeline still
+  builds the result.
+
+Every repository the workbench creates also has **"Automatically delete head branches"**
+turned on (`delete_branch_on_merge` on the create call). GitHub has no organisation-wide
+default for it.
+
 ## #626 Cookbook: apply a recipe to a repository, and update every repository that took it
 
 Named user: a consultant on a customer project who found the right recipe and wants it
