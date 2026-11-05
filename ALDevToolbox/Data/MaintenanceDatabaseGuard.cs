@@ -102,7 +102,10 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     /// read could run on a pool thread while a server render read the user too,
     /// and <c>HttpContext</c> is not thread-safe (#1731). Being an
     /// <see cref="AsyncLocal{T}"/>, the answer follows the request's work into
-    /// any thread and scope.
+    /// any thread and scope, and so into anything the request starts and does not
+    /// await: unlike the old check, that would keep the allowance after the
+    /// request ends. As with <see cref="MaintenanceModeState.AllowDatabase"/>, a
+    /// console request must not leave detached work behind.
     /// </summary>
     internal static readonly AsyncLocal<bool> SiteAdminRequestOnConsole = new();
 

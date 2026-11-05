@@ -93,7 +93,22 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         await app.Build()(ctx);
 
         seen.Should().Be(marked);
-        ALDevToolbox.Data.MaintenanceDatabaseGuard.SiteAdminRequestOnConsole.Value.Should().BeFalse("the mark ends with the request");
+    }
+
+    /// <summary>
+    /// The mark reads the signed-in user, so it has to come after authentication;
+    /// ahead of it every request is anonymous and a SiteAdmin's console write
+    /// during a restore would be refused, with no other test noticing.
+    /// </summary>
+    [Fact]
+    public void The_console_mark_is_set_after_authentication()
+    {
+        var program = File.ReadAllText(Path.Combine(RepoRoot.Directory.FullName, "ALDevToolbox", "Program.cs"));
+        var authentication = program.IndexOf("app.UseAuthentication();", StringComparison.Ordinal);
+        var mark = program.IndexOf("app.UseSiteAdminConsoleRequests();", StringComparison.Ordinal);
+
+        authentication.Should().BeGreaterThan(-1);
+        mark.Should().BeGreaterThan(authentication);
     }
 
     /// <summary>
