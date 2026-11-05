@@ -29,11 +29,17 @@ namespace ALDevToolbox.Tests.Tools;
 /// does. Hosted services are exempt: they run with no request, and keep
 /// <c>ConfigureAwait(false)</c> because their continuations have no context to
 /// return to anyway.</para>
+///
+/// <para>What the scan cannot see: a static helper that runs a caller's
+/// delegate after its own <c>ConfigureAwait(false)</c> (<c>BcAppOperationPoller</c>
+/// was one), and EF Core's own internals, which continue off the caller's
+/// context before some interceptor callbacks run. Keep helpers that take
+/// callbacks free of it too.</para>
 /// </summary>
 public sealed class ConfigureAwaitCallerContextTests
 {
     private static readonly Regex Declaration =
-        new(@"\b(?:class|record|struct|interface)\s+(?<name>[A-Za-z_]\w*)", RegexOptions.Compiled);
+        new(@"\b(?:record\s+(?:class|struct)|class|record|struct|interface)\s+(?<name>[A-Za-z_]\w*)", RegexOptions.Compiled);
 
     private static readonly Regex UserReadingName =
         new(@"\b(?:AppDbContext|IOrganizationContext|IHttpContextAccessor|HttpContext|AuthenticationStateProvider)\b",
