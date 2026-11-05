@@ -162,6 +162,21 @@ public sealed class AccountServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_new_organisation_starts_with_the_workflow_that_keeps_test_up_to_date()
+    {
+        var ctx = _db.NewContext();
+        var (_, _, org) = await NewAccounts(ctx).SignupAsync(
+            "carol@example.com", "Carol", "verylongpassword12345", null, "CRONUS A/S");
+
+        await using var read = _db.NewContext();
+        var files = await read.GitHubRepositoryStandardFiles.IgnoreQueryFilters()
+            .AsNoTracking().Where(f => f.OrganizationId == org!.Id).ToListAsync();
+        var file = files.Should().ContainSingle().Subject;
+        file.Path.Should().Be(ALDevToolbox.Services.GitHub.DefaultRepositoryStandardFiles.RefreshTestWorkflowPath);
+        file.Content.Should().Be(ALDevToolbox.Services.GitHub.DefaultRepositoryStandardFiles.RefreshTestWorkflowContent);
+    }
+
+    [Fact]
     public async Task Signup_rejects_short_passwords()
     {
         var ctx = _db.NewContext();
