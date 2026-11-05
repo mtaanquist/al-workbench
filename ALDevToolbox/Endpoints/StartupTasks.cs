@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
@@ -315,6 +316,10 @@ internal static class StartupTasks
                 CreatedAt = DateTime.UtcNow,
             };
             db.Organizations.Add(systemOrg);
+            // Only on a database this fresh: an existing system org got its
+            // defaults from the SeedRefreshTestWorkflow migration, and re-adding
+            // them on boot would undo an Admin's delete.
+            DefaultRepositoryStandardFiles.AddForNewOrganization(db, systemOrg, systemOrg.CreatedAt);
         }
         else
         {

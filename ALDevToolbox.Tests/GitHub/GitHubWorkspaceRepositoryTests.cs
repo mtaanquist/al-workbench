@@ -88,6 +88,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         // Nothing is auto-initialised: whatever the template says belongs in the
         // repository arrives in the first commit instead.
         body.Should().Contain("\"auto_init\":false");
+        body.Should().Contain("\"delete_branch_on_merge\":true");
     }
 
     [Fact]

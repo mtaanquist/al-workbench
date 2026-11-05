@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.GitHub;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
@@ -631,6 +632,9 @@ public sealed class AccountService
             CreatedAt = now,
         };
         _db.Organizations.Add(org);
+        // The repository standards a new organisation starts with (the workflow
+        // that keeps test up to date with main). Its Admins own them from here.
+        DefaultRepositoryStandardFiles.AddForNewOrganization(_db, org, now);
         await _db.SaveChangesAsync(ct);
 
         // Seed the platform-default workspace files (.gitignore, the shared
