@@ -570,7 +570,10 @@ mode="picker"): the live fleet without deleted environments, the Environments li
 (search, solution, type, Active / Update waiting) and the Fleet table's columns, in a dialog of
 fixed height where only the table scrolls, full screen on a phone. Its selection is its own
 `SelectionSet`, so "4 selected, 1 shown" holds across searches, and **Show selected** brings
-every tick back. A line already on this upgrade is ticked and locked; one on another open
+every tick back. The view select opens on **All eligible**, which leaves out environments
+already on the target or later (the same Major.Minor test as the fill buttons): there is
+nothing for this upgrade to do on them. **All environments** and **With an update waiting**
+are one choice away. A line already on this upgrade is ticked and locked; one on another open
 upgrade is locked and names it in the warning tone (`ListOpenLineOwnersAsync`); one whose
 solution the person may not manage is locked and says so. The two fill buttons, **Production
 not yet on 28.5** and **Sandboxes not yet on 28.5**, add to the selection and never replace it,
@@ -590,7 +593,7 @@ Where it departs from its sheets, and why:
 | The Checked tick, with "Tick when checked" beside it | The same words inside the tick's label | So the tick reads as its own control and not as a second copy of the row's selection box. |
 | The Mark done confirm as one list of the unchecked lines | The leftovers under "Failed or never started (3)", then "The rest, not checked yet (4)", and a line naming any environment still updating | "The 3 that failed or never started" has to point at three rows the reader can see. |
 | No row menu on a phone card | The row menu beside Call, and the note editor under the tick | Retrying the failed one and noting what was checked are the morning's work, and the phone is where the customer is rung. |
-| "Start with" before the picker's fill buttons; the view select as "Active" / "Update waiting"; "None waiting" | "Add to the selection:"; "All environments" / "With an update waiting" (the fleet page's words); "Nothing waiting" | "Start with" read as "start the update on"; "Active" named nothing; one fact, one wording. |
+| "Start with" before the picker's fill buttons; the view select as "Active" / "Update waiting"; "None waiting" | "Add to the selection:"; "All eligible" (the default) / "All environments" / "With an update waiting" (the fleet page's words); "Nothing waiting" | "Start with" read as "start the update on"; "Active" named nothing; one fact, one wording. |
 | "4 selected, 0 shown" | "4 selected, none of them shown" | A zero read as "nothing on screen" with five rows showing. |
 | An open upgrade's overflow with Reopen, disabled | No Reopen until the upgrade is done | Port note left with the sheet: a command the page can never offer here is hidden, not dimmed. |
 | "New upgrade from the leftovers" enabled on an open upgrade | Disabled, with "Mark this upgrade done first. Its environments stay on it while it is open." | The engine needs the source done first (above): while it is open it still holds those environments. |
