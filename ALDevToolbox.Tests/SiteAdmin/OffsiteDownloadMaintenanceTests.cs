@@ -249,7 +249,7 @@ public sealed class OffsiteDownloadMaintenanceTests : IDisposable
         // As in production: a fresh scope per job, its context behind the guard,
         // and no request or SiteAdmin behind it.
         services.AddScoped(_ => _db.NewContext(new MaintenanceDatabaseGuard(
-            _maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null), holdMargin: TimeSpan.Zero)));
+            _maintenance, new AmbientOrganizationContext(), holdMargin: TimeSpan.Zero)));
         services.AddScoped(sp => NewOffsite(sp.GetRequiredService<AppDbContext>()));
         return new OffsiteRestoreWorker(
             _jobs, services.BuildServiceProvider(), NullLogger<OffsiteRestoreWorker>.Instance,

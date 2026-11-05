@@ -97,6 +97,10 @@ app.UseMcpAcceptCompatibility();
 
 app.UseAuthentication();
 
+// Marks a SiteAdmin's /site-admin request for the maintenance database guard,
+// on the request thread. See Endpoints/MaintenanceModeMiddleware.cs.
+app.UseSiteAdminConsoleRequests();
+
 // Tool visibility gate: 404 a disabled tool's end-user routes (site-wide or
 // per-org) so a hidden tool isn't reachable by typing its URL. Runs after
 // authentication so the org_disabled_tools claim is available, but *before*

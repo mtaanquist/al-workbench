@@ -65,17 +65,15 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
 
     private readonly MaintenanceModeState _maintenance;
     private readonly IOrganizationContext _org;
-    private readonly IHttpContextAccessor? _http;
     private readonly ConditionalWeakTable<DbCommand, object> _counted = new();
     private readonly TimeSpan _holdMargin;
 
-    public MaintenanceDatabaseGuard(MaintenanceModeState maintenance, IOrganizationContext org, IHttpContextAccessor? http = null,
+    public MaintenanceDatabaseGuard(MaintenanceModeState maintenance, IOrganizationContext org,
         // Tests shorten it; production always uses HoldMargin.
         TimeSpan? holdMargin = null)
     {
         _maintenance = maintenance;
         _org = org;
-        _http = http;
         _holdMargin = holdMargin ?? HoldMargin;
     }
 
@@ -95,6 +93,18 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     /// and ends with it. Only set for a SiteAdmin, so it answers for both halves.
     /// </summary>
     internal static readonly AsyncLocal<Func<bool>?> SiteAdminCircuitOnConsole = new();
+
+    /// <summary>
+    /// True for the rest of a SiteAdmin's <c>/site-admin</c> request, set by
+    /// <c>UseSiteAdminConsoleRequests</c> on the request thread once
+    /// authentication has run. The guard used to work this out itself from
+    /// <c>HttpContext</c>, but EF calls it after its own internal awaits, so that
+    /// read could run on a pool thread while a server render read the user too,
+    /// and <c>HttpContext</c> is not thread-safe (#1731). Being an
+    /// <see cref="AsyncLocal{T}"/>, the answer follows the request's work into
+    /// any thread and scope.
+    /// </summary>
+    internal static readonly AsyncLocal<bool> SiteAdminRequestOnConsole = new();
 
     /// <summary>How much longer than the restore's own wait a held command waits (#1599).</summary>
     internal static readonly TimeSpan HoldMargin = TimeSpan.FromSeconds(30);
@@ -193,10 +203,11 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
         return OnSiteAdminConsole();
     }
 
+    // No HttpContext here: see SiteAdminRequestOnConsole. The circuit hook is null
+    // outside a circuit, so a request never reaches the read of the caller.
     private bool OnSiteAdminConsole() =>
-        (_org.IsSiteAdmin
-            && (_http?.HttpContext?.Request.Path.StartsWithSegments(HttpOrganizationContext.SiteAdminPathPrefix) == true
-                || CircuitOnSiteAdminConsole?.Invoke() == true))
+        SiteAdminRequestOnConsole.Value
+        || (CircuitOnSiteAdminConsole?.Invoke() == true && _org.IsSiteAdmin)
         || SiteAdminCircuitOnConsole.Value?.Invoke() == true;
 
     /// <summary>

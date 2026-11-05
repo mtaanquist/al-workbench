@@ -4,7 +4,6 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
-using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
@@ -26,14 +25,14 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
 
     // No hold by default: the restore in these tests never sets a wait, so a command
     // with no allowance is refused as soon as it is held. The hold has tests of its own.
-    private AppDbContext NewGuardedContext(bool siteAdmin = false, string? requestPath = null, TimeSpan? hold = null) =>
-        _db.NewContext(NewGuard(siteAdmin, requestPath, hold));
+    private AppDbContext NewGuardedContext(bool siteAdmin = false, TimeSpan? hold = null) =>
+        _db.NewContext(NewGuard(siteAdmin, hold));
 
-    private MaintenanceDatabaseGuard NewGuard(bool siteAdmin = false, string? requestPath = null, TimeSpan? hold = null) =>
-        new(_maintenance,
-            new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId, IsSiteAdmin = siteAdmin },
-            new TestDb.FixedHttpContextAccessor(requestPath is null ? null : new DefaultHttpContext { Request = { Path = requestPath } }),
-            hold ?? TimeSpan.Zero);
+    private MaintenanceDatabaseGuard NewGuard(bool siteAdmin = false, TimeSpan? hold = null) =>
+        NewGuard(new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId, IsSiteAdmin = siteAdmin }, hold);
+
+    private MaintenanceDatabaseGuard NewGuard(IOrganizationContext org, TimeSpan? hold = null) =>
+        new(_maintenance, org, hold ?? TimeSpan.Zero);
 
     // ---- Work already running when a restore begins is held, not refused (#1599) ----
 
@@ -330,13 +329,16 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     {
         _maintenance.Enter("Restoring backup test.dump");
 
-        await using (var console = NewGuardedContext(siteAdmin: true, requestPath: "/site-admin/backups"))
+        // A SiteAdmin's /site-admin request, as UseSiteAdminConsoleRequests marks it.
+        await Task.Run(async () =>
         {
+            MaintenanceDatabaseGuard.SiteAdminRequestOnConsole.Value = true;
+            await using var console = NewGuardedContext(siteAdmin: true);
             console.Users.Add(NewUser());
             await console.SaveChangesAsync(TestContext.Current.CancellationToken);
-        }
+        }, TestContext.Current.CancellationToken);
 
-        var circuitGuard = NewGuard(siteAdmin: true, requestPath: "/_blazor");
+        var circuitGuard = NewGuard(siteAdmin: true);
         var onConsole = true;
         circuitGuard.CircuitOnSiteAdminConsole = () => onConsole;
         await using (var circuit = _db.NewContext(circuitGuard))
@@ -347,10 +349,37 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
             await elsewhere.Should().ThrowAsync<DatabaseClosedForMaintenanceException>("the circuit has moved off the console");
         }
 
-        await using var otherPage = NewGuardedContext(siteAdmin: true, requestPath: "/solutions/3");
+        // Any other request by a SiteAdmin carries no mark.
+        await using var otherPage = NewGuardedContext(siteAdmin: true);
         var write = () => otherPage.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
         await write.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
         _maintenance.ActiveJobs.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_request_is_judged_without_reading_the_caller()
+    {
+        // EF runs the guard after its own internal awaits, so in a request it may be
+        // off the request thread while a server render reads the signed-in user, and
+        // HttpContext is not thread-safe (#1731). The request's answer comes from the
+        // mark the middleware set; the caller is read only for a circuit's hook.
+        _maintenance.Enter("Restoring backup test.dump");
+        var recorder = new ContextCheckingOrganizationContext(
+            new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId, IsSiteAdmin = true });
+
+        await using (var refused = _db.NewContext(NewGuard(recorder)))
+        {
+            var write = () => refused.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
+            await write.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
+        }
+        await Task.Run(async () =>
+        {
+            MaintenanceDatabaseGuard.SiteAdminRequestOnConsole.Value = true;
+            await using var console = _db.NewContext(NewGuard(recorder));
+            await console.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
+
+        recorder.Reads.Should().Be(0);
     }
 
     [Fact]

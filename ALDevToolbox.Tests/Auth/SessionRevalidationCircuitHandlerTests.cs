@@ -204,7 +204,7 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
             ran = true;
             // A guard from a fresh scope: no SiteAdmin context, no request, no circuit hook.
             await using var ctx = _db.NewContext(new MaintenanceDatabaseGuard(
-                maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null), holdMargin: TimeSpan.Zero));
+                maintenance, new AmbientOrganizationContext(), holdMargin: TimeSpan.Zero));
             try { await ctx.SystemSettings.AsNoTracking().CountAsync(); }
             catch (DatabaseClosedForMaintenanceException ex) { refused = ex; }
         });
@@ -221,7 +221,7 @@ public sealed class SessionRevalidationCircuitHandlerTests : IDisposable
 
         // Outside the event the allowance is gone.
         await using var outside = _db.NewContext(new MaintenanceDatabaseGuard(
-            maintenance, new AmbientOrganizationContext(), new TestDb.FixedHttpContextAccessor(null), holdMargin: TimeSpan.Zero));
+            maintenance, new AmbientOrganizationContext(), holdMargin: TimeSpan.Zero));
         var act = () => outside.SystemSettings.AsNoTracking().CountAsync();
         await act.Should().ThrowAsync<DatabaseClosedForMaintenanceException>();
     }

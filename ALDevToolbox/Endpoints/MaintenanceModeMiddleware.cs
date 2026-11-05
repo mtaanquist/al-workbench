@@ -71,6 +71,29 @@ internal static class MaintenanceModeMiddleware
         return app;
     }
 
+    /// <summary>
+    /// Tells <see cref="Data.MaintenanceDatabaseGuard"/> that this request is a
+    /// SiteAdmin on the SiteAdmin console, so its database work gets through
+    /// during a restore. Decided here, on the request thread right after
+    /// authentication, because the guard runs inside EF where it may be off
+    /// that thread and must not read <c>HttpContext</c> (#1731). Set for every
+    /// such request, not only during maintenance, so a console request already
+    /// running when a restore begins keeps its allowance as it always has.
+    /// </summary>
+    public static IApplicationBuilder UseSiteAdminConsoleRequests(this IApplicationBuilder app)
+    {
+        app.Use(async (ctx, next) =>
+        {
+            if (ctx.Request.Path.StartsWithSegments(HttpOrganizationContext.SiteAdminPathPrefix)
+                && ctx.User?.FindFirst(HttpOrganizationContext.SiteAdminClaim)?.Value == "true")
+            {
+                Data.MaintenanceDatabaseGuard.SiteAdminRequestOnConsole.Value = true;
+            }
+            await next();
+        });
+        return app;
+    }
+
     public static IApplicationBuilder UseMaintenanceMode(this IApplicationBuilder app)
     {
         app.Use(async (ctx, next) =>
