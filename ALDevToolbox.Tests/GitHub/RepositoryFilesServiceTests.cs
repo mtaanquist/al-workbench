@@ -170,6 +170,28 @@ public sealed class RepositoryFilesServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_branch_left_without_an_open_pull_request_is_stepped_past_not_reset()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync();
+        var expected = await ExpectedAsync();
+        var api = WritableApi(expected, except: StandardPath)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{RepositoryFilesService.Branch}", HttpStatusCode.OK,
+                "{\"object\":{\"sha\":\"somebodys-work\"}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{RepositoryFilesService.Branch}-2", HttpStatusCode.NotFound,
+                "{\"message\":\"Not Found\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = await service.OpenPullRequestAsync(Repo);
+
+        result.IsNewPullRequest.Should().BeTrue();
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/git/refs")).Body
+            .Should().Contain($"refs/heads/{RepositoryFilesService.Branch}-2");
+        api.Calls.Should().NotContain(c => c.StartsWith("PATCH") && c.Contains("/git/refs/heads/"));
+    }
+
+    [Fact]
     public async Task Nothing_is_opened_when_every_file_already_matches()
     {
         await ReadyAsync();
@@ -228,7 +250,8 @@ public sealed class RepositoryFilesServiceTests : IDisposable
                 FakeGitHubApi.InstallationRepositoriesJson(Repo))
             .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Repo))
             .On(HttpMethod.Get, $"/repos/{Repo}/contents/", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}")
-            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]");
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}");
         if (withSavedSettings)
         {
             api.On(HttpMethod.Get, $"/repos/{Repo}/contents/{WorkspaceConfigService.FileName}", HttpStatusCode.OK,

@@ -591,10 +591,10 @@
         {
             await using var scope = Scopes.CreateAsyncScope();
             var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
-            var outcome = await drift.CheckRepositoryAsync(row.FullName!);
             // The files do not depend on an environment or a release, so they are read
-            // even when the app.json comparison could not run.
+            // first and on their own: whatever happens to the app.json comparison after.
             var filesOutcome = await scope.ServiceProvider.GetRequiredService<RepositoryFilesService>().CheckRepositoryAsync(row.FullName!);
+            var outcome = await drift.CheckRepositoryAsync(row.FullName!);
             if ((CheckOutcomeText(outcome) ?? CheckOutcomeText(filesOutcome)) is { } text)
             {
                 _results[row.RepositoryId] = new RowResult(text, null, IsProblem: true);
@@ -639,6 +639,7 @@
         {
             await using var scope = Scopes.CreateAsyncScope();
             var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
+            await scope.ServiceProvider.GetRequiredService<RepositoryFilesService>().CheckAllAsync();
             if (await drift.NewestFirstPartyReleaseIdAsync() is { } releaseId)
             {
                 await drift.ScanForReleaseAsync(releaseId);
@@ -647,7 +648,6 @@
             {
                 _error = "app.json versions were not compared: no Business Central release has been imported into the Object Explorer yet.";
             }
-            await scope.ServiceProvider.GetRequiredService<RepositoryFilesService>().CheckAllAsync();
         }
         catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
         {

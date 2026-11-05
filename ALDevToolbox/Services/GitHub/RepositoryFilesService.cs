@@ -97,10 +97,13 @@ public sealed class RepositoryFilesService
     /// </summary>
     public async Task<RepositoryCheckOutcome> CheckRepositoryAsync(string repository, CancellationToken ct = default)
     {
-        RequireOrganizationId();
+        var orgId = RequireOrganizationId();
         var fullName = DependencyDriftService.ToFullName($"https://github.com/{repository}") ?? repository;
         if (!(await _drift.VisibleRepositoryNamesAsync(ct)).Contains(fullName)) return RepositoryCheckOutcome.NotTracked;
 
+        // One reader per organisation at a time, shared with the drift scan, so two
+        // people checking at once wait for each other rather than collide on the row.
+        using var gate = await DependencyDriftService.ScanGate.EnterAsync(orgId, ct);
         var status = await _connection.GetStatusAsync(ct);
         if (status.InstallationId is not { } installationId || string.IsNullOrWhiteSpace(status.OrgLogin))
         {
@@ -130,6 +133,7 @@ public sealed class RepositoryFilesService
     public async Task<int> CheckAllAsync(CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
+        using var gate = await DependencyDriftService.ScanGate.EnterAsync(orgId, ct);
         var status = await _connection.GetStatusAsync(ct);
         if (status.InstallationId is not { } installationId || string.IsNullOrWhiteSpace(status.OrgLogin)) return 0;
 
@@ -181,6 +185,17 @@ public sealed class RepositoryFilesService
         if (token is null)
         {
             return new WorkspaceFilesPullRequest(null, false, 0, DependencyDriftService.ReadinessRefusal(readiness));
+        }
+        // The same repositories a check reads: confirmed, and in the connected GitHub
+        // organisation. Anything else is not the organisation's to write its standards into.
+        var status = await _connection.GetStatusAsync(ct);
+        var tracked = string.IsNullOrWhiteSpace(status.OrgLogin)
+            ? []
+            : await _drift.TrackedRepositoryNamesAsync(status.OrgLogin!, ct);
+        if (!tracked.Contains(fullName, StringComparer.OrdinalIgnoreCase))
+        {
+            return new WorkspaceFilesPullRequest(null, false, 0,
+                "Nobody has confirmed AL Workbench may use this repository, or it is outside your organisation's GitHub. Open the solution's Repositories tab to confirm it.");
         }
 
         try
@@ -238,7 +253,7 @@ public sealed class RepositoryFilesService
             }
         }
 
-        var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, Branch, ct);
+        var open = await FindOpenAsync(token, repo, ct);
         return new GitHubRepositoryFileCheck
         {
             OrganizationId = RequireOrganizationId(),
@@ -409,7 +424,13 @@ public sealed class RepositoryFilesService
         {
             // The name it was written under when the repository was made, which the
             // organisation's folder style may no longer produce (#1615).
-            var path = string.IsNullOrWhiteSpace(import.CodeWorkspaceFileName) ? codeWorkspace : import.CodeWorkspaceFileName;
+            // Only a workspace file at the root: the saved settings are the repository's
+            // own text, and must not point the merge at some other JSON file.
+            var savedName = import.CodeWorkspaceFileName;
+            var path = !string.IsNullOrWhiteSpace(savedName) && !savedName.Contains('/') && !savedName.Contains('\\')
+                && savedName.EndsWith(".code-workspace", StringComparison.Ordinal)
+                ? savedName
+                : codeWorkspace;
             var current = await _github.GetFileAsync(token, repo.Owner, repo.Name, path, repo.DefaultBranch, ct);
             // Only compared when the repository has one: a workspace saved under a name
             // nobody can work out is not one to plant a second copy beside.
@@ -441,10 +462,10 @@ public sealed class RepositoryFilesService
 
     private async Task<WorkspaceFilesPullRequest> OpenAsync(string token, GitHubRepositorySummary repo, CancellationToken ct)
     {
-        var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, Branch, ct);
+        var (branch, open) = await ChooseBranchAsync(token, repo, ct);
         var parent = open is not null
-            ? await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, Branch, ct)
-                ?? throw Refuse($"Pull request #{open.Number} says it comes from {Branch}, but that branch is gone. Close the pull request on GitHub, then try again.")
+            ? await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct)
+                ?? throw Refuse($"Pull request #{open.Number} says it comes from {branch}, but that branch is gone. Close the pull request on GitHub, then try again.")
             : await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, repo.DefaultBranch, ct)
                 ?? throw Refuse($"'{repo.FullName}' has no commits on {repo.DefaultBranch} yet, so there is nothing to update.");
 
@@ -475,36 +496,64 @@ public sealed class RepositoryFilesService
 
         if (open is null)
         {
-            // A branch left behind by a merged or closed pull request is started again
-            // from the default branch: what it held has been answered.
-            var moved = await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, Branch, ct) is null
-                ? await _github.CreateBranchAsync(token, repo.Owner, repo.Name, Branch, commit, ct)
-                : await ResetAsync(token, repo, commit, ct);
-            if (!moved)
+            if (!await _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct))
             {
-                throw Refuse($"Branch {Branch} on '{repo.FullName}' changed while this was being prepared. Try again.");
+                throw Refuse($"Branch {branch} appeared on '{repo.FullName}' while this was being prepared. Try again and the workbench will pick the next name.");
             }
             var created = await _github.CreatePullRequestAsync(
                 token, repo.Owner, repo.Name,
                 title: PullRequestTitle,
-                head: Branch,
+                head: branch,
                 baseBranch: repo.DefaultBranch,
                 body: Body(written),
                 ct);
             return new WorkspaceFilesPullRequest(created, true, written.Count, null);
         }
 
-        if (!await _github.UpdateBranchAsync(token, repo.Owner, repo.Name, Branch, commit, ct))
+        if (!await _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct))
         {
-            throw Refuse($"Branch {Branch} on '{repo.FullName}' moved on while this was being prepared, so nothing was committed. Try again.");
+            throw Refuse($"Branch {branch} on '{repo.FullName}' moved on while this was being prepared, so nothing was committed. Try again.");
         }
         return new WorkspaceFilesPullRequest(open, false, written.Count, null);
     }
 
-    private async Task<bool> ResetAsync(string token, GitHubRepositorySummary repo, string commit, CancellationToken ct)
+    private const int MaxBranchAttempts = 5;
+
+    /// <summary>
+    /// The branch the update belongs on: <see cref="Branch"/>, then <c>-2</c>, <c>-3</c>...
+    /// until one has a pull request open (join it) or does not exist (start it). A branch
+    /// with no open pull request is somebody's - a closed review kept for more work, say -
+    /// so it is stepped past, never reset.
+    /// </summary>
+    private async Task<(string Branch, GitHubPullRequest? Open)> ChooseBranchAsync(
+        string token, GitHubRepositorySummary repo, CancellationToken ct)
     {
-        await _github.ResetBranchAsync(token, repo.Owner, repo.Name, Branch, commit, ct);
-        return true;
+        for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
+        {
+            var branch = attempt == 1 ? Branch : $"{Branch}-{attempt}";
+            if (await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct) is { } open)
+            {
+                return (branch, open);
+            }
+            if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is null)
+            {
+                return (branch, null);
+            }
+        }
+        throw Refuse(
+            $"'{repo.FullName}' already has branches named {Branch} through {Branch}-{MaxBranchAttempts}, and none of them has a pull request open. Tidy those up on GitHub, then try again.");
+    }
+
+    /// <summary>The open workspace files pull request, on whichever branch name it ended up.</summary>
+    private async Task<GitHubPullRequest?> FindOpenAsync(string token, GitHubRepositorySummary repo, CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
+        {
+            var branch = attempt == 1 ? Branch : $"{Branch}-{attempt}";
+            if (await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct) is { } open) return open;
+            if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is null) return null;
+        }
+        return null;
     }
 
     private static string Body(IReadOnlyList<string> paths)
