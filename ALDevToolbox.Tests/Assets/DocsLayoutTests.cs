@@ -5,15 +5,16 @@ namespace ALDevToolbox.Tests.Assets;
 
 /// <summary>
 /// Guards the width decisions in the content archetype (divergences 72, 73
-/// and 75), both raised by the maintainer looking at rendered pages.
+/// and 75), all raised by the maintainer looking at rendered pages.
 ///
-/// <para>The pair is worth reading together, because they pull opposite ways and
+/// <para>They are worth reading together, because they pull opposite ways and
 /// the reason is the same one. A reading measure belongs to <b>prose</b>. On
 /// <c>/tools/mcp</c> the measure had been put on the step <i>list</i>, which also
 /// holds a two-up card row, a token field and JSON config - so the container was
 /// held to 82ch and the UI inside it was crushed. On <c>/docs/mcp</c> the column
 /// really is all prose, so the measure is right and it was the grid around it
-/// that was wrong.</para>
+/// that was wrong. Divergence 75 extends the first case to <c>.note</c>: a box
+/// in a page layout fills its container.</para>
 /// </summary>
 public sealed class DocsLayoutTests
 {
