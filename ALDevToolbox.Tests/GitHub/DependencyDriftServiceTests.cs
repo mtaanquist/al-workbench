@@ -1297,6 +1297,45 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Checking_again_stops_calling_a_pull_request_open_once_it_was_closed_on_GitHub()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        await SeedReleaseAsync();
+        await using (var seed = _db.NewContext())
+        {
+            seed.GitHubUpdatePullRequests.AddRange(
+                new GitHubUpdatePullRequest
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Repository = RepoA, Version = "28.2",
+                    PullRequestNumber = 7, HtmlUrl = $"https://github.com/{RepoA}/pull/7", OpenedAt = DateTime.UtcNow,
+                },
+                new GitHubUpdatePullRequest
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Repository = RepoA, Version = "28.1",
+                    PullRequestNumber = 5, HtmlUrl = $"https://github.com/{RepoA}/pull/5", OpenedAt = DateTime.UtcNow,
+                });
+            await seed.SaveChangesAsync();
+        }
+        var api = BaseApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", CurrentManifest))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/7", HttpStatusCode.OK, """{"number":7,"state":"closed"}""")
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/5", HttpStatusCode.OK, """{"number":5,"state":"open"}""")
+            .On(HttpMethod.Get, $"/repos/{RepoA}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(RepoA));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.Checked);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubUpdatePullRequests.Where(p => p.SupersededAt == null).Select(p => p.PullRequestNumber).ToListAsync())
+            .Should().Equal(5);
+    }
+
+    [Fact]
     public async Task A_repository_of_a_solution_the_viewer_cannot_see_is_not_checked_for_them()
     {
         await ReadyAsync();

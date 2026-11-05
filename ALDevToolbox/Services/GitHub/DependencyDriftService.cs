@@ -361,6 +361,7 @@ public sealed class DependencyDriftService
                 var scanned = await ScanRepositoryAsync(orgId, token, repo, release, target, catalogue, ct);
                 findings.AddRange(scanned.Findings);
                 checks.Add(scanned.Check);
+                await ForgetClosedPullRequestsAsync(token, repo.FullName, ct);
             }
             catch (Exception ex) when (ex is GitHubApiException or HttpRequestException or TaskCanceledException)
             {
@@ -744,6 +745,41 @@ public sealed class DependencyDriftService
     }
 
     /// <summary>
+    /// Marks the update pull requests recorded for <paramref name="repository"/> that
+    /// someone has since merged or closed on GitHub, so the Repositories list stops
+    /// calling them open and offers to create a new one (issue #1719). Saved by the
+    /// caller. A pull request GitHub cannot answer about keeps its record until the
+    /// next check.
+    /// </summary>
+    private async Task ForgetClosedPullRequestsAsync(string token, string repository, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        var records = await _db.GitHubUpdatePullRequests
+            .Where(r => r.Repository == key && r.SupersededAt == null)
+            .ToListAsync(ct);
+        if (records.Count == 0) return;
+
+        var parts = repository.Split('/');
+        foreach (var record in records)
+        {
+            try
+            {
+                if (!await _github.IsPullRequestOpenAsync(token, parts[0], parts[1], record.PullRequestNumber, ct))
+                {
+                    record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
+                }
+            }
+            catch (Exception ex) when (ex is GitHubApiException or HttpRequestException
+                                       || (ex is TaskCanceledException && !ct.IsCancellationRequested))
+            {
+                _logger.LogWarning(ex,
+                    "Could not read pull request #{PullRequestNumber} on {RepoFullName}; it is still shown as open.",
+                    record.PullRequestNumber, repository);
+            }
+        }
+    }
+
+    /// <summary>
     /// Reads one repository again and replaces what is stored about it - its findings
     /// and its check - leaving every other repository as the last scan saw it. What the
     /// Repositories list's "Check again" on a row does (issue #1719).
@@ -801,6 +837,11 @@ public sealed class DependencyDriftService
         var target = new DriftTarget(environment.Version, PlatformFor(environment.Version), environment.Id);
         var scanned = await ScanRepositoryAsync(orgId, token, repo, release, target, catalogue, ct);
 
+        await ForgetClosedPullRequestsAsync(token, fullName, ct);
+
+        // One transaction, so a save that fails part-way cannot leave the repository
+        // with its findings gone and its old check still saying what it was on.
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         _db.GitHubRepositoryDrift.RemoveRange(oldFindings);
         await _db.SaveChangesAsync(ct);
         _db.GitHubRepositoryDrift.AddRange(scanned.Findings
@@ -808,6 +849,7 @@ public sealed class DependencyDriftService
             .Select(g => g.First()));
         await _db.SaveChangesAsync(ct);
         await ReplaceChecksAsync([scanned.Check], fullName, ct);
+        await transaction.CommitAsync(ct);
 
         _logger.LogInformation(
             "Checked {RepoFullName} again for organisation {OrgId}: {FindingCount} findings.",

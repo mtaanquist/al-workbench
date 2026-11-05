@@ -518,6 +518,11 @@
             Logger.LogWarning(ex, "Could not check {Repository} again.", row.FullName);
             _results[row.RepositoryId] = new RowResult("Could not reach GitHub just now. Try again in a moment.", null, IsProblem: true);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogError(ex, "Checking {Repository} again failed.", row.FullName);
+            _results[row.RepositoryId] = new RowResult("The check did not finish, so nothing was changed. Try again in a moment.", null, IsProblem: true);
+        }
         finally
         {
             _busy = false;
@@ -560,6 +565,11 @@
         {
             Logger.LogWarning(ex, "Could not check the repositories again.");
             _error = "AL Workbench could not reach GitHub just now, so nothing was changed. Try again in a moment.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogError(ex, "Checking the repositories again failed.");
+            _error = "The check did not finish, so the list may be out of date. Try again in a moment.";
         }
         finally
         {
