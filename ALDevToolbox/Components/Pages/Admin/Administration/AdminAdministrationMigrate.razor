@@ -454,7 +454,7 @@
                 _addTemplateExtensions = _preview.AddTemplateExtensions;
             }
         }
-        _history = await Migration.ListHistoryAsync(_historySearch, _historyTake);
+        _history = await Db(() => Migration.ListHistoryAsync(_historySearch, _historyTake));
         await PrepareCreateAsync();
         if (_customerName.Length > 0) _nameClash = await Db(() => Migration.FindSolutionClashAsync(_customerName));
         _loading = false;
@@ -482,6 +482,8 @@
         _nameCheck?.Dispose();
         var check = _nameCheck = new CancellationTokenSource();
         var name = _customerName.Trim();
+        // What was said about the last name no longer holds for this one.
+        if (_nameClash is not null && !string.Equals(_nameClash.Name, name, StringComparison.OrdinalIgnoreCase)) _nameClash = null;
         try
         {
             if (name.Length > 0) await Task.Delay(NameCheckDelay, check.Token);
@@ -535,8 +537,14 @@
             Nav.NavigateTo("/admin/administration/repositories/migrate", replace: true);
         }
         _customerName = row.CustomerName;
-        _shortName = row.ShortName ?? string.Empty;
-        _addTemplateExtensions = row.AddTemplateExtensions;
+        _nameClash = null;
+        // Runs recorded before the short name and the switch were kept (#1706) say
+        // nothing about them, so the fields are left as they are rather than cleared.
+        if (row.SourceRepositoryIds.Count > 0)
+        {
+            _shortName = row.ShortName ?? string.Empty;
+            _addTemplateExtensions = row.AddTemplateExtensions;
+        }
         if (_templates.Any(t => t.Key == row.TemplateKey)) _templateKey = row.TemplateKey;
         _projectAddress = row.SourceProjectUrl;
         await ListAsync();

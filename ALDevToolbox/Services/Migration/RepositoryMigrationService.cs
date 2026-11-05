@@ -238,7 +238,7 @@ public sealed class RepositoryMigrationService
         var rows = await query
             .OrderByDescending(m => m.CreatedAt)
             .ThenByDescending(m => m.Id)
-            .Take(Math.Clamp(take, 1, 1000))
+            .Take(Math.Max(take, 1))
             .Select(m => new
             {
                 m.Id, m.CreatedAt, m.CustomerName, m.ShortName, m.SourceProject, m.SourceProjectUrl, m.SourceRepositoryIds,
