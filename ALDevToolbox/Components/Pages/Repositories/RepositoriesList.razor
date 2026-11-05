@@ -1,0 +1,587 @@
+@page "/repositories"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@rendermode InteractiveServer
+@inject IServiceScopeFactory Scopes
+@inject ILogger<RepositoriesList> Logger
+@using ALDevToolbox.Components.Pages.Projects
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.GitHub
+@using ALDevToolbox.Services.Organizations
+@using Microsoft.Extensions.DependencyInjection
+
+@*
+    Every repository on a solution the viewer can see, in one table (issue #1719):
+    which solution it belongs to, how its last build went, what Business Central the
+    customer runs, and whether its app.json has caught up - with the pull request
+    that moves it on a row's menu.
+
+    Named user: a lead developer keeping the customers' repositories current, who
+    wants to see at a glance which ones are behind and fix them without opening each
+    one. The Solutions list used to carry this as a card above the list; it moved
+    here because most people opening Solutions are looking up a customer.
+
+    Archetype 2a (cross-solution list, live data), like Environments beside it in the
+    sidebar. The rows come from the database - what GitHub said comes from the last
+    scan - so a slow GitHub cannot hold the page up. Only the row actions and the
+    page's Check again call GitHub.
+
+    See .design/github-integration-phase2.md, "The Repositories list".
+*@
+
+<PageTitle>Repositories · AL Workbench</PageTitle>
+
+@{
+    var shown = Filtered().ToList();
+    // Rows already in review are left out: their pull request is linked on the row.
+    var behind = shown.Where(r => r.HasAppJsonUpdate && r.FullName is not null && r.PullRequest is null).ToList();
+}
+
+<ListPage Title="Repositories" Sticky="true"
+          Subtitle="Every repository on the solutions you can see, and whether it has caught up with what the customer runs."
+          IsLoading="@(_rows is null)"
+          IsEmpty="@(_loadFailed || _rows is { Count: 0 })"
+          HasNoMatches="@(shown.Count == 0)"
+          Trail='@([new("Home", "/"), new("Solutions", "/solutions"), new("Repositories")])'>
+    <Actions>
+        @if (_canUseGitHub && _rows is { Count: > 0 })
+        {
+            <button type="button" class="btn" disabled="@(_busy || behind.Count == 0)" @onclick="() => OpenAsync(behind)"
+                    title="@(behind.Count == 0 ? "Nothing shown needs a new update pull request" : null)">
+                <Icon Name="git-pull-request" Width="15" Height="15" />
+                <span>@(_openingAll ? "Creating..." : behind.Count == 0 ? "Create update pull requests" : $"Create {behind.Count} update pull request{(behind.Count == 1 ? "" : "s")}")</span>
+            </button>
+        }
+    </Actions>
+    <Notices>
+        @* Repositories in the GitHub organisation that no solution has yet. It moved
+           here from the Solutions list with the update card: both are about
+           repositories, not customers. Silent unless it has something to say. *@
+        <UntrackedRepositoriesPanel />
+
+        @if (_rows is { Count: > 0 } && GitHubNotice() is { } notice)
+        {
+            <p class="note note--info">
+                <span class="note__icon"><Icon Name="info" Width="17" Height="17" /></span>
+                <span class="note__body">
+                    @notice.Text
+                    @if (notice.Href is { } href)
+                    {
+                        <text> </text><a href="@href">@notice.LinkText</a>
+                    }
+                </span>
+            </p>
+        }
+
+        @if (_error is { } error)
+        {
+            <Alert Tone="AlertTone.Warn" Role="alert"><span>@error</span></Alert>
+        }
+
+        @if (_rows is { Count: > 0 } && _canUseGitHub)
+        {
+            <div class="freshness">
+                <Icon Name="cloud-download" Width="15" Height="15" Css="freshness__icon" />
+                <span class="freshness__text">
+                    @if (_rows.Max(r => r.CheckedAt) is { } checkedAt)
+                    {
+                        <text>app.json versions last read from GitHub <Timestamp Value="@checkedAt" Relative="true" />.</text>
+                    }
+                    else
+                    {
+                        <text>app.json versions not read from GitHub yet.</text>
+                    }
+                </span>
+                <span class="freshness__spacer"></span>
+                <button type="button" class="btn btn--sm @(_checkingAll ? "btn--loading" : "")"
+                        disabled="@_busy" @onclick="CheckAllAsync" data-page-refresh>
+                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                    <span class="btn__label">@(_checkingAll ? "Checking" : "Check all again")</span>
+                </button>
+            </div>
+        }
+    </Notices>
+    <Loading>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Repository</th><th>Solution</th><th>Last build</th><th>BC version</th><th>app.json</th><th class="data-table__actions">Actions</th>
+                </tr>
+            </thead>
+            <tbody><TableSkeletonRows Columns="6" StateColumn="false" /></tbody>
+        </table>
+        <LoadingBlock Text="Loading repositories..." UnderTable="true" />
+    </Loading>
+    <Empty>
+        <div class="card">
+            @if (_loadFailed)
+            {
+                <EmptyState Icon="circle-alert" Title="Couldn't load your repositories">
+                    <Text>Something went wrong at our end. Try again in a moment.</Text>
+                    <Action>
+                        <button type="button" class="btn" @onclick="LoadAsync">Try again</button>
+                    </Action>
+                </EmptyState>
+            }
+            else
+            {
+                <EmptyState Icon="folder-git-2" Title="No repositories yet">
+                    <Text>
+                        Repositories appear here once a solution has one. Open a solution and add
+                        its repositories on the Repositories tab.
+                    </Text>
+                    <Action>
+                        <a class="btn" href="/solutions">Go to solutions</a>
+                    </Action>
+                </EmptyState>
+            }
+        </div>
+    </Empty>
+    <Search>
+        <input class="input" type="search" placeholder="Repository or solution"
+               aria-label="Search repository or solution"
+               aria-keyshortcuts="F3" title="Search repository or solution (F3)"
+               @bind="_search" @bind:event="oninput" />
+    </Search>
+    <Trailing>
+        <div class="pill-tabs" role="tablist" aria-label="Show">
+            <button type="button" class="pill-tab @(!_onlyUpdates ? "is-active" : "")" role="tab"
+                    aria-selected="@(!_onlyUpdates ? "true" : "false")" @onclick="() => _onlyUpdates = false">
+                All<span class="pill-tab__count">@(_rows?.Count ?? 0)</span>
+            </button>
+            <button type="button" class="pill-tab @(_onlyUpdates ? "is-active" : "")" role="tab"
+                    aria-selected="@(_onlyUpdates ? "true" : "false")" @onclick="() => _onlyUpdates = true">
+                Updates available<span class="pill-tab__count">@(_rows?.Count(r => r.HasAppJsonUpdate) ?? 0)</span>
+            </button>
+        </div>
+    </Trailing>
+    <NoMatches>
+        <div class="card">
+            @if (_onlyUpdates && string.IsNullOrWhiteSpace(_search))
+            {
+                <EmptyState Icon="circle-check" Title="Every repository is up to date">
+                    <Text>No repository's app.json asks for an older Business Central than its customer runs.</Text>
+                    <Action>
+                        <button type="button" class="btn" @onclick="() => _onlyUpdates = false">Show all repositories</button>
+                    </Action>
+                </EmptyState>
+            }
+            else
+            {
+                <EmptyState Icon="funnel-x" Title="No repositories match">
+                    <Text>Try a shorter search term, or clear it to see all @(_rows?.Count ?? 0).</Text>
+                    <Action>
+                        <button type="button" class="btn" @onclick="ClearFilters">Show all repositories</button>
+                    </Action>
+                </EmptyState>
+            }
+        </div>
+    </NoMatches>
+    <ChildContent>
+        @* Scrolls on its own on a narrow screen rather than pushing the page sideways;
+           the build column is the one a phone drops. *@
+        <div class="repos__scroll">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th scope="col">Repository</th>
+                    <th scope="col">Solution</th>
+                    <th scope="col" class="repos__build-col">Last build</th>
+                    <th scope="col">BC version</th>
+                    <th scope="col">app.json</th>
+                    <th scope="col" class="data-table__actions">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in shown)
+                {
+                    <tr @key="row.RepositoryId">
+                        <td>
+                            <span class="cell-stack">
+                                @* The name alone: every repository of one GitHub organisation
+                                   shares the owner, and on a phone "owner/..." is all that fit. *@
+                                <span class="cell-stack__main">
+                                    <a href="@row.HtmlUrl" target="_blank" rel="noopener" title="@row.Repository">@ShortName(row)</a>
+                                </span>
+                                @if (_results.TryGetValue(row.RepositoryId, out var result))
+                                {
+                                    <span class="cell-stack__sub @(result.IsProblem ? "repos__problem" : "")" role="@(result.IsProblem ? "alert" : null)">
+                                        @if (result.Href is { } href)
+                                        {
+                                            <a href="@href" target="_blank" rel="noopener">@result.Text</a>
+                                        }
+                                        else
+                                        {
+                                            @result.Text
+                                        }
+                                    </span>
+                                }
+                            </span>
+                        </td>
+                        <td>
+                            <a href="@row.SolutionHref">@row.SolutionName</a>
+                            @if (row.SolutionShortName is { } shortName)
+                            {
+                                <span class="sol-list__short" title="Short name">@shortName</span>
+                            }
+                        </td>
+                        <td class="repos__build-col">
+                            @if (row.LastBuild is { } build)
+                            {
+                                <a class="@(build.Status == ProjectBuildStatus.Ready ? "repos__build repos__build--ready" : build.Status == ProjectBuildStatus.Failed ? "repos__build repos__build--failed" : "repos__build")" href="@build.Href">
+                                    <Icon Name="@BuildIcon(build.Status)" Width="14" Height="14" />
+                                    <span>@BuildVerb(build.Status) <Timestamp Value="@build.At" Relative="true" /></span>
+                                </a>
+                            }
+                            else
+                            {
+                                <span class="u-muted">No builds yet</span>
+                            }
+                        </td>
+                        <td class="u-num">
+                            @if (row.BcVersion is { } version)
+                            {
+                                <span class="cell-stack">
+                                    <span class="cell-stack__main">@version</span>
+                                    <span class="cell-stack__sub">@row.Environment!.Name</span>
+                                </span>
+                            }
+                            else
+                            {
+                                <a class="u-muted" href="@($"{row.SolutionHref}/bc")">No environment</a>
+                            }
+                        </td>
+                        <td class="u-num">
+                            @AppJsonCell(row)
+                        </td>
+                        <td class="data-table__actions">
+                            <RowActions Label="@($"Actions for {row.Repository}")">
+                                @if (_canUseGitHub && row.FullName is not null && row.HasAppJsonUpdate)
+                                {
+                                    <button type="button" class="menu__item" role="menuitem" disabled="@_busy"
+                                            @onclick="() => OpenAsync([row])">@(row.PullRequest is null ? "Create update pull request" : "Update the open pull request")</button>
+                                }
+                                @if (_canUseGitHub && row.FullName is not null)
+                                {
+                                    <button type="button" class="menu__item" role="menuitem" disabled="@_busy"
+                                            @onclick="() => CheckAsync(row)">Check again</button>
+                                }
+                                <a class="menu__item" role="menuitem" href="@row.HtmlUrl" target="_blank" rel="noopener">Open repository</a>
+                                <a class="menu__item" role="menuitem" href="@row.SolutionHref">Open solution</a>
+                            </RowActions>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        </div>
+    </ChildContent>
+    <Footer>
+        <div class="pager">
+            <span class="pager__count">
+                @(shown.Count == _rows!.Count
+                    ? $"{shown.Count} {(shown.Count == 1 ? "repository" : "repositories")}"
+                    : $"Showing {shown.Count} of {_rows.Count} repositories")
+            </span>
+        </div>
+    </Footer>
+</ListPage>
+
+@code {
+    private List<RepositoryListRow>? _rows;
+    private bool _loadFailed;
+    private bool _canUseGitHub;
+    private GitHubRepositoryReadiness? _readiness;
+    private bool _busy;
+    private bool _openingAll;
+    private bool _checkingAll;
+    private bool _onlyUpdates;
+    private string _search = string.Empty;
+    private string? _error;
+
+    /// <summary>What the last action on a row came to, shown under its name until the next one.</summary>
+    private sealed record RowResult(string Text, string? Href, bool IsProblem);
+
+    private readonly Dictionary<int, RowResult> _results = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loadFailed = false;
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var services = scope.ServiceProvider;
+            _rows = await services.GetRequiredService<RepositoryListService>().GetAsync();
+            _canUseGitHub = await CanUseGitHubAsync(services);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load the repository list.");
+            _rows ??= [];
+            _loadFailed = true;
+        }
+    }
+
+    /// <summary>
+    /// The row actions open pull requests and read GitHub as this person, so they show
+    /// only when the organisation allows GitHub and the person has linked their account.
+    /// </summary>
+    private async Task<bool> CanUseGitHubAsync(IServiceProvider services)
+    {
+        try
+        {
+            var policy = services.GetRequiredService<RepositoryProviderPolicyService>();
+            if (!(await policy.GetAllowedProvidersAsync()).Contains(RepositoryProvider.GitHub)) return false;
+            var access = await services.GetRequiredService<GitHubRepositoryService>().GetAccessAsync();
+            _readiness = access.Readiness;
+            return access.IsReady;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not tell whether the repository list can act on GitHub.");
+            return false;
+        }
+    }
+
+    private sealed record Notice(string Text, string? Href, string? LinkText);
+
+    /// <summary>
+    /// Why the GitHub actions are missing, when they are and the person can do something
+    /// about it. Null when they are there, or the organisation does not use GitHub.
+    /// </summary>
+    private Notice? GitHubNotice() => _readiness switch
+    {
+        GitHubRepositoryReadiness.NotLinked => new(
+            "Connect your GitHub account to create update pull requests and check repositories from here.",
+            "/account/repos", "Connect GitHub"),
+        GitHubRepositoryReadiness.LinkNeedsRepair => new(
+            "Your GitHub connection has stopped working. Connect it again to create update pull requests from here.",
+            "/account/repos", "Connect GitHub"),
+        GitHubRepositoryReadiness.NotConnected or GitHubRepositoryReadiness.NotConfigured => new(
+            "This organisation has not connected GitHub yet, so pull requests cannot be created from here. An admin can connect it under Administration.",
+            null, null),
+        _ => null,
+    };
+
+    private IEnumerable<RepositoryListRow> Filtered()
+    {
+        if (_rows is null) return [];
+        IEnumerable<RepositoryListRow> rows = _rows;
+        if (_onlyUpdates) rows = rows.Where(r => r.HasAppJsonUpdate);
+        var term = _search.Trim();
+        if (term.Length > 0)
+        {
+            rows = rows.Where(r =>
+                r.Repository.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || r.SolutionName.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || (r.SolutionShortName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false));
+        }
+        return rows;
+    }
+
+    private static string ShortName(RepositoryListRow row) =>
+        row.FullName is { } full ? full[(full.IndexOf('/') + 1)..] : row.Repository;
+
+    private void ClearFilters()
+    {
+        _search = string.Empty;
+        _onlyUpdates = false;
+    }
+
+    private RenderFragment AppJsonCell(RepositoryListRow row) => __builder =>
+    {
+        if (row.FullName is null)
+        {
+            <span class="u-muted">Not on GitHub</span>
+        }
+        else if (row.AppJsonApplication is null && !row.HasAppJsonUpdate)
+        {
+            <span class="u-muted">@(row.Environment is null ? "Needs an environment" : "Not checked yet")</span>
+        }
+        else
+        {
+            <span class="cell-stack">
+                <span class="cell-stack__main">@(row.AppJsonApplication ?? CurrentFromChanges(row) ?? "—")</span>
+                @if (row.PullRequest is { } pull)
+                {
+                    <a class="cell-stack__sub repos__pr" href="@pull.HtmlUrl" target="_blank" rel="noopener">
+                        <Icon Name="git-pull-request" Width="13" Height="13" />
+                        <span>Pull request #@pull.Number open</span>
+                    </a>
+                }
+                else if (row.HasAppJsonUpdate)
+                {
+                    <span class="cell-stack__sub repos__warn" title="@UpdateSummary(row)">
+                        <Icon Name="triangle-alert" Width="13" Height="13" />
+                        <span>@UpdateLabel(row)</span>
+                    </span>
+                }
+            </span>
+        }
+    };
+
+    /// <summary>A repository checked before the scan stored versions still says what it is on through its findings.</summary>
+    private static string? CurrentFromChanges(RepositoryListRow row) =>
+        row.Changes
+            .Where(c => c.Field == DependencyDriftService.ApplicationField)
+            .Select(c => ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.ToMajorMinor(c.Current))
+            .FirstOrDefault();
+
+    /// <summary>The short visible words under a version that is behind: "Update to 29.0".</summary>
+    private static string UpdateLabel(RepositoryListRow row) =>
+        row.Changes
+            .Where(c => c.Field == DependencyDriftService.ApplicationField)
+            .Select(c => $"Update to {ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.ToMajorMinor(c.Proposed)}")
+            .FirstOrDefault() ?? "Update available";
+
+    /// <summary>The warning's tooltip: everything an update pull request would change.</summary>
+    private static string UpdateSummary(RepositoryListRow row) =>
+        "Update available: " + string.Join("; ", row.Changes
+            .Select(c => $"{c.Label} {c.Current} to {c.Proposed}")
+            .Distinct());
+
+    private static string BuildVerb(string status) => status switch
+    {
+        ProjectBuildStatus.Ready => "Built",
+        ProjectBuildStatus.Failed => "Failed",
+        ProjectBuildStatus.Building => "Building, started",
+        _ => "Queued",
+    };
+
+    private static string BuildIcon(string status) => status switch
+    {
+        ProjectBuildStatus.Ready => "circle-check",
+        ProjectBuildStatus.Failed => "circle-x",
+        _ => "clock",
+    };
+
+    private async Task OpenAsync(IReadOnlyList<RepositoryListRow> rows)
+    {
+        var targets = rows.Where(r => r.FullName is not null).ToList();
+        if (targets.Count == 0) return;
+        _busy = true;
+        _openingAll = targets.Count > 1;
+        _error = null;
+        StateHasChanged();
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
+            var results = await drift.OpenUpdatePullRequestsAsync(targets.Select(r => r.FullName!).ToList());
+            foreach (var row in targets)
+            {
+                var result = results.FirstOrDefault(r => string.Equals(r.Repository, row.FullName, StringComparison.OrdinalIgnoreCase));
+                if (result is null) continue;
+                _results[row.RepositoryId] = result.PullRequest is { } pull
+                    ? new RowResult(
+                        $"{(result.IsNewPullRequest ? "Pull request opened" : "Added to the open pull request")} (#{pull.Number})",
+                        pull.HtmlUrl, IsProblem: false)
+                    : new RowResult(result.Refusal ?? "Nothing was opened.", null, IsProblem: !result.IsUpToDate);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not open the update pull requests.");
+            _error = "AL Workbench could not reach GitHub just now, so nothing was opened. Try again in a moment.";
+        }
+        finally
+        {
+            _busy = false;
+            _openingAll = false;
+        }
+        await ReloadKeepingResultsAsync();
+    }
+
+    private async Task CheckAsync(RepositoryListRow row)
+    {
+        _busy = true;
+        _error = null;
+        _results.Remove(row.RepositoryId);
+        StateHasChanged();
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
+            var outcome = await drift.CheckRepositoryAsync(row.FullName!);
+            if (CheckOutcomeText(outcome) is { } text)
+            {
+                _results[row.RepositoryId] = new RowResult(text, null, IsProblem: true);
+            }
+        }
+        catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
+        {
+            Logger.LogWarning(ex, "Could not check {Repository} again.", row.FullName);
+            _results[row.RepositoryId] = new RowResult("Could not reach GitHub just now. Try again in a moment.", null, IsProblem: true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogError(ex, "Checking {Repository} again failed.", row.FullName);
+            _results[row.RepositoryId] = new RowResult("The check did not finish, so nothing was changed. Try again in a moment.", null, IsProblem: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+        await ReloadKeepingResultsAsync();
+    }
+
+    /// <summary>What to say under a row when its check did not read it. Null when it did.</summary>
+    private static string? CheckOutcomeText(RepositoryCheckOutcome outcome) => outcome switch
+    {
+        RepositoryCheckOutcome.Checked => null,
+        RepositoryCheckOutcome.NoEnvironment => "Not compared: the solution has no Business Central environment yet.",
+        RepositoryCheckOutcome.NoRelease => "Not compared: no Business Central release has been imported into the Object Explorer yet.",
+        RepositoryCheckOutcome.NotConnected => "Not read: the organisation has not connected GitHub.",
+        RepositoryCheckOutcome.NotReadable => "Not read: AL Workbench cannot open this repository on GitHub.",
+        _ => "Not read: nobody has confirmed AL Workbench may read this repository. Open the solution's Repositories tab to confirm it.",
+    };
+
+    private async Task CheckAllAsync()
+    {
+        _busy = true;
+        _checkingAll = true;
+        _error = null;
+        _results.Clear();
+        StateHasChanged();
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
+            if (await drift.NewestFirstPartyReleaseIdAsync() is { } releaseId)
+            {
+                await drift.ScanForReleaseAsync(releaseId);
+            }
+            else
+            {
+                _error = "Nothing was compared: no Business Central release has been imported into the Object Explorer yet.";
+            }
+        }
+        catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
+        {
+            Logger.LogWarning(ex, "Could not check the repositories again.");
+            _error = "AL Workbench could not reach GitHub just now, so nothing was changed. Try again in a moment.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogError(ex, "Checking the repositories again failed.");
+            _error = "The check did not finish, so the list may be out of date. Try again in a moment.";
+        }
+        finally
+        {
+            _busy = false;
+            _checkingAll = false;
+        }
+        await ReloadKeepingResultsAsync();
+    }
+
+    private async Task ReloadKeepingResultsAsync()
+    {
+        await LoadAsync();
+        StateHasChanged();
+    }
+}

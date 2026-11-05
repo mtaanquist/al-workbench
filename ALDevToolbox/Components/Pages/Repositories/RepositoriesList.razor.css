@@ -1,0 +1,48 @@
+/* The Repositories list. The table, pills and freshness strip are the design
+   system's; what is local is the inline state of the build and app.json cells. */
+
+.repos__build {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--ink-2);
+    text-decoration: none;
+}
+
+.repos__build:hover {
+    text-decoration: underline;
+}
+
+.repos__build--ready {
+    color: var(--success-text);
+}
+
+.repos__build--failed {
+    color: var(--danger-text);
+}
+
+.repos__warn,
+.repos__pr {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+}
+
+.repos__warn {
+    color: var(--warning-text);
+}
+
+.repos__problem {
+    color: var(--danger-text);
+}
+
+.repos__scroll {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+    .repos__build-col {
+        display: none;
+    }
+}

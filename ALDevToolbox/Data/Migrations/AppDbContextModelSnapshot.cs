@@ -572,6 +572,43 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("github_repository_candidates", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCheck", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Application")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("application");
+
+                    b.Property<DateTime>("CheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("checked_at");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("repository");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "Repository")
+                        .IsUnique()
+                        .HasDatabaseName("ux_github_repository_checks_org_repo");
+
+                    b.ToTable("github_repository_checks", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryDrift", b =>
                 {
                     b.Property<int>("Id")
@@ -7552,6 +7589,17 @@ namespace ALDevToolbox.Data.Migrations
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCandidate", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCheck", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
                         .WithMany()

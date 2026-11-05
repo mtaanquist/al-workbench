@@ -1149,8 +1149,8 @@ year's Business Central after a new release lands in the Object Explorer.
   versions survive), and compares `application` / `platform` against the release and
   `dependencies[*].version` against the well-known-dependency defaults.
 - **Drift is a per-org table**, `github_repository_drift` (repository, path, field,
-  current, proposed, release id, detected_at), so the Solutions page can say "12
-  repositories still on 27.x" from the database.
+  current, proposed, release id, detected_at), so the Repositories list (Solutions page
+  until #1719) can say which repositories are still on 27.x from the database.
 - **Open update pull requests** edits the `app.json` in place (only the fields that
   moved, preserving formatting elsewhere) on `aldt/bump-bc-<major.minor>` **with the
   user's token**, one pull request per repository, reused while open. The body says what
@@ -1334,6 +1334,41 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   a person opened is theirs to close.
 - **Left out.** No email or in-app notification: GitHub already tells the people watching
   the repository. No auto-merge.
+
+### The Repositories list (#1719)
+
+Named user: a lead developer keeping the customers' repositories current, who wants to see
+at a glance which ones are behind and fix them from one place. Most people opening
+Solutions are looking up a customer, so the drift card and the "AL repositories on GitHub"
+card moved off the Solutions list onto a page of their own, `/repositories`, listed under
+Solutions in the sidebar beside Environments. A top-level route like `/environments` rather
+than `/solutions/repositories`, which `/solutions/{slug}` would have claimed.
+
+- **One row per repository on a solution the viewer may see**, any provider: repository,
+  solution, last build, BC version, app.json, and a row menu. A Private solution the viewer
+  is not on contributes nothing. `RepositoryListService.GetAsync` reads the database only.
+- **Last build** is the newest build that recorded a commit of that repository
+  (`oe_project_build_repo_commits`), leaving out pull-request builds and preview checks:
+  the column answers "does the branch build".
+- **BC version** is the environment drift measures against
+  (`DependencyDriftService.YardstickEnvironmentsAsync`: first production by name, else
+  first sandbox), shown as `major.minor`. "No environment" when there is none, with no
+  warning, since such a solution is not checked.
+- **app.json** is the oldest `application` the repository's manifests ask for. A scan now
+  stores it for every repository it reads, behind or not, in `github_repository_checks`
+  (one row per repository, replaced like the findings). A warning icon marks a repository
+  with findings, its tooltip saying what would move; an update pull request already
+  recorded for the version (`github_update_pull_requests`, not superseded) is linked in its
+  place, so a repository already in review does not keep warning.
+- **Actions.** The row menu has "Open update pull request" (the existing
+  `OpenUpdatePullRequestsAsync` for that one repository), "Check again" (the new
+  `CheckRepositoryAsync`, which re-reads one repository and replaces only its findings and
+  check), "Open repository" and "Open solution". The page has a bulk "Open N update pull
+  requests" over the rows shown, and "Check all again" (the organisation-wide scan) in a
+  freshness strip that says when the files were last read. The GitHub actions show only
+  when the organisation allows GitHub and the viewer has linked their account.
+- **Next:** a "Workspace files" column for the workbench-managed files (repository
+  standards, always-included files, workspace settings) and pull requests that update them.
 
 ## #633 MCP parity for the GitHub workflows
 

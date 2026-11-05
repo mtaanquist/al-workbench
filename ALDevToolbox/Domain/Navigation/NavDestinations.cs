@@ -157,6 +157,8 @@ public static class NavDestinations
         new("Solutions", "/solutions", "folder-git-2", "Deliver", Tool: ToolKey.Projects),
         new("Environments", "/environments", "server", "Deliver",
             Tool: ToolKey.Projects, Parent: "Solutions"),
+        new("Repositories", "/repositories", "git-branch", "Deliver",
+            Tool: ToolKey.Projects, Parent: "Solutions"),
         // Upgrades is its own grant and its own route: the sidebar shows it
         // under Solutions when that tool is on and on its own when it is off,
         // so the net rule is the grant alone.
