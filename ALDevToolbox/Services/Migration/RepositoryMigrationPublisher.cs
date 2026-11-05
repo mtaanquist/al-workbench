@@ -80,6 +80,7 @@ public sealed class RepositoryMigrationPublisher
     private readonly ProjectService _projects;
     private readonly IProcessRunner _processes;
     private readonly AppDbContext _db;
+    private readonly TimeProvider _clock;
     private readonly ILogger<RepositoryMigrationPublisher> _logger;
 
     public RepositoryMigrationPublisher(
@@ -89,8 +90,10 @@ public sealed class RepositoryMigrationPublisher
         ProjectService projects,
         IProcessRunner processes,
         AppDbContext db,
+        TimeProvider clock,
         ILogger<RepositoryMigrationPublisher> logger)
     {
+        _clock = clock;
         _repositories = repositories;
         _connection = connection;
         _github = github;
@@ -160,10 +163,11 @@ public sealed class RepositoryMigrationPublisher
         var migrated = await _db.RepositoryMigrations.AsNoTracking()
             .Where(m => m.ProjectId == existing.Id && m.Succeeded && m.RepositoryFullName != null)
             .OrderByDescending(m => m.CreatedAt)
-            .Select(m => m.RepositoryFullName)
+            .Select(m => new { FullName = m.RepositoryFullName!, m.RepositoryGitHubId })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         return new MigrationSolutionClash(existing.Id, existing.Name, existing.Slug, CanJoin: false,
-            CanReplace: migrated is not null && await RepositoryIsGoneAsync(migrated, ct).ConfigureAwait(false));
+            CanReplace: migrated is not null
+                && await RepositoryIsGoneAsync(migrated.FullName, migrated.RepositoryGitHubId, ct).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -205,14 +209,14 @@ public sealed class RepositoryMigrationPublisher
                 : made is null
                     ? "The migration failed unexpectedly before the repository was created."
                     : $"The migration failed unexpectedly after {made.FullName} was created. Check it on GitHub, and delete it before you try again.";
-            await RecordAsync(job, sources, made?.FullName, made?.HtmlUrl, null, false, message, ct).ConfigureAwait(false);
+            await RecordAsync(job, sources, made, null, false, message, ct).ConfigureAwait(false);
             throw;
         }
 
         var warnings = new[] { created.StandardsWarning, created.BranchesWarning, created.SolutionWarning, created.PipelinesWarning }
             .OfType<string>()
             .ToList();
-        await RecordAsync(job, sources, created.Repository.FullName, created.Repository.HtmlUrl, created.SolutionId, true,
+        await RecordAsync(job, sources, created.Repository, created.SolutionId, true,
             warnings.Count == 0 ? null : string.Join(" ", warnings), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
@@ -232,7 +236,7 @@ public sealed class RepositoryMigrationPublisher
     /// run the Admin started.
     /// </summary>
     public Task RecordStoppedAsync(MigrationPreviewJob job, IReadOnlyDictionary<string, string> commits, string message, CancellationToken ct) =>
-        RecordAsync(job, Sources(job, commits), null, null, null, false, message, ct);
+        RecordAsync(job, Sources(job, commits), null, null, false, message, ct);
 
     private static string Sources(MigrationPreviewJob job, IReadOnlyDictionary<string, string> commits) =>
         string.Join("\n", job.Repositories.Select(r => $"{r.Name}@{commits.GetValueOrDefault(r.Name) ?? "?"}"));
@@ -356,7 +360,13 @@ public sealed class RepositoryMigrationPublisher
         return message.ToString();
     }
 
-    private async Task<bool> RepositoryIsGoneAsync(string fullName, CancellationToken ct)
+    /// <summary>
+    /// Whether the repository an earlier migration created is gone from the
+    /// connected GitHub organisation. Asked by GitHub's number for it when the
+    /// history row has one, so a renamed repository is not taken for a deleted
+    /// one; by name on rows from before the number was kept.
+    /// </summary>
+    private async Task<bool> RepositoryIsGoneAsync(string fullName, long? gitHubId, CancellationToken ct)
     {
         var parts = fullName.Split('/', 2);
         if (parts.Length != 2) return false;
@@ -369,7 +379,10 @@ public sealed class RepositoryMigrationPublisher
         {
             var token = await _github.GetInstallationTokenAsync(installationId, ct).ConfigureAwait(false);
             // The app made this repository, so it can always see it while it exists.
-            return await _github.GetRepositoryAsync(token, parts[0], parts[1], ct).ConfigureAwait(false) is null;
+            var found = gitHubId is { } id
+                ? await _github.GetRepositoryByIdAsync(token, id, ct).ConfigureAwait(false)
+                : await _github.GetRepositoryAsync(token, parts[0], parts[1], ct).ConfigureAwait(false);
+            return found is null;
         }
         catch (GitHubApiException ex)
         {
@@ -379,7 +392,7 @@ public sealed class RepositoryMigrationPublisher
     }
 
     private async Task RecordAsync(
-        MigrationPreviewJob job, string sources, string? fullName, string? url, int? solutionId, bool succeeded,
+        MigrationPreviewJob job, string sources, GitHubRepositorySummary? repository, int? solutionId, bool succeeded,
         string? message, CancellationToken ct)
     {
         try
@@ -391,14 +404,18 @@ public sealed class RepositoryMigrationPublisher
             {
                 OrganizationId = job.Identity.OrganizationId,
                 CreatedByUserId = job.Identity.UserId,
-                CreatedAt = DateTime.UtcNow,
+                CreatedAt = _clock.GetUtcNow().UtcDateTime,
                 SourceProject = job.Project.DisplayName,
                 SourceProjectUrl = job.Project.WebUrl,
                 Sources = sources,
+                SourceRepositoryIds = string.Join("\n", job.Repositories.Select(r => r.Id)),
                 CustomerName = job.Target.CustomerName,
+                ShortName = string.IsNullOrWhiteSpace(job.Target.Plan.ShortName) ? null : job.Target.Plan.ShortName,
                 TemplateKey = job.Target.TemplateKey,
-                RepositoryFullName = fullName,
-                RepositoryUrl = url,
+                AddTemplateExtensions = job.Target.AddTemplateExtensions,
+                RepositoryFullName = repository?.FullName,
+                RepositoryUrl = repository?.HtmlUrl,
+                RepositoryGitHubId = repository?.Id,
                 ProjectId = solutionId,
                 Succeeded = succeeded,
                 Message = message,

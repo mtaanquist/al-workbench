@@ -5652,6 +5652,10 @@ namespace ALDevToolbox.Data.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
+                    b.Property<bool>("AddTemplateExtensions")
+                        .HasColumnType("boolean")
+                        .HasColumnName("add_template_extensions");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -5683,10 +5687,19 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(300)")
                         .HasColumnName("repository_full_name");
 
+                    b.Property<long?>("RepositoryGitHubId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("repository_github_id");
+
                     b.Property<string>("RepositoryUrl")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)")
                         .HasColumnName("repository_url");
+
+                    b.Property<string>("ShortName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("short_name");
 
                     b.Property<string>("SourceProject")
                         .IsRequired()
@@ -5699,6 +5712,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)")
                         .HasColumnName("source_project_url");
+
+                    b.Property<string>("SourceRepositoryIds")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("source_repository_ids");
 
                     b.Property<string>("Sources")
                         .IsRequired()

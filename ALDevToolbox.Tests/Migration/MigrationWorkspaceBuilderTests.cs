@@ -223,6 +223,51 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
         .Select(f => Path.GetRelativePath(root, f).Replace('\\', '/'))
         .ToList();
 
+    [Fact]
+    public async Task A_template_kept_from_the_preview_is_laid_out_even_after_the_template_is_deleted()
+    {
+        if (!GitAvailable()) return;
+        await MigrationTestServices.SeedTemplateAsync(_db);
+        var single = _temp.Sub("cronus-base");
+        WriteApp(single, BaseId, "CRONUS Base");
+        var sources = new[] { new ClonedSource("cronus-base", single, "https://dev.azure.com/cronus/Sales/_git/cronus-base") };
+        var analysis = MigrationSourceAnalyzer.Analyze(sources);
+        var movedOn = DateTimeOffset.UtcNow.AddDays(-40);
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(movedOn);
+        var commits = new Dictionary<string, string> { ["cronus-base"] = "abc1234" };
+
+        // What a preview keeps: the template as generated then.
+        MigrationTarget kept;
+        await using (var ctx = _db.NewContext())
+        {
+            var target = MigrationTestServices.Target();
+            kept = target with { Template = await MigrationTestServices.NewBuilder(_db, ctx).GenerateTemplateAsync(target.Plan, CancellationToken.None) };
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var template = await ctx.RuntimeTemplates.SingleAsync(t => t.Key == MigrationTestServices.TemplateKey);
+            template.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        MigrationWorkspace workspace;
+        var destination = Path.Combine(_temp.Path, "out");
+        await using (var ctx = _db.NewContext())
+        {
+            var builder = MigrationTestServices.NewBuilder(_db, ctx, clock);
+            var regenerate = () => builder.BuildAsync(
+                MigrationTestServices.Target(), sources, analysis, commits, Path.Combine(_temp.Path, "again"), null, CancellationToken.None);
+            await regenerate.Should().ThrowAsync<Exception>("without the kept template it would be generated again, and it is gone");
+
+            workspace = await builder.BuildAsync(kept, sources, analysis, commits, destination, null, CancellationToken.None);
+        }
+
+        workspace.CanMigrate.Should().BeTrue();
+        workspace.RootFiles.Should().Contain(["README.md", "workspace.aldt.toml"]);
+        File.ReadAllText(Path.Combine(destination, MigrationWorkspaceBuilder.ArchiveFile))
+            .Should().Contain($"on {movedOn:yyyy-MM-dd} with AL Workbench", "the date comes from the clock");
+    }
+
     private static bool GitAvailable()
     {
         try

@@ -1,30 +1,36 @@
 /*
     Scoped layout for Migrate repositories (#1699): the address field with its
     button beside it, the narrow tick column, and the list of preview findings.
+    The preview details, step 5 and Earlier migrations are child components
+    (#1706), so the rules they use reach into them with ::deep from .mig.
 */
 .mig__address { align-items: stretch; flex-wrap: wrap; }
 .mig__address .input { flex: 1 1 18rem; min-width: 0; }
 .mig__pick { width: 2.5rem; }
 .mig__note { margin-top: var(--space-2); }
-.mig__go { margin-top: var(--space-4); }
-.mig__subhead { font-size: var(--text-md); margin: var(--space-2) 0 0; }
-.mig__findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
-.mig__finding { display: flex; gap: var(--space-2); align-items: baseline; }
-.mig__finding > :first-child { flex: none; }
+.mig ::deep .mig__go { margin-top: var(--space-4); }
+.mig ::deep .mig__subhead { font-size: var(--text-md); margin: var(--space-2) 0 0; }
+.mig ::deep .mig__findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.mig ::deep .mig__finding { display: flex; gap: var(--space-2); align-items: baseline; }
+.mig ::deep .mig__finding > :first-child { flex: none; }
 /* Tables scroll inside their card on a phone rather than widening the page. */
 .mig { min-width: 0; }
-.mig > .card { min-width: 0; }
-.mig__scroll { overflow-x: auto; max-width: 100%; }
+.mig ::deep > .card { min-width: 0; }
+.mig ::deep .mig__scroll { overflow-x: auto; max-width: 100%; }
 /* Part 2 (#1700): the short-name field, the app.json changes and the left-behind paths. */
 .mig__short { max-width: 14rem; }
-.mig__changes > summary { cursor: pointer; padding: var(--space-1) 0; }
-.mig__changes[open] > summary { margin-bottom: var(--space-2); }
-.mig__path { word-break: break-all; }
-.mig__changes { min-width: 0; max-width: 100%; }
-.mig__value { overflow-wrap: anywhere; min-width: 10rem; }
+.mig ::deep .mig__changes > summary { cursor: pointer; padding: var(--space-1) 0; }
+.mig ::deep .mig__changes[open] > summary { margin-bottom: var(--space-2); }
+.mig ::deep .mig__path { word-break: break-all; }
+.mig ::deep .mig__changes { min-width: 0; max-width: 100%; }
+.mig ::deep .mig__value { overflow-wrap: anywhere; min-width: 10rem; }
 
 /* The result column of Earlier migrations carries a message under the pill. */
-.mig__result {
+.mig ::deep .mig__result {
     min-width: 12rem;
     max-width: 26rem;
 }
+
+/* #1706: the search over Earlier migrations, and Migrate again under a failed run's message. */
+.mig ::deep .mig__search { flex: 1 1 18rem; max-width: 28rem; }
+.mig ::deep .mig__again { margin-top: var(--space-2); }

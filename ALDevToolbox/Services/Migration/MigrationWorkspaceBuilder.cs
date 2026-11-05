@@ -24,7 +24,15 @@ public sealed record MigrationTarget(
     string CustomerName,
     bool AddTemplateExtensions,
     ProjectPlan Plan,
-    string? ProductionVersion = null);
+    string? ProductionVersion = null)
+{
+    /// <summary>
+    /// The template as the preview generated it. Set once a preview has built
+    /// its workspace; the run that follows reuses it instead of generating the
+    /// template again, so an edit to the template in between is not picked up.
+    /// </summary>
+    internal MigrationWorkspaceBuilder.MigrationTemplate? Template { get; init; }
+}
 
 /// <summary>Why a source file is not in the new workspace.</summary>
 public enum MigrationLeftBehindReason
@@ -86,17 +94,20 @@ public sealed class MigrationWorkspaceBuilder
     private readonly GenerationService _generation;
     private readonly WorkspaceConfigService _config;
     private readonly IProcessRunner _processes;
+    private readonly TimeProvider _clock;
     private readonly ILogger<MigrationWorkspaceBuilder> _logger;
 
     public MigrationWorkspaceBuilder(
         GenerationService generation,
         WorkspaceConfigService config,
         IProcessRunner processes,
+        TimeProvider clock,
         ILogger<MigrationWorkspaceBuilder> logger)
     {
         _generation = generation;
         _config = config;
         _processes = processes;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -108,12 +119,12 @@ public sealed class MigrationWorkspaceBuilder
     public const string ArchiveFile = "ARCHIVE.md";
 
     private static string ArchiveText(
-        AzureDevOpsProject? project, IReadOnlyList<ClonedSource> sources, IReadOnlyDictionary<string, string> commits)
+        DateTime movedOn, AzureDevOpsProject? project, IReadOnlyList<ClonedSource> sources, IReadOnlyDictionary<string, string> commits)
     {
         var text = new StringBuilder();
         text.AppendLine("# Archive").AppendLine();
         text.Append("This repository was moved from Azure DevOps on ")
-            .Append(DateTime.UtcNow.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
+            .Append(movedOn.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
             .AppendLine(" with AL Workbench.");
         text.AppendLine("Only the newest commit on main of each repository below was copied, without its history.");
         text.AppendLine("The full history is still in Azure DevOps.").AppendLine();
@@ -157,7 +168,7 @@ public sealed class MigrationWorkspaceBuilder
         CancellationToken ct)
     {
         Directory.CreateDirectory(destination);
-        var template = await ReadTemplateAsync(target.Plan, ct).ConfigureAwait(false);
+        var template = target.Template ?? await GenerateTemplateAsync(target.Plan, ct).ConfigureAwait(false);
         var findings = new List<MigrationFinding>();
         var migratedFolders = analysis.Extensions.Select(e => e.Folder).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var templateFolders = template.Extensions.Select(e => e.Folder).ToList();
@@ -231,7 +242,7 @@ public sealed class MigrationWorkspaceBuilder
             leftBehind.AddRange(OutsideExtensions(source, extensions.Select(e => e.SourcePath).ToList(), template));
         }
 
-        await File.WriteAllTextAsync(Path.Combine(destination, ArchiveFile), ArchiveText(project, sources, commits), ct).ConfigureAwait(false);
+        await File.WriteAllTextAsync(Path.Combine(destination, ArchiveFile), ArchiveText(_clock.GetUtcNow().UtcDateTime, project, sources, commits), ct).ConfigureAwait(false);
         if (!rootFiles.Contains(ArchiveFile, StringComparer.OrdinalIgnoreCase)) rootFiles.Add(ArchiveFile);
 
         await WriteWorkspaceFilesAsync(destination, template, target, dropped, analysis.Extensions.Select(e => e.Folder).ToList(), identities, ct)
@@ -259,9 +270,15 @@ public sealed class MigrationWorkspaceBuilder
 
     // ===== The template =====
 
-    private sealed record TemplateFiles(
-        Dictionary<string, byte[]> Files,
-        List<string> Directories,
+    /// <summary>
+    /// The template as generated for one plan: its files by path below the
+    /// workspace folder, and what was read back from them. A preview keeps it on
+    /// <see cref="MigrationTarget.Template"/> so the run lays out exactly what was
+    /// previewed (#1706). Read-only once made: a migration only reads it.
+    /// </summary>
+    internal sealed record MigrationTemplate(
+        IReadOnlyDictionary<string, byte[]> Files,
+        IReadOnlyList<string> Directories,
         IReadOnlyList<WorkspaceExtensionIdentity> Extensions,
         ProjectPlan Plan,
         string? CodeWorkspaceFile,
@@ -274,7 +291,8 @@ public sealed class MigrationWorkspaceBuilder
     /// recorded, and the first extension's <c>app.json</c> as the one every
     /// moved extension's is rebuilt on.
     /// </summary>
-    private async Task<TemplateFiles> ReadTemplateAsync(ProjectPlan plan, CancellationToken ct)
+    /// <exception cref="PlanValidationException">The template can no longer be generated (it was deleted, say).</exception>
+    internal async Task<MigrationTemplate> GenerateTemplateAsync(ProjectPlan plan, CancellationToken ct)
     {
         var archive = await _generation.GenerateWorkspaceAsync(plan, ct).ConfigureAwait(false);
         var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
@@ -311,12 +329,12 @@ public sealed class MigrationWorkspaceBuilder
         var appJson = first is not null && files.TryGetValue($"{first.Folder}/{AppJsonManifestParser.FileName}", out var bytes)
             ? MigrationAppJson.Parse(Encoding.UTF8.GetString(bytes)) ?? new JsonObject()
             : new JsonObject();
-        return new TemplateFiles(files, directories, config.Extensions, config.Workspace ?? plan, config.CodeWorkspaceFileName, appJson, first?.Folder);
+        return new MigrationTemplate(files, directories, config.Extensions, config.Workspace ?? plan, config.CodeWorkspaceFileName, appJson, first?.Folder);
     }
 
     private async Task WriteWorkspaceFilesAsync(
         string destination,
-        TemplateFiles template,
+        MigrationTemplate template,
         MigrationTarget target,
         IReadOnlyCollection<string> dropped,
         IReadOnlyList<string> migratedFolders,
@@ -406,7 +424,7 @@ public sealed class MigrationWorkspaceBuilder
     /// What in <paramref name="source"/> is outside every extension folder,
     /// as whole folders where nothing inside them moves.
     /// </summary>
-    private static IEnumerable<MigrationLeftBehind> OutsideExtensions(ClonedSource source, IReadOnlyList<string> extensionPaths, TemplateFiles template)
+    private static IEnumerable<MigrationLeftBehind> OutsideExtensions(ClonedSource source, IReadOnlyList<string> extensionPaths, MigrationTemplate template)
     {
         if (extensionPaths.Contains(string.Empty))
         {
@@ -454,7 +472,7 @@ public sealed class MigrationWorkspaceBuilder
         }
     }
 
-    private static MigrationLeftBehindReason ReasonFor(string path, TemplateFiles template)
+    private static MigrationLeftBehindReason ReasonFor(string path, MigrationTemplate template)
     {
         var replaced = path.EndsWith('/')
             ? template.Files.Keys.Any(f => f.StartsWith(path, StringComparison.OrdinalIgnoreCase))
@@ -546,7 +564,7 @@ public sealed class MigrationWorkspaceBuilder
     /// its logo points at the workspace's asset from the template's own extension
     /// folder, so it is re-aimed from wherever this extension sits.
     /// </summary>
-    private static JsonObject TemplateAppJsonFor(TemplateFiles template, string destination, string extensionDir)
+    private static JsonObject TemplateAppJsonFor(MigrationTemplate template, string destination, string extensionDir)
     {
         if (template.AppJsonFolder is null
             || template.AppJson["logo"] is not JsonValue logo

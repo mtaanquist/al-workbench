@@ -141,7 +141,9 @@ public sealed class RepositoryMigrationService
 
     /// <summary>
     /// The solution that already has <paramref name="customerName"/>, and whether
-    /// a migration may replace it. Null when the name is free.
+    /// a migration joins it or may replace it. Null when the name is free. Step 3
+    /// asks as the name is typed, so a clash shows before the preview runs (#1706);
+    /// step 5 asks again for the preview's name.
     /// </summary>
     public Task<MigrationSolutionClash?> FindSolutionClashAsync(string? customerName, CancellationToken ct = default) =>
         _publisher.FindSolutionClashAsync(customerName ?? string.Empty, ct);
@@ -171,9 +173,10 @@ public sealed class RepositoryMigrationService
         }
 
         var project = ParseProject(preview.ProjectUrl);
-        var target = await BuildTargetAsync(
-            new MigrationTargetInput(preview.TemplateKey, preview.CustomerName, preview.ShortName, preview.AddTemplateExtensions), ct)
-            .ConfigureAwait(false);
+        // What the preview laid out, template included: an edit to the template
+        // since then is not picked up, so what is created is what was looked at (#1706).
+        var target = preview.Target
+            ?? throw Refuse(RepositoryField, "This preview can't be migrated any more. Preview again, then create the repository from the new preview.");
 
         var clash = await _publisher.FindSolutionClashAsync(target.CustomerName, ct).ConfigureAwait(false);
         var request = new MigrationCreateRequest(
@@ -210,20 +213,51 @@ public sealed class RepositoryMigrationService
         return run;
     }
 
-    /// <summary>The organisation's latest migrations, newest first.</summary>
-    public async Task<List<RepositoryMigrationHistoryRow>> ListHistoryAsync(int take = 25, CancellationToken ct = default)
+    /// <summary>How many earlier migrations the page lists at first, and adds on each Show more.</summary>
+    public const int HistoryPageSize = 25;
+
+    /// <summary>
+    /// The organisation's migrations, newest first: the first <paramref name="take"/>
+    /// of those whose customer, Azure DevOps project or GitHub repository contains
+    /// <paramref name="search"/> (all of them when it is blank), and how many match in all.
+    /// </summary>
+    public async Task<RepositoryMigrationHistoryPage> ListHistoryAsync(
+        string? search = null, int take = HistoryPageSize, CancellationToken ct = default)
     {
-        return await _db.RepositoryMigrations.AsNoTracking()
+        var query = _db.RepositoryMigrations.AsNoTracking();
+        var term = (search ?? string.Empty).Trim();
+        if (term.Length > 0)
+        {
+            var pattern = $"%{ObjectExplorer.Explore.ObjectSearchService.EscapeLike(term)}%";
+            query = query.Where(m => EF.Functions.ILike(m.CustomerName, pattern, "\\")
+                || EF.Functions.ILike(m.SourceProject, pattern, "\\")
+                || (m.RepositoryFullName != null && EF.Functions.ILike(m.RepositoryFullName, pattern, "\\")));
+        }
+
+        var total = await query.CountAsync(ct).ConfigureAwait(false);
+        var rows = await query
             .OrderByDescending(m => m.CreatedAt)
-            .Take(take)
-            .Select(m => new RepositoryMigrationHistoryRow(
-                m.Id, m.CreatedAt, m.CustomerName, m.SourceProject, m.SourceProjectUrl,
-                m.RepositoryFullName, m.RepositoryUrl,
-                m.Project != null && m.Project.DeletedAt == null ? m.ProjectId : null,
-                m.Project != null && m.Project.DeletedAt == null ? m.Project.Slug : null,
-                m.CreatedByUser != null ? (m.CreatedByUser.DisplayName != "" ? m.CreatedByUser.DisplayName : m.CreatedByUser.Email) : null,
-                m.Succeeded, m.Message))
+            .ThenByDescending(m => m.Id)
+            .Take(Math.Max(take, 1))
+            .Select(m => new
+            {
+                m.Id, m.CreatedAt, m.CustomerName, m.ShortName, m.SourceProject, m.SourceProjectUrl, m.SourceRepositoryIds,
+                m.TemplateKey, m.AddTemplateExtensions, m.RepositoryFullName, m.RepositoryUrl,
+                SolutionId = m.Project != null && m.Project.DeletedAt == null ? m.ProjectId : null,
+                SolutionSlug = m.Project != null && m.Project.DeletedAt == null ? m.Project.Slug : null,
+                StartedBy = m.CreatedByUser != null ? (m.CreatedByUser.DisplayName != "" ? m.CreatedByUser.DisplayName : m.CreatedByUser.Email) : null,
+                m.Succeeded, m.Message,
+            })
             .ToListAsync(ct).ConfigureAwait(false);
+
+        return new RepositoryMigrationHistoryPage(
+            rows.Select(m => new RepositoryMigrationHistoryRow(
+                m.Id, m.CreatedAt, m.CustomerName, m.SourceProject, m.SourceProjectUrl,
+                m.RepositoryFullName, m.RepositoryUrl, m.SolutionId, m.SolutionSlug, m.StartedBy, m.Succeeded, m.Message,
+                m.SourceRepositoryIds.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                m.ShortName, m.TemplateKey, m.AddTemplateExtensions))
+                .ToList(),
+            total);
     }
 
     /// <summary>
@@ -420,6 +454,10 @@ public sealed record MigrationCreateInput(
 
 /// <summary>One earlier migration, as the page lists it.</summary>
 /// <param name="SolutionId">The solution it created, while that solution still exists.</param>
+/// <param name="SourceRepositoryIds">
+/// Azure DevOps's ids for the repositories it moved, so Migrate again can tick the
+/// same ones. Empty on runs from before they were kept.
+/// </param>
 public sealed record RepositoryMigrationHistoryRow(
     int Id,
     DateTime CreatedAt,
@@ -432,7 +470,14 @@ public sealed record RepositoryMigrationHistoryRow(
     string? SolutionSlug,
     string? StartedBy,
     bool Succeeded,
-    string? Message);
+    string? Message,
+    IReadOnlyList<string> SourceRepositoryIds,
+    string? ShortName,
+    string TemplateKey,
+    bool AddTemplateExtensions);
+
+/// <summary>A page of earlier migrations, and how many match in all.</summary>
+public sealed record RepositoryMigrationHistoryPage(IReadOnlyList<RepositoryMigrationHistoryRow> Rows, int Total);
 
 /// <summary>What the Admin chose to move the repositories into, as the page sends it.</summary>
 /// <param name="ShortName">Optional short form of the customer's name, as on New Workspace.</param>

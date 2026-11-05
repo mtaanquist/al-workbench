@@ -119,6 +119,8 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
         preview.CanMigrate.Should().BeTrue();
         preview.Workspace!.AppJson.Select(a => a.Folder).Should().Equal("cronus-base");
         preview.Workspace.RootFiles.Should().Contain("README.md");
+        preview.Target!.Template.Should().NotBeNull("the run lays out the template as previewed, not as it is by then");
+        preview.Target.Template!.Files.Keys.Should().Contain("README.md");
         Directory.EnumerateFileSystemEntries(workRoot).Should().BeEmpty("the built workspace is removed with the clones");
     }
 
@@ -187,6 +189,7 @@ public sealed class RepositoryMigrationPreviewerTests : IDisposable
         _queue,
         MigrationTestServices.NewBuilder(_db, ctx),
         _db.NewRepositoryMigrationPublisher(ctx),
+        TimeProvider.System,
         NullLogger<RepositoryMigrationPreviewer>.Instance);
 
     private static MigrationPreviewJob Job(int userId, params AzureDevOpsRepository[] repositories) => new(

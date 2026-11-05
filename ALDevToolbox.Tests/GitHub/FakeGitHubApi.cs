@@ -216,12 +216,14 @@ public sealed class FakeGitHubApi : HttpMessageHandler
         string fullName,
         string defaultBranch = "main",
         bool isPrivate = true,
-        string? description = null)
+        string? description = null,
+        long? id = null)
     {
         var name = fullName.Split('/').Last();
         var describe = description is null ? "null" : $"\"{description}\"";
+        var number = id is { } n ? $"\"id\":{n}," : string.Empty;
         return $$"""
-            {"full_name":"{{fullName}}","name":"{{name}}","default_branch":"{{defaultBranch}}",
+            {{{number}}"full_name":"{{fullName}}","name":"{{name}}","default_branch":"{{defaultBranch}}",
              "private":{{(isPrivate ? "true" : "false")}},"description":{{describe}},
              "html_url":"https://github.com/{{fullName}}","clone_url":"https://github.com/{{fullName}}.git"}
             """;
