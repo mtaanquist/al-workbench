@@ -1360,15 +1360,45 @@ than `/solutions/repositories`, which `/solutions/{slug}` would have claimed.
   with findings, its tooltip saying what would move; an update pull request already
   recorded for the version (`github_update_pull_requests`, not superseded) is linked in its
   place, so a repository already in review does not keep warning.
-- **Actions.** The row menu has "Open update pull request" (the existing
-  `OpenUpdatePullRequestsAsync` for that one repository), "Check again" (the new
-  `CheckRepositoryAsync`, which re-reads one repository and replaces only its findings and
-  check), "Open repository" and "Open solution". The page has a bulk "Open N update pull
-  requests" over the rows shown, and "Check all again" (the organisation-wide scan) in a
-  freshness strip that says when the files were last read. The GitHub actions show only
-  when the organisation allows GitHub and the viewer has linked their account.
-- **Next:** a "Workspace files" column for the workbench-managed files (repository
-  standards, always-included files, workspace settings) and pull requests that update them.
+- **Actions.** The row menu has "Create app.json pull request" (the existing
+  `OpenUpdatePullRequestsAsync` for that one repository), "Create workspace files pull
+  request" (below), "Check again" (the drift service's `CheckRepositoryAsync`, which re-reads
+  one repository and replaces only its findings and check, then the workspace files check),
+  "Open repository" and "Open solution". The page has a bulk "Create N app.json pull
+  requests" over the rows shown that have none open yet, and "Check all again" (the
+  organisation-wide drift scan, then every repository's workspace files) in a freshness
+  strip that says when GitHub was last read. The GitHub actions show only when the
+  organisation allows GitHub and the viewer has linked their account. "Updates available"
+  counts a row behind on either column.
+
+#### Workspace files
+
+The column says whether a repository still has the files the workbench manages, as the
+organisation has them now. `RepositoryFilesService` owns it.
+
+- **What is compared.** The repository standards, verbatim. And, when the repository
+  carries `workspace.aldt.toml` naming a template that still exists, the always-included
+  files that template opts into **that have no placeholders and sit at the workspace root**
+  (the `.gitignore`, the ruleset), plus the `settings` of its `.code-workspace`. A file with
+  placeholders - the README stub, each extension's app.json - is a starting point the team
+  is expected to edit, so it is never compared; flagging it would put a warning on every
+  row. A standard at the same path as an always-included file wins, as it does when the
+  workbench creates a repository. Maintainer's call, 2026-11-05.
+- **What the generator would write is read out of its archive**, built from the saved
+  settings with no optional extensions, modules or examples, so the column cannot come to
+  disagree with what New Workspace produces. Line endings and trailing blank lines are not a
+  difference.
+- **Workspace settings are merged, not replaced.** Every value the organisation sets must be
+  present (nested objects compared key by key); settings the repository added itself are
+  kept. The pull request writes the merged file, which drops comments; its body says so. A
+  `.code-workspace` that does not parse, or is not there, is left alone.
+- **Stored** in `github_repository_file_checks`, one row per repository with the missing and
+  changed paths and the workspace files pull request open when it was read. Replaced per
+  repository by "Check again" and for the organisation by "Check all again"; nothing runs it
+  on a schedule yet.
+- **The pull request** is opened with the person's own account on `aldt/workspace-files`,
+  added to while open, and started again from the default branch once merged or closed. It
+  writes only the files that differ.
 
 ## #633 MCP parity for the GitHub workflows
 

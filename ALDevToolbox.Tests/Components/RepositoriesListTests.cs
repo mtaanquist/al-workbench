@@ -150,11 +150,47 @@ public sealed class RepositoriesListTests : IDisposable
 
         var cut = _ctx.Render<RepositoriesList>();
         cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
-        await cut.Find("button.menu__item:contains('Create update pull request')").ClickAsync(new());
+        await cut.Find("button.menu__item:contains('Create app.json pull request')").ClickAsync(new());
 
         cut.WaitForAssertion(
             () => cut.Markup.Should().Contain("Pull request opened").And.Contain($"https://github.com/{RepoA}/pull/77"),
             WaitTimeout);
+    }
+
+    [Fact]
+    public async Task A_repository_whose_workspace_files_differ_says_how_many_and_offers_a_pull_request()
+    {
+        await ReadyAsync();
+        await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.GitHubRepositoryFileChecks.AddRange(
+                new GitHubRepositoryFileCheck
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Repository = RepoA, CheckedAt = DateTime.UtcNow,
+                    MissingPaths = [".github/workflows/refresh-test.yml"], ChangedPaths = [".gitignore"],
+                },
+                new GitHubRepositoryFileCheck
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Repository = RepoB, CheckedAt = DateTime.UtcNow,
+                });
+            await ctx.SaveChangesAsync();
+        }
+        _db.AddGitHubServices(_ctx.Services, WritableApi());
+
+        var cut = _ctx.Render<RepositoriesList>();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+
+        var behind = cut.FindAll("tbody tr").Single(r => r.TextContent.Contains("payment-import"));
+        behind.TextContent.Should().Contain("2 files to update");
+        behind.QuerySelectorAll(".repos__warn").Select(w => w.GetAttribute("title")).Should()
+            .Contain(t => t != null && t.Contains("Missing: .github/workflows/refresh-test.yml") && t.Contains("Different: .gitignore"));
+        behind.QuerySelectorAll("button.menu__item").Select(b => b.TextContent).Should()
+            .Contain("Create workspace files pull request");
+        var upToDate = cut.FindAll("tbody tr").Single(r => r.TextContent.Contains("warehouse-ext"));
+        upToDate.TextContent.Should().Contain("Up to date");
+        upToDate.QuerySelectorAll("button.menu__item").Select(b => b.TextContent).Should()
+            .NotContain(t => t.Contains("workspace files"));
     }
 
     [Fact]

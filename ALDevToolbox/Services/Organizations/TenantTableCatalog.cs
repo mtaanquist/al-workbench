@@ -125,6 +125,10 @@ internal static class TenantTableCatalog
         // by a rescan, restored like the drift beside it; its only parent is
         // organizations.
         "github_repository_checks",
+        // What the last workspace files check found in each repository (#1719).
+        // Recomputable by a check, restored like the checks beside it; its only
+        // parent is organizations.
+        "github_repository_file_checks",
         // Which Business Central versions have already been offered to each
         // repository (#1104). Restorable content: without it the nightly run would
         // open again every update pull request somebody had closed. Its only

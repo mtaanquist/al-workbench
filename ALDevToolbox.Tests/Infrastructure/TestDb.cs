@@ -878,6 +878,7 @@ public sealed class TestDb : IDisposable
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerLinks>();
         services.AddScoped<ALDevToolbox.Services.GitHub.DependencyDriftService>();
         services.AddScoped<ALDevToolbox.Services.GitHub.RepositoryListService>();
+        services.AddScoped<ALDevToolbox.Services.GitHub.RepositoryFilesService>();
         // A push refreshes the modules copied from the pushed branch (#1415).
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddScoped<FolderTreeHydrator>();

@@ -13,8 +13,8 @@
 @*
     Every repository on a solution the viewer can see, in one table (issue #1719):
     which solution it belongs to, how its last build went, what Business Central the
-    customer runs, and whether its app.json has caught up - with the pull request
-    that moves it on a row's menu.
+    customer runs, whether its app.json has caught up, and whether the files the
+    workbench manages still match - with the pull requests that fix both on a row's menu.
 
     Named user: a lead developer keeping the customers' repositories current, who
     wants to see at a glance which ones are behind and fix them without opening each
@@ -38,7 +38,7 @@
 }
 
 <ListPage Title="Repositories" Sticky="true"
-          Subtitle="Every repository on the solutions you can see, and whether it has caught up with what the customer runs."
+          Subtitle="Every repository on the solutions you can see, and whether it has caught up with what the customer runs and your workspace setup."
           IsLoading="@(_rows is null)"
           IsEmpty="@(_loadFailed || _rows is { Count: 0 })"
           HasNoMatches="@(shown.Count == 0)"
@@ -49,7 +49,7 @@
             <button type="button" class="btn" disabled="@(_busy || behind.Count == 0)" @onclick="() => OpenAsync(behind)"
                     title="@(behind.Count == 0 ? "Nothing shown needs a new update pull request" : null)">
                 <Icon Name="git-pull-request" Width="15" Height="15" />
-                <span>@(_openingAll ? "Creating..." : behind.Count == 0 ? "Create update pull requests" : $"Create {behind.Count} update pull request{(behind.Count == 1 ? "" : "s")}")</span>
+                <span>@(_openingAll ? "Creating..." : behind.Count == 0 ? "Create app.json pull requests" : $"Create {behind.Count} app.json pull request{(behind.Count == 1 ? "" : "s")}")</span>
             </button>
         }
     </Actions>
@@ -83,13 +83,13 @@
             <div class="freshness">
                 <Icon Name="cloud-download" Width="15" Height="15" Css="freshness__icon" />
                 <span class="freshness__text">
-                    @if (_rows.Max(r => r.CheckedAt) is { } checkedAt)
+                    @if (LastChecked() is { } checkedAt)
                     {
-                        <text>app.json versions last read from GitHub <Timestamp Value="@checkedAt" Relative="true" />.</text>
+                        <text>Repositories last read from GitHub <Timestamp Value="@checkedAt" Relative="true" />.</text>
                     }
                     else
                     {
-                        <text>app.json versions not read from GitHub yet.</text>
+                        <text>Repositories not read from GitHub yet.</text>
                     }
                 </span>
                 <span class="freshness__spacer"></span>
@@ -105,10 +105,10 @@
         <table class="data-table">
             <thead>
                 <tr>
-                    <th>Repository</th><th>Solution</th><th>Last build</th><th>BC version</th><th>app.json</th><th class="data-table__actions">Actions</th>
+                    <th>Repository</th><th>Solution</th><th>Last build</th><th>BC version</th><th>app.json</th><th>Workspace files</th><th class="data-table__actions">Actions</th>
                 </tr>
             </thead>
-            <tbody><TableSkeletonRows Columns="6" StateColumn="false" /></tbody>
+            <tbody><TableSkeletonRows Columns="7" StateColumn="false" /></tbody>
         </table>
         <LoadingBlock Text="Loading repositories..." UnderTable="true" />
     </Loading>
@@ -151,7 +151,7 @@
             </button>
             <button type="button" class="pill-tab @(_onlyUpdates ? "is-active" : "")" role="tab"
                     aria-selected="@(_onlyUpdates ? "true" : "false")" @onclick="() => _onlyUpdates = true">
-                Updates available<span class="pill-tab__count">@(_rows?.Count(r => r.HasAppJsonUpdate) ?? 0)</span>
+                Updates available<span class="pill-tab__count">@(_rows?.Count(HasUpdate) ?? 0)</span>
             </button>
         </div>
     </Trailing>
@@ -160,7 +160,7 @@
             @if (_onlyUpdates && string.IsNullOrWhiteSpace(_search))
             {
                 <EmptyState Icon="circle-check" Title="Every repository is up to date">
-                    <Text>No repository's app.json asks for an older Business Central than its customer runs.</Text>
+                    <Text>No repository's app.json asks for an older Business Central than its customer runs, and every workspace file matches your setup.</Text>
                     <Action>
                         <button type="button" class="btn" @onclick="() => _onlyUpdates = false">Show all repositories</button>
                     </Action>
@@ -189,6 +189,7 @@
                     <th scope="col" class="repos__build-col">Last build</th>
                     <th scope="col">BC version</th>
                     <th scope="col">app.json</th>
+                    <th scope="col">Workspace files</th>
                     <th scope="col" class="data-table__actions">Actions</th>
                 </tr>
             </thead>
@@ -254,12 +255,20 @@
                         <td class="u-num">
                             @AppJsonCell(row)
                         </td>
+                        <td>
+                            @FilesCell(row)
+                        </td>
                         <td class="data-table__actions">
                             <RowActions Label="@($"Actions for {row.Repository}")">
                                 @if (_canUseGitHub && row.FullName is not null && row.HasAppJsonUpdate)
                                 {
                                     <button type="button" class="menu__item" role="menuitem" disabled="@_busy"
-                                            @onclick="() => OpenAsync([row])">@(row.PullRequest is null ? "Create update pull request" : "Update the open pull request")</button>
+                                            @onclick="() => OpenAsync([row])">@(row.PullRequest is null ? "Create app.json pull request" : "Update the app.json pull request")</button>
+                                }
+                                @if (_canUseGitHub && row.FullName is not null && row.Files is { Count: > 0 } files)
+                                {
+                                    <button type="button" class="menu__item" role="menuitem" disabled="@_busy"
+                                            @onclick="() => OpenFilesAsync(row)">@(files.PullRequest is null ? "Create workspace files pull request" : "Update the workspace files pull request")</button>
                                 }
                                 @if (_canUseGitHub && row.FullName is not null)
                                 {
@@ -372,7 +381,7 @@
     {
         if (_rows is null) return [];
         IEnumerable<RepositoryListRow> rows = _rows;
-        if (_onlyUpdates) rows = rows.Where(r => r.HasAppJsonUpdate);
+        if (_onlyUpdates) rows = rows.Where(HasUpdate);
         var term = _search.Trim();
         if (term.Length > 0)
         {
@@ -383,6 +392,12 @@
         }
         return rows;
     }
+
+    private static bool HasUpdate(RepositoryListRow row) => row.HasAppJsonUpdate || row.Files is { Count: > 0 };
+
+    /// <summary>When GitHub was last read for anything on the page.</summary>
+    private DateTime? LastChecked() =>
+        _rows!.SelectMany(r => new[] { r.CheckedAt, r.Files?.CheckedAt }).Max();
 
     private static string ShortName(RepositoryListRow row) =>
         row.FullName is { } full ? full[(full.IndexOf('/') + 1)..] : row.Repository;
@@ -424,6 +439,44 @@
             </span>
         }
     };
+
+    private RenderFragment FilesCell(RepositoryListRow row) => __builder =>
+    {
+        if (row.FullName is null)
+        {
+            <span class="u-muted">Not on GitHub</span>
+        }
+        else if (row.Files is not { } files)
+        {
+            <span class="u-muted">Not checked yet</span>
+        }
+        else if (files.PullRequest is { } pull)
+        {
+            <a class="repos__pr" href="@pull.HtmlUrl" target="_blank" rel="noopener">
+                <Icon Name="git-pull-request" Width="13" Height="13" />
+                <span>Pull request #@pull.Number open</span>
+            </a>
+        }
+        else if (files.Count > 0)
+        {
+            <span class="repos__warn" title="@FilesSummary(files)">
+                <Icon Name="triangle-alert" Width="13" Height="13" />
+                <span>@files.Count @(files.Count == 1 ? "file" : "files") to update</span>
+            </span>
+        }
+        else
+        {
+            <span class="u-muted">Up to date</span>
+        }
+    };
+
+    /// <summary>The warning's tooltip: which files an update pull request would write.</summary>
+    private static string FilesSummary(RepositoryListFiles files) =>
+        string.Join("; ", new[]
+        {
+            files.Missing.Count > 0 ? "Missing: " + string.Join(", ", files.Missing) : null,
+            files.Changed.Count > 0 ? "Different: " + string.Join(", ", files.Changed) : null,
+        }.Where(t => t is not null));
 
     /// <summary>A repository checked before the scan stored versions still says what it is on through its findings.</summary>
     private static string? CurrentFromChanges(RepositoryListRow row) =>
@@ -497,6 +550,37 @@
         await ReloadKeepingResultsAsync();
     }
 
+    private async Task OpenFilesAsync(RepositoryListRow row)
+    {
+        _busy = true;
+        _error = null;
+        _results.Remove(row.RepositoryId);
+        StateHasChanged();
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var files = scope.ServiceProvider.GetRequiredService<RepositoryFilesService>();
+            var result = await files.OpenPullRequestAsync(row.FullName!);
+            _results[row.RepositoryId] = result.PullRequest is { } pull
+                ? new RowResult(
+                    result.IsNewPullRequest ? $"Pull request opened (#{pull.Number})"
+                    : result.FileCount > 0 ? $"Added to the open pull request (#{pull.Number})"
+                    : $"The open pull request already has every file (#{pull.Number})",
+                    pull.HtmlUrl, IsProblem: false)
+                : new RowResult(result.Refusal ?? "Nothing was opened.", null, IsProblem: !result.IsUpToDate);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Could not open the workspace files pull request on {Repository}.", row.FullName);
+            _results[row.RepositoryId] = new RowResult("AL Workbench could not reach GitHub just now, so nothing was opened. Try again in a moment.", null, IsProblem: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+        await ReloadKeepingResultsAsync();
+    }
+
     private async Task CheckAsync(RepositoryListRow row)
     {
         _busy = true;
@@ -508,7 +592,10 @@
             await using var scope = Scopes.CreateAsyncScope();
             var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
             var outcome = await drift.CheckRepositoryAsync(row.FullName!);
-            if (CheckOutcomeText(outcome) is { } text)
+            // The files do not depend on an environment or a release, so they are read
+            // even when the app.json comparison could not run.
+            var filesOutcome = await scope.ServiceProvider.GetRequiredService<RepositoryFilesService>().CheckRepositoryAsync(row.FullName!);
+            if ((CheckOutcomeText(outcome) ?? CheckOutcomeText(filesOutcome)) is { } text)
             {
                 _results[row.RepositoryId] = new RowResult(text, null, IsProblem: true);
             }
@@ -534,8 +621,8 @@
     private static string? CheckOutcomeText(RepositoryCheckOutcome outcome) => outcome switch
     {
         RepositoryCheckOutcome.Checked => null,
-        RepositoryCheckOutcome.NoEnvironment => "Not compared: the solution has no Business Central environment yet.",
-        RepositoryCheckOutcome.NoRelease => "Not compared: no Business Central release has been imported into the Object Explorer yet.",
+        RepositoryCheckOutcome.NoEnvironment => "app.json not compared: the solution has no Business Central environment yet.",
+        RepositoryCheckOutcome.NoRelease => "app.json not compared: no Business Central release has been imported into the Object Explorer yet.",
         RepositoryCheckOutcome.NotConnected => "Not read: the organisation has not connected GitHub.",
         RepositoryCheckOutcome.NotReadable => "Not read: AL Workbench cannot open this repository on GitHub.",
         _ => "Not read: nobody has confirmed AL Workbench may read this repository. Open the solution's Repositories tab to confirm it.",
@@ -558,8 +645,9 @@
             }
             else
             {
-                _error = "Nothing was compared: no Business Central release has been imported into the Object Explorer yet.";
+                _error = "app.json versions were not compared: no Business Central release has been imported into the Object Explorer yet.";
             }
+            await scope.ServiceProvider.GetRequiredService<RepositoryFilesService>().CheckAllAsync();
         }
         catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
         {

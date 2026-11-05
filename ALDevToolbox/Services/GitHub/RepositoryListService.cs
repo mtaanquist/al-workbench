@@ -18,6 +18,20 @@ public sealed record RepositoryListBuild(int Id, string Status, DateTime At, str
 /// <summary>An update pull request already open for a repository.</summary>
 public sealed record RepositoryListPullRequest(int Number, string HtmlUrl);
 
+/// <summary>What the last workspace files check found in a repository.</summary>
+/// <param name="Missing">Files the organisation expects that the repository does not have.</param>
+/// <param name="Changed">Files the repository has with different content.</param>
+/// <param name="PullRequest">The workspace files pull request open when it was checked, if any.</param>
+public sealed record RepositoryListFiles(
+    IReadOnlyList<string> Missing,
+    IReadOnlyList<string> Changed,
+    RepositoryListPullRequest? PullRequest,
+    DateTime CheckedAt)
+{
+    /// <summary>How many files an update pull request would write.</summary>
+    public int Count => Missing.Count + Changed.Count;
+}
+
 /// <summary>One repository on the Repositories list (issue #1719).</summary>
 /// <param name="Repository">
 /// <c>owner/name</c> for a GitHub repository, else the display name it was added with.
@@ -30,6 +44,7 @@ public sealed record RepositoryListPullRequest(int Number, string HtmlUrl);
 /// </param>
 /// <param name="Changes">What an update pull request would move. Empty when it is up to date.</param>
 /// <param name="PullRequest">The update pull request already open for the version it would move to, if any.</param>
+/// <param name="Files">What the last workspace files check found. Null when it has not been checked.</param>
 public sealed record RepositoryListRow(
     int RepositoryId,
     string Repository,
@@ -44,7 +59,8 @@ public sealed record RepositoryListRow(
     string? AppJsonApplication,
     DateTime? CheckedAt,
     IReadOnlyList<DependencyDriftChange> Changes,
-    RepositoryListPullRequest? PullRequest)
+    RepositoryListPullRequest? PullRequest,
+    RepositoryListFiles? Files = null)
 {
     /// <summary>The customer's Business Central as <c>major.minor</c>, the way the Solutions list shows it.</summary>
     public string? BcVersion => Environment is null ? null : BcArtifactIndex.ToMajorMinor(Environment.Version);
@@ -152,6 +168,8 @@ public sealed class RepositoryListService
                 .ToListAsync(ct))
             .GroupBy(p => (p.Repository, p.Version))
             .ToDictionary(g => g.Key, g => g.OrderByDescending(p => p.OpenedAt).First());
+        var fileChecks = (await _db.GitHubRepositoryFileChecks.AsNoTracking().ToListAsync(ct))
+            .ToDictionary(c => c.Repository, StringComparer.OrdinalIgnoreCase);
         var dependencyNames = (await _catalog.GetAllAsync(ct))
             .GroupBy(w => AppJsonValueEditor.NormaliseId(w.DepId))
             .ToDictionary(g => g.Key, g => g.First().DepName);
@@ -209,7 +227,16 @@ public sealed class RepositoryListService
                 check?.Application,
                 check?.CheckedAt,
                 changes,
-                pullRequest));
+                pullRequest,
+                fullName is not null && fileChecks.TryGetValue(fullName, out var files)
+                    ? new RepositoryListFiles(
+                        files.MissingPaths,
+                        files.ChangedPaths,
+                        files.PullRequestNumber is { } number && files.PullRequestUrl is { } url
+                            ? new RepositoryListPullRequest(number, url)
+                            : null,
+                        files.CheckedAt)
+                    : null));
         }
 
         return rows
