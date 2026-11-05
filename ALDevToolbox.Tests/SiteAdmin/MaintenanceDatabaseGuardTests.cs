@@ -45,7 +45,8 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     [Fact]
     public async Task A_write_held_during_a_restore_that_is_refused_runs_once_the_site_reopens()
     {
-        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        var guard = NewGuard(hold: TimeSpan.FromSeconds(30));
+        await using var ctx = _db.NewContext(guard);
         await ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
         var before = _maintenance.Capture();
         _maintenance.Enter("Restoring backup test.dump");
@@ -53,7 +54,7 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
         var user = NewUser();
         ctx.Users.Add(user);
         var save = ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
-        await Task.Delay(300, TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => guard.HeldCommands == 1);
         save.IsCompleted.Should().BeFalse("the write waits for the restore rather than being refused");
         _maintenance.ActiveJobs.Should().Be(0, "a held command is not counted, so the restore does not wait for it");
 
@@ -69,13 +70,17 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     [Fact]
     public async Task A_write_held_while_a_restore_replaces_the_database_is_refused()
     {
-        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        var guard = NewGuard(hold: TimeSpan.FromSeconds(30));
+        await using var ctx = _db.NewContext(guard);
         _maintenance.Enter("Restoring backup test.dump");
 
         var user = NewUser();
         ctx.Users.Add(user);
         var save = ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
-        await Task.Delay(300, TestContext.Current.CancellationToken);
+        // Wait for the hold itself, not a fixed time: on a loaded machine the first
+        // command can still be opening its connection, reach the guard after the
+        // restore, and rightly run against the new database (#1707).
+        await WaitUntilAsync(() => guard.HeldCommands == 1);
         _maintenance.AdvanceEpoch();
         _maintenance.Exit();
 
@@ -95,10 +100,11 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     [Fact]
     public async Task After_a_held_command_is_refused_for_a_replaced_database_the_rest_of_the_work_is_refused_too()
     {
-        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        var guard = NewGuard(hold: TimeSpan.FromSeconds(30));
+        await using var ctx = _db.NewContext(guard);
         _maintenance.Enter("Restoring backup test.dump");
         var held = ctx.Database.ExecuteSqlRawAsync("UPDATE users SET display_name = display_name", TestContext.Current.CancellationToken);
-        await Task.Delay(300, TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => guard.HeldCommands == 1);
         _maintenance.AdvanceEpoch();
         _maintenance.Exit();
         var wait = () => held.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -122,10 +128,11 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     [Fact]
     public async Task A_held_command_is_let_go_as_soon_as_the_restore_goes_ahead()
     {
-        await using var ctx = NewGuardedContext(hold: TimeSpan.FromSeconds(30));
+        var guard = NewGuard(hold: TimeSpan.FromSeconds(30));
+        await using var ctx = _db.NewContext(guard);
         _maintenance.Enter("Restoring backup test.dump");
         var held = ctx.Users.AsNoTracking().CountAsync(TestContext.Current.CancellationToken);
-        await Task.Delay(300, TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => guard.HeldCommands == 1);
         held.IsCompleted.Should().BeFalse();
 
         _maintenance.MarkRestoreGoingAhead();
@@ -227,14 +234,27 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     [Fact]
     public async Task A_command_in_flight_when_the_restore_begins_holds_the_restore_until_it_finishes()
     {
+        // The command waits on a lock this test holds rather than sleeping for a set
+        // time, so a slow machine cannot let it finish before the restore checks (#1707).
+        await using var blocker = new Npgsql.NpgsqlConnection(_db.ConnectionString);
+        await blocker.OpenAsync(TestContext.Current.CancellationToken);
+        await using (var lockCmd = new Npgsql.NpgsqlCommand("SELECT pg_advisory_lock(1707)", blocker))
+        {
+            await lockCmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
         await using var ctx = NewGuardedContext();
-        var running = ctx.Database.ExecuteSqlRawAsync("SELECT pg_sleep(1)", TestContext.Current.CancellationToken);
+        var running = ctx.Database.ExecuteSqlRawAsync(
+            "SELECT pg_advisory_lock(1707); SELECT pg_advisory_unlock(1707);", TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => _maintenance.ActiveJobs == 1);
 
         _maintenance.Enter("Restoring backup test.dump");
         (await _maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, TestContext.Current.CancellationToken))
             .Should().BeFalse("the restore must not drop the schema under a running command");
 
+        await using (var unlockCmd = new Npgsql.NpgsqlCommand("SELECT pg_advisory_unlock(1707)", blocker))
+        {
+            await unlockCmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
         await running;
         (await _maintenance.WaitForActiveJobsAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))
             .Should().BeTrue();
