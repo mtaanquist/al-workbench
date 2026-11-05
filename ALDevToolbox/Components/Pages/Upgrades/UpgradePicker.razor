@@ -74,6 +74,7 @@
                     </SelectBox>
                     <SelectBox Class="upk-select upk-wide">
                         <select class="select" aria-label="View" @bind="_view" @bind:after="ApplyFilters">
+                            <option value="eligible">All eligible</option>
                             <option value="active">All environments</option>
                             <option value="waiting">With an update waiting</option>
                         </select>
@@ -198,7 +199,12 @@
     private string _search = string.Empty;
     private string _solution = string.Empty;
     private string _type = string.Empty;
-    private string _view = "active";
+    /// <summary>
+    /// "eligible" (the default) hides environments already on the target or later: there is
+    /// nothing for this upgrade to do on them. "active" shows the whole fleet, "waiting"
+    /// only those with an update pending.
+    /// </summary>
+    private string _view = "eligible";
 
     /// <summary>The ticked environments. Never the ones already on this upgrade: those are not the person's to add.</summary>
     private readonly SelectionSet _selection = new();
@@ -220,7 +226,7 @@
         _onThis = onThisUpgrade.ToHashSet();
         _selection.Clear();
         _search = _solution = _type = string.Empty;
-        _view = "active";
+        _view = "eligible";
         _all = null;
         _rows = new();
         _open = true;
@@ -280,7 +286,11 @@
         {
             q = q.Where(r => string.Equals(r.EnvironmentType, _type, StringComparison.OrdinalIgnoreCase));
         }
-        if (_view == "waiting")
+        if (_view == "eligible")
+        {
+            q = q.Where(r => !EnvironmentUpgradeLineState.IsOnTarget(r.Version, _target));
+        }
+        else if (_view == "waiting")
         {
             q = q.Where(r => r.HasUpdate);
         }
@@ -336,6 +346,8 @@
         ? "No environments yet. Connect a solution to Business Central, and its environments show up here."
         : _selection.ShowSelectedOnly
         ? "Nothing selected yet"
+        : _view == "eligible" && _search.Trim().Length == 0 && _solution.Length == 0 && _type.Length == 0
+            ? $"Every environment is already on {_target} or later. Choose All environments in the last filter to see them."
         : _search.Trim().Length > 0
             ? $"No environment matches \"{_search.Trim()}\""
             : "No environment matches these filters";
