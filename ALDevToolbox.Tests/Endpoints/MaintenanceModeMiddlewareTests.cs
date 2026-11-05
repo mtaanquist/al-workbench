@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Tests.Infrastructure;
@@ -57,6 +58,57 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         }
 
         await AssertNotGatedAsync(consultant, "/");
+    }
+
+    /// <summary>
+    /// The database guard learns that a request is a SiteAdmin on the console from
+    /// this mark, set on the request thread, rather than reading HttpContext from
+    /// inside EF (#1731). Only a SiteAdmin on <c>/site-admin</c> gets it.
+    /// </summary>
+    [Theory]
+    [InlineData("/site-admin/backups", true, true)]
+    [InlineData("/site-admin", true, true)]
+    [InlineData("/site-administrator", true, false)]
+    [InlineData("/solutions/3", true, false)]
+    [InlineData("/site-admin/backups", false, false)]
+    public async Task Only_a_site_admin_on_the_console_is_marked_for_the_database_guard(string path, bool siteAdmin, bool marked)
+    {
+        var app = new ApplicationBuilder(new ServiceCollection().BuildServiceProvider());
+        app.UseSiteAdminConsoleRequests();
+        bool? seen = null;
+        app.Run(_ =>
+        {
+            seen = ALDevToolbox.Data.MaintenanceDatabaseGuard.SiteAdminRequestOnConsole.Value;
+            return Task.CompletedTask;
+        });
+        var claims = siteAdmin
+            ? new[] { new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.SiteAdminClaim, "true") }
+            : [];
+        var ctx = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            Request = { Path = path },
+            User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(claims, "test")),
+        };
+
+        await app.Build()(ctx);
+
+        seen.Should().Be(marked);
+    }
+
+    /// <summary>
+    /// The mark reads the signed-in user, so it has to come after authentication;
+    /// ahead of it every request is anonymous and a SiteAdmin's console write
+    /// during a restore would be refused, with no other test noticing.
+    /// </summary>
+    [Fact]
+    public void The_console_mark_is_set_after_authentication()
+    {
+        var program = File.ReadAllText(Path.Combine(RepoRoot.Directory.FullName, "ALDevToolbox", "Program.cs"));
+        var authentication = program.IndexOf("app.UseAuthentication();", StringComparison.Ordinal);
+        var mark = program.IndexOf("app.UseSiteAdminConsoleRequests();", StringComparison.Ordinal);
+
+        authentication.Should().BeGreaterThan(-1);
+        mark.Should().BeGreaterThan(authentication);
     }
 
     /// <summary>

@@ -21,8 +21,7 @@ public static class DatabaseRegistration
         services.AddScoped<AuditInterceptor>();
         services.AddScoped(sp => new MaintenanceDatabaseGuard(
             sp.GetRequiredService<ALDevToolbox.Services.Operations.MaintenanceModeState>(),
-            sp.GetRequiredService<ALDevToolbox.Services.IOrganizationContext>(),
-            sp.GetService<IHttpContextAccessor>()));
+            sp.GetRequiredService<ALDevToolbox.Services.IOrganizationContext>()));
         // The model snapshot stays a hand-rolled affair (the InitialCreate designer
         // file's BuildTargetModel is intentionally empty), so EF's pending-model-
         // changes guard would fire on every MigrateAsync. Real schema drift still
