@@ -234,14 +234,27 @@ public sealed class MaintenanceDatabaseGuardTests : IDisposable
     [Fact]
     public async Task A_command_in_flight_when_the_restore_begins_holds_the_restore_until_it_finishes()
     {
+        // The command waits on a lock this test holds rather than sleeping for a set
+        // time, so a slow machine cannot let it finish before the restore checks (#1707).
+        await using var blocker = new Npgsql.NpgsqlConnection(_db.ConnectionString);
+        await blocker.OpenAsync(TestContext.Current.CancellationToken);
+        await using (var lockCmd = new Npgsql.NpgsqlCommand("SELECT pg_advisory_lock(1707)", blocker))
+        {
+            await lockCmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
         await using var ctx = NewGuardedContext();
-        var running = ctx.Database.ExecuteSqlRawAsync("SELECT pg_sleep(1)", TestContext.Current.CancellationToken);
+        var running = ctx.Database.ExecuteSqlRawAsync(
+            "SELECT pg_advisory_lock(1707); SELECT pg_advisory_unlock(1707);", TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => _maintenance.ActiveJobs == 1);
 
         _maintenance.Enter("Restoring backup test.dump");
         (await _maintenance.WaitForActiveJobsAsync(TimeSpan.Zero, TestContext.Current.CancellationToken))
             .Should().BeFalse("the restore must not drop the schema under a running command");
 
+        await using (var unlockCmd = new Npgsql.NpgsqlCommand("SELECT pg_advisory_unlock(1707)", blocker))
+        {
+            await unlockCmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
         await running;
         (await _maintenance.WaitForActiveJobsAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))
             .Should().BeTrue();
