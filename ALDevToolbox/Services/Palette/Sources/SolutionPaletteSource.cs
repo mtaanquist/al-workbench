@@ -72,7 +72,7 @@ public sealed class SolutionPaletteSource : IPaletteSource
         PaletteQuery query, int limit, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(query);
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
 
         // Contacts ride along as a correlated projection rather than a second
         // read: sources share the request's DbContext and run one at a time, so
@@ -98,7 +98,7 @@ public sealed class SolutionPaletteSource : IPaletteSource
                     .Select(c => new { c.Name, c.Company })
                     .ToList(),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // The version in the subtitle is the one the Solutions list shows: Business
         // Central's own, for a connected customer with a production environment. A second
@@ -107,7 +107,7 @@ public sealed class SolutionPaletteSource : IPaletteSource
         // row the read above already let through.
         var production = rows.Count == 0
             ? new Dictionary<int, ProductionEnvironmentFacts>()
-            : await ProjectCustomerInfoService.ReadProductionFactsAsync(_db, null, ct).ConfigureAwait(false);
+            : await ProjectCustomerInfoService.ReadProductionFactsAsync(_db, null, ct);
 
         var candidates = new List<PaletteCandidate>(rows.Count);
         foreach (var row in rows)

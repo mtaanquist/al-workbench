@@ -28,7 +28,7 @@ public static class InterruptedBuilds
     /// </summary>
     public static async Task<int> FailAsync(IServiceProvider services, DateTime nowUtc, CancellationToken ct)
     {
-        var orgs = await SweptOrganizations.ListAsync(services, ct).ConfigureAwait(false);
+        var orgs = await SweptOrganizations.ListAsync(services, ct);
 
         var failed = 0;
         foreach (var (orgId, system) in orgs)
@@ -44,8 +44,7 @@ public static class InterruptedBuilds
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(b => b.Status, ProjectBuildStatus.Failed)
                     .SetProperty(b => b.FailureMessage, RestartedMessage)
-                    .SetProperty(b => b.FinishedAt, nowUtc), ct)
-                .ConfigureAwait(false);
+                    .SetProperty(b => b.FinishedAt, nowUtc), ct);
         }
         return failed;
     }

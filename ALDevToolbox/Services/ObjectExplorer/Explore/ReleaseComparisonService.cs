@@ -253,7 +253,7 @@ public sealed class ReleaseComparisonService
     /// tens to a few hundred modules, so picking in memory costs one small read.
     /// </summary>
     private async Task<List<long>> LoadWinningModuleIdsAsync(int releaseId, CancellationToken ct)
-        => OneModulePerApp(await LoadModuleCompareRowsAsync(releaseId, ct).ConfigureAwait(false))
+        => OneModulePerApp(await LoadModuleCompareRowsAsync(releaseId, ct))
             .Values
             .Select(m => m.ModuleId)
             .ToList();
@@ -447,8 +447,8 @@ public sealed class ReleaseComparisonService
         CancellationToken ct = default)
     {
         if (!await BothSidesVisibleAsync(leftReleaseId, rightReleaseId, ct)) return new([], 0, false);
-        var left = await LoadCompareObjectsAsync(leftReleaseId, ct).ConfigureAwait(false);
-        var right = await LoadCompareObjectsAsync(rightReleaseId, ct).ConfigureAwait(false);
+        var left = await LoadCompareObjectsAsync(leftReleaseId, ct);
+        var right = await LoadCompareObjectsAsync(rightReleaseId, ct);
 
         var leftByKey = ToKeyedMap(left.Where(o => MatchesFilter(o, kind, nameContains)));
         var rightByKey = ToKeyedMap(right.Where(o => MatchesFilter(o, kind, nameContains)));
@@ -518,7 +518,7 @@ public sealed class ReleaseComparisonService
         int releaseId, string kind, int? objectId, string name, CancellationToken ct = default)
     {
         if (!await _access.IsReleaseVisibleAsync(releaseId, ct)) return null;
-        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct).ConfigureAwait(false);
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct);
         var query = _db.OeModuleObjects.AsNoTracking()
             .Where(o => moduleIds.Contains(o.ModuleId)
                         && o.Kind == kind
@@ -528,8 +528,7 @@ public sealed class ReleaseComparisonService
             : query.Where(o => o.ObjectId == null && o.Name.ToLower() == name.ToLower());
         return await query
             .Select(o => o.SourceFileId)
-            .FirstOrDefaultAsync(ct)
-            .ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>
@@ -539,14 +538,14 @@ public sealed class ReleaseComparisonService
     /// </summary>
     private async Task<List<CompareObject>> LoadCompareObjectsAsync(int releaseId, CancellationToken ct)
     {
-        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct).ConfigureAwait(false);
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct);
         return await _db.OeModuleObjects.AsNoTracking()
             .Where(o => moduleIds.Contains(o.ModuleId))
             .Select(o => new CompareObject(
                 o.Kind, o.ObjectId, o.Name, o.SourceFileId,
                 o.SourceFile != null ? o.SourceFile.ContentHash : null,
                 o.Module!.AppId, o.Module.Version, o.Module.AppFileHash))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
     }
 
     /// <summary>

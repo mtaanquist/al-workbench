@@ -44,7 +44,7 @@ public sealed class PersistedImportJobs
     {
         var row = NewRow(releaseId, identity, source, storeSymbolReference);
         _db.OeImportJobs.Add(row);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         return row.Id;
     }
 
@@ -73,7 +73,7 @@ public sealed class PersistedImportJobs
         CancellationToken ct = default)
     {
         await using var tx = _db.Database.CurrentTransaction is null
-            ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
+            ? await _db.Database.BeginTransactionAsync(ct)
             : null;
         var ids = releaseIds.Distinct().ToList();
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -85,9 +85,9 @@ public sealed class PersistedImportJobs
             .ExecuteUpdateAsync(u => u
                 .SetProperty(j => j.Status, "failed")
                 .SetProperty(j => j.ErrorMessage, StaleBackfillMessage)
-                .SetProperty(j => j.CompletedAt, now), ct).ConfigureAwait(false);
+                .SetProperty(j => j.CompletedAt, now), ct);
 
-        var active = await ListReleasesWithActiveBackfillAsync(ct).ConfigureAwait(false);
+        var active = await ListReleasesWithActiveBackfillAsync(ct);
         // Decided on the newest finished row, completed or failed: a backfill that
         // failed after an earlier one completed (cut off, references incomplete) still
         // needs running.
@@ -95,7 +95,7 @@ public sealed class PersistedImportJobs
             .Where(j => j.Kind == BackfillKind && (j.Status == "completed" || j.Status == "failed")
                 && j.CompletedAt != null && ids.Contains(j.ReleaseId))
             .Join(_db.OeReleases, j => j.ReleaseId, r => r.Id, (j, r) => new { j.ReleaseId, j.Id, j.Status, j.CompletedAt, r.UpdatedAt })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var done = finished
             .GroupBy(x => x.ReleaseId)
             .Select(g => g.OrderByDescending(x => x.CompletedAt).ThenByDescending(x => x.Id).First())
@@ -109,8 +109,8 @@ public sealed class PersistedImportJobs
             .Select(id => NewRow(id, identity, source, storeSymbolReference: false))
             .ToList();
         _db.OeImportJobs.AddRange(rows);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-        if (tx is not null) await tx.CommitAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
         return rows.Select(r => (r.ReleaseId, r.Id)).ToList();
     }
 
@@ -202,11 +202,11 @@ public sealed class PersistedImportJobs
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct);
         if (row is null) return;
         row.Status = "running";
         row.StartedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <param name="note">
@@ -217,12 +217,12 @@ public sealed class PersistedImportJobs
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct);
         if (row is null) return;
         row.Status = "completed";
         row.CompletedAt = _clock.GetUtcNow().UtcDateTime;
         if (note is not null) row.ErrorMessage = Truncate(note, 4000);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -250,12 +250,12 @@ public sealed class PersistedImportJobs
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct);
         if (row is null) return;
         row.Status = "failed";
         row.ErrorMessage = Truncate(errorMessage, 4000);
         row.CompletedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -297,7 +297,7 @@ public sealed class PersistedImportJobs
                     .Select(r => r.Status)
                     .FirstOrDefault(),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (survivors.Count == 0) return Array.Empty<ReleaseImportJob>();
 
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -466,7 +466,7 @@ public sealed class PersistedImportJobs
             // ids collected from the lost jobs above.
             var releases = await _db.OeReleases.IgnoreQueryFilters()
                 .Where(r => ids.Contains(r.Id) && r.Status == "ingesting")
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             foreach (var r in releases)
             {
                 if (amendedReleases.Contains(r.Id))
@@ -482,7 +482,7 @@ public sealed class PersistedImportJobs
             }
         }
 
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         toResume.AddRange(cutOffBackfills);
         return toResume;
     }
@@ -526,7 +526,7 @@ public sealed class PersistedImportJobs
             .Where(j => j.Kind == "backfill_system_references" && (j.Status == "queued" || j.Status == "running"))
             .Select(j => j.ReleaseId)
             .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return ids.ToHashSet();
     }
 
@@ -551,7 +551,7 @@ public sealed class PersistedImportJobs
             .OrderByDescending(j => j.CreatedAt)
             .ThenByDescending(j => j.Id)
             .Select(j => new ImportJobOrigin(j.Kind, j.DownloadUrl, j.StagedIsDvd, j.StoreSymbolReference, j.ProjectId))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>Snapshot for the admin "Background workers" page — depth + recent rows.</summary>
@@ -560,12 +560,12 @@ public sealed class PersistedImportJobs
         // Fence category 2 (SiteAdmin cross-org console): the snapshot's only caller is
         // /site-admin/workers, gated by [Authorize(Roles = SiteAdminRole)].
         var pending = await _db.OeImportJobs.IgnoreQueryFilters()
-            .CountAsync(j => j.Status == "queued" || j.Status == "running", ct).ConfigureAwait(false);
+            .CountAsync(j => j.Status == "queued" || j.Status == "running", ct);
         // Same category 2 read, for the same SiteAdmin-only page.
         var jobs = await _db.OeImportJobs.IgnoreQueryFilters()
             .OrderByDescending(j => j.CreatedAt)
             .Take(recentLimit)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Resolve release labels cross-org (this is the SiteAdmin console) so
         // the workers page can name each import rather than show a bare id.
@@ -574,7 +574,7 @@ public sealed class PersistedImportJobs
         var labels = await _db.OeReleases.IgnoreQueryFilters()
             .Where(r => releaseIds.Contains(r.Id))
             .Select(r => new { r.Id, r.Label })
-            .ToDictionaryAsync(x => x.Id, x => x.Label, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(x => x.Id, x => x.Label, ct);
 
         var recent = jobs
             .Select(j => new ImportQueueRow(

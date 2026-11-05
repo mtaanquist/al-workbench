@@ -36,7 +36,7 @@ public sealed class MachineTranslationService
     /// </summary>
     public async Task<MtTrigger> GetTriggerAsync(CancellationToken ct = default)
     {
-        var settings = await _config.ResolveMachineTranslationAsync(ct).ConfigureAwait(false);
+        var settings = await _config.ResolveMachineTranslationAsync(ct);
         return settings?.Trigger ?? MtTrigger.Off;
     }
 
@@ -50,14 +50,13 @@ public sealed class MachineTranslationService
         string? context, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(sourceText)) return null;
-        var settings = await _config.ResolveMachineTranslationAsync(ct).ConfigureAwait(false);
+        var settings = await _config.ResolveMachineTranslationAsync(ct);
         if (settings is null) return null;
 
         var provider = _factory.Create(settings);
         try
         {
-            var result = await provider.TranslateAsync(sourceText, sourceLanguage, targetLanguage, context, ct)
-                .ConfigureAwait(false);
+            var result = await provider.TranslateAsync(sourceText, sourceLanguage, targetLanguage, context, ct);
             _logger.LogInformation(
                 "Machine translation via {Provider}: {SourceLang}→{TargetLang}.",
                 settings.Provider, sourceLanguage ?? "auto", targetLanguage);
@@ -76,7 +75,7 @@ public sealed class MachineTranslationService
     /// </summary>
     public async Task<MtTestResult> TestConnectionAsync(CancellationToken ct = default)
     {
-        var settings = await _config.ResolveMachineTranslationAsync(ct).ConfigureAwait(false);
+        var settings = await _config.ResolveMachineTranslationAsync(ct);
         if (settings is null)
         {
             return new MtTestResult(false,
@@ -86,7 +85,7 @@ public sealed class MachineTranslationService
         var provider = _factory.Create(settings);
         try
         {
-            return await provider.TestConnectionAsync(ct).ConfigureAwait(false);
+            return await provider.TestConnectionAsync(ct);
         }
         catch (Exception ex)
         {

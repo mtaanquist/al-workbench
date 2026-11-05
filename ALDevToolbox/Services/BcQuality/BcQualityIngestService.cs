@@ -103,13 +103,13 @@ public sealed class BcQualityIngestService
         var attemptedAt = _clock.GetUtcNow().UtcDateTime;
         try
         {
-            var (directory, sha, commitDate) = await SyncCloneAsync(ct).ConfigureAwait(false);
-            var result = await IngestFromDirectoryAsync(directory, sha, commitDate, ct).ConfigureAwait(false);
+            var (directory, sha, commitDate) = await SyncCloneAsync(ct);
+            var result = await IngestFromDirectoryAsync(directory, sha, commitDate, ct);
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await RecordAttemptFailureAsync(attemptedAt, ex.Message, ct).ConfigureAwait(false);
+            await RecordAttemptFailureAsync(attemptedAt, ex.Message, ct);
             throw;
         }
     }
@@ -145,7 +145,7 @@ public sealed class BcQualityIngestService
 
         var sw = Stopwatch.StartNew();
         var skipped = new List<BcQualitySkippedFile>();
-        var parsed = await ReadArticlesAsync(root, skipped, ct).ConfigureAwait(false);
+        var parsed = await ReadArticlesAsync(root, skipped, ct);
 
         if (parsed.Count == 0)
         {
@@ -162,8 +162,7 @@ public sealed class BcQualityIngestService
         // hashes would read a couple of megabytes to do no work. The samples
         // of the few articles that did change are fetched below.
         var existing = await _db.BcQualityArticles
-            .ToDictionaryAsync(a => a.ArticleKey, ct)
-            .ConfigureAwait(false);
+            .ToDictionaryAsync(a => a.ArticleKey, ct);
 
         int added = 0, unchanged = 0;
         var changed = new List<(BcQualityArticle Row, BcQualityParsedArticle Article)>();
@@ -198,8 +197,7 @@ public sealed class BcQualityIngestService
             var changedIds = changed.Select(c => c.Row.Id).ToList();
             var oldSamples = await _db.BcQualityArticleSamples
                 .Where(s => changedIds.Contains(s.ArticleId))
-                .ToListAsync(ct)
-                .ConfigureAwait(false);
+                .ToListAsync(ct);
             _db.BcQualityArticleSamples.RemoveRange(oldSamples);
             foreach (var (row, article) in changed)
             {
@@ -218,8 +216,8 @@ public sealed class BcQualityIngestService
         // guidance has been withdrawn and should stop being cited.
         if (stale.Count > 0) _db.BcQualityArticles.RemoveRange(stale);
 
-        await UpsertStateAsync(commitSha, commitDate, now, parsed.Count, ct).ConfigureAwait(false);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await UpsertStateAsync(commitSha, commitDate, now, parsed.Count, ct);
+        await _db.SaveChangesAsync(ct);
 
         var result = new BcQualityIngestResult(added, updated, unchanged, stale.Count, commitSha, skipped);
         _logger.LogInformation(
@@ -269,8 +267,8 @@ public sealed class BcQualityIngestService
                     continue;
                 }
 
-                var text = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
-                var samples = await ReadSamplesAsync(path, skipped, root, ct).ConfigureAwait(false);
+                var text = await File.ReadAllTextAsync(path, ct);
+                var samples = await ReadSamplesAsync(path, skipped, root, ct);
                 var article = BcQualityMarkdown.TryParse(key, text, samples, out var reason);
                 if (article is null)
                 {
@@ -321,7 +319,7 @@ public sealed class BcQualityIngestService
                 parts[0].ToLowerInvariant(),
                 fileName,
                 parts[1].ToLowerInvariant(),
-                await File.ReadAllTextAsync(path, ct).ConfigureAwait(false)));
+                await File.ReadAllTextAsync(path, ct)));
         }
         return samples;
     }
@@ -410,8 +408,7 @@ public sealed class BcQualityIngestService
         string commitSha, DateTime? commitDate, DateTime now, int articleCount, CancellationToken ct)
     {
         var state = await _db.BcQualityIngestState
-            .FirstOrDefaultAsync(s => s.Id == BcQualityIngestState.SingletonId, ct)
-            .ConfigureAwait(false);
+            .FirstOrDefaultAsync(s => s.Id == BcQualityIngestState.SingletonId, ct);
         if (state is null)
         {
             state = new BcQualityIngestState { Id = BcQualityIngestState.SingletonId };
@@ -435,8 +432,7 @@ public sealed class BcQualityIngestService
         try
         {
             var state = await _db.BcQualityIngestState
-                .FirstOrDefaultAsync(s => s.Id == BcQualityIngestState.SingletonId, ct)
-                .ConfigureAwait(false);
+                .FirstOrDefaultAsync(s => s.Id == BcQualityIngestState.SingletonId, ct);
             if (state is null)
             {
                 state = new BcQualityIngestState { Id = BcQualityIngestState.SingletonId };
@@ -444,7 +440,7 @@ public sealed class BcQualityIngestService
             }
             state.LastAttemptAt = attemptedAt;
             state.LastError = Truncate(message, 1000);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (Exception ex)
         {
@@ -480,16 +476,14 @@ public sealed class BcQualityIngestService
 
         if (Directory.Exists(Path.Combine(dir, ".git")))
         {
-            var fetch = await RunGitAsync(gitPath, ["-C", dir, "fetch", "--depth", "1", "origin", "HEAD"], ct)
-                .ConfigureAwait(false);
+            var fetch = await RunGitAsync(gitPath, ["-C", dir, "fetch", "--depth", "1", "origin", "HEAD"], ct);
             if (fetch.Succeeded)
             {
                 // Links checked out as plain files holding their target, here as
                 // well as at clone: a cache cloned before the setting existed
                 // does not carry it in its own config.
-                var reset = await RunGitAsync(gitPath, ["-c", "core.symlinks=false", "-C", dir, "reset", "--hard", "FETCH_HEAD"], ct)
-                    .ConfigureAwait(false);
-                if (reset.Succeeded) return await DescribeAsync(gitPath, dir, ct).ConfigureAwait(false);
+                var reset = await RunGitAsync(gitPath, ["-c", "core.symlinks=false", "-C", dir, "reset", "--hard", "FETCH_HEAD"], ct);
+                if (reset.Succeeded) return await DescribeAsync(gitPath, dir, ct);
             }
             // A wedged or half-written cache (an interrupted clone, a shallow
             // history git will not fast-forward) is cheaper to throw away than
@@ -512,20 +506,19 @@ public sealed class BcQualityIngestService
         // as a small text file naming its target, never as a link the ingest
         // could read through. See WithoutLinks.
         var clone = await RunGitAsync(
-            gitPath, ["clone", "-c", "core.symlinks=false", "--depth", "1", RepositoryUrl, dir], ct).ConfigureAwait(false);
+            gitPath, ["clone", "-c", "core.symlinks=false", "--depth", "1", RepositoryUrl, dir], ct);
         if (!clone.Succeeded)
         {
             throw new InvalidOperationException(
                 $"git clone of the BCQuality repository failed (exit {clone.ExitCode}): {clone.StdErr.Trim()}");
         }
-        return await DescribeAsync(gitPath, dir, ct).ConfigureAwait(false);
+        return await DescribeAsync(gitPath, dir, ct);
     }
 
     private async Task<(string Directory, string Sha, DateTime? CommitDate)> DescribeAsync(
         string gitPath, string dir, CancellationToken ct)
     {
-        var result = await RunGitAsync(gitPath, ["-C", dir, "show", "-s", "--format=%H%x09%cI", "HEAD"], ct)
-            .ConfigureAwait(false);
+        var result = await RunGitAsync(gitPath, ["-C", dir, "show", "-s", "--format=%H%x09%cI", "HEAD"], ct);
         if (!result.Succeeded) return (dir, string.Empty, null);
 
         var parts = result.StdOut.Trim().Split('\t');

@@ -61,7 +61,7 @@ public sealed class CalImportService
         int releaseId, string txtPath, string encodingName, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct)
             ?? throw new InvalidOperationException($"Release {releaseId} not found for C/AL processing.");
 
         // A 150 MB+ export runs the chunked writes and the module-wide
@@ -77,7 +77,7 @@ public sealed class CalImportService
             // The quota check sits inside the try for the same reason as the
             // encoding below: a refusal outside it left the release stuck in
             // `ingesting`, where Retry cannot reach it (#1261).
-            await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+            await _quotaGuard.EnsureCanWriteAsync(ct);
 
             // Resolve the encoding *inside* the try: the codepage string comes
             // from the import form and an unknown value makes ResolveEncoding
@@ -87,7 +87,7 @@ public sealed class CalImportService
             _logger.LogInformation(
                 "Processing C/AL ingest: ReleaseId={ReleaseId} Encoding={Encoding}", release.Id, encoding.WebName);
 
-            var appFileHash = await HashFileAsync(txtPath, ct).ConfigureAwait(false);
+            var appFileHash = await HashFileAsync(txtPath, ct);
 
             var module = new OeModule
             {
@@ -103,7 +103,7 @@ public sealed class CalImportService
                 CreatedAt = DateTime.UtcNow,
             };
             _db.OeModules.Add(module);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             long moduleId = module.Id;
 
             int objectsImported = 0, referencesImported = 0, filesImported = 0;
@@ -128,27 +128,26 @@ public sealed class CalImportService
 
                     if (pendingObjects >= OeIngestHelpers.ObjectChunkSize)
                     {
-                        await FlushAsync(pendingContent, ct).ConfigureAwait(false);
+                        await FlushAsync(pendingContent, ct);
                         pendingContent.Clear();
                         pendingObjects = 0;
                     }
                 }
             }
             if (pendingObjects > 0)
-                await FlushAsync(pendingContent, ct).ConfigureAwait(false);
+                await FlushAsync(pendingContent, ct);
 
             // Stamp the parsed Version List on the module (e.g. "NAVW114.49,NAVDK14.49").
             if (!string.IsNullOrWhiteSpace(versionList))
             {
                 await _db.OeModules.Where(m => m.Id == moduleId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(m => m.Version, versionList!.Trim()), ct)
-                    .ConfigureAwait(false);
+                    .ExecuteUpdateAsync(s => s.SetProperty(m => m.Version, versionList!.Trim()), ct);
             }
 
-            await ResolveTargetsByIdAsync(moduleId, ct).ConfigureAwait(false);
+            await ResolveTargetsByIdAsync(moduleId, ct);
 
             _db.ChangeTracker.Clear();
-            var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false)
+            var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct)
                 ?? throw new InvalidOperationException($"Release {release.Id} disappeared mid-ingest.");
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
@@ -157,10 +156,10 @@ public sealed class CalImportService
                 .Where(f => f.Module!.ReleaseId == release.Id)
                 .GroupBy(_ => 1)
                 .Select(g => new { Count = g.Count(), Length = g.Sum(f => (long)f.FileContent!.ContentLength) })
-                .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+                .SingleOrDefaultAsync(ct);
             ready.SourceFileCount = totalsRow?.Count ?? 0;
             ready.SourceContentLength = totalsRow?.Length ?? 0;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
 
             _logger.LogInformation(
                 "Completed C/AL ingest: ReleaseId={ReleaseId} Objects={Objects} References={References} Files={Files}",
@@ -179,7 +178,7 @@ public sealed class CalImportService
         {
             _logger.LogError(ex, "C/AL ingest failed: ReleaseId={ReleaseId}", release.Id);
             _db.ChangeTracker.Clear();
-            var failed = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false);
+            var failed = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct);
             if (failed is not null)
             {
                 failed.Status = "failed";
@@ -189,7 +188,7 @@ public sealed class CalImportService
                     ? pve.Errors.First().Value
                     : ex.Message;
                 failed.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
             }
             throw;
         }
@@ -211,7 +210,7 @@ public sealed class CalImportService
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (preview is null || preview.DeletedAt is not null
             || !string.Equals(preview.Status, "ready", StringComparison.Ordinal))
         {
@@ -223,11 +222,11 @@ public sealed class CalImportService
 
         await _db.Database.ExecuteSqlRawAsync(
             "DELETE FROM oe_module_system_references WHERE module_id IN (SELECT id FROM oe_modules WHERE release_id = {0});",
-            new object[] { releaseId }, ct).ConfigureAwait(false);
+            new object[] { releaseId }, ct);
 
         var moduleAppId = await _db.OeModules.AsNoTracking()
             .Where(m => m.ReleaseId == releaseId)
-            .ToDictionaryAsync(m => m.Id, m => m.AppId, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(m => m.Id, m => m.AppId, ct);
 
         // Page the objects in chunks rather than one FirstOrDefaultAsync (with two
         // Include chains) + SaveChangesAsync per object — that was tens of
@@ -236,7 +235,7 @@ public sealed class CalImportService
         var objectIds = await _db.OeModuleObjects.AsNoTracking()
             .Where(o => o.Module!.ReleaseId == releaseId && o.SourceFileId != null)
             .Select(o => o.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         int emitted = 0;
         foreach (var chunk in objectIds.Chunk(OeIngestHelpers.ObjectChunkSize))
@@ -251,7 +250,7 @@ public sealed class CalImportService
                 .Include(o => o.SourceFile!).ThenInclude(f => f.FileContent!)
                 .Include(o => o.Symbols)
                 .Where(o => chunk.Contains(o.Id))
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
 
             foreach (var obj in objs)
             {
@@ -316,13 +315,13 @@ public sealed class CalImportService
             }
 
             // One save per chunk rather than per object (#384).
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _db.ChangeTracker.Clear();
         }
 
         foreach (var moduleId in moduleAppId.Keys)
         {
-            await ResolveSystemReferenceIdsAsync(moduleId, ct).ConfigureAwait(false);
+            await ResolveSystemReferenceIdsAsync(moduleId, ct);
         }
 
         _logger.LogInformation(
@@ -632,7 +631,7 @@ public sealed class CalImportService
         IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> pendingContent,
         CancellationToken ct)
     {
-        await OeIngestHelpers.SaveWithFileContentsAsync(_db, pendingContent, ct).ConfigureAwait(false);
+        await OeIngestHelpers.SaveWithFileContentsAsync(_db, pendingContent, ct);
         _db.ChangeTracker.Clear();
     }
 
@@ -650,7 +649,7 @@ public sealed class CalImportService
             "WHERE r.module_id = {0} AND o.module_id = {0} " +
             "AND r.target_object_id IS NULL AND r.target_object_name <> '' " +
             "AND lower(o.name) = lower(r.target_object_name) AND o.kind = r.target_object_kind",
-            new object[] { moduleId }, ct).ConfigureAwait(false);
+            new object[] { moduleId }, ct);
     }
 
     /// <summary>
@@ -662,7 +661,7 @@ public sealed class CalImportService
     {
         var p = new object[] { moduleId };
 
-        await ResolveSystemReferenceIdsAsync(moduleId, ct).ConfigureAwait(false);
+        await ResolveSystemReferenceIdsAsync(moduleId, ct);
 
         await _db.Database.ExecuteSqlRawAsync(
             "UPDATE oe_module_references r SET target_object_name = o.name " +
@@ -670,7 +669,7 @@ public sealed class CalImportService
             "WHERE r.module_id = {0} AND o.module_id = {0} " +
             "AND r.target_object_id IS NOT NULL " +
             "AND o.object_id = r.target_object_id AND o.kind = r.target_object_kind " +
-            "AND (r.target_object_name = '' OR r.target_object_name IS NULL)", p, ct).ConfigureAwait(false);
+            "AND (r.target_object_name = '' OR r.target_object_name IS NULL)", p, ct);
 
         // The mirror image for static object receivers (CODEUNIT::"Sales-Post"),
         // which name their target but carry no id — see #713.
@@ -679,7 +678,7 @@ public sealed class CalImportService
             "FROM oe_module_objects o " +
             "WHERE r.module_id = {0} AND o.module_id = {0} " +
             "AND r.target_object_id IS NULL AND r.target_object_name <> '' " +
-            "AND o.name = r.target_object_name AND o.kind = r.target_object_kind", p, ct).ConfigureAwait(false);
+            "AND o.name = r.target_object_name AND o.kind = r.target_object_kind", p, ct);
 
         // Paren-less member access (`Cust.MyProc;`) reads exactly like a field
         // read in C/AL, so the walker emits field_access for both. Now that the
@@ -694,14 +693,14 @@ public sealed class CalImportService
             "AND r.target_object_id IS NOT NULL " +
             "AND o.object_id = r.target_object_id AND o.kind = r.target_object_kind " +
             "AND s.kind IN ('procedure', 'local_procedure') " +
-            "AND lower(s.name) = lower(r.target_member_name)", p, ct).ConfigureAwait(false);
+            "AND lower(s.name) = lower(r.target_member_name)", p, ct);
 
         await _db.Database.ExecuteSqlRawAsync(
             "UPDATE oe_module_variables v SET target_object_name = o.name " +
             "FROM oe_module_objects o " +
             "WHERE v.module_id = {0} AND o.module_id = {0} " +
             "AND v.target_object_id IS NOT NULL " +
-            "AND o.object_id = v.target_object_id AND o.kind = v.target_object_kind", p, ct).ConfigureAwait(false);
+            "AND o.object_id = v.target_object_id AND o.kind = v.target_object_kind", p, ct);
 
         // Pages store SourceTable as a bare numeric id; resolve to the table name
         // so Rec-field resolution and the outline read a name like the AL path.
@@ -710,7 +709,7 @@ public sealed class CalImportService
             "FROM oe_module_objects t " +
             "WHERE pg.module_id = {0} AND t.module_id = {0} AND t.kind = 'table' " +
             "AND pg.source_table_name ~ '^[0-9]+$' " +
-            "AND t.object_id = CAST(pg.source_table_name AS int)", p, ct).ConfigureAwait(false);
+            "AND t.object_id = CAST(pg.source_table_name AS int)", p, ct);
 
         // Platform virtual tables (Field, Object, Date, AllObj, …) are
         // referenced by id but never shipped as objects in the export, so the
@@ -725,18 +724,18 @@ public sealed class CalImportService
             "UPDATE oe_module_references r SET target_object_name = v.name " +
             "FROM unnest({1}::int[], {2}::text[]) AS v(id, name) " +
             "WHERE r.module_id = {0} AND r.target_object_kind = 'table' AND r.target_object_id = v.id " +
-            "AND (r.target_object_name = '' OR r.target_object_name IS NULL)", vt, ct).ConfigureAwait(false);
+            "AND (r.target_object_name = '' OR r.target_object_name IS NULL)", vt, ct);
 
         await _db.Database.ExecuteSqlRawAsync(
             "UPDATE oe_module_variables mv SET target_object_name = v.name " +
             "FROM unnest({1}::int[], {2}::text[]) AS v(id, name) " +
             "WHERE mv.module_id = {0} AND mv.target_object_kind = 'table' AND mv.target_object_id = v.id " +
-            "AND (mv.target_object_name = '' OR mv.target_object_name IS NULL)", vt, ct).ConfigureAwait(false);
+            "AND (mv.target_object_name = '' OR mv.target_object_name IS NULL)", vt, ct);
 
         await _db.Database.ExecuteSqlRawAsync(
             "UPDATE oe_module_objects o SET source_table_name = v.name " +
             "FROM unnest({1}::int[], {2}::text[]) AS v(id, name) " +
-            "WHERE o.module_id = {0} AND o.source_table_name = v.id::text", vt, ct).ConfigureAwait(false);
+            "WHERE o.module_id = {0} AND o.source_table_name = v.id::text", vt, ct);
     }
 
     private static int? CalScanEndLine(CalTrigger t)
@@ -766,7 +765,7 @@ public sealed class CalImportService
     {
         await using var fs = File.OpenRead(path);
         using var sha = SHA256.Create();
-        var hash = await sha.ComputeHashAsync(fs, ct).ConfigureAwait(false);
+        var hash = await sha.ComputeHashAsync(fs, ct);
         return Convert.ToHexString(hash);
     }
 

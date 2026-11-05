@@ -168,7 +168,7 @@ public sealed class MigrationWorkspaceBuilder
         CancellationToken ct)
     {
         Directory.CreateDirectory(destination);
-        var template = target.Template ?? await GenerateTemplateAsync(target.Plan, ct).ConfigureAwait(false);
+        var template = target.Template ?? await GenerateTemplateAsync(target.Plan, ct);
         var findings = new List<MigrationFinding>();
         var migratedFolders = analysis.Extensions.Select(e => e.Folder).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var templateFolders = template.Extensions.Select(e => e.Folder).ToList();
@@ -230,11 +230,11 @@ public sealed class MigrationWorkspaceBuilder
                 CopyExtension(from, to, extension.SourcePath, nested);
 
                 var manifestPath = Path.Combine(to, AppJsonManifestParser.FileName);
-                var sourceJson = MigrationAppJson.Parse(await File.ReadAllTextAsync(manifestPath, ct).ConfigureAwait(false)) ?? new JsonObject();
+                var sourceJson = MigrationAppJson.Parse(await File.ReadAllTextAsync(manifestPath, ct)) ?? new JsonObject();
                 var (normalized, changes) = MigrationAppJson.Normalize(
                     TemplateAppJsonFor(template, destination, to), sourceJson, BusinessCentralWaves.MajorOf(target.ProductionVersion),
                     relative => FileInWorkspace(destination, to, relative));
-                await File.WriteAllTextAsync(manifestPath, WorkspaceZipBuilder.WriteJson(normalized) + "\n", ct).ConfigureAwait(false);
+                await File.WriteAllTextAsync(manifestPath, WorkspaceZipBuilder.WriteJson(normalized) + "\n", ct);
                 appJson.Add(new MigrationAppJsonReport(extension.Folder, extension.RepositoryName, changes));
                 identities.Add(Identity(extension, normalized, commits.GetValueOrDefault(extension.RepositoryName)));
             }
@@ -242,12 +242,11 @@ public sealed class MigrationWorkspaceBuilder
             leftBehind.AddRange(OutsideExtensions(source, extensions.Select(e => e.SourcePath).ToList(), template));
         }
 
-        await File.WriteAllTextAsync(Path.Combine(destination, ArchiveFile), ArchiveText(_clock.GetUtcNow().UtcDateTime, project, sources, commits), ct).ConfigureAwait(false);
+        await File.WriteAllTextAsync(Path.Combine(destination, ArchiveFile), ArchiveText(_clock.GetUtcNow().UtcDateTime, project, sources, commits), ct);
         if (!rootFiles.Contains(ArchiveFile, StringComparer.OrdinalIgnoreCase)) rootFiles.Add(ArchiveFile);
 
-        await WriteWorkspaceFilesAsync(destination, template, target, dropped, analysis.Extensions.Select(e => e.Folder).ToList(), identities, ct)
-            .ConfigureAwait(false);
-        leftBehind.AddRange(await RemoveIgnoredAsync(destination, analysis.Extensions, ct).ConfigureAwait(false));
+        await WriteWorkspaceFilesAsync(destination, template, target, dropped, analysis.Extensions.Select(e => e.Folder).ToList(), identities, ct);
+        leftBehind.AddRange(await RemoveIgnoredAsync(destination, analysis.Extensions, ct));
 
         var fileCount = Directory.EnumerateFiles(destination, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint })
             .Count(f => !Path.GetRelativePath(destination, f).Replace('\\', '/').StartsWith(".git/", StringComparison.Ordinal));
@@ -294,10 +293,10 @@ public sealed class MigrationWorkspaceBuilder
     /// <exception cref="PlanValidationException">The template can no longer be generated (it was deleted, say).</exception>
     internal async Task<MigrationTemplate> GenerateTemplateAsync(ProjectPlan plan, CancellationToken ct)
     {
-        var archive = await _generation.GenerateWorkspaceAsync(plan, ct).ConfigureAwait(false);
+        var archive = await _generation.GenerateWorkspaceAsync(plan, ct);
         var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         var directories = new List<string>();
-        await using (archive.Stream.ConfigureAwait(false))
+        await using (archive.Stream)
         {
             archive.Stream.Position = 0;
             using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read, leaveOpen: true);
@@ -315,7 +314,7 @@ public sealed class MigrationWorkspaceBuilder
                 }
                 using var stream = entry.Open();
                 using var buffer = new MemoryStream();
-                await stream.CopyToAsync(buffer, ct).ConfigureAwait(false);
+                await stream.CopyToAsync(buffer, ct);
                 files[path] = buffer.ToArray();
             }
         }
@@ -324,7 +323,7 @@ public sealed class MigrationWorkspaceBuilder
         {
             throw new InvalidOperationException("The generated workspace has no workspace.aldt.toml.");
         }
-        var config = await _config.ParseAsync(Encoding.UTF8.GetString(toml), ct).ConfigureAwait(false);
+        var config = await _config.ParseAsync(Encoding.UTF8.GetString(toml), ct);
         var first = config.Extensions.FirstOrDefault();
         var appJson = first is not null && files.TryGetValue($"{first.Folder}/{AppJsonManifestParser.FileName}", out var bytes)
             ? MigrationAppJson.Parse(Encoding.UTF8.GetString(bytes)) ?? new JsonObject()
@@ -345,7 +344,7 @@ public sealed class MigrationWorkspaceBuilder
         {
             var json = Encoding.UTF8.GetString(bytes);
             var rewritten = WorkspaceZipBuilder.ReplaceExtensionFolders(json, dropped, migratedFolders.Order(StringComparer.OrdinalIgnoreCase).ToList());
-            await File.WriteAllTextAsync(Path.Combine(destination, codeWorkspace), rewritten ?? json, ct).ConfigureAwait(false);
+            await File.WriteAllTextAsync(Path.Combine(destination, codeWorkspace), rewritten ?? json, ct);
         }
 
         var plan = target.AddTemplateExtensions
@@ -354,7 +353,7 @@ public sealed class MigrationWorkspaceBuilder
         await File.WriteAllTextAsync(
             Path.Combine(destination, WorkspaceConfigService.FileName),
             _config.BuildWorkspace(plan, identities, template.CodeWorkspaceFile),
-            ct).ConfigureAwait(false);
+            ct);
     }
 
     private static WorkspaceExtensionIdentity Identity(MigrationExtension extension, JsonObject appJson, string? commit)
@@ -493,10 +492,10 @@ public sealed class MigrationWorkspaceBuilder
         var gitDir = Path.Combine(destination, ".git");
         try
         {
-            var init = await _processes.RunAsync(new ProcessRunRequest(git, ["init", "--quiet", destination], destination, null, GitTimeout), ct).ConfigureAwait(false);
+            var init = await _processes.RunAsync(new ProcessRunRequest(git, ["init", "--quiet", destination], destination, null, GitTimeout), ct);
             if (!init.Succeeded) throw new InvalidOperationException($"git init failed with exit code {init.ExitCode}.");
             var listed = await _processes.RunAsync(new ProcessRunRequest(git,
-                ["-C", destination, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], destination, null, GitTimeout), ct).ConfigureAwait(false);
+                ["-C", destination, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], destination, null, GitTimeout), ct);
             if (!listed.Succeeded) throw new InvalidOperationException($"git ls-files failed with exit code {listed.ExitCode}.");
 
             var byFolder = extensions.ToDictionary(e => e.Folder, StringComparer.OrdinalIgnoreCase);

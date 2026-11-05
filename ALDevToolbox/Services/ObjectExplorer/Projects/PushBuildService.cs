@@ -54,7 +54,7 @@ public sealed class PushBuildService
     {
         if (!IsBuildable(push)) return [];
 
-        var repositories = await GitHubRepositoryMatch.TrackingRepositoriesAsync(_db, push.CloneUrl, ct).ConfigureAwait(false);
+        var repositories = await GitHubRepositoryMatch.TrackingRepositoriesAsync(_db, push.CloneUrl, ct);
         if (repositories.Count == 0) return [];
         var repositoryByProject = repositories
             .GroupBy(r => r.ProjectId)
@@ -71,7 +71,7 @@ public sealed class PushBuildService
                         && h.Branch == push.Branch
                         && h.PushedAt > push.PushedAt)
             .Select(h => h.ProjectRepositoryId)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         foreach (var project in repositoryByProject.Where(r => superseded.Contains(r.Value)).Select(r => r.Key).ToList())
         {
             repositoryByProject.Remove(project);
@@ -109,7 +109,7 @@ public sealed class PushBuildService
                                                   && repositoryIds.Contains(c.ProjectRepositoryId.Value)))),
             })
             .OrderBy(p => p.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         return pipelines
             .Where(p => !p.AlreadyBuilt && !p.BeforeBuilt)

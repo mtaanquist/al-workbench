@@ -147,8 +147,7 @@ public sealed class BcQualitySearchService
                 a.Content,
                 SampleCount = a.Samples.Count,
             })
-            .ToListAsync(ct)
-            .ConfigureAwait(false);
+            .ToListAsync(ct);
 
         return hits.Select(h => new BcQualitySearchHit(
             h.ArticleKey,
@@ -180,8 +179,7 @@ public sealed class BcQualitySearchService
         var key = NormaliseKey(id);
         var row = await _db.BcQualityArticles.AsNoTracking()
             .Include(a => a.Samples)
-            .FirstOrDefaultAsync(a => a.ArticleKey == key, ct)
-            .ConfigureAwait(false);
+            .FirstOrDefaultAsync(a => a.ArticleKey == key, ct);
 
         // Callers cite articles by path and drop the extension often enough
         // that retrying once is cheaper than an unhelpful "not found".
@@ -190,16 +188,14 @@ public sealed class BcQualitySearchService
             var withExtension = key + ".md";
             row = await _db.BcQualityArticles.AsNoTracking()
                 .Include(a => a.Samples)
-                .FirstOrDefaultAsync(a => a.ArticleKey == withExtension, ct)
-                .ConfigureAwait(false);
+                .FirstOrDefaultAsync(a => a.ArticleKey == withExtension, ct);
         }
         if (row is null) return null;
 
         var commitSha = await _db.BcQualityIngestState.AsNoTracking()
             .Where(s => s.Id == BcQualityIngestState.SingletonId)
             .Select(s => s.CommitSha)
-            .FirstOrDefaultAsync(ct)
-            .ConfigureAwait(false) ?? string.Empty;
+            .FirstOrDefaultAsync(ct) ?? string.Empty;
 
         var folder = row.ArticleKey.Contains('/', StringComparison.Ordinal)
             ? row.ArticleKey[..row.ArticleKey.LastIndexOf('/')]

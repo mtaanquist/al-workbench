@@ -110,7 +110,7 @@ public class CallSiteReferenceEmitter
                 o.ExtendsObjectName,
                 o.ExtendsAppId,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var typesByName = new Dictionary<string, List<ALDevToolbox.Services.Al.AlTypeRef>>(StringComparer.OrdinalIgnoreCase);
         var typesByObjectId = new Dictionary<long, ALDevToolbox.Services.Al.AlTypeRef>();
         // Catalog lookup by AL object id (the numeric id developers write
@@ -229,7 +229,7 @@ public class CallSiteReferenceEmitter
                 s.ReturnType,
                 s.LineNumber,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var membersByOwner = new Dictionary<long, List<MemberEntry>>();
         // (Owner, LineNumber) → SymbolId. Used by the reference loop to
         // resolve source_symbol_id (the calling procedure / trigger) and
@@ -268,7 +268,7 @@ public class CallSiteReferenceEmitter
                 v.TypeKeyword,
                 v.TypeName,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var globalsByOwner = new Dictionary<long, Dictionary<string, ALDevToolbox.Services.Al.ResolvedVariableType>>();
         // Per-(owner, lowered name) → variable id lookup so the
         // reference-emit loop can stamp TargetVariableId on
@@ -308,7 +308,7 @@ public class CallSiteReferenceEmitter
                 ExtensionAppId = o.Module!.AppId,
                 BaseName = o.ExtendsObjectName!,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var extensionsByBaseName = new Dictionary<string, List<ExtensionEntry>>(StringComparer.OrdinalIgnoreCase);
         // Extension owner id → base object owner id. Used by the per-
         // file context builder to merge the base object's global var
@@ -386,7 +386,7 @@ public class CallSiteReferenceEmitter
         // method's contract stays narrow.
         var moduleAppIdsById = await _db.OeModules.AsNoTracking()
             .Where(m => chainModuleIds.Contains(m.Id))
-            .ToDictionaryAsync(m => m.Id, m => m.AppId, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(m => m.Id, m => m.AppId, ct);
 
         // Foundational app ids — the platform / system / system-app /
         // application modules whose tables (Company, User, File, …)
@@ -400,7 +400,7 @@ public class CallSiteReferenceEmitter
                     && m.Publisher == "Microsoft"
                     && ReleaseImportAllowLists.FoundationalAppNames.Contains(m.Name))
                 .Select(m => m.AppId)
-                .ToListAsync(ct).ConfigureAwait(false));
+                .ToListAsync(ct));
 
         // (6) Per-module resolver cache. All files in the same module
         // share the same visibility set, so build the resolver once
@@ -457,7 +457,7 @@ public class CallSiteReferenceEmitter
                     })
                     .FirstOrDefault(),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         int totalEmitted = 0;
         int totalUnresolved = 0;
@@ -490,8 +490,7 @@ public class CallSiteReferenceEmitter
                 contentById = await _db.OeModuleFiles.AsNoTracking()
                     .Where(f => batchIds.Contains(f.Id))
                     .Select(f => new { f.Id, Content = f.FileContent!.Content })
-                    .ToDictionaryAsync(x => x.Id, x => x.Content, ct)
-                    .ConfigureAwait(false);
+                    .ToDictionaryAsync(x => x.Id, x => x.Content, ct);
             }
             fileIndex++;
 
@@ -745,14 +744,14 @@ public class CallSiteReferenceEmitter
 
             if (pending >= 500)
             {
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
                 _db.ChangeTracker.Clear();
                 pending = 0;
             }
         }
         if (pending > 0)
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _db.ChangeTracker.Clear();
         }
 
@@ -891,7 +890,7 @@ public class CallSiteReferenceEmitter
             """;
         var rows = await _db.Database
             .SqlQueryRaw<ChainIdRow>(sql, releaseId)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows.Select(r => r.Id).ToHashSet();
     }
 
@@ -911,7 +910,7 @@ public class CallSiteReferenceEmitter
         var modules = await _db.OeModules.AsNoTracking()
             .Where(m => chainModuleIds.Contains(m.Id))
             .Select(m => new { m.Id, m.AppId, m.Name, m.Publisher, m.DependenciesJson })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Each module's direct deps as parsed from DependenciesJson.
         var directDepsByAppId = new Dictionary<Guid, HashSet<Guid>>();

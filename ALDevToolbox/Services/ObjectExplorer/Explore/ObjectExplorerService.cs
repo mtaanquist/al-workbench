@@ -54,8 +54,8 @@ public class ObjectExplorerService
         var releaseId = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId)
             .Select(m => (int?)m.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct);
     }
 
     private async Task<bool> ObjectVisibleAsync(long objectId, CancellationToken ct)
@@ -63,8 +63,8 @@ public class ObjectExplorerService
         var releaseId = await _db.OeModuleObjects.AsNoTracking()
             .Where(o => o.Id == objectId)
             .Select(o => (int?)o.Module!.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct);
     }
 
     private async Task<bool> SymbolVisibleAsync(long symbolId, CancellationToken ct)
@@ -72,8 +72,8 @@ public class ObjectExplorerService
         var releaseId = await _db.OeModuleSymbols.AsNoTracking()
             .Where(sym => sym.Id == symbolId)
             .Select(sym => (int?)sym.Object!.Module!.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct);
     }
 
     // ── Releases ────────────────────────────────────────────────────────
@@ -549,9 +549,9 @@ public class ObjectExplorerService
                         && o.Kind == kind
                         && EF.Functions.ILike(o.Name, name, "\\"))
             .Select(o => (long?)o.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (id is null) return null;
-        return await GetObjectAsync(id.Value, ct).ConfigureAwait(false);
+        return await GetObjectAsync(id.Value, ct);
     }
 
     /// <summary>
@@ -588,7 +588,7 @@ public class ObjectExplorerService
                 SourceFilePath = o.SourceFile != null ? o.SourceFile.Path : null,
                 o.LineNumber,
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (header is null) return null;
 
         var symbols = await _db.OeModuleSymbols.AsNoTracking()
@@ -596,7 +596,7 @@ public class ObjectExplorerService
             .OrderBy(s => s.LineNumber).ThenBy(s => s.Name)
             .Select(s => new ObjectSymbolRow(
                 s.Id, s.Kind, s.Name, s.Signature, s.ReturnType, s.FieldId, s.LineNumber, s.Doc))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // For interface targets, attach the implementing codeunits so
         // MCP agents calling get_object_outline on an interface get the
@@ -658,7 +658,7 @@ public class ObjectExplorerService
                 OwnerKind = s.Object.Kind,
                 SourceFileId = s.Object.SourceFileId,
             })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (row is null || row.SourceFileId is null) return null;
 
         // Fallback for legacy rows: take the next symbol's line on the
@@ -675,14 +675,14 @@ public class ObjectExplorerService
                 .Where(s => s.ObjectId == row.OwnerId && s.LineNumber > row.LineNumber)
                 .OrderBy(s => s.LineNumber)
                 .Select(s => (int?)s.LineNumber)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             endLine = nextLine is int n ? n - 1 : int.MaxValue;
         }
 
         var fileContent = await _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.Id == row.SourceFileId)
             .Select(f => f.FileContent!.Content)
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (fileContent is null) return null;
 
         // SplitLines normalises line endings (the previous raw Split('\n') left
@@ -745,7 +745,7 @@ public class ObjectExplorerService
                 s.LineNumber,
                 s.EndLine,
             })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (symbol is null) return null;
 
         // Primary indexed seek via ix_oe_module_references_source_symbol.
@@ -756,7 +756,7 @@ public class ObjectExplorerService
             .Select(r => new ProcedureCall(
                 r.Id, r.TargetAppId, r.TargetObjectKind, r.TargetObjectId, r.TargetObjectName,
                 r.TargetMemberName, r.TargetMemberKind, r.ReferenceKind, r.LineNumber, r.ColumnNumber))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (direct.Count > 0 || symbol.EndLine is null) return direct;
 
         // Lazy-backfill fallback: rows from pre-#181 ingests don't carry
@@ -776,7 +776,7 @@ public class ObjectExplorerService
             .Select(r => new ProcedureCall(
                 r.Id, r.TargetAppId, r.TargetObjectKind, r.TargetObjectId, r.TargetObjectName,
                 r.TargetMemberName, r.TargetMemberKind, r.ReferenceKind, r.LineNumber, r.ColumnNumber))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
     }
 
     /// <summary>

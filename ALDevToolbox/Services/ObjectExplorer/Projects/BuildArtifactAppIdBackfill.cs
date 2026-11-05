@@ -30,7 +30,7 @@ public static class BuildArtifactAppIdBackfill
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             orgs = (await db.Organizations.AsNoTracking()
                     .Select(o => new { o.Id, o.IsSystem })
-                    .ToListAsync(ct).ConfigureAwait(false))
+                    .ToListAsync(ct))
                 .Select(o => (o.Id, o.IsSystem))
                 .ToList();
         }
@@ -43,7 +43,7 @@ public static class BuildArtifactAppIdBackfill
                     AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
                 await using var scope = services.CreateAsyncScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                await StampOrganizationAsync(db, logger, ct).ConfigureAwait(false);
+                await StampOrganizationAsync(db, logger, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -63,7 +63,7 @@ public static class BuildArtifactAppIdBackfill
             .Where(a => a.AppId == null)
             .OrderBy(a => a.Id)
             .Select(a => a.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var stamped = 0;
         foreach (var id in ids)
@@ -71,7 +71,7 @@ public static class BuildArtifactAppIdBackfill
             var row = await db.OeProjectBuildArtifacts.AsNoTracking()
                 .Where(a => a.Id == id)
                 .Select(a => new { a.FileName, a.Content })
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             if (row is null) continue;
 
             var appId = ReadAppId(row.Content);
@@ -83,7 +83,7 @@ public static class BuildArtifactAppIdBackfill
             }
             stamped += await db.OeProjectBuildArtifacts
                 .Where(a => a.Id == id && a.AppId == null)
-                .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppId, appId), ct).ConfigureAwait(false);
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppId, appId), ct);
         }
 
         if (stamped > 0) logger.LogInformation("Stamped the app id on {Count} build artifact(s).", stamped);

@@ -241,7 +241,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         }
 
         var changedByUserId = ResolveUserId();
-        var changedBy = await ResolveChangedByAsync(ctx, changedByUserId, cancellationToken).ConfigureAwait(false);
+        var changedBy = await ResolveChangedByAsync(ctx, changedByUserId, cancellationToken);
         var organizationId = ResolveOrganizationId();
         var timestamp = DateTime.UtcNow;
 
@@ -613,7 +613,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             if (userId is null || ctx is not AppDbContext db) return AuditActor.SystemActor();
             if (_ambientActor is not { } cached || cached.UserId != userId.Value)
             {
-                _ambientActor = (userId.Value, await AuditActor.ResolveAsync(db, userId, ct).ConfigureAwait(false));
+                _ambientActor = (userId.Value, await AuditActor.ResolveAsync(db, userId, ct));
             }
             return _ambientActor.Value.Name;
         }

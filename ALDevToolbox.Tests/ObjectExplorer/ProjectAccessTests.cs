@@ -1341,28 +1341,4 @@ public sealed class ProjectAccessTests : IDisposable
         recorder.Reads.Should().BeGreaterThan(0);
         recorder.OffContextReads.Should().BeEmpty();
     }
-
-    /// <summary>
-    /// Passes every read through to <paramref name="inner"/>, noting each one made
-    /// with no synchronization context (a continuation that left the caller's).
-    /// </summary>
-    private sealed class ContextCheckingOrganizationContext(IOrganizationContext inner) : IOrganizationContext
-    {
-        private int _reads;
-        public int Reads => _reads;
-        public System.Collections.Concurrent.ConcurrentQueue<string> OffContextReads { get; } = new();
-
-        private T Read<T>(T value, [System.Runtime.CompilerServices.CallerMemberName] string name = "")
-        {
-            Interlocked.Increment(ref _reads);
-            if (SynchronizationContext.Current is null) OffContextReads.Enqueue(name);
-            return value;
-        }
-
-        public int? CurrentOrganizationId => Read(inner.CurrentOrganizationId);
-        public int? CurrentUserId => Read(inner.CurrentUserId);
-        public bool IsSiteAdmin => Read(inner.IsSiteAdmin);
-        public bool IsSystemOrganization => Read(inner.IsSystemOrganization);
-        public int OrganizationIdForFilter => Read(inner.OrganizationIdForFilter);
-    }
 }

@@ -63,7 +63,7 @@ public sealed class BcArtifactService
             throw Invalid("Country", "Enter a BC country code, e.g. 'dk' or 'w1'.");
         }
 
-        var versions = await TryListVersionsAsync(country, BcArtifactChannel.Release, ct).ConfigureAwait(false);
+        var versions = await TryListVersionsAsync(country, BcArtifactChannel.Release, ct);
         if (versions is null)
         {
             throw Invalid("Country",
@@ -80,9 +80,9 @@ public sealed class BcArtifactService
     /// </summary>
     private async Task<IReadOnlyList<string>?> TryListVersionsAsync(string country, BcArtifactChannel channel, CancellationToken ct)
     {
-        var countryJson = await GetIndexAsync(BcArtifactIndex.CountryIndexUrl(country, channel), ct).ConfigureAwait(false);
+        var countryJson = await GetIndexAsync(BcArtifactIndex.CountryIndexUrl(country, channel), ct);
         if (countryJson is null) return null;
-        var platformJson = await GetIndexAsync(BcArtifactIndex.PlatformIndexUrl(channel), ct).ConfigureAwait(false);
+        var platformJson = await GetIndexAsync(BcArtifactIndex.PlatformIndexUrl(channel), ct);
         return BcArtifactIndex.ParseVersions(countryJson, platformJson);
     }
 
@@ -93,7 +93,7 @@ public sealed class BcArtifactService
     /// </summary>
     public async Task<ResolvedArtifact?> ResolveOnPremAsync(string country, string? version, CancellationToken ct = default)
     {
-        var available = await ListAvailableVersionsAsync(country, ct).ConfigureAwait(false);
+        var available = await ListAvailableVersionsAsync(country, ct);
         var selected = BcArtifactIndex.SelectVersion(available, version);
         if (selected is null) return null;
         return Resolve(selected, country, BcArtifactChannel.Release);
@@ -109,11 +109,11 @@ public sealed class BcArtifactService
     /// </summary>
     public async Task<IReadOnlyList<ResolvedArtifact>> ResolvePreviewsAsync(string country, CancellationToken ct = default)
     {
-        var released = await ListAvailableVersionsAsync(country, ct).ConfigureAwait(false);
+        var released = await ListAvailableVersionsAsync(country, ct);
         var newestReleasedMajor = BcArtifactIndex.ToMajor(released.FirstOrDefault());
         if (newestReleasedMajor is null) return Array.Empty<ResolvedArtifact>();
 
-        var previews = await TryListVersionsAsync(country, BcArtifactChannel.Preview, ct).ConfigureAwait(false);
+        var previews = await TryListVersionsAsync(country, BcArtifactChannel.Preview, ct);
         if (previews is null)
         {
             _logger.LogInformation("No insider artifact index for country {Country}; no preview builds to resolve.", country);
@@ -142,11 +142,11 @@ public sealed class BcArtifactService
             throw new ArgumentOutOfRangeException(nameof(target), "The current version resolves by Major.Minor; use ResolveOnPremAsync.");
         }
 
-        var released = await ListAvailableVersionsAsync(country, ct).ConfigureAwait(false);
+        var released = await ListAvailableVersionsAsync(country, ct);
         var newestReleased = released.FirstOrDefault();
         if (newestReleased is null) return null;
 
-        var previews = await TryListVersionsAsync(country, BcArtifactChannel.Preview, ct).ConfigureAwait(false);
+        var previews = await TryListVersionsAsync(country, BcArtifactChannel.Preview, ct);
         if (previews is null) return null;
 
         var selected = BcArtifactIndex.SelectTargetVersion(previews, newestReleased, target);
@@ -176,13 +176,13 @@ public sealed class BcArtifactService
     public async Task<IReadOnlyList<OeArtifactVersion>> RefreshIndexAsync(string country, CancellationToken ct = default)
     {
         var normalized = country.Trim().ToLowerInvariant();
-        var versions = await ListAvailableVersionsAsync(normalized, ct).ConfigureAwait(false);
+        var versions = await ListAvailableVersionsAsync(normalized, ct);
         var orgId = RequireOrganizationId();
         var now = DateTime.UtcNow;
 
         var existing = await _db.OeArtifactVersions
             .Where(a => a.Country == normalized)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var byVersion = existing.ToDictionary(a => a.Version, StringComparer.OrdinalIgnoreCase);
         var wanted = new HashSet<string>(versions, StringComparer.OrdinalIgnoreCase);
 
@@ -215,12 +215,12 @@ public sealed class BcArtifactService
             if (!wanted.Contains(row.Version)) _db.OeArtifactVersions.Remove(row);
         }
 
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "Refreshed BC artifact index for org {OrgId}, country {Country}: {Count} version(s).",
             orgId, normalized, versions.Count);
 
-        return await GetCachedVersionsAsync(normalized, ct).ConfigureAwait(false);
+        return await GetCachedVersionsAsync(normalized, ct);
     }
 
     /// <summary>Reads the cached artifact versions for the current org + country, newest first.</summary>
@@ -230,7 +230,7 @@ public sealed class BcArtifactService
         var rows = await _db.OeArtifactVersions
             .AsNoTracking()
             .Where(a => a.Country == normalized)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows
             .OrderByDescending(a => Version.TryParse(a.Version, out var v) ? v : new Version(0, 0))
             .ThenByDescending(a => a.Version, StringComparer.OrdinalIgnoreCase)
@@ -253,7 +253,7 @@ public sealed class BcArtifactService
         // rotated; the trust check only knows the current names (#1428), so move
         // it onto those before vetting it.
         applicationUrl = BcArtifactIndex.ToCdnUrl(applicationUrl);
-        var appZip = await DownloadZipAsync(applicationUrl, ct).ConfigureAwait(false);
+        var appZip = await DownloadZipAsync(applicationUrl, ct);
         string? platformZip = null;
         try
         {
@@ -278,7 +278,7 @@ public sealed class BcArtifactService
                 }
                 else
                 {
-                    platformZip = await DownloadZipAsync(platformUrl, ct).ConfigureAwait(false);
+                    platformZip = await DownloadZipAsync(platformUrl, ct);
                 }
             }
             else
@@ -317,7 +317,7 @@ public sealed class BcArtifactService
                 client, uri, dest,
                 DvdDownloadService.MaxDownloadAttempts,
                 DvdDownloadService.IdleReadTimeout,
-                _logger, ct).ConfigureAwait(false);
+                _logger, ct);
             _logger.LogInformation("Downloaded BC artifact from {Host} ({Bytes} bytes).", uri.Host, bytes);
             return tempPath;
         }
@@ -347,13 +347,13 @@ public sealed class BcArtifactService
     private async Task<string?> GetIndexAsync(string url, CancellationToken ct)
     {
         var client = _httpClientFactory.CreateClient(nameof(DvdDownloadService));
-        using var response = await client.GetAsync(url, ct).ConfigureAwait(false);
+        using var response = await client.GetAsync(url, ct);
         if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
         {
             return null;
         }
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        return await response.Content.ReadAsStringAsync(ct);
     }
 
     private static PlanValidationException Invalid(string field, string message) =>

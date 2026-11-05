@@ -81,7 +81,7 @@ public sealed class ArtifactReleaseImporter
     /// </summary>
     public async Task<ArtifactImportOutcome> ImportAsync(string country, string? version, CancellationToken ct = default)
     {
-        var resolved = await _artifacts.ResolveOnPremAsync(country, version, ct).ConfigureAwait(false);
+        var resolved = await _artifacts.ResolveOnPremAsync(country, version, ct);
         if (resolved is null)
         {
             return new ArtifactImportOutcome(ArtifactImportStatus.NotFound, null, null);
@@ -91,13 +91,13 @@ public sealed class ArtifactReleaseImporter
         var existing = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
             .Select(r => new { r.Id, r.Status })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (existing is { Status: "failed" })
         {
             // A failed import is not "in the catalogue": without this, one network
             // error left the version stuck for the sweep and the Artifacts tab alike
             // (#1222). Re-run it in place, so the release keeps its id and label.
-            await RequeueFailedAsync(existing.Id, resolved, ct).ConfigureAwait(false);
+            await RequeueFailedAsync(existing.Id, resolved, ct);
             return new ArtifactImportOutcome(ArtifactImportStatus.Queued, existing.Id, resolved.Label);
         }
         if (existing is not null)
@@ -105,7 +105,7 @@ public sealed class ArtifactReleaseImporter
             return new ArtifactImportOutcome(ArtifactImportStatus.AlreadyImported, existing.Id, resolved.Label);
         }
 
-        var releaseId = await QueueAsync(resolved, ct).ConfigureAwait(false);
+        var releaseId = await QueueAsync(resolved, ct);
         return new ArtifactImportOutcome(ArtifactImportStatus.Queued, releaseId, resolved.Label);
     }
 
@@ -121,15 +121,15 @@ public sealed class ArtifactReleaseImporter
         // Reads as importing from the reopen on, so a build polling it does not
         // take it for abandoned while the wipe runs (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
-        await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
+        await _importer.ReopenForRetryAsync(releaseId, ct);
         long? jobRowId = null;
         try
         {
-            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            await _management.ClearIngestedDataAsync(releaseId, ct);
             var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
             jobRowId = await _persistedJobs.CreateAsync(
-                releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
-            await EnqueueAsync(releaseId, jobRowId.Value, resolved, ct).ConfigureAwait(false);
+                releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct);
+            await EnqueueAsync(releaseId, jobRowId.Value, resolved, ct);
         }
         catch (Exception ex)
         {
@@ -140,14 +140,14 @@ public sealed class ArtifactReleaseImporter
             {
                 try
                 {
-                    await _persistedJobs.FailUnqueuedAsync(rowId, ReleaseImportService.RetryNotQueuedMessage).ConfigureAwait(false);
+                    await _persistedJobs.FailUnqueuedAsync(rowId, ReleaseImportService.RetryNotQueuedMessage);
                 }
                 catch (Exception rowEx)
                 {
                     _logger.LogError(rowEx, "Could not fail import job row {JobRowId} of release {ReleaseId}.", rowId, releaseId);
                 }
             }
-            await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
+            await _importer.FailUnqueuedRetryAsync(releaseId);
             throw;
         }
     }
@@ -166,26 +166,26 @@ public sealed class ArtifactReleaseImporter
     /// </summary>
     public async Task<IReadOnlyList<ArtifactImportOutcome>> ImportPreviewsAsync(string country, CancellationToken ct = default)
     {
-        var resolved = await _artifacts.ResolvePreviewsAsync(country, ct).ConfigureAwait(false);
+        var resolved = await _artifacts.ResolvePreviewsAsync(country, ct);
         var outcomes = new List<ArtifactImportOutcome>(resolved.Count);
         var now = _clock.GetUtcNow().UtcDateTime;
         var cc = country.Trim().ToLowerInvariant();
 
         foreach (var preview in resolved)
         {
-            await RetireOtherMinorsAsync(preview, cc, ct).ConfigureAwait(false);
+            await RetireOtherMinorsAsync(preview, cc, ct);
 
             var existing = await _db.OeReleases.AsNoTracking()
                 .Where(r => r.DedupKey == preview.DedupKey && r.DeletedAt == null)
                 .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
 
             if (existing is { Status: "failed" })
             {
                 // A failed preview is re-run in place the next night, as a failed
                 // shipped version is (#1222), instead of waiting out the 14-day
                 // refresh age with no usable preview (#1549).
-                await RequeueFailedAsync(existing.Id, preview, ct).ConfigureAwait(false);
+                await RequeueFailedAsync(existing.Id, preview, ct);
                 outcomes.Add(new ArtifactImportOutcome(ArtifactImportStatus.Queued, existing.Id, preview.Label));
                 continue;
             }
@@ -208,14 +208,14 @@ public sealed class ArtifactReleaseImporter
                 // quota guard (or anything else) refuses the replacement, the org
                 // keeps the preview it had instead of ending up with none.
                 (int replacementId, long jobRowId) begun;
-                await using (var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false))
+                await using (var tx = await _db.Database.BeginTransactionAsync(ct))
                 {
-                    await _management.SupersedeAsync(existing.Id, ct).ConfigureAwait(false);
-                    begun = await BeginAsync(preview, ct).ConfigureAwait(false);
-                    await tx.CommitAsync(ct).ConfigureAwait(false);
+                    await _management.SupersedeAsync(existing.Id, ct);
+                    begun = await BeginAsync(preview, ct);
+                    await tx.CommitAsync(ct);
                 }
                 var replacementId = begun.replacementId;
-                await EnqueueAsync(replacementId, begun.jobRowId, preview, ct).ConfigureAwait(false);
+                await EnqueueAsync(replacementId, begun.jobRowId, preview, ct);
                 _logger.LogInformation(
                     "Replaced preview release {OldReleaseId} ({OldVersion}) with build {Version} as release {ReleaseId}.",
                     existing.Id, existing.BcVersion, preview.Version, replacementId);
@@ -223,7 +223,7 @@ public sealed class ArtifactReleaseImporter
                 continue;
             }
 
-            var releaseId = await QueueAsync(preview, ct).ConfigureAwait(false);
+            var releaseId = await QueueAsync(preview, ct);
             outcomes.Add(new ArtifactImportOutcome(ArtifactImportStatus.Queued, releaseId, preview.Label));
         }
 
@@ -251,7 +251,7 @@ public sealed class ArtifactReleaseImporter
                         && r.DedupKey.StartsWith(BcArtifactIndex.PreviewDedupPrefix + ":")
                         && r.DedupKey.EndsWith(":" + cc))
             .Select(r => new { r.Id, r.Label, r.DedupKey })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (previews.Count == 0) return 0;
 
         var shippedKeys = await _db.OeReleases.AsNoTracking()
@@ -259,7 +259,7 @@ public sealed class ArtifactReleaseImporter
                         && r.DedupKey.StartsWith(BcArtifactIndex.ReleaseDedupPrefix + ":")
                         && r.DedupKey.EndsWith(":" + cc))
             .Select(r => r.DedupKey!)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var newestShipped = shippedKeys
             .Select(k => ParseMajorMinor(BcArtifactIndex.ParseDedupKey(k)))
             .Where(v => v is not null)
@@ -272,7 +272,7 @@ public sealed class ArtifactReleaseImporter
             var previewVersion = ParseMajorMinor(BcArtifactIndex.ParseDedupKey(preview.DedupKey));
             if (previewVersion is null || previewVersion > newestShipped) continue;
 
-            await _management.SupersedeAsync(preview.Id, ct).ConfigureAwait(false);
+            await _management.SupersedeAsync(preview.Id, ct);
             retired++;
             _logger.LogInformation(
                 "Retired preview release {ReleaseId} ({Label}): {Shipped} has shipped for {Country}.",
@@ -300,10 +300,10 @@ public sealed class ArtifactReleaseImporter
                         && r.DedupKey.StartsWith(sameMajorPrefix)
                         && r.DedupKey.EndsWith(":" + cc))
             .Select(r => new { r.Id, r.Label })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         foreach (var other in others)
         {
-            await _management.SupersedeAsync(other.Id, ct).ConfigureAwait(false);
+            await _management.SupersedeAsync(other.Id, ct);
             _logger.LogInformation(
                 "Retired preview release {ReleaseId} ({Label}): the insider channel now offers {MajorMinor} for major {Major}.",
                 other.Id, other.Label, preview.MajorMinor, major.Value);
@@ -313,8 +313,8 @@ public sealed class ArtifactReleaseImporter
     /// <summary>Creates the ingesting release row for <paramref name="resolved"/> and enqueues its download job.</summary>
     private async Task<int> QueueAsync(ResolvedArtifact resolved, CancellationToken ct)
     {
-        var (releaseId, jobRowId) = await BeginAsync(resolved, ct).ConfigureAwait(false);
-        await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
+        var (releaseId, jobRowId) = await BeginAsync(resolved, ct);
+        await EnqueueAsync(releaseId, jobRowId, resolved, ct);
         return releaseId;
     }
 
@@ -328,10 +328,10 @@ public sealed class ArtifactReleaseImporter
             ApplicationVersionId: null,
             DedupKey: resolved.DedupKey,
             IsPrerelease: resolved.IsPrerelease);
-        var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+        var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing an artifact import");
         var source = new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl);
-        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct);
         return (releaseId, jobRowId);
     }
 
@@ -341,7 +341,7 @@ public sealed class ArtifactReleaseImporter
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing an artifact import");
         var source = new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl);
         await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct).ConfigureAwait(false);
+            new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct);
 
         _logger.LogInformation(
             "Queued BC artifact import {Label} (release {ReleaseId}, version {Version}, prerelease {Prerelease}, {Url}).",

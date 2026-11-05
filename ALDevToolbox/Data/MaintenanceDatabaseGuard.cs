@@ -143,7 +143,7 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
         Interlocked.Increment(ref _heldCommands);
         try
         {
-            await HoldAsync(ct).ConfigureAwait(false);
+            await HoldAsync(ct);
         }
         finally
         {
@@ -173,7 +173,7 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
                 _workOutlivedItsDatabase = true;
                 throw new DatabaseClosedForMaintenanceException();
             }
-            await Task.Delay(HoldPoll, ct).ConfigureAwait(false);
+            await Task.Delay(HoldPoll, ct);
         }
     }
 
@@ -323,7 +323,7 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
     {
-        await BeginAsync(command, eventData, cancellationToken).ConfigureAwait(false);
+        await BeginAsync(command, eventData, cancellationToken);
         return result;
     }
 
@@ -337,7 +337,7 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
     {
-        await BeginAsync(command, eventData, cancellationToken).ConfigureAwait(false);
+        await BeginAsync(command, eventData, cancellationToken);
         return result;
     }
 
@@ -351,7 +351,7 @@ public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
     public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken cancellationToken = default)
     {
-        await BeginAsync(command, eventData, cancellationToken).ConfigureAwait(false);
+        await BeginAsync(command, eventData, cancellationToken);
         return result;
     }
 

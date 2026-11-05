@@ -52,15 +52,15 @@ public sealed class ProjectDiscoveryService
         var project = await _db.OeProjects.AsNoTracking()
             .Where(c => c.Id == projectId && c.DeletedAt == null)
             .Select(c => new { c.CreatedByUserId })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Discovery"] = "This solution no longer exists.",
             });
 
-        await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct).ConfigureAwait(false);
+        await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
-        var enqueued = await _queue.EnqueueAsync(new ProjectDiscoveryJob(projectId, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a discovery")), ct).ConfigureAwait(false);
+        var enqueued = await _queue.EnqueueAsync(new ProjectDiscoveryJob(projectId, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a discovery")), ct);
         if (enqueued)
         {
             _logger.LogInformation("Queued extension discovery for project {ProjectId}.", projectId);
@@ -76,11 +76,11 @@ public sealed class ProjectDiscoveryService
     public async Task<ProjectDiscovery> GetDiscoveryAsync(int projectId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
+        await _access.EnsureCanViewAsync(projectId, ct);
         var row = await _db.OeProjects.AsNoTracking()
             .Where(c => c.Id == projectId && c.DeletedAt == null)
             .Select(c => new { c.DiscoveredExtensionsJson, c.DiscoveredAt, c.DiscoveryError })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
 
         var inFlight = _queue.IsInFlight(projectId);
         if (row is null)

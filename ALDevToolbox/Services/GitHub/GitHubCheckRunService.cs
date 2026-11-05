@@ -169,17 +169,17 @@ public sealed class GitHubCheckRunService
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ReleaseId == releaseId)
             .Select(b => new { b.Id, b.ProjectId, b.Status, b.FailureMessage, b.CheckRunId, b.BcVersion })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (build?.CheckRunId is not long checkRunId) return;
 
         var allDiagnostics = await _db.OeProjectBuildDiagnostics.AsNoTracking()
             .Where(d => d.ProjectBuildId == build.Id)
             .OrderBy(d => d.Ordering)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var results = await _db.OeProjectBuildResults.AsNoTracking()
             .Where(r => r.ReleaseId == releaseId)
             .Select(r => new { r.AppName, r.Status, r.Message })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // A solution can list several repositories, and a pull request is about
         // exactly one of them. Annotating another repository's file would put a
@@ -191,7 +191,7 @@ public sealed class GitHubCheckRunService
         var repositoryIds = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.ProjectId == build.ProjectId)
             .Select(r => new { r.Id, r.Url })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var wanted = GitHubPullRequestBuildWorker.NormaliseRepositoryUrl($"https://github.com/{repositoryFullName}");
         var underReview = repositoryIds
             .Where(r => GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(r.Url) == wanted)

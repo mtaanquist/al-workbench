@@ -56,7 +56,7 @@ public static class BcAppOperationPoller
             try
             {
                 operation = await apps.GetAppOperationAsync(
-                    accessToken, applicationFamily, environmentName, appId, started.Id, ct).ConfigureAwait(false);
+                    accessToken, applicationFamily, environmentName, appId, started.Id, ct);
                 consecutiveErrors = 0;
                 refreshed = false;
             }
@@ -68,7 +68,7 @@ public static class BcAppOperationPoller
                 refreshed = true;
                 try
                 {
-                    accessToken = await refreshToken(ct).ConfigureAwait(false);
+                    accessToken = await refreshToken(ct);
                 }
                 catch (BcApiException signInFailed)
                 {
@@ -90,7 +90,7 @@ public static class BcAppOperationPoller
                     return BcAppOperationResult.Unconfirmed("Business Central was still installing the app when the workbench stopped waiting, so the install wasn't confirmed here.");
                 }
                 var pause = wait > pollDelay ? wait : pollDelay;
-                await Task.Delay(pause < left ? pause : left, ct).ConfigureAwait(false);
+                await Task.Delay(pause < left ? pause : left, ct);
                 continue;
             }
             catch (BcApiException) when (++consecutiveErrors < MaxConsecutivePollErrors)
@@ -124,7 +124,7 @@ public static class BcAppOperationPoller
             {
                 return BcAppOperationResult.Unconfirmed("Business Central was still installing the app when the workbench stopped waiting, so the install wasn't confirmed here.");
             }
-            await Task.Delay(pollDelay, ct).ConfigureAwait(false);
+            await Task.Delay(pollDelay, ct);
         }
     }
 

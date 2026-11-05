@@ -73,7 +73,7 @@ public static class AuditActor
         var user = await db.Users.AsNoTracking()
             .Where(u => u.Id == userId.Value)
             .Select(u => new { u.DisplayName, u.Email })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (user is null) return Unknown;
 
         var name = string.IsNullOrWhiteSpace(user.DisplayName) ? user.Email : user.DisplayName;

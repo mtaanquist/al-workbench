@@ -66,7 +66,7 @@ public sealed class TemplatePaletteSource : IPaletteSource
             .OrderBy(t => t.Name)
             .Take(MaxTemplatesScanned)
             .Select(t => new { t.Key, t.Name, t.Runtime, t.Deprecated })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var candidates = rows.Select(r => new PaletteCandidate(
             "template",
