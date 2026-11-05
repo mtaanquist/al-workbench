@@ -30,6 +30,7 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
     private const string OrgLogin = "cronus-dk";
     private const string RepoName = "cronus-as";
     private const string Repo = $"{OrgLogin}/{RepoName}";
+    private const long RepoGitHubId = 4711;
 
     private readonly TestDb _db = new();
     private readonly MigrationTempDir _temp = new();
@@ -91,6 +92,61 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
         row.ProjectId.Should().Be(outcome.SolutionId);
         row.CreatedByUserId.Should().Be(UserId);
         row.Sources.Should().Be("cronus-base@abc1234");
+        row.SourceRepositoryIds.Should().Be("r1", "Migrate again ticks the same repositories by id");
+        row.RepositoryGitHubId.Should().Be(RepoGitHubId);
+    }
+
+    [Fact]
+    public async Task A_failed_run_keeps_what_migrate_again_needs()
+    {
+        await ReadyAsync();
+        var api = WritableApi().On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.InternalServerError, "{}");
+        var target = MigrationTestServices.Target(addTemplateExtensions: true);
+        var job = Job() with { Target = target with { Plan = target.Plan with { ShortName = "CRO" } } };
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewPublisher(ctx, api, _temp.Path).PublishAsync(job, Request(), _temp.Path, Commits, CancellationToken.None);
+            await act.Should().ThrowAsync<Exception>();
+        }
+
+        await using var check = _db.NewContext();
+        var row = await check.RepositoryMigrations.AsNoTracking().SingleAsync();
+        row.SourceRepositoryIds.Should().Be("r1");
+        row.ShortName.Should().Be("CRO");
+        row.AddTemplateExtensions.Should().BeTrue();
+        row.RepositoryGitHubId.Should().BeNull("no repository was made");
+    }
+
+    [Fact]
+    public async Task A_renamed_repository_is_not_taken_for_gone()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS A/S");
+        await SeedHistoryAsync(solutionId, $"{OrgLogin}/old-cronus", gitHubId: 99);
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{OrgLogin}/old-cronus", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, "/repositories/99", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson($"{OrgLogin}/cronus-renamed", id: 99));
+
+        await using var ctx = _db.NewContext();
+        var clash = await NewPublisher(ctx, api, _temp.Path).FindSolutionClashAsync("CRONUS A/S", CancellationToken.None);
+
+        clash!.CanReplace.Should().BeFalse("GitHub still has the repository under its new name");
+    }
+
+    [Fact]
+    public async Task A_repository_gone_by_its_github_number_can_be_replaced()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS A/S");
+        await SeedHistoryAsync(solutionId, $"{OrgLogin}/old-cronus", gitHubId: 99);
+        var api = WritableApi().On(HttpMethod.Get, "/repositories/99", HttpStatusCode.NotFound);
+
+        await using var ctx = _db.NewContext();
+        var clash = await NewPublisher(ctx, api, _temp.Path).FindSolutionClashAsync("CRONUS A/S", CancellationToken.None);
+
+        clash!.CanReplace.Should().BeTrue();
+        api.Calls.Should().NotContain(c => c.Contains("/repos/cronus-dk/old-cronus"), "the number is asked, not the name");
     }
 
     [Fact]
@@ -324,7 +380,7 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson())
             .On(HttpMethod.Get, $"/orgs/{OrgLogin}/members/", HttpStatusCode.NoContent)
-            .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.Created, FakeGitHubApi.RepositoryJson(Repo))
+            .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.Created, FakeGitHubApi.RepositoryJson(Repo, id: RepoGitHubId))
             .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Created, """{"ref":"refs/heads/x"}""");
 
     private async Task ReadyAsync()
@@ -383,7 +439,7 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
     }
 
     /// <summary>An earlier migration's run, and the repository row it registered on the solution.</summary>
-    private async Task SeedHistoryAsync(int solutionId, string repository)
+    private async Task SeedHistoryAsync(int solutionId, string repository, long? gitHubId = null)
     {
         await SeedGitHubRepositoryAsync(solutionId, repository);
         await using var ctx = _db.NewContext();
@@ -399,6 +455,7 @@ public sealed class RepositoryMigrationPublisherTests : IDisposable
             TemplateKey = MigrationTestServices.TemplateKey,
             RepositoryFullName = repository,
             RepositoryUrl = "https://github.com/" + repository,
+            RepositoryGitHubId = gitHubId,
             ProjectId = solutionId,
             Succeeded = true,
         });

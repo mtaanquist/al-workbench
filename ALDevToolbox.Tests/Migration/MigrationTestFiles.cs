@@ -93,10 +93,11 @@ internal static class MigrationTestServices
         await ctx.SaveChangesAsync();
     }
 
-    public static MigrationWorkspaceBuilder NewBuilder(TestDb db, AppDbContext ctx) => new(
+    public static MigrationWorkspaceBuilder NewBuilder(TestDb db, AppDbContext ctx, TimeProvider? clock = null) => new(
         db.NewGenerationService(ctx),
         new WorkspaceConfigService(ctx),
         new ProcessRunner(),
+        clock ?? TimeProvider.System,
         NullLogger<MigrationWorkspaceBuilder>.Instance);
 
     /// <summary>A target on the test template for the customer "CRONUS A/S".</summary>

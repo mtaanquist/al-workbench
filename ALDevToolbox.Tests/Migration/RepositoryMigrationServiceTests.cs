@@ -212,9 +212,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
         var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
         var preview = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
         _queue.Reader.TryRead(out _);
-        _queue.MarkDone(preview.Id,
-            new MigrationSourceAnalysis([new MigrationExtension("cronus-base", "", "cronus-base", "id", "CRONUS Base", "CRONUS", "1.0.0.0")], []),
-            new MigrationWorkspace("Test Runtime", [], [], [], [], [], 3));
+        MarkReady(preview.Id);
 
         var act = () => svc.StartMigrationAsync(preview.Id, new MigrationCreateInput("cronus-as"));
 
@@ -222,6 +220,126 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
             .Which.Errors[RepositoryMigrationService.RepositoryField].Should().Contain("GitHub is not set up");
         _queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued before GitHub could take it");
     }
+
+    [Fact]
+    public async Task A_run_uses_the_template_as_previewed_even_after_the_template_is_deleted()
+    {
+        await SeedUserWithTokenAsync();
+        var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
+        var preview = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
+        _queue.Reader.TryRead(out _);
+        MarkReady(preview.Id);
+        await using (var ctx = _db.NewContext())
+        {
+            var template = await ctx.RuntimeTemplates.SingleAsync(t => t.Key == MigrationTestServices.TemplateKey);
+            template.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        var act = () => svc.StartMigrationAsync(preview.Id, new MigrationCreateInput("cronus-as"));
+
+        // Past the template: the next refusal is GitHub's, not "that template no longer exists".
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().NotContainKey(RepositoryMigrationService.TemplateField);
+        errors[RepositoryMigrationService.RepositoryField].Should().Contain("GitHub is not set up");
+    }
+
+    [Fact]
+    public async Task A_ready_preview_without_its_target_is_refused_rather_than_read_again()
+    {
+        await SeedUserWithTokenAsync();
+        var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
+        var preview = await svc.StartPreviewAsync(Project, ["r1"], Cronus);
+        _queue.Reader.TryRead(out _);
+        _queue.MarkDone(preview.Id, ReadyAnalysis, ReadyWorkspace);
+
+        var act = () => svc.StartMigrationAsync(preview.Id, new MigrationCreateInput("cronus-as"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors[RepositoryMigrationService.RepositoryField].Should().Contain("Preview again");
+    }
+
+    [Fact]
+    public async Task The_history_searches_customer_project_and_repository_and_counts_every_match()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var rows = new[]
+            {
+                ("CRONUS A/S", "cronus/Sales", (string?)null, 4),
+                ("CRONUS Sverige", "cronus/Sverige", "cronus-dk/cronus-se", 3),
+                ("Fabrikam", "fabrikam/Main", "cronus-dk/fabrikam", 2),
+                ("Contoso_100", "contoso/Main", null, 1),
+                ("Contoso 1000", "contoso/Main", null, 0),
+            };
+            foreach (var (customer, project, repository, daysAgo) in rows)
+            {
+                ctx.RepositoryMigrations.Add(new RepositoryMigration
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    CreatedAt = DateTime.UtcNow.AddDays(-daysAgo),
+                    SourceProject = project,
+                    SourceProjectUrl = "https://dev.azure.com/" + project,
+                    CustomerName = customer,
+                    TemplateKey = MigrationTestServices.TemplateKey,
+                    RepositoryFullName = repository,
+                    Succeeded = repository is not null,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+        var svc = NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing));
+
+        (await svc.ListHistoryAsync("cronus")).Rows.Select(r => r.CustomerName)
+            .Should().Equal(["Fabrikam", "CRONUS Sverige", "CRONUS A/S"], "the repository name matches too");
+        (await svc.ListHistoryAsync("SVERIGE")).Rows.Should().ContainSingle();
+        (await svc.ListHistoryAsync("contoso_")).Rows.Select(r => r.CustomerName)
+            .Should().Equal(["Contoso_100"], "an underscore is a character, not a wildcard");
+
+        var first = await svc.ListHistoryAsync(null, take: 2);
+        first.Rows.Should().HaveCount(2);
+        first.Total.Should().Be(5, "Show more needs to know how many there are");
+    }
+
+    [Fact]
+    public async Task The_history_carries_what_migrate_again_fills_in()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.RepositoryMigrations.Add(new RepositoryMigration
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                CreatedAt = DateTime.UtcNow,
+                SourceProject = "cronus/Sales",
+                SourceProjectUrl = Project,
+                SourceRepositoryIds = "r1\nr2",
+                CustomerName = "CRONUS A/S",
+                ShortName = "CRO",
+                TemplateKey = MigrationTestServices.TemplateKey,
+                AddTemplateExtensions = true,
+                Succeeded = false,
+                Message = "main has changed",
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var row = (await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing))
+            .ListHistoryAsync()).Rows.Single();
+
+        row.SourceRepositoryIds.Should().Equal("r1", "r2");
+        row.ShortName.Should().Be("CRO");
+        row.TemplateKey.Should().Be(MigrationTestServices.TemplateKey);
+        row.AddTemplateExtensions.Should().BeTrue();
+    }
+
+    private static readonly MigrationSourceAnalysis ReadyAnalysis =
+        new([new MigrationExtension("cronus-base", "", "cronus-base", "id", "CRONUS Base", "CRONUS", "1.0.0.0")], []);
+
+    private static readonly MigrationWorkspace ReadyWorkspace = new("Test Runtime", [], [], [], [], [], 3);
+
+    /// <summary>A preview that read one extension cleanly, with the target it laid out.</summary>
+    private void MarkReady(Guid previewId) =>
+        _queue.MarkDone(previewId, ReadyAnalysis, ReadyWorkspace, MigrationTestServices.Target());
 
     [Fact]
     public async Task The_history_is_the_organisations_own_newest_first()
@@ -244,9 +362,10 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
             await ctx.SaveChangesAsync();
         }
 
-        var rows = await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing)).ListHistoryAsync();
+        var page = await NewService(_db.NewContext(), new AzureDevOpsClientTests.StubHandler(HttpStatusCode.OK, Listing)).ListHistoryAsync();
 
-        rows.Select(r => r.CustomerName).Should().Equal("CRONUS Sverige", "CRONUS A/S");
+        page.Rows.Select(r => r.CustomerName).Should().Equal("CRONUS Sverige", "CRONUS A/S");
+        page.Total.Should().Be(2);
     }
 
     [Fact]

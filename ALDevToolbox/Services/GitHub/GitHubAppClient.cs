@@ -644,6 +644,19 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// The repository GitHub numbers <paramref name="id"/>, wherever it is now and
+    /// whatever it is called, or null when the credential cannot see one by that
+    /// number (it was deleted, or moved out of sight).
+    /// </summary>
+    public async Task<GitHubRepositorySummary?> GetRepositoryByIdAsync(
+        string credential, long id, CancellationToken ct = default)
+    {
+        using var request = NewRequest(HttpMethod.Get, $"repositories/{id}", credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        return document is null ? null : ReadRepository(document.RootElement);
+    }
+
+    /// <summary>
     /// Creates a repository in <paramref name="org"/>, carrying the
     /// <em>installation</em> token: creating a repository is an act of the
     /// organisation, and no individual should have to hold <c>admin:org</c> for
@@ -1247,7 +1260,8 @@ public sealed partial class GitHubAppClient
                 ? d.GetString()
                 : null,
             HtmlUrl: element.TryGetProperty("html_url", out var h) ? h.GetString() ?? string.Empty : string.Empty,
-            CloneUrl: element.TryGetProperty("clone_url", out var c) ? c.GetString() ?? string.Empty : string.Empty);
+            CloneUrl: element.TryGetProperty("clone_url", out var c) ? c.GetString() ?? string.Empty : string.Empty,
+            Id: element.TryGetProperty("id", out var i) && i.ValueKind == JsonValueKind.Number && i.TryGetInt64(out var id) ? id : null);
     }
 
     private static string RepoPath(string owner, string repo) =>

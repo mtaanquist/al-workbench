@@ -17,10 +17,14 @@ internal sealed class RepositoryMigrationConfiguration : IEntityTypeConfiguratio
         entity.Property(e => e.SourceProject).HasColumnName("source_project").HasMaxLength(200).IsRequired();
         entity.Property(e => e.SourceProjectUrl).HasColumnName("source_project_url").HasMaxLength(500).IsRequired();
         entity.Property(e => e.Sources).HasColumnName("sources").IsRequired();
+        entity.Property(e => e.SourceRepositoryIds).HasColumnName("source_repository_ids").IsRequired();
         entity.Property(e => e.CustomerName).HasColumnName("customer_name").HasMaxLength(200).IsRequired();
+        entity.Property(e => e.ShortName).HasColumnName("short_name").HasMaxLength(200);
         entity.Property(e => e.TemplateKey).HasColumnName("template_key").HasMaxLength(200).IsRequired();
+        entity.Property(e => e.AddTemplateExtensions).HasColumnName("add_template_extensions").IsRequired();
         entity.Property(e => e.RepositoryFullName).HasColumnName("repository_full_name").HasMaxLength(300);
         entity.Property(e => e.RepositoryUrl).HasColumnName("repository_url").HasMaxLength(500);
+        entity.Property(e => e.RepositoryGitHubId).HasColumnName("repository_github_id");
         entity.Property(e => e.ProjectId).HasColumnName("project_id");
         entity.Property(e => e.Succeeded).HasColumnName("succeeded").IsRequired();
         entity.Property(e => e.Message).HasColumnName("message");

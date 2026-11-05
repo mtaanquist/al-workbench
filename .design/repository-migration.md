@@ -129,7 +129,7 @@ repository style), private (on), and "Set up build pipelines" (on). "Create repo
 then the page's primary action; the preview button turns outline.
 
 `RepositoryMigrationService.StartMigrationAsync` takes the preview's id, never the page's copy of
-it. It rebuilds the target from what the preview recorded, lists the repositories from Azure
+it. It takes the target the preview laid out, lists the repositories from Azure
 DevOps again, and checks on the request everything that would refuse the creation before
 anything exists: the name, GitHub's readiness and the Admin's membership
 (`GitHubWorkspaceRepositoryService.CheckCanCreateAsync`, shared with New Workspace), and a
@@ -138,8 +138,11 @@ carrying a `MigrationCreateRequest` with the commit of `main` the preview read i
 repository, keyed by Azure DevOps repository id. The page shows the run in place of the
 preview, with a stage line. A preview starts at most one run; a second tab is told it was used.
 
-The template itself is read again at run time, so an edit to the template between the preview
-and the run is picked up. The repositories are what is pinned, not the template.
+The template is pinned too (#1706): the preview generates it once and keeps the generated files
+on the in-memory preview, with the rest of the target (customer, short name, tenant, production
+version), and the run lays out exactly those. An edit to the template, or its deletion, between
+the preview and the run is not picked up; preview again to use the new one. The repositories
+cannot be kept the same way, which is why `main` is checked instead.
 
 The run clones again, and stops with "main has changed ... preview again" if any repository's
 `main` moved since the preview (or a repository the preview did not read is in the run), so
@@ -157,8 +160,10 @@ workspace again and hands it to `RepositoryMigrationPublisher`, which:
   the default branch on the installation token. A customer's source is thousands of files, and
   an API call each would spend the installation's hourly allowance that builds and webhooks
   share;
-- records the run in `repository_migrations` (who, when, from where, which commits, into which
-  repository and solution, and the outcome), whatever the outcome: created, refused, failed
+- records the run in `repository_migrations` (who, when, from where, which repositories by
+  Azure DevOps id and which commits, the customer, short name, template and whether its own
+  extensions were asked for, into which repository, by name and by GitHub's number, and solution,
+  and the outcome), whatever the outcome: created, refused, failed
   after the repository was made (the row names it), or stopped before GitHub because `main`
   moved or the sources no longer move cleanly.
 
@@ -171,7 +176,9 @@ customer again, except that the solution keeps its name. So when a solution of t
 name exists, the page offers **"Replace the existing solution"** only if a successful earlier
 migration created that solution and GitHub says its repository is gone (asked with the
 installation token, which can see every repository the app created, and only for a repository in
-the GitHub organisation connected now: one elsewhere is out of sight, not gone). After a
+the GitHub organisation connected now: one elsewhere is out of sight, not gone). It is asked by
+GitHub's number for the repository, so a renamed repository is not taken for a deleted one; runs
+recorded before the number was kept (#1706) are asked by name. After a
 confirmation, the old solution and its pipelines are soft-deleted once the new repository holds
 the code and before the new solution is registered, so a run refused earlier (the name is taken,
 the push failed) leaves the old solution as it was.
@@ -182,8 +189,20 @@ as New Workspace adds them to a solution it is given (only when it is the soluti
 repository). Any other solution of that name, one that already has a GitHub repository, is
 refused: the Admin picks another customer name or removes that repository first.
 
+**Step 3 checks the customer name** as it is typed (#1706), with the same lookup step 5 uses: a
+solution of that name with no GitHub repository is named as the one the repository will join,
+one from an earlier migration whose repository is gone is named as replaceable in step 5, and
+any other is a warning that the name would be refused, while the Admin can still change it and
+before a preview spends minutes cloning. It warns rather than blocks, since removing the
+repository from that solution meanwhile is a valid way out.
+
 **Earlier migrations** lists the organisation's runs, newest first, below the steps, so with a
-hundred customers to move the Admin can see which are done. Run state itself stays in memory
+hundred customers to move the Admin can see which are done. It shows 25 at a time with Show
+more, and searches customer name, Azure DevOps project and GitHub repository (#1706). A failed
+run offers **Migrate again**, which fills in steps 1 to 3 from the row: the project is listed
+again, the same repositories are ticked by Azure DevOps id (all of them, as on any listing, for
+a run recorded before the ids were kept), and the customer, short name, template and template
+extensions are put back. Nothing starts until the Admin previews. Run state itself stays in memory
 like a preview's. A restart in the middle of a run loses it without a history row, and may
 leave a half-made repository on GitHub; the run's failure message says to check for one.
 The page serialises its own database reads, because the poll that follows a run and a button

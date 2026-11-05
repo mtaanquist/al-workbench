@@ -1,0 +1,213 @@
+@using ALDevToolbox.Services.Migration
+
+@*
+    The findings and the layout a finished preview or migration run reports, on
+    Migrate repositories (#1700): what stands in the way, the extensions found,
+    what the template adds, the app.json changes and what is left behind. Split
+    out of the page (#1706); it only shows what the preview holds.
+*@
+
+@if (Preview.Analysis is { } analysis)
+{
+    var findings = analysis.Findings.Concat(Preview.Workspace?.Findings ?? []).ToList();
+    @if (Preview.CanMigrate && !Preview.IsMigration)
+    {
+        <Alert Tone="AlertTone.Success">
+            <span>Nothing stands in the way. @analysis.Extensions.Count @(analysis.Extensions.Count == 1 ? "extension" : "extensions") would be moved, @Preview.Workspace!.FileCount files in all. Look through the details below, then create the repository.</span>
+        </Alert>
+    }
+    else if (findings.Any(f => f.Severity == MigrationFindingSeverity.Blocking))
+    {
+        <Alert Tone="AlertTone.Danger">
+            <span>@(Preview.IsMigration ? "Nothing was created. " : "")Fix the problems below, then preview again.</span>
+        </Alert>
+    }
+
+    @if (findings.Count > 0)
+    {
+        <ul class="mig__findings">
+            @foreach (var finding in findings)
+            {
+                <li class="mig__finding">
+                    <StatusPill Tone="@(finding.Severity == MigrationFindingSeverity.Blocking ? "danger" : "warn")">
+                        @(finding.Severity == MigrationFindingSeverity.Blocking ? "Problem" : "Note")
+                    </StatusPill>
+                    <span>
+                        @if (finding.RepositoryName is { } name)
+                        {
+                            <strong>@name:</strong>@(" ")
+                        }
+                        @finding.Message
+                    </span>
+                </li>
+            }
+        </ul>
+    }
+
+    @if (analysis.Extensions.Count > 0)
+    {
+        <h3 class="mig__subhead">Extensions found</h3>
+        <div class="mig__scroll">
+            <table class="data-table">
+                <thead>
+                    <tr><th>Folder in the new repository</th><th>Extension</th><th>Publisher</th><th>Version</th><th>From</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var ext in analysis.Extensions)
+                    {
+                        <tr>
+                            <td class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @ext.Folder</td>
+                            <td>@ext.Name</td>
+                            <td>@ext.Publisher</td>
+                            <td class="u-nowrap">@ext.Version</td>
+                            <td class="u-muted">@ext.RepositoryName@(ext.SourcePath.Length > 0 ? "/" + ext.SourcePath : "")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (Preview.Workspace is { } workspace)
+    {
+        @if (workspace.TemplateFolders.Count > 0)
+        {
+            <p>
+                Added from the template:
+                @foreach (var folder in workspace.TemplateFolders)
+                {
+                    <span class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @folder</span>@(" ")
+                }
+            </p>
+        }
+        @if (workspace.RootFiles.Count > 0)
+        {
+            <p>
+                Added in the root folder of the repository:
+                @for (var i = 0; i < workspace.RootFiles.Count; i++)
+                {
+                    <code>@workspace.RootFiles[i]</code>@(i < workspace.RootFiles.Count - 1 ? ", " : ".")
+                }
+                @(" ")<span class="u-muted">
+                    <code>@MigrationWorkspaceBuilder.ArchiveFile</code> links each Azure DevOps repository and the commit that was copied,
+                    so the old history stays easy to find. The rest come from the template.
+                </span>
+            </p>
+        }
+
+        <h3 class="mig__subhead">Changes to app.json</h3>
+        @if (workspace.AppJson.All(a => a.Changes.Count == 0))
+        {
+            <p class="u-muted">Every app.json already matches the template.</p>
+        }
+        else
+        {
+            @foreach (var report in workspace.AppJson)
+            {
+                var (changes, blanks) = Split(report.Changes);
+                <details class="mig__changes">
+                    <summary>
+                        <span class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @report.Folder</span>
+                        <span class="u-muted">· @Summary(changes, blanks.Count)</span>
+                    </summary>
+                    @if (blanks.Count > 0)
+                    {
+                        <p class="field__hint">
+                            Added empty, as the template has them:
+                            @for (var i = 0; i < blanks.Count; i++)
+                            {
+                                <code>@blanks[i]</code>@(i < blanks.Count - 1 ? ", " : ".")
+                            }
+                        </p>
+                    }
+                    @if (changes.Count > 0)
+                    {
+                        <div class="mig__scroll">
+                            <table class="data-table">
+                                <thead><tr><th>Setting</th><th>Now</th><th>After the move</th></tr></thead>
+                                <tbody>
+                                    @foreach (var change in changes)
+                                    {
+                                        <tr>
+                                            <td class="u-nowrap"><code>@change.Property</code></td>
+                                            <td class="mig__value">@ShowValue(change.Before, "not set")</td>
+                                            <td class="mig__value">@ShowValue(change.After, "removed")</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </details>
+            }
+        }
+
+        <h3 class="mig__subhead">Left behind</h3>
+        <p class="field__hint">These stay in Azure DevOps. If you still need one, copy it into the new repository after it is created.</p>
+        @if (workspace.LeftBehind.Count == 0)
+        {
+            <p class="u-muted">Nothing. Every file in the extensions moves.</p>
+        }
+        else
+        {
+            <div class="mig__scroll">
+                <table class="data-table">
+                    <thead><tr><th>Repository</th><th>File or folder</th><th>Why</th><th class="u-num">Files</th></tr></thead>
+                    <tbody>
+                        @foreach (var left in workspace.LeftBehind)
+                        {
+                            <tr>
+                                <td class="u-nowrap">@left.RepositoryName</td>
+                                <td class="mig__path"><code>@left.Path</code></td>
+                                <td>@LeftBehindLabel(left.Reason)</td>
+                                <td class="u-num">@left.FileCount</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <p class="field__hint">.alpackages folders are never copied. The build downloads the symbols it needs.</p>
+    }
+}
+
+@code {
+    /// <summary>A preview or run with an analysis.</summary>
+    [Parameter, EditorRequired] public MigrationPreview Preview { get; set; } = default!;
+
+    private static string LeftBehindLabel(MigrationLeftBehindReason reason) => reason switch
+    {
+        MigrationLeftBehindReason.ReplacedByTemplate => "The template has its own",
+        MigrationLeftBehindReason.IgnoredByGitignore => "Ignored by the template's .gitignore",
+        _ => "Not part of an extension",
+    };
+
+    /// <summary>
+    /// Splits off the settings that only gain an empty value from the template
+    /// ("privacyStatement": ""), which say nothing and would bury the real changes.
+    /// </summary>
+    private static (List<MigrationAppJsonChange> Changes, List<string> Blanks) Split(IReadOnlyList<MigrationAppJsonChange> all)
+    {
+        static bool Blank(MigrationAppJsonChange c) => c.Before is null && c.After is "\"\"" or "[]" or "{}";
+        return (all.Where(c => !Blank(c)).ToList(), all.Where(Blank).Select(c => c.Property).ToList());
+    }
+
+    /// <summary>The line under each extension: the version changes that can break a compile, then a count of the rest.</summary>
+    private static string Summary(List<MigrationAppJsonChange> changes, int blanks)
+    {
+        if (changes.Count == 0 && blanks == 0) return "no changes";
+        var versions = changes
+            .Where(c => c.Property is "application" or "platform" or "runtime")
+            .Select(c => $"{c.Property} {Trim(c.Before) ?? "not set"} → {Trim(c.After) ?? "removed"}")
+            .ToList();
+        var rest = changes.Count - versions.Count + blanks;
+        if (rest > 0) versions.Add(versions.Count == 0 ? $"{rest} {(rest == 1 ? "change" : "changes")}" : $"{rest} more");
+        return string.Join(", ", versions);
+
+        static string? Trim(string? json) => json?.Trim('"');
+    }
+
+    /// <summary>An app.json value as the table shows it: short, and a word in place of nothing.</summary>
+    private static string ShowValue(string? json, string missing) =>
+        json is null ? missing : json.Length > 160 ? json[..160] + "..." : json;
+}

@@ -14,6 +14,7 @@
 @using ALDevToolbox.Services.Migration
 @using ALDevToolbox.Services.Templates
 @using ALDevToolbox.Services.ObjectExplorer.Projects
+@using Microsoft.JSInterop
 
 @*
     Migrate repositories (issue #1698; parts #1699, #1700 and #1701). Reached from the
@@ -61,7 +62,7 @@
                     <div class="field">
                         <label class="field__label" for="mig-project">Project address</label>
                         <div class="u-row mig__address">
-                            <input class="input" id="mig-project" type="text" required
+                            <input class="input" id="mig-project" type="text" required @ref="_projectInput"
                                    placeholder="e.g. https://dev.azure.com/cronus/Sales"
                                    @bind="_projectAddress" @bind:event="oninput"
                                    @onkeydown="OnAddressKeyAsync"
@@ -182,9 +183,34 @@
                                     <label class="field__label" for="mig-customer">Customer name</label>
                                     <input class="input" id="mig-customer" type="text" required
                                            maxlength="@CustomerNaming.MaxLength" placeholder="e.g. CRONUS A/S"
-                                           @bind="_customerName" @bind:event="oninput" />
+                                           @ref="_customerInput"
+                                           @bind="_customerName" @bind:event="oninput" @bind:after="CheckCustomerNameAsync" />
                                     <span class="field__hint">Names the workspace and the solution. If a solution of this name has no GitHub repository yet, the repository is added to it; otherwise a new solution is created.</span>
                                     <FieldError Field="@RepositoryMigrationService.CustomerField" Errors="_errors" />
+                                    @if (_nameClash is { CanJoin: true } join)
+                                    {
+                                        <span class="field__hint">
+                                            <a href="@SolutionLinks.Solution(join.Slug, join.Id)">@join.Name</a> already exists and has no GitHub repository yet, so the new repository will be added to it.
+                                        </span>
+                                    }
+                                    else if (_nameClash is { CanReplace: true } replace)
+                                    {
+                                        <Alert Tone="AlertTone.Info">
+                                            <span>
+                                                <a href="@SolutionLinks.Solution(replace.Slug, replace.Id)">@replace.Name</a> came from an earlier migration whose repository has since been deleted from GitHub.
+                                                You can choose to replace it when you create the repository.
+                                            </span>
+                                        </Alert>
+                                    }
+                                    else if (_nameClash is { } taken)
+                                    {
+                                        <Alert Tone="AlertTone.Warn">
+                                            <span>
+                                                <a href="@SolutionLinks.Solution(taken.Slug, taken.Id)">@taken.Name</a> already has a GitHub repository, so a repository can't be created under this name.
+                                                Use another customer name, or remove that repository from the solution first.
+                                            </span>
+                                        </Alert>
+                                    }
                                 </div>
                                 <div class="field">
                                     <label class="field__label" for="mig-short">Short name <span class="u-muted">(optional)</span></label>
@@ -316,168 +342,9 @@
                             </table>
                         </div>
 
-                        @if (_preview.Analysis is { } analysis)
+                        @if (_preview.Analysis is not null)
                         {
-                            var findings = analysis.Findings.Concat(_preview.Workspace?.Findings ?? []).ToList();
-                            @if (_preview.CanMigrate && !_preview.IsMigration)
-                            {
-                                <Alert Tone="AlertTone.Success">
-                                    <span>Nothing stands in the way. @analysis.Extensions.Count @(analysis.Extensions.Count == 1 ? "extension" : "extensions") would be moved, @_preview.Workspace!.FileCount files in all. Look through the details below, then create the repository.</span>
-                                </Alert>
-                            }
-                            else if (findings.Any(f => f.Severity == MigrationFindingSeverity.Blocking))
-                            {
-                                <Alert Tone="AlertTone.Danger">
-                                    <span>@(_preview.IsMigration ? "Nothing was created. " : "")Fix the problems below, then preview again.</span>
-                                </Alert>
-                            }
-
-                            @if (findings.Count > 0)
-                            {
-                                <ul class="mig__findings">
-                                    @foreach (var finding in findings)
-                                    {
-                                        <li class="mig__finding">
-                                            <StatusPill Tone="@(finding.Severity == MigrationFindingSeverity.Blocking ? "danger" : "warn")">
-                                                @(finding.Severity == MigrationFindingSeverity.Blocking ? "Problem" : "Note")
-                                            </StatusPill>
-                                            <span>
-                                                @if (finding.RepositoryName is { } name)
-                                                {
-                                                    <strong>@name:</strong>@(" ")
-                                                }
-                                                @finding.Message
-                                            </span>
-                                        </li>
-                                    }
-                                </ul>
-                            }
-
-                            @if (analysis.Extensions.Count > 0)
-                            {
-                                <h3 class="mig__subhead">Extensions found</h3>
-                                <div class="mig__scroll">
-                                    <table class="data-table">
-                                        <thead>
-                                            <tr><th>Folder in the new repository</th><th>Extension</th><th>Publisher</th><th>Version</th><th>From</th></tr>
-                                        </thead>
-                                        <tbody>
-                                            @foreach (var ext in analysis.Extensions)
-                                            {
-                                                <tr>
-                                                    <td class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @ext.Folder</td>
-                                                    <td>@ext.Name</td>
-                                                    <td>@ext.Publisher</td>
-                                                    <td class="u-nowrap">@ext.Version</td>
-                                                    <td class="u-muted">@ext.RepositoryName@(ext.SourcePath.Length > 0 ? "/" + ext.SourcePath : "")</td>
-                                                </tr>
-                                            }
-                                        </tbody>
-                                    </table>
-                                </div>
-                            }
-
-                            @if (_preview.Workspace is { } workspace)
-                            {
-                                @if (workspace.TemplateFolders.Count > 0)
-                                {
-                                    <p>
-                                        Added from the template:
-                                        @foreach (var folder in workspace.TemplateFolders)
-                                        {
-                                            <span class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @folder</span>@(" ")
-                                        }
-                                    </p>
-                                }
-                                @if (workspace.RootFiles.Count > 0)
-                                {
-                                    <p>
-                                        Added in the root folder of the repository:
-                                        @for (var i = 0; i < workspace.RootFiles.Count; i++)
-                                        {
-                                            <code>@workspace.RootFiles[i]</code>@(i < workspace.RootFiles.Count - 1 ? ", " : ".")
-                                        }
-                                        @(" ")<span class="u-muted">
-                                            <code>@MigrationWorkspaceBuilder.ArchiveFile</code> links each Azure DevOps repository and the commit that was copied,
-                                            so the old history stays easy to find. The rest come from the template.
-                                        </span>
-                                    </p>
-                                }
-
-                                <h3 class="mig__subhead">Changes to app.json</h3>
-                                @if (workspace.AppJson.All(a => a.Changes.Count == 0))
-                                {
-                                    <p class="u-muted">Every app.json already matches the template.</p>
-                                }
-                                else
-                                {
-                                    @foreach (var report in workspace.AppJson)
-                                    {
-                                        var (changes, blanks) = Split(report.Changes);
-                                        <details class="mig__changes">
-                                            <summary>
-                                                <span class="u-nowrap"><Icon Name="folder" Width="14" Height="14" /> @report.Folder</span>
-                                                <span class="u-muted">· @Summary(changes, blanks.Count)</span>
-                                            </summary>
-                                            @if (blanks.Count > 0)
-                                            {
-                                                <p class="field__hint">
-                                                    Added empty, as the template has them:
-                                                    @for (var i = 0; i < blanks.Count; i++)
-                                                    {
-                                                        <code>@blanks[i]</code>@(i < blanks.Count - 1 ? ", " : ".")
-                                                    }
-                                                </p>
-                                            }
-                                            @if (changes.Count > 0)
-                                            {
-                                                <div class="mig__scroll">
-                                                    <table class="data-table">
-                                                        <thead><tr><th>Setting</th><th>Now</th><th>After the move</th></tr></thead>
-                                                        <tbody>
-                                                            @foreach (var change in changes)
-                                                            {
-                                                                <tr>
-                                                                    <td class="u-nowrap"><code>@change.Property</code></td>
-                                                                    <td class="mig__value">@ShowValue(change.Before, "not set")</td>
-                                                                    <td class="mig__value">@ShowValue(change.After, "removed")</td>
-                                                                </tr>
-                                                            }
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            }
-                                        </details>
-                                    }
-                                }
-
-                                <h3 class="mig__subhead">Left behind</h3>
-                                <p class="field__hint">These stay in Azure DevOps. If you still need one, copy it into the new repository after it is created.</p>
-                                @if (workspace.LeftBehind.Count == 0)
-                                {
-                                    <p class="u-muted">Nothing. Every file in the extensions moves.</p>
-                                }
-                                else
-                                {
-                                    <div class="mig__scroll">
-                                        <table class="data-table">
-                                            <thead><tr><th>Repository</th><th>File or folder</th><th>Why</th><th class="u-num">Files</th></tr></thead>
-                                            <tbody>
-                                                @foreach (var left in workspace.LeftBehind)
-                                                {
-                                                    <tr>
-                                                        <td class="u-nowrap">@left.RepositoryName</td>
-                                                        <td class="mig__path"><code>@left.Path</code></td>
-                                                        <td>@LeftBehindLabel(left.Reason)</td>
-                                                        <td class="u-num">@left.FileCount</td>
-                                                    </tr>
-                                                }
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                }
-                                <p class="field__hint">.alpackages folders are never copied. The build downloads the symbols it needs.</p>
-                            }
+                            <MigrationPreviewDetails Preview="_preview" />
                         }
                         else if (_preview.IsActive)
                         {
@@ -509,169 +376,22 @@
 
             @if (ReadyToCreate)
             {
-                <section class="card">
-                    <div class="card__head">
-                        <div>
-                            <h2 class="card__title">5. Create the repository</h2>
-                            <p class="card__sub">
-                                Creates the repository in your GitHub organisation with the files shown above in a single commit,
-                                and @(_clash is { CanJoin: true } ? "adds it to the existing solution" : "a new solution") for @_preview!.CustomerName.
-                            </p>
-                        </div>
-                    </div>
-                    <div class="card__body form-sec">
-                        @if (_github?.Blocker is { } blocker)
-                        {
-                            <Alert Tone="AlertTone.Warn"><span>@blocker</span></Alert>
-                        }
-                        <div class="field">
-                            <label class="field__label" for="mig-repo">Repository name</label>
-                            <input class="input" id="mig-repo" type="text" required maxlength="@GitHubWorkspaceRepositoryService.MaxNameLength"
-                                   pattern="@GitHubWorkspaceRepositoryService.NamePattern"
-                                   placeholder="e.g. cronus-as"
-                                   @bind="_repositoryName" @bind:event="oninput" />
-                            <span class="field__hint">
-                                @if (_github?.OrgLogin is { } org)
-                                {
-                                    <text>Created as @org/@(_repositoryName.Trim().Length > 0 ? _repositoryName.Trim() : "..."). </text>
-                                }
-                                Letters, digits, hyphens, underscores and full stops.
-                            </span>
-                            <FieldError Field="@RepositoryMigrationService.RepositoryNameField" Errors="_createErrors" />
-                        </div>
-                        <div class="field">
-                            <Switch Name="mig-private" Label="Private repository" Checked="_isPrivate" CheckedChanged="v => _isPrivate = v" />
-                            <span class="field__hint">Only people you give access to in GitHub can see it.</span>
-                        </div>
-                        <div class="field">
-                            <Switch Name="mig-pipelines" Label="Set up build pipelines" Checked="_addPipelines" CheckedChanged="v => _addPipelines = v" />
-                            <span class="field__hint">Adds build pipelines to the solution in AL Workbench, so it builds straight away.</span>
-                        </div>
-                        @if (_clash is { CanReplace: true } replaceable)
-                        {
-                            <div class="field">
-                                <Switch Name="mig-replace" Label="Replace the existing solution" Checked="_replace" CheckedChanged="v => _replace = v" />
-                                <span class="field__hint">
-                                    A solution called @replaceable.Name came from an earlier migration, and its repository has since been
-                                    deleted from GitHub. Replacing it deletes that solution and its pipelines first.
-                                </span>
-                            </div>
-                        }
-                        else if (_clash is { CanJoin: true } joined)
-                        {
-                            <Alert Tone="AlertTone.Info">
-                                <span>
-                                    The repository is added to the existing solution
-                                    <a href="@SolutionLinks.Solution(joined.Slug, joined.Id)">@joined.Name</a>, which has no GitHub repository yet.
-                                </span>
-                            </Alert>
-                        }
-                        else if (_clash is { } taken)
-                        {
-                            <Alert Tone="AlertTone.Warn">
-                                <span>
-                                    A solution called <a href="@SolutionLinks.Solution(taken.Slug, taken.Id)">@taken.Name</a> already has a GitHub repository, so this would be refused.
-                                    Change the customer name above and preview again, or remove that repository from the solution first.
-                                </span>
-                            </Alert>
-                        }
-                        <FieldError Field="@RepositoryMigrationService.SolutionField" Errors="_createErrors" />
-                        <FieldError Field="@RepositoryMigrationService.RepositoryField" Errors="_createErrors" />
-                        @foreach (var (field, message) in _createErrors.Where(e => e.Key is not (RepositoryMigrationService.SolutionField or RepositoryMigrationService.RepositoryField or RepositoryMigrationService.RepositoryNameField)))
-                        {
-                            <FieldError Message="@message" />
-                        }
-                        <div class="u-row mig__go">
-                            <button type="button" class="btn btn--primary" @onclick="CreateAsync"
-                                    disabled="@(_starting || string.IsNullOrWhiteSpace(_repositoryName) || _clash is { CanJoin: false, CanReplace: false } || _github?.Blocker is not null)">
-                                <Icon Name="folder-git-2" Width="16" Height="16" />
-                                <span>@(_starting ? "Starting..." : "Create repository")</span>
-                            </button>
-                        </div>
-                    </div>
-                </section>
+                <MigrationCreateStep Preview="_preview!" Clash="_clash" GitHub="_github" Errors="_createErrors"
+                                     Starting="_starting" OnCreate="CreateAsync" />
             }
 
-            <section class="card">
-                <div class="card__head">
-                    <div>
-                        <h2 class="card__title">Earlier migrations</h2>
-                        <p class="card__sub">Every migration run in your organisation, newest first.</p>
-                    </div>
-                </div>
-                <div class="card__body">
-                    @if (_history is null)
-                    {
-                        <LoadingBlock />
-                    }
-                    else if (_history.Count == 0)
-                    {
-                        <EmptyState Icon="history" Title="No migrations yet">
-                            <Text>When you create a repository from a preview above, it is listed here.</Text>
-                        </EmptyState>
-                    }
-                    else
-                    {
-                        <div class="mig__scroll">
-                            <table class="data-table">
-                                <thead>
-                                    <tr><th>When</th><th>Customer</th><th>From</th><th>Repository</th><th>Result</th></tr>
-                                </thead>
-                                <tbody>
-                                    @foreach (var row in _history)
-                                    {
-                                        <tr>
-                                            <td class="u-nowrap"><Timestamp Value="@row.CreatedAt" /></td>
-                                            <td>
-                                                @if (row.SolutionId is { } solutionId)
-                                                {
-                                                    <a class="u-nowrap" href="@SolutionLinks.Solution(row.SolutionSlug, solutionId)">@row.CustomerName</a>
-                                                }
-                                                else
-                                                {
-                                                    <span class="u-nowrap">@row.CustomerName</span>
-                                                }
-                                                @if (row.StartedBy is { } by)
-                                                {
-                                                    <div class="field__hint">by @by</div>
-                                                }
-                                            </td>
-                                            <td><a href="@row.SourceProjectUrl" target="_blank" rel="noopener">@row.SourceProject</a></td>
-                                            <td>
-                                                @if (row.RepositoryUrl is { } url)
-                                                {
-                                                    <a class="u-nowrap" href="@url" target="_blank" rel="noopener">@row.RepositoryFullName</a>
-                                                }
-                                                else
-                                                {
-                                                    <span class="u-muted">-</span>
-                                                }
-                                            </td>
-                                            <td class="mig__result">
-                                                <StatusPill Tone="@(row.Succeeded ? "succeeded" : "failed")">@(row.Succeeded ? "Created" : "Failed")</StatusPill>
-                                                @if (row.Message is { } message)
-                                                {
-                                                    <div class="field__hint">@message</div>
-                                                }
-                                            </td>
-                                        </tr>
-                                    }
-                                </tbody>
-                            </table>
-                        </div>
-                    }
-                </div>
-            </section>
+            <MigrationHistory Page="_history" Search="@_historySearch" LoadingMore="_loadingHistory" Busy="@(!_hasToken || _listing || _starting)"
+                              OnSearch="SearchHistoryAsync" OnShowMore="ShowMoreHistoryAsync" OnMigrateAgain="MigrateAgainAsync" />
         </div>
     </ChildContent>
 </EditPage>
 
-<ConfirmDialog @ref="_confirmReplace" />
 
 @code {
     [SupplyParameterFromQuery(Name = "preview")] public Guid? PreviewId { get; set; }
 
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan NameCheckDelay = TimeSpan.FromMilliseconds(400);
 
     private bool _loading = true;
     private bool _hasToken;
@@ -688,16 +408,19 @@
     private IReadOnlyDictionary<string, string> _errors = new Dictionary<string, string>();
     private IReadOnlyDictionary<string, string> _againErrors = new Dictionary<string, string>();
     private MigrationPreview? _preview;
-    private List<RepositoryMigrationHistoryRow>? _history;
+    private RepositoryMigrationHistoryPage? _history;
+    private string _historySearch = string.Empty;
+    private int _historyTake = RepositoryMigrationService.HistoryPageSize;
+    private bool _loadingHistory;
     private MigrationSolutionClash? _clash;
+    private MigrationSolutionClash? _nameClash;
+    private CancellationTokenSource? _nameCheck;
+    private ElementReference _customerInput;
+    private ElementReference _projectInput;
+    private bool _focusAfterRender;
     private MigrationGitHubReadiness? _github;
     private Guid? _preparedFor;
-    private string _repositoryName = string.Empty;
-    private bool _isPrivate = true;
-    private bool _addPipelines = true;
-    private bool _replace;
     private IReadOnlyDictionary<string, string> _createErrors = new Dictionary<string, string>();
-    private ConfirmDialog? _confirmReplace;
 
     // The page's services share one database context, and the poll loop's reads
     // can overlap a button's; a context allows one operation at a time.
@@ -731,44 +454,109 @@
                 _addTemplateExtensions = _preview.AddTemplateExtensions;
             }
         }
-        _history = await Migration.ListHistoryAsync();
+        _history = await Migration.ListHistoryAsync(_historySearch, _historyTake);
         await PrepareCreateAsync();
+        if (_customerName.Length > 0) _nameClash = await Db(() => Migration.FindSolutionClashAsync(_customerName));
         _loading = false;
     }
 
-    /// <summary>
-    /// Once per ready preview: suggests the repository name from the customer's,
-    /// and looks for a solution that already has that name.
-    /// </summary>
+    /// <summary>Once per ready preview: looks for a solution that already has its customer's name, and at GitHub.</summary>
     private async Task PrepareCreateAsync()
     {
         if (!ReadyToCreate || _preparedFor == _preview!.Id) return;
         _preparedFor = _preview.Id;
-        _repositoryName = GitHubWorkspaceRepositoryService.SuggestName(_preview.CustomerName);
-        _replace = false;
         _createErrors = new Dictionary<string, string>();
         var customer = _preview.CustomerName;
         _clash = await Db(() => Migration.FindSolutionClashAsync(customer));
         _github = await Db(() => Migration.CheckGitHubAsync());
     }
 
-    private async Task CreateAsync()
+    /// <summary>
+    /// Step 3 says straight away when the customer name is taken by a solution
+    /// (#1706), rather than only in step 5 after the preview has run. Waits until
+    /// the Admin stops typing; the check can ask GitHub whether an old repository is gone.
+    /// </summary>
+    private async Task CheckCustomerNameAsync()
+    {
+        _nameCheck?.Cancel();
+        _nameCheck?.Dispose();
+        var check = _nameCheck = new CancellationTokenSource();
+        var name = _customerName.Trim();
+        try
+        {
+            if (name.Length > 0) await Task.Delay(NameCheckDelay, check.Token);
+            // Not cancelled once asked: the database context is shared with the page's other reads.
+            var clash = name.Length == 0 ? null : await Db(() => Migration.FindSolutionClashAsync(name));
+            if (!check.IsCancellationRequested) _nameClash = clash;
+        }
+        catch (OperationCanceledException) { /* typed on */ }
+        catch (ObjectDisposedException) { /* typed on, or left the page */ }
+    }
+
+    private async Task SearchHistoryAsync(string search)
+    {
+        _historySearch = search.Trim();
+        _historyTake = RepositoryMigrationService.HistoryPageSize;
+        var (term, take) = (_historySearch, _historyTake);
+        _history = await Db(() => Migration.ListHistoryAsync(term, take));
+    }
+
+    private async Task ShowMoreHistoryAsync()
+    {
+        if (_loadingHistory) return;
+        _loadingHistory = true;
+        try
+        {
+            _historyTake += RepositoryMigrationService.HistoryPageSize;
+            var (term, take) = (_historySearch, _historyTake);
+            _history = await Db(() => Migration.ListHistoryAsync(term, take));
+        }
+        finally
+        {
+            _loadingHistory = false;
+        }
+    }
+
+    /// <summary>
+    /// Fills in steps 1 to 3 from an earlier run (#1706): lists the same project
+    /// again, ticks the same repositories where the run recorded them, and puts
+    /// back the customer, short name and template. Nothing starts until the Admin
+    /// presses Preview.
+    /// </summary>
+    private async Task MigrateAgainAsync(RepositoryMigrationHistoryRow row)
+    {
+        if (_listing || _starting) return;
+        // A finished preview on screen belongs to another run; a running one stays,
+        // since the server only takes one at a time anyway.
+        if (_preview is { IsActive: false })
+        {
+            _preview = null;
+            _preparedFor = null;
+            Nav.NavigateTo("/admin/administration/repositories/migrate", replace: true);
+        }
+        _customerName = row.CustomerName;
+        _shortName = row.ShortName ?? string.Empty;
+        _addTemplateExtensions = row.AddTemplateExtensions;
+        if (_templates.Any(t => t.Key == row.TemplateKey)) _templateKey = row.TemplateKey;
+        _projectAddress = row.SourceProjectUrl;
+        await ListAsync();
+        if (_listed is not null && row.SourceRepositoryIds.Count > 0)
+        {
+            var listed = _listed.Repositories.Where(r => !r.IsDisabled).Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _chosen.Clear();
+            foreach (var id in row.SourceRepositoryIds.Where(listed.Contains)) _chosen.Add(id);
+        }
+        await CheckCustomerNameAsync();
+        _focusAfterRender = true;
+    }
+
+    private async Task CreateAsync(MigrationCreateInput input)
     {
         if (_starting || _preview is null) return;
-        if (_replace && _clash is { CanReplace: true } clash && _confirmReplace is not null
-            && !await _confirmReplace.OpenAsync(
-                $"Replace {clash.Name}?",
-                $"The solution {clash.Name} and its pipelines are deleted, then the new repository and a new solution are created.",
-                "Replace and create", "btn--danger", "trash-2"))
-        {
-            return;
-        }
-
         _starting = true;
         _createErrors = new Dictionary<string, string>();
         try
         {
-            var input = new MigrationCreateInput(_repositoryName, _isPrivate, _addPipelines, _replace);
             var previewId = _preview.Id;
             _preview = await Db(() => Migration.StartMigrationAsync(previewId, input));
             Nav.NavigateTo($"/admin/administration/repositories/migrate?preview={_preview.Id}", replace: true);
@@ -786,9 +574,17 @@
 
     // Not only on the first render: initialisation awaits a database read, so the
     // first render can come before a reloaded preview has been read.
-    protected override void OnAfterRender(bool firstRender)
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (_preview?.IsActive == true && _poll is null) StartPoll();
+        if (_focusAfterRender)
+        {
+            // Migrate again is pressed at the bottom of the page; bring the
+            // filled-in steps into view, or the project address if it was refused.
+            _focusAfterRender = false;
+            try { await (_listed is not null && _templates.Count > 0 ? _customerInput : _projectInput).FocusAsync(); }
+            catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException) { }
+        }
     }
 
     private async Task OnAddressKeyAsync(KeyboardEventArgs e)
@@ -908,7 +704,11 @@
                     if (!keepGoing)
                     {
                         await PrepareCreateAsync();
-                        if (_preview.IsMigration) _history = await Db(() => Migration.ListHistoryAsync());
+                        if (_preview.IsMigration)
+                        {
+                            var (term, take) = (_historySearch, _historyTake);
+                            _history = await Db(() => Migration.ListHistoryAsync(term, take));
+                        }
                     }
                     StateHasChanged();
                 });
@@ -939,6 +739,8 @@
     public ValueTask DisposeAsync()
     {
         StopPoll();
+        _nameCheck?.Cancel();
+        _nameCheck?.Dispose();
         return ValueTask.CompletedTask;
     }
 
@@ -966,42 +768,6 @@
         _ when p.IsMigration => p.Outcome is not null ? "Migrated" : "Not migrated",
         _ => p.CanMigrate ? "Ready to migrate" : "Needs fixing",
     };
-
-    private static string LeftBehindLabel(MigrationLeftBehindReason reason) => reason switch
-    {
-        MigrationLeftBehindReason.ReplacedByTemplate => "The template has its own",
-        MigrationLeftBehindReason.IgnoredByGitignore => "Ignored by the template's .gitignore",
-        _ => "Not part of an extension",
-    };
-
-    /// <summary>
-    /// Splits off the settings that only gain an empty value from the template
-    /// ("privacyStatement": ""), which say nothing and would bury the real changes.
-    /// </summary>
-    private static (List<MigrationAppJsonChange> Changes, List<string> Blanks) Split(IReadOnlyList<MigrationAppJsonChange> all)
-    {
-        static bool Blank(MigrationAppJsonChange c) => c.Before is null && c.After is "\"\"" or "[]" or "{}";
-        return (all.Where(c => !Blank(c)).ToList(), all.Where(Blank).Select(c => c.Property).ToList());
-    }
-
-    /// <summary>The line under each extension: the version changes that can break a compile, then a count of the rest.</summary>
-    private static string Summary(List<MigrationAppJsonChange> changes, int blanks)
-    {
-        if (changes.Count == 0 && blanks == 0) return "no changes";
-        var versions = changes
-            .Where(c => c.Property is "application" or "platform" or "runtime")
-            .Select(c => $"{c.Property} {Trim(c.Before) ?? "not set"} → {Trim(c.After) ?? "removed"}")
-            .ToList();
-        var rest = changes.Count - versions.Count + blanks;
-        if (rest > 0) versions.Add(versions.Count == 0 ? $"{rest} {(rest == 1 ? "change" : "changes")}" : $"{rest} more");
-        return string.Join(", ", versions);
-
-        static string? Trim(string? json) => json?.Trim('"');
-    }
-
-    /// <summary>An app.json value as the table shows it: short, and a word in place of nothing.</summary>
-    private static string ShowValue(string? json, string missing) =>
-        json is null ? missing : json.Length > 160 ? json[..160] + "..." : json;
 
     private static string RepositoryTone(MigrationRepositoryStatus s) => s switch
     {

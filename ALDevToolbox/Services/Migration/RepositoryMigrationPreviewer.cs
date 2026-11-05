@@ -47,6 +47,7 @@ public sealed class RepositoryMigrationPreviewer
     private readonly RepositoryMigrationQueue _queue;
     private readonly MigrationWorkspaceBuilder _workspace;
     private readonly RepositoryMigrationPublisher _publisher;
+    private readonly TimeProvider _clock;
     private readonly ILogger<RepositoryMigrationPreviewer> _logger;
 
     public RepositoryMigrationPreviewer(
@@ -55,8 +56,10 @@ public sealed class RepositoryMigrationPreviewer
         RepositoryMigrationQueue queue,
         MigrationWorkspaceBuilder workspace,
         RepositoryMigrationPublisher publisher,
+        TimeProvider clock,
         ILogger<RepositoryMigrationPreviewer> logger)
     {
+        _clock = clock;
         _processes = processes;
         _tokens = tokens;
         _queue = queue;
@@ -86,7 +89,7 @@ public sealed class RepositoryMigrationPreviewer
         var gitPath = GitPath();
         var root = Path.Combine(WorkRoot, TempPrefix + job.Id.ToString("N"));
         Directory.CreateDirectory(root);
-        var started = DateTime.UtcNow;
+        var started = _clock.GetTimestamp();
         try
         {
             var env = ProjectBuildService.GitAuthEnv(RepositoryProvider.AzureDevOps, token);
@@ -142,12 +145,20 @@ public sealed class RepositoryMigrationPreviewer
             // The workspace is only worth building once the sources are sound:
             // a folder clash or a duplicate id would make it wrong.
             MigrationWorkspace? workspace = null;
+            var target = job.Target;
             if (analysis.CanMigrate)
             {
                 if (job.Create is not null) _queue.SetStage(job.Id, "Laying out the new repository");
                 try
                 {
-                    workspace = await _workspace.BuildAsync(job.Target, cloned, analysis, commits, Path.Combine(root, "workspace"), job.Project, ct)
+                    // A preview generates the template once and keeps it, so the
+                    // run lays out what was previewed even if the template is
+                    // edited in between (#1706). A run brings the preview's.
+                    if (target.Template is null)
+                    {
+                        target = target with { Template = await _workspace.GenerateTemplateAsync(target.Plan, ct).ConfigureAwait(false) };
+                    }
+                    workspace = await _workspace.BuildAsync(target, cloned, analysis, commits, Path.Combine(root, "workspace"), job.Project, ct)
                         .ConfigureAwait(false);
                 }
                 catch (PlanValidationException ex)
@@ -179,10 +190,10 @@ public sealed class RepositoryMigrationPreviewer
                 await _publisher.RecordStoppedAsync(job, commits,
                     "Nothing was created: the repositories no longer migrate cleanly. Preview again to see why.", ct).ConfigureAwait(false);
             }
-            _queue.MarkDone(job.Id, analysis, workspace);
+            _queue.MarkDone(job.Id, analysis, workspace, workspace is null ? null : target);
             _logger.LogInformation(
                 "Migration preview {PreviewId} of {Project} read {RepositoryCount} repositories ({FailedCount} failed) and found {ExtensionCount} extensions in {Duration}.",
-                job.Id, job.Project.DisplayName, job.Repositories.Count, failed.Count, analysis.Extensions.Count, DateTime.UtcNow - started);
+                job.Id, job.Project.DisplayName, job.Repositories.Count, failed.Count, analysis.Extensions.Count, _clock.GetElapsedTime(started));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

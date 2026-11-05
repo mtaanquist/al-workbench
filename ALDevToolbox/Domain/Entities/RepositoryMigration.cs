@@ -33,16 +33,35 @@ public class RepositoryMigration
     /// </summary>
     public string Sources { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Azure DevOps's ids for the repositories that were chosen, one per line, so
+    /// "Migrate again" can tick the same ones. Empty on rows from before #1706.
+    /// </summary>
+    public string SourceRepositoryIds { get; set; } = string.Empty;
+
     /// <summary>The customer's name, as the solution was named.</summary>
     public string CustomerName { get; set; } = string.Empty;
 
+    /// <summary>The short name the Admin gave, if any; refilled by "Migrate again".</summary>
+    public string? ShortName { get; set; }
+
     public string TemplateKey { get; set; } = string.Empty;
+
+    /// <summary>Whether the template's own extensions were asked for; refilled by "Migrate again".</summary>
+    public bool AddTemplateExtensions { get; set; }
 
     /// <summary>"owner/name" of the GitHub repository, once it was created.</summary>
     public string? RepositoryFullName { get; set; }
 
     /// <summary>The repository's page on GitHub, once it was created.</summary>
     public string? RepositoryUrl { get; set; }
+
+    /// <summary>
+    /// GitHub's number for the repository, once it was created. It survives a
+    /// rename, so "is that repository gone" is asked by it rather than by
+    /// <see cref="RepositoryFullName"/>. Null on rows from before #1706.
+    /// </summary>
+    public long? RepositoryGitHubId { get; set; }
 
     /// <summary>The solution it was registered on. Null when registering failed, or once that solution is gone.</summary>
     public int? ProjectId { get; set; }

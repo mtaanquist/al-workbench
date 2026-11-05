@@ -82,6 +82,13 @@ public sealed record MigrationPreview(
 
     /// <summary>True while the worker may still change it.</summary>
     public bool IsActive => Status is MigrationPreviewStatus.Waiting or MigrationPreviewStatus.Running;
+
+    /// <summary>
+    /// What a finished preview moved into, with the template as it generated it:
+    /// the run started from this preview uses it as it is (#1706). Server-side
+    /// only; the page never needs it.
+    /// </summary>
+    internal MigrationTarget? Target { get; init; }
 }
 
 /// <summary>
@@ -216,8 +223,8 @@ public sealed class RepositoryMigrationQueue : JobQueue<MigrationPreviewJob>
                 .ToList(),
         });
 
-    internal void MarkDone(Guid id, MigrationSourceAnalysis analysis, MigrationWorkspace? workspace = null) =>
-        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis, Workspace = workspace, Stage = null });
+    internal void MarkDone(Guid id, MigrationSourceAnalysis analysis, MigrationWorkspace? workspace = null, MigrationTarget? target = null) =>
+        Update(id, p => p with { Status = MigrationPreviewStatus.Done, Analysis = analysis, Workspace = workspace, Stage = null, Target = target });
 
     /// <summary>What a migration run is doing now, for the page's status line.</summary>
     internal void SetStage(Guid id, string stage) =>

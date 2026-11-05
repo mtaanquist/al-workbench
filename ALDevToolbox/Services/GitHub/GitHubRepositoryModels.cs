@@ -21,6 +21,10 @@ namespace ALDevToolbox.Services.GitHub;
 /// <param name="Description">GitHub's one-line description, when it has one.</param>
 /// <param name="HtmlUrl">The repository's page, for links out.</param>
 /// <param name="CloneUrl">The HTTPS clone URL, which issue #624 fills a pipeline's field from.</param>
+/// <param name="Id">
+/// GitHub's own number for the repository, which survives a rename or a
+/// transfer where the full name does not. Null when GitHub's answer had none.
+/// </param>
 public sealed record GitHubRepositorySummary(
     string FullName,
     string Owner,
@@ -29,7 +33,8 @@ public sealed record GitHubRepositorySummary(
     bool IsPrivate,
     string? Description,
     string HtmlUrl,
-    string CloneUrl);
+    string CloneUrl,
+    long? Id = null);
 
 /// <summary>What one person may do in one repository, as GitHub told them.</summary>
 /// <param name="CanSee">They can read it.</param>
