@@ -165,7 +165,7 @@ public sealed record WorkspaceResult(
 /// </param>
 /// <param name="Branches">
 /// The branches created beside the default branch at the same commit
-/// (test and staging), empty when none were.
+/// (test), empty when none were.
 /// </param>
 /// <param name="BranchesWarning">Which of those GitHub refused, or null.</param>
 /// <param name="BuildPipelines">

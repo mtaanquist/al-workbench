@@ -141,10 +141,10 @@ public sealed class GitHubWorkspaceRepositoryService
 
     /// <summary>
     /// The branches every new repository gets beside its default branch, each
-    /// with a build pipeline: work moves through test and staging before it
+    /// with a build pipeline: work moves through test before it
     /// reaches the default branch.
     /// </summary>
-    public static readonly IReadOnlyList<string> WorkingBranches = ["test", "staging"];
+    public static readonly IReadOnlyList<string> WorkingBranches = ["test"];
 
     private readonly GenerationService _generation;
     private readonly GitHubRepositoryService _repositories;
@@ -481,9 +481,11 @@ public sealed class GitHubWorkspaceRepositoryService
     /// the pipelines themselves. A branch the solution already has a pipeline for
     /// is left alone.</para>
     ///
-    /// <para>The default branch's pipeline names it rather than leaving the
-    /// branch blank, because a deployment pipeline to a production environment
-    /// only accepts builds from a named branch.</para>
+    /// <para>The default branch's pipeline leaves the branch blank and so follows
+    /// the default branch, named "Default branch" like one a person adds by hand
+    /// (Mads, 2026-11-05). A production deployment pipeline that allows the
+    /// default branch, or names it, accepts its builds, since each build records
+    /// the default branch it cloned (#1129).</para>
     ///
     /// <para><strong>Nothing here may throw</strong>, for the same reason as the
     /// solution itself. A pipeline that would not save is cleared out of the
@@ -525,8 +527,10 @@ public sealed class GitHubWorkspaceRepositoryService
                 // pipeline's) does not stop the others.
                 try
                 {
+                    var isDefault = string.Equals(branch, branches[0], StringComparison.Ordinal);
                     var id = await _pipelines.CreatePipelineAsync(
-                        new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch, BuildOnPush: true), ct);
+                        new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null,
+                            Branch: isDefault ? null : branch, BuildOnPush: true), ct);
                     names.Add((await _pipelines.GetPipelineAsync(id, ct))!.Name);
                 }
                 catch (PlanValidationException ex)

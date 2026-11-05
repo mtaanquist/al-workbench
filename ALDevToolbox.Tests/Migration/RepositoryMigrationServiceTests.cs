@@ -284,6 +284,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
             {
                 OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS A/S", Visibility = ProjectVisibility.Public,
                 DefaultArtifactCountry = "dk", CreatedAt = now, UpdatedAt = now,
+                BcTenantId = Guid.Parse("8d898474-514a-4f1f-8d40-44edb7dbc846"),
             };
             ctx.OeProjects.Add(project);
             await ctx.SaveChangesAsync();
@@ -305,6 +306,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
 
         _queue.Reader.TryRead(out var job).Should().BeTrue();
         job!.Target.ProductionVersion.Should().Be("26.5.39000.0", "every app has to install on each production environment");
+        job.Target.Plan.TenantId.Should().Be("8d898474-514a-4f1f-8d40-44edb7dbc846", "the launch configurations point at the customer's tenant");
     }
 
     [Fact]
@@ -317,6 +319,7 @@ public sealed class RepositoryMigrationServiceTests : IDisposable
 
         _queue.Reader.TryRead(out var job).Should().BeTrue();
         job!.Target.ProductionVersion.Should().BeNull();
+        job.Target.Plan.TenantId.Should().BeEmpty("a made-up tenant would point the launch configurations at nobody's environments");
     }
 
     [Theory]
