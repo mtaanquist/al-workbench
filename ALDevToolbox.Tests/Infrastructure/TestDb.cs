@@ -302,6 +302,13 @@ public sealed class TestDb : IDisposable
     public AppDbContext NewContext() => new(_options, OrgContext);
 
     /// <summary>
+    /// Returns a fresh context whose tenant filter reads <paramref name="orgContext"/>
+    /// instead of <see cref="OrgContext"/>, for a test that watches how the filter
+    /// reads the caller.
+    /// </summary>
+    public AppDbContext NewContext(IOrganizationContext orgContext) => new(_options, orgContext);
+
+    /// <summary>
     /// Returns a factory handing out fresh contexts bound to the per-fixture
     /// database, for the services that open a context per call rather than
     /// holding a scoped one (<see cref="AuditService"/>; see issue #741).

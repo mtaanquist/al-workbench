@@ -1310,4 +1310,59 @@ public sealed class ProjectAccessTests : IDisposable
             (await Access(ctx).GetSnapshotAsync()).CanUseEnvironmentOps.Should().BeFalse();
         }
     }
+
+    // ── Threading (#1724) ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task Access_checks_read_the_caller_on_the_callers_synchronization_context()
+    {
+        // The sidebar runs these checks while a page renders on the server, and the
+        // render reads HttpContext.User on the renderer's context at the same time.
+        // A continuation that left that context read the caller (directly, and in
+        // each query's tenant filter) concurrently with the render, which is how a
+        // 404 page became a 500. Every read has to stay on the caller's context.
+        var projectId = await SeedProjectAsync();
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        await GrantUpdateFlagAsync(teamId, TeamMemberUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, teamId);
+        ActAs(TeamMemberUserId);
+        var recorder = new ContextCheckingOrganizationContext(_db.OrgContext);
+
+        await Microsoft.AspNetCore.Components.Dispatcher.CreateDefault().InvokeAsync(async () =>
+        {
+            await using var ctx = _db.NewContext(recorder);
+            var access = new ProjectAccess(ctx, recorder);
+            (await access.GetSnapshotAsync()).CanUseEnvironmentOps.Should().BeTrue();
+            (await access.CanViewAsync(projectId)).Should().BeTrue();
+            (await access.CanManageAsync(projectId, OwnerUserId)).Should().BeTrue();
+            (await access.CanManageEnvironmentUpdatesAsync(projectId)).Should().BeTrue();
+        });
+
+        recorder.Reads.Should().BeGreaterThan(0);
+        recorder.OffContextReads.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Passes every read through to <paramref name="inner"/>, noting each one made
+    /// with no synchronization context (a continuation that left the caller's).
+    /// </summary>
+    private sealed class ContextCheckingOrganizationContext(IOrganizationContext inner) : IOrganizationContext
+    {
+        private int _reads;
+        public int Reads => _reads;
+        public System.Collections.Concurrent.ConcurrentQueue<string> OffContextReads { get; } = new();
+
+        private T Read<T>(T value, [System.Runtime.CompilerServices.CallerMemberName] string name = "")
+        {
+            Interlocked.Increment(ref _reads);
+            if (SynchronizationContext.Current is null) OffContextReads.Enqueue(name);
+            return value;
+        }
+
+        public int? CurrentOrganizationId => Read(inner.CurrentOrganizationId);
+        public int? CurrentUserId => Read(inner.CurrentUserId);
+        public bool IsSiteAdmin => Read(inner.IsSiteAdmin);
+        public bool IsSystemOrganization => Read(inner.IsSystemOrganization);
+        public int OrganizationIdForFilter => Read(inner.OrganizationIdForFilter);
+    }
 }
