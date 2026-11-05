@@ -764,7 +764,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         try
         {
-            return (await read().ConfigureAwait(false), null);
+            return (await read(), null);
         }
         catch (BcApiException ex)
         {
@@ -2846,8 +2846,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 : "This solution's own Business Central client secret has expired. Rotate it in Entra and re-enter it on the solution's Business Central tab, or switch the solution to your organisation's app registration there.");
         }
 
-        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh, ct)
-            .ConfigureAwait(false);
+        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh, ct);
         return new BcDeliveryContext(token, creds.TenantId);
     }
 

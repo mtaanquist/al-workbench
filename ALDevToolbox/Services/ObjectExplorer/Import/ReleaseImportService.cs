@@ -130,16 +130,16 @@ public class ReleaseImportService
                 ["Uploads"] = "At least one .app file is required.",
             });
         }
-        var releaseId = await BeginReleaseAsync(ReleaseImportMetadata.From(request), ct).ConfigureAwait(false);
+        var releaseId = await BeginReleaseAsync(ReleaseImportMetadata.From(request), ct);
         try
         {
-            return await ProcessReleaseAsync(releaseId, request.Uploads, request.StoreSymbolReference, ct).ConfigureAwait(false);
+            return await ProcessReleaseAsync(releaseId, request.Uploads, request.StoreSymbolReference, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             _logger.LogWarning(
                 "Release ingest interrupted because the upload request ended: ReleaseId={ReleaseId}", releaseId);
-            await StampFailedAsync(releaseId, InterruptedUploadMessage, onlyWhileIngesting: true).ConfigureAwait(false);
+            await StampFailedAsync(releaseId, InterruptedUploadMessage, onlyWhileIngesting: true);
             throw;
         }
     }
@@ -162,9 +162,9 @@ public class ReleaseImportService
         ArgumentNullException.ThrowIfNull(metadata);
         var orgId = RequireOrganizationId();
         ValidateMetadata(metadata);
-        await EnsureParentReleaseVisibleAsync(metadata.ParentReleaseId, ct).ConfigureAwait(false);
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
-        await EnsureDedupKeyAvailableAsync(orgId, metadata.DedupKey, ct).ConfigureAwait(false);
+        await EnsureParentReleaseVisibleAsync(metadata.ParentReleaseId, ct);
+        await _quotaGuard.EnsureCanWriteAsync(ct);
+        await EnsureDedupKeyAvailableAsync(orgId, metadata.DedupKey, ct);
 
         var release = new OeRelease
         {
@@ -183,7 +183,7 @@ public class ReleaseImportService
             UpdatedAt = DateTime.UtcNow,
         };
         _db.OeReleases.Add(release);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
             "Started Release ingest: ReleaseId={ReleaseId} Label={Label} Kind={Kind} ParentReleaseId={ParentReleaseId}",
@@ -207,7 +207,7 @@ public class ReleaseImportService
         var orgId = RequireOrganizationId();
         // A build waiting on this release tells a running import from an abandoned one by this (#1180).
         using var tracked = Ingests.Track(releaseId);
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct)
             ?? throw new InvalidOperationException($"Release {releaseId} not found for processing.");
 
         // The long UPDATE…FROM resolution post-passes (numeric source tables,
@@ -226,7 +226,7 @@ public class ReleaseImportService
             foreach (var upload in uploads)
             {
                 ct.ThrowIfCancellationRequested();
-                await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference, ct).ConfigureAwait(false);
+                await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference, ct);
             }
 
             // SourceTable propagation for pageextensions. The symbol
@@ -235,7 +235,7 @@ public class ReleaseImportService
             // its own. Copy it across now so the reference extractor's
             // page-Rec resolution (BuildGlobalScope) finds it for
             // pageextensions too.
-            await PropagateSourceTableToPageExtensionsAsync(release.Id, ct).ConfigureAwait(false);
+            await PropagateSourceTableToPageExtensionsAsync(release.Id, ct);
 
             // SourceTable property values in modern BC (28.x+) ship as
             // bare numeric ids ("36" for Sales Header) rather than the
@@ -244,14 +244,14 @@ public class ReleaseImportService
             // extractor can ResolveTypeByName on it. Runs AFTER the
             // pageextension propagation so any propagated numeric values
             // get normalised too.
-            await ResolveNumericSourceTableNamesAsync(release.Id, ct).ConfigureAwait(false);
+            await ResolveNumericSourceTableNamesAsync(release.Id, ct);
 
             // Dataitem-alias variables (and any same-module Record
             // globals whose symbol package omitted ModuleId) get their
             // TargetAppId / TargetObjectId filled in now that the full
             // catalog for this release exists. Object Explorer's variable
             // rows render click-through links via those fields.
-            await ResolveVariableTargetsAsync(release.Id, ct).ConfigureAwait(false);
+            await ResolveVariableTargetsAsync(release.Id, ct);
 
             // Phase 2 call-site extraction. Runs once per release, AFTER
             // every module's symbols + variables are in the DB so the
@@ -259,16 +259,16 @@ public class ReleaseImportService
             // Cross-release receivers (DK Core file references Customer
             // from a parent Base App release) currently drop — phase 2.1
             // can add the chain walk when needed.
-            totals.ReferencesImported += await _callSites.EmitAsync(orgId, release.Id, ct).ConfigureAwait(false);
+            totals.ReferencesImported += await _callSites.EmitAsync(orgId, release.Id, ct);
 
             // Pin the platform/application version from the canonical Base App
             // module when one came in this Release. Continue to leave null if
             // the upload was third-party-only. Re-find via the cleared tracker
             // because per-module SaveChanges has detached the entity already.
             _db.ChangeTracker.Clear();
-            var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false)
+            var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct)
                 ?? throw new InvalidOperationException($"Release {release.Id} disappeared mid-ingest.");
-            ready.BcVersion = await InferBcVersionAsync(release.Id, ct).ConfigureAwait(false);
+            ready.BcVersion = await InferBcVersionAsync(release.Id, ct);
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
 
@@ -280,11 +280,11 @@ public class ReleaseImportService
                 .Where(f => f.Module!.ReleaseId == release.Id)
                 .GroupBy(_ => 1)
                 .Select(g => new { Count = g.Count(), Length = g.Sum(f => (long)f.FileContent!.ContentLength) })
-                .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+                .SingleOrDefaultAsync(ct);
             ready.SourceFileCount = totalsRow?.Count ?? 0;
             ready.SourceContentLength = totalsRow?.Length ?? 0;
 
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
 
 
             // A new Business Central release is exactly when the customer
@@ -292,7 +292,7 @@ public class ReleaseImportService
             // so the drift scan runs here (issue #630). Best-effort: a GitHub
             // that will not answer must not fail an import that has already
             // landed every module it was given.
-            await ScanForDependencyDriftAsync(ready, ct).ConfigureAwait(false);
+            await ScanForDependencyDriftAsync(ready, ct);
 
             _logger.LogInformation(
                 "Completed Release ingest: ReleaseId={ReleaseId} ModulesImported={ModulesImported} ModulesSkipped={ModulesSkipped} ObjectsImported={ObjectsImported} ReferencesImported={ReferencesImported} TranslationsImported={TranslationsImported}",
@@ -322,7 +322,7 @@ public class ReleaseImportService
                 release.Id, totals.ModulesImported);
             // Stamp the release as failed so the UI can show the operator which
             // upload didn't make it.
-            await StampFailedAsync(release.Id, ex.Message).ConfigureAwait(false);
+            await StampFailedAsync(release.Id, ex.Message);
             throw;
         }
     }
@@ -340,13 +340,13 @@ public class ReleaseImportService
     private async Task StampFailedAsync(int releaseId, string message, bool onlyWhileIngesting = false)
     {
         _db.ChangeTracker.Clear();
-        var failed = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
+        var failed = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None);
         if (failed is null) return;
         if (onlyWhileIngesting && !string.Equals(failed.Status, "ingesting", StringComparison.Ordinal)) return;
         failed.Status = "failed";
         failed.StatusMessage = message;
         failed.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+        await _db.SaveChangesAsync(CancellationToken.None);
     }
 
     /// <summary>The status message a release gets when a Retry reopened it but could not queue its import (#1612).</summary>
@@ -397,7 +397,7 @@ public class ReleaseImportService
     {
         try
         {
-            await StampFailedAsync(releaseId, message, onlyWhileIngesting: true).ConfigureAwait(false);
+            await StampFailedAsync(releaseId, message, onlyWhileIngesting: true);
         }
         catch (Exception ex)
         {
@@ -445,8 +445,8 @@ public class ReleaseImportService
                 ["Uploads"] = "At least one .app file is required.",
             });
         }
-        await BeginAmendAsync(releaseId, ct).ConfigureAwait(false);
-        return await RunAmendAsync(releaseId, uploads, ct).ConfigureAwait(false);
+        await BeginAmendAsync(releaseId, ct);
+        return await RunAmendAsync(releaseId, uploads, ct);
     }
 
     /// <summary>
@@ -461,17 +461,17 @@ public class ReleaseImportService
     public async Task BeginAmendAsync(int releaseId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
         // Pre-check the Release's current state so the operator gets a
         // field-keyed error instead of an unexpected status flip if they
         // try to amend an ingesting / failed / soft-deleted Release.
         // Visibility first, so a hidden id and an unknown one run the same queries.
-        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct);
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (preview is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -495,7 +495,7 @@ public class ReleaseImportService
                 .ExecuteUpdateAsync(u => u
                     .SetProperty(r => r.Status, "ingesting")
                     .SetProperty(r => r.StatusMessage, (string?)null)
-                    .SetProperty(r => r.UpdatedAt, now), ct).ConfigureAwait(false);
+                    .SetProperty(r => r.UpdatedAt, now), ct);
         }
         if (flipped == 0)
         {
@@ -540,7 +540,7 @@ public class ReleaseImportService
         // command timeout off Npgsql's 30 s default. See issue #382.
         _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
 
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false);
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct);
         if (release is null || release.Status != "ingesting" || release.DeletedAt is not null)
         {
             throw new InvalidOperationException(
@@ -551,7 +551,7 @@ public class ReleaseImportService
         _amendBlobHashes.Clear();
         if (uploads.Count == 0)
         {
-            await RestoreReadyAsync(release.Id).ConfigureAwait(false);
+            await RestoreReadyAsync(release.Id);
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Uploads"] = "No .app files were found in the upload, so nothing was added.",
@@ -566,29 +566,29 @@ public class ReleaseImportService
         OeRelease ready;
         try
         {
-            await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
             foreach (var upload in uploads)
             {
                 ct.ThrowIfCancellationRequested();
                 // Amend (#216) doesn't expose the store-symbol-reference option.
-                await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference: false, ct).ConfigureAwait(false);
+                await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference: false, ct);
             }
 
             // Same post-passes as ImportReleaseAsync (lines ~130–147). The
             // first two are idempotent UPDATEs; the third (call-site
             // extraction) is not, so we wipe its previous output for this
             // release before re-running. See issue #216 reindex section.
-            await PropagateSourceTableToPageExtensionsAsync(release.Id, ct).ConfigureAwait(false);
-            await ResolveNumericSourceTableNamesAsync(release.Id, ct).ConfigureAwait(false);
-            await ResolveVariableTargetsAsync(release.Id, ct).ConfigureAwait(false);
-            await DeleteExtractedCallSiteReferencesAsync(release.Id, ct).ConfigureAwait(false);
+            await PropagateSourceTableToPageExtensionsAsync(release.Id, ct);
+            await ResolveNumericSourceTableNamesAsync(release.Id, ct);
+            await ResolveVariableTargetsAsync(release.Id, ct);
+            await DeleteExtractedCallSiteReferencesAsync(release.Id, ct);
             // The emit also writes a system reference per built-in call site,
             // for every module in the release, so those go too (#1223).
-            await DeleteSystemReferencesAsync(release.Id, ct).ConfigureAwait(false);
-            totals.ReferencesImported += await _callSites.EmitAsync(orgId, release.Id, ct).ConfigureAwait(false);
+            await DeleteSystemReferencesAsync(release.Id, ct);
+            totals.ReferencesImported += await _callSites.EmitAsync(orgId, release.Id, ct);
 
             _db.ChangeTracker.Clear();
-            ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false)
+            ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct)
                 ?? throw new InvalidOperationException($"Release {release.Id} disappeared mid-amend.");
 
             // Re-infer BcVersion so amending the Base App into a previously
@@ -596,7 +596,7 @@ public class ReleaseImportService
             // already-set value if InferBcVersionAsync returns null — the
             // amend can only add modules, never remove them, so the
             // pre-existing inference still stands.
-            var inferred = await InferBcVersionAsync(release.Id, ct).ConfigureAwait(false);
+            var inferred = await InferBcVersionAsync(release.Id, ct);
             if (inferred is not null)
             {
                 ready.BcVersion = inferred;
@@ -612,14 +612,14 @@ public class ReleaseImportService
                 .Where(f => f.Module!.ReleaseId == release.Id)
                 .GroupBy(_ => 1)
                 .Select(g => new { Count = g.Count(), Length = g.Sum(f => (long)f.FileContent!.ContentLength) })
-                .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+                .SingleOrDefaultAsync(ct);
             ready.SourceFileCount = totalsRow?.Count ?? 0;
             ready.SourceContentLength = totalsRow?.Length ?? 0;
 
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             // Not cancellable: once every row is written, a request cancelled at
             // the last step should not throw the work away.
-            await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
+            await tx.CommitAsync(CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -638,8 +638,8 @@ public class ReleaseImportService
             // Disposing the transaction rolled back every row the amend wrote, so
             // the release holds what it held before: hand it back ready. An amend
             // has no job to resume it, so leaving it importing would strand it (#1180).
-            await RestoreReadyAsync(release.Id).ConfigureAwait(false);
-            await ReclaimAmendBlobsAsync(release.Id).ConfigureAwait(false);
+            await RestoreReadyAsync(release.Id);
+            await ReclaimAmendBlobsAsync(release.Id);
             throw;
         }
 
@@ -648,7 +648,7 @@ public class ReleaseImportService
         // so the drift scan runs here (issue #630). Best-effort: a GitHub
         // that will not answer must not fail an import that has already
         // landed every module it was given.
-        await ScanForDependencyDriftAsync(ready, ct).ConfigureAwait(false);
+        await ScanForDependencyDriftAsync(ready, ct);
 
         _logger.LogInformation(
             "Completed Release amend: ReleaseId={ReleaseId} ModulesImported={ModulesImported} ModulesSkipped={ModulesSkipped} ObjectsImported={ObjectsImported} ReferencesImported={ReferencesImported} TranslationsImported={TranslationsImported}",
@@ -677,7 +677,7 @@ public class ReleaseImportService
         try
         {
             var reclaimed = await ReleaseManagementService.ReclaimOrphanedBlobsAsync(
-                _db, _logger, _amendBlobHashes.ToList(), CancellationToken.None).ConfigureAwait(false);
+                _db, _logger, _amendBlobHashes.ToList(), CancellationToken.None);
             _logger.LogInformation(
                 "Reclaimed {Count} source blob(s) the rolled-back amend of release {ReleaseId} had saved.", reclaimed, releaseId);
         }
@@ -698,12 +698,12 @@ public class ReleaseImportService
     private async Task RestoreReadyAsync(int releaseId)
     {
         _db.ChangeTracker.Clear();
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None);
         if (release is null) return;
         release.Status = "ready";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+        await _db.SaveChangesAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -733,7 +733,7 @@ public class ReleaseImportService
                     'label_use', 'variable_use')
               AND module_id IN (SELECT id FROM oe_modules WHERE release_id = {0});
             """;
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
     }
 
     /// <summary>
@@ -753,7 +753,7 @@ public class ReleaseImportService
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (preview is null)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -773,11 +773,11 @@ public class ReleaseImportService
         // it the same headroom the C/AL import grants its module-wide passes.
         _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
 
-        await DeleteSystemReferencesAsync(releaseId, ct).ConfigureAwait(false);
+        await DeleteSystemReferencesAsync(releaseId, ct);
 
         var totals = new ImportTotals();
         totals.ReferencesImported += await _callSites
-            .EmitSystemReferencesOnlyAsync(orgId, releaseId, ct).ConfigureAwait(false);
+            .EmitSystemReferencesOnlyAsync(orgId, releaseId, ct);
 
         _logger.LogInformation(
             "Backfilled system references (AL): ReleaseId={ReleaseId} Emitted={Count}",
@@ -804,7 +804,7 @@ public class ReleaseImportService
         var preview = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Status, r.DeletedAt })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (preview is null)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -822,11 +822,11 @@ public class ReleaseImportService
 
         _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
 
-        await DeleteExtractedCallSiteReferencesAsync(releaseId, ct).ConfigureAwait(false);
-        await DeleteSystemReferencesAsync(releaseId, ct).ConfigureAwait(false);
+        await DeleteExtractedCallSiteReferencesAsync(releaseId, ct);
+        await DeleteSystemReferencesAsync(releaseId, ct);
 
         var totals = new ImportTotals();
-        totals.ReferencesImported += await _callSites.EmitAsync(orgId, releaseId, ct).ConfigureAwait(false);
+        totals.ReferencesImported += await _callSites.EmitAsync(orgId, releaseId, ct);
 
         _logger.LogInformation(
             "Re-extracted references (AL): ReleaseId={ReleaseId} Emitted={Count}",
@@ -844,7 +844,7 @@ public class ReleaseImportService
             DELETE FROM oe_module_system_references
             WHERE module_id IN (SELECT id FROM oe_modules WHERE release_id = {0});
             """;
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
     }
 
     // ── Validation ──────────────────────────────────────────────────────
@@ -874,7 +874,7 @@ public class ReleaseImportService
     {
         if (parentReleaseId is not { } parentId) return;
         var exists = await _db.OeReleases.AsNoTracking()
-            .AnyAsync(r => r.Id == parentId && r.DeletedAt == null, ct).ConfigureAwait(false);
+            .AnyAsync(r => r.Id == parentId && r.DeletedAt == null, ct);
         if (!exists)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -892,12 +892,12 @@ public class ReleaseImportService
     /// </summary>
     public async Task MarkFailedAsync(int releaseId, string message, CancellationToken ct = default)
     {
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false);
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct);
         if (release is null) return;
         release.Status = "failed";
         release.StatusMessage = message;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -910,14 +910,14 @@ public class ReleaseImportService
     /// </summary>
     public async Task MarkReadyWithoutIngestAsync(int releaseId, CancellationToken ct = default)
     {
-        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct)
             ?? throw new InvalidOperationException($"Release {releaseId} not found.");
         release.Status = "ready";
         release.StatusMessage = null;
         release.SourceFileCount = 0;
         release.SourceContentLength = 0;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         _logger.LogInformation("Release {ReleaseId} marked ready without indexing its objects.", releaseId);
     }
 
@@ -946,7 +946,7 @@ public class ReleaseImportService
     {
         RequireOrganizationId();
         var found = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct);
         var release = (visible ? found : null) ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
@@ -962,12 +962,12 @@ public class ReleaseImportService
         // Covers the manage page's Retry and the nightly requeue of failed
         // artifact imports, which both come through here (#1338). After the
         // state checks, so a release that can't be retried says why first.
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
         release.Status = "ingesting";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Reopened Release {ReleaseId} ({Label}) for retry.", release.Id, release.Label);
     }
@@ -988,7 +988,7 @@ public class ReleaseImportService
     {
         RequireOrganizationId();
         var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
             ?? throw RetryNotFound(releaseId);
 
         if (release.DeletedAt is not null)
@@ -1007,7 +1007,7 @@ public class ReleaseImportService
         release.Status = "ingesting";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Reopened project Release {ReleaseId} ({Label}) for rebuild.", release.Id, release.Label);
     }
@@ -1046,8 +1046,7 @@ public class ReleaseImportService
         var takenBy = await _db.OeReleases.AsNoTracking()
             .Where(r => r.OrganizationId == orgId && r.DeletedAt == null && r.DedupKey == dedupKey)
             .Select(r => r.Label)
-            .FirstOrDefaultAsync(ct)
-            .ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (takenBy is not null)
         {
             // The key is internal; the admin reads this in a banner, so name the
@@ -1076,7 +1075,7 @@ public class ReleaseImportService
         AppPackage pkg;
         try
         {
-            pkg = await AppPackageReader.ReadAsync(upload.AppStream, storeSymbolReference, captureTranslations, ct).ConfigureAwait(false);
+            pkg = await AppPackageReader.ReadAsync(upload.AppStream, storeSymbolReference, captureTranslations, ct);
         }
         catch (NeaEncryptedAppException ex)
         {
@@ -1096,7 +1095,7 @@ public class ReleaseImportService
             .AsNoTracking()
             .Where(m => m.ReleaseId == release.Id && m.AppId == pkg.Manifest.AppId && m.Version == pkg.Manifest.Version)
             .Select(m => new { m.Id, m.AppFileHash })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
 
         if (existing is not null)
         {
@@ -1161,7 +1160,7 @@ public class ReleaseImportService
             sourceFiles = fromEmbedded;
         }
 
-        await WriteModuleAsync(orgId, release, upload, pkg, sourceFiles, storeSymbolReference, totals, ct).ConfigureAwait(false);
+        await WriteModuleAsync(orgId, release, upload, pkg, sourceFiles, storeSymbolReference, totals, ct);
     }
 
     private async Task WriteModuleAsync(
@@ -1211,7 +1210,7 @@ public class ReleaseImportService
             CreatedAt = DateTime.UtcNow,
         };
         _db.OeModules.Add(module);
-        await SaveWithFileContentsAsync(symbolReferenceContent, ct).ConfigureAwait(false);
+        await SaveWithFileContentsAsync(symbolReferenceContent, ct);
 
         // Files first so we can resolve ModuleObject.SourceFileId on the way.
         // Symbol-package ReferenceSourceFileName is the full relative path
@@ -1249,14 +1248,14 @@ public class ReleaseImportService
             filesPending++;
             if (filesPending >= FileChunkSize)
             {
-                await SaveWithFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
+                await SaveWithFileContentsAsync(pendingContent, ct);
                 pendingContent.Clear();
                 filesPending = 0;
             }
         }
         if (filesPending > 0)
         {
-            await SaveWithFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
+            await SaveWithFileContentsAsync(pendingContent, ct);
         }
 
         // Build the (Kind, Name) → (File, Line) index used to link
@@ -1401,7 +1400,7 @@ public class ReleaseImportService
             objectsPending++;
             if (objectsPending >= ObjectChunkSize)
             {
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
                 // Drop tracker state once the chunk is committed. The next
                 // iteration's object will only navigate via SourceFileId
                 // (already a primitive FK), so detaching the file entities
@@ -1412,7 +1411,7 @@ public class ReleaseImportService
         }
         if (objectsPending > 0)
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
 
         totals.ModulesImported++;
@@ -1424,7 +1423,7 @@ public class ReleaseImportService
         // admin-upload-only. Best-effort — a bad XLIFF must not sink the ingest.
         if (pkg.Translations.Count > 0)
         {
-            await ImportModuleTranslationsAsync(module, pkg, totals, ct).ConfigureAwait(false);
+            await ImportModuleTranslationsAsync(module, pkg, totals, ct);
         }
 
         // Surface a warning when source files were loaded but no
@@ -1486,8 +1485,7 @@ public class ReleaseImportService
                 // fall back to the containing module's name.
                 var origin = string.IsNullOrEmpty(parsed.OriginalName) ? module.Name : parsed.OriginalName;
                 var inserted = await _translations
-                    .ImportForModuleAsync(module.Id, parsed, origin, ct)
-                    .ConfigureAwait(false);
+                    .ImportForModuleAsync(module.Id, parsed, origin, ct);
                 totals.TranslationsImported += inserted;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1902,15 +1900,15 @@ public class ReleaseImportService
         // on a second connection, committed at once (#1549, OEI-6).
         if (_blobContexts is not null && contents.Count > 0 && _db.Database.CurrentTransaction is not null)
         {
-            await using var blobs = await _blobContexts.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using var blobs = await _blobContexts.CreateDbContextAsync(ct);
             blobs.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
             // Remembered, so an amend that rolls back can reclaim what it committed here.
             _amendBlobHashes.UnionWith(contents.Keys);
-            await OeIngestHelpers.UpsertFileContentsAsync(_db, contents, ct, insertVia: blobs).ConfigureAwait(false);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await OeIngestHelpers.UpsertFileContentsAsync(_db, contents, ct, insertVia: blobs);
+            await _db.SaveChangesAsync(ct);
             return;
         }
-        await OeIngestHelpers.SaveWithFileContentsAsync(_db, contents, ct).ConfigureAwait(false);
+        await OeIngestHelpers.SaveWithFileContentsAsync(_db, contents, ct);
     }
 
     // ── BC version inference ────────────────────────────────────────────
@@ -1935,7 +1933,7 @@ public class ReleaseImportService
 
         try
         {
-            var found = await _drift.ScanForReleaseAsync(release.Id, ct).ConfigureAwait(false);
+            var found = await _drift.ScanForReleaseAsync(release.Id, ct);
             _logger.LogInformation(
                 "Dependency drift scan after Release {ReleaseId} recorded {FindingCount} findings.",
                 release.Id, found);
@@ -1963,8 +1961,7 @@ public class ReleaseImportService
                 && m.Publisher == "Microsoft"
                 && (m.Name == "Base Application" || m.Name == "Application"))
             .Select(m => m.Version)
-            .FirstOrDefaultAsync(ct)
-            .ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         return baseApp;
     }
 
@@ -2006,7 +2003,7 @@ public class ReleaseImportService
                   SELECT id FROM oe_modules WHERE release_id = {0}
               );
             """;
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
     }
 
     /// <summary>
@@ -2050,7 +2047,7 @@ public class ReleaseImportService
                   SELECT id FROM oe_modules WHERE release_id = {0}
               );
             """;
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
 
         // Second pass: numeric SourceTable values that fall in the BC
         // platform-table id range (2000000001 – 2000000999) don't match
@@ -2086,7 +2083,7 @@ public class ReleaseImportService
         await _db.Database.ExecuteSqlRawAsync(
             platformSql,
             new object[] { platformIds, platformNames, releaseId },
-            ct).ConfigureAwait(false);
+            ct);
     }
 
     // ── Mutable tally ───────────────────────────────────────────────────
@@ -2162,6 +2159,6 @@ public class ReleaseImportService
               AND v.target_object_id IS NULL
               AND v.target_object_name IS NOT NULL;
             """;
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
     }
 }

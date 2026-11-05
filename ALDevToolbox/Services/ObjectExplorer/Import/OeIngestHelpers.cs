@@ -64,14 +64,14 @@ internal static class OeIngestHelpers
     {
         if (contents.Count == 0 || db.Database.CurrentTransaction is not null)
         {
-            await UpsertFileContentsAsync(db, contents, ct).ConfigureAwait(false);
-            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await UpsertFileContentsAsync(db, contents, ct);
+            await db.SaveChangesAsync(ct);
             return;
         }
-        await using var tx = await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
-        await UpsertFileContentsAsync(db, contents, ct).ConfigureAwait(false);
-        await db.SaveChangesAsync(ct).ConfigureAwait(false);
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await UpsertFileContentsAsync(db, contents, ct);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>
@@ -130,11 +130,11 @@ internal static class OeIngestHelpers
                 "INSERT INTO oe_file_contents (content_hash, content, content_length, line_count) " +
                 "SELECT * FROM unnest({0}::text[], {1}::text[], {2}::int[], {3}::int[]) ORDER BY 1 " +
                 "ON CONFLICT (content_hash) DO NOTHING",
-                new object[] { hashes, bodies, lengths, lines }, ct).ConfigureAwait(false);
+                new object[] { hashes, bodies, lengths, lines }, ct);
             var locked = await db.Database.SqlQueryRaw<int>(
                 "SELECT count(*)::int AS \"Value\" FROM (SELECT 1 FROM oe_file_contents " +
                 "WHERE content_hash = ANY({0}) ORDER BY content_hash FOR KEY SHARE) l",
-                new object[] { hashes }).SingleAsync(ct).ConfigureAwait(false);
+                new object[] { hashes }).SingleAsync(ct);
             if (locked == hashes.Length) return;
             if (attempt == 3)
             {

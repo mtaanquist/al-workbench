@@ -72,7 +72,7 @@ internal sealed class BuildArtifactSymbolResolver
             var floor = AlSymbolFeedResolver.ParseVersion(dependency.MinVersion);
             if (present.TryGetValue(appId, out var have) && (floor is null || (have is not null && have >= floor))) continue;
 
-            var hit = await FindAsync(request.ProjectId, appId, floor, target, ct).ConfigureAwait(false);
+            var hit = await FindAsync(request.ProjectId, appId, floor, target, ct);
             if (hit is null)
             {
                 if (transitive) transitiveMisses.Add(dependency with { AppId = appId });
@@ -82,12 +82,12 @@ internal sealed class BuildArtifactSymbolResolver
             var content = await _db.OeProjectBuildArtifacts.AsNoTracking()
                 .Where(a => a.Id == hit.ArtifactId)
                 .Select(a => a.Content)
-                .FirstAsync(ct).ConfigureAwait(false);
+                .FirstAsync(ct);
             // Only a plain file name is ever written: the row's name came from a
             // compiler or a GitHub Release asset, and neither is trusted as a path.
             var fileName = Path.GetFileName(hit.FileName);
             var dest = Path.Combine(request.TargetDirectory, fileName);
-            if (!File.Exists(dest)) await File.WriteAllBytesAsync(dest, content, ct).ConfigureAwait(false);
+            if (!File.Exists(dest)) await File.WriteAllBytesAsync(dest, content, ct);
             present[appId] = hit.Version;
             resolved.Add(new ResolvedBuildArtifact(appId, hit.AppName, hit.AppVersion, hit.ProjectId, hit.ProjectName, hit.BuildId, fileName));
             _logger.LogInformation("Resolved symbols for {App} {Version} from build {BuildId} of solution {Project}.",
@@ -127,7 +127,7 @@ internal sealed class BuildArtifactSymbolResolver
                 a.ProjectBuild.ProjectId,
                 ProjectName = a.ProjectBuild.Project!.Name,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         return rows
             .Select(r => new Candidate(r.Id, r.FileName, r.AppName, r.AppVersion, AlSymbolFeedResolver.ParseVersion(r.AppVersion),

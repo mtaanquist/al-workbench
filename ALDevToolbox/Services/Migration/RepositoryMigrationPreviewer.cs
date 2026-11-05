@@ -78,7 +78,7 @@ public sealed class RepositoryMigrationPreviewer
     public async Task RunAsync(MigrationPreviewJob job, CancellationToken ct)
     {
         _queue.MarkRunning(job.Id);
-        var token = await _tokens.ResolveTokenAsync(RepositoryProvider.AzureDevOps, ct).ConfigureAwait(false);
+        var token = await _tokens.ResolveTokenAsync(RepositoryProvider.AzureDevOps, ct);
         if (string.IsNullOrEmpty(token))
         {
             _queue.MarkFailed(job.Id,
@@ -110,7 +110,7 @@ public sealed class RepositoryMigrationPreviewer
                     _logger.LogWarning("Migration preview {PreviewId}: only {FreeBytes} bytes free under {Folder}; skipped {Repository}.", job.Id, free, root, repository.Name);
                     continue;
                 }
-                var (commit, failure) = await CloneAsync(gitPath, repository, dest, env, token, ct).ConfigureAwait(false);
+                var (commit, failure) = await CloneAsync(gitPath, repository, dest, env, token, ct);
                 if (failure is not null)
                 {
                     _queue.SetRepository(job.Id, repository.Name, MigrationRepositoryStatus.Failed, message: failure);
@@ -134,7 +134,7 @@ public sealed class RepositoryMigrationPreviewer
                 {
                     var message = $"main has changed in {string.Join(", ", moved)} since the preview. Nothing was created. Preview again to see what would move now.";
                     _queue.MarkFailed(job.Id, message);
-                    await _publisher.RecordStoppedAsync(job, commits, message, ct).ConfigureAwait(false);
+                    await _publisher.RecordStoppedAsync(job, commits, message, ct);
                     return;
                 }
             }
@@ -156,10 +156,9 @@ public sealed class RepositoryMigrationPreviewer
                     // edited in between (#1706). A run brings the preview's.
                     if (target.Template is null)
                     {
-                        target = target with { Template = await _workspace.GenerateTemplateAsync(target.Plan, ct).ConfigureAwait(false) };
+                        target = target with { Template = await _workspace.GenerateTemplateAsync(target.Plan, ct) };
                     }
-                    workspace = await _workspace.BuildAsync(target, cloned, analysis, commits, Path.Combine(root, "workspace"), job.Project, ct)
-                        .ConfigureAwait(false);
+                    workspace = await _workspace.BuildAsync(target, cloned, analysis, commits, Path.Combine(root, "workspace"), job.Project, ct);
                 }
                 catch (PlanValidationException ex)
                 {
@@ -173,7 +172,7 @@ public sealed class RepositoryMigrationPreviewer
                 MigrationOutcome outcome;
                 try
                 {
-                    outcome = await _publisher.PublishAsync(job, create, Path.Combine(root, "workspace"), commits, ct).ConfigureAwait(false);
+                    outcome = await _publisher.PublishAsync(job, create, Path.Combine(root, "workspace"), commits, ct);
                 }
                 catch (PlanValidationException ex)
                 {
@@ -188,7 +187,7 @@ public sealed class RepositoryMigrationPreviewer
             {
                 // The sources no longer move cleanly; the page shows the findings.
                 await _publisher.RecordStoppedAsync(job, commits,
-                    "Nothing was created: the repositories no longer migrate cleanly. Preview again to see why.", ct).ConfigureAwait(false);
+                    "Nothing was created: the repositories no longer migrate cleanly. Preview again to see why.", ct);
             }
             _queue.MarkDone(job.Id, analysis, workspace, workspace is null ? null : target);
             _logger.LogInformation(
@@ -231,7 +230,7 @@ public sealed class RepositoryMigrationPreviewer
         // Asking for main first turns "no such branch" into its own answer rather
         // than a clone failure in git's words.
         var probe = await _processes.RunAsync(new ProcessRunRequest(gitPath,
-            ["ls-remote", "--heads", repository.CloneUrl, "refs/heads/" + Branch], Path.GetDirectoryName(dest), env, ProbeTimeout), ct).ConfigureAwait(false);
+            ["ls-remote", "--heads", repository.CloneUrl, "refs/heads/" + Branch], Path.GetDirectoryName(dest), env, ProbeTimeout), ct);
         if (!probe.Succeeded)
         {
             _logger.LogWarning("Migration: could not reach {Repository} (exit {Exit}).", repository.CloneUrl, probe.ExitCode);
@@ -251,7 +250,7 @@ public sealed class RepositoryMigrationPreviewer
         };
         foreach (var (args, what) in steps)
         {
-            var result = await _processes.RunAsync(new ProcessRunRequest(gitPath, args, Path.GetDirectoryName(dest), env, GitTimeout), ct).ConfigureAwait(false);
+            var result = await _processes.RunAsync(new ProcessRunRequest(gitPath, args, Path.GetDirectoryName(dest), env, GitTimeout), ct);
             if (!result.Succeeded)
             {
                 _logger.LogWarning("Migration: git {Step} of {Repository} failed (exit {Exit}).", what, repository.CloneUrl, result.ExitCode);
@@ -259,7 +258,7 @@ public sealed class RepositoryMigrationPreviewer
             }
         }
 
-        var head = await _processes.RunAsync(new ProcessRunRequest(gitPath, ["-C", dest, "rev-parse", "HEAD"], dest, null, ProbeTimeout), ct).ConfigureAwait(false);
+        var head = await _processes.RunAsync(new ProcessRunRequest(gitPath, ["-C", dest, "rev-parse", "HEAD"], dest, null, ProbeTimeout), ct);
         return (head.Succeeded ? head.StdOut.Trim() : null, null);
     }
 

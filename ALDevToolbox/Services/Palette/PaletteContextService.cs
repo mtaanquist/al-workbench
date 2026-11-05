@@ -95,20 +95,20 @@ public sealed partial class PaletteContextService
         ArgumentNullException.ThrowIfNull(user);
         if (user.Identity?.IsAuthenticated != true) return PaletteContextResult.Empty;
 
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
 
         PaletteContextBlock? context = null;
         if (PaletteContextRef.TryParse(at, out var reference))
         {
             context = reference.Kind switch
             {
-                PaletteContextKind.Solution => await SolutionContextAsync(user, snapshot, reference.Id, ct).ConfigureAwait(false),
-                PaletteContextKind.Environment => await EnvironmentContextAsync(user, reference.Id, ct).ConfigureAwait(false),
+                PaletteContextKind.Solution => await SolutionContextAsync(user, snapshot, reference.Id, ct),
+                PaletteContextKind.Environment => await EnvironmentContextAsync(user, reference.Id, ct),
                 _ => null,
             };
         }
 
-        var checkedRecents = await CheckRecentsAsync(user, snapshot, recents, ct).ConfigureAwait(false);
+        var checkedRecents = await CheckRecentsAsync(user, snapshot, recents, ct);
 
         _logger.LogDebug(
             "Palette context answered {HasContext} with {ContextItems} items and kept {KeptRecents} of {AskedRecents} recents",
@@ -135,12 +135,12 @@ public sealed partial class PaletteContextService
             .Where(p => p.Id == projectId && p.DeletedAt == null)
             .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
             .Select(p => new { p.Id, p.Name, p.CreatedByUserId, p.HostingType })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (project is null) return null;
 
-        var canManage = await _access.CanManageAsync(project.Id, project.CreatedByUserId, ct).ConfigureAwait(false);
+        var canManage = await _access.CanManageAsync(project.Id, project.CreatedByUserId, ct);
         // What ProjectService.CanChangeAccessAsync answers, without re-reading the row.
-        var canChangeAccess = await _access.CanDeleteAsync(project.CreatedByUserId, ct).ConfigureAwait(false);
+        var canChangeAccess = await _access.CanDeleteAsync(project.CreatedByUserId, ct);
 
         var root = $"/solutions/{project.Id.ToString(CultureInfo.InvariantCulture)}";
         var items = new List<PaletteResultItem>
@@ -166,7 +166,7 @@ public sealed partial class PaletteContextService
             .OrderBy(e => e.Name)
             .Take(MaxContextEnvironments)
             .Select(e => new { e.Id, e.Name, e.Type, e.Version, e.Status })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         items.AddRange(environments.Select(e => new PaletteResultItem(
             "environment",
             e.Name,
@@ -174,7 +174,7 @@ public sealed partial class PaletteContextService
             EnvironmentPaletteSource.Describe(null, e.Type, e.Version, e.Status),
             $"/environments/{e.Id.ToString(CultureInfo.InvariantCulture)}")));
 
-        if (await LatestBuildAsync(user, project.Id, ct).ConfigureAwait(false) is { } build) items.Add(build);
+        if (await LatestBuildAsync(user, project.Id, ct) is { } build) items.Add(build);
 
         return new PaletteContextBlock(project.Name, items);
     }
@@ -194,7 +194,7 @@ public sealed partial class PaletteContextService
                 && b.BcTarget == ProjectBuildTarget.Current)
             .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
             .Select(b => new { PipelineId = b.PipelineId!.Value, PipelineName = b.Pipeline!.Name, b.Status, b.StartedAt })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (build is null) return null;
 
         var subtitle = string.Join(" - ", new[]
@@ -230,7 +230,7 @@ public sealed partial class PaletteContextService
     {
         if (!_tools.IsEnabled(ToolKey.Projects, user)) return null;
 
-        var detail = await _fleet.GetEnvironmentAsync(environmentId, ct).ConfigureAwait(false);
+        var detail = await _fleet.GetEnvironmentAsync(environmentId, ct);
         if (detail is null) return null;
         var row = detail.Fleet;
 
@@ -295,12 +295,12 @@ public sealed partial class PaletteContextService
                 .Where(p => solutionIds.Contains(p.Id) && p.DeletedAt == null)
                 .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
                 .Select(p => new { p.Id, p.Name, p.ShortName, p.HostingType, p.BcVersion })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             // The same version the Solutions source and the list show - see
             // ProjectCustomerInfoService.ReadProductionFactsAsync.
             var production = rows.Count == 0
                 ? new Dictionary<int, ProductionEnvironmentFacts>()
-                : await ProjectCustomerInfoService.ReadProductionFactsAsync(_db, rows.Select(r => r.Id).ToList(), ct).ConfigureAwait(false);
+                : await ProjectCustomerInfoService.ReadProductionFactsAsync(_db, rows.Select(r => r.Id).ToList(), ct);
             foreach (var r in rows)
             {
                 var href = $"/solutions/{r.Id.ToString(CultureInfo.InvariantCulture)}";
@@ -321,7 +321,7 @@ public sealed partial class PaletteContextService
                 .Where(e => environmentIds.Contains(e.Id) && e.MissingSince == null)
                 .Where(e => _db.OeProjects.Where(visible).Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
                 .Select(e => new { e.Id, e.Name, e.Type, e.Version, e.Status, ProjectName = e.Project!.Name })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             foreach (var r in rows)
             {
                 var href = $"/environments/{r.Id.ToString(CultureInfo.InvariantCulture)}";
@@ -339,7 +339,7 @@ public sealed partial class PaletteContextService
                 .Where(OeRelease.NotACheckOnlyBuild(_db.OeProjectBuilds))
                 .Where(_access.VisibleReleasePredicate(snapshot))
                 .Select(r => new { r.Id, r.Label, r.BcVersion })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             foreach (var r in rows)
             {
                 var href = $"/object-explorer/release/{r.Id.ToString(CultureInfo.InvariantCulture)}";
@@ -355,7 +355,7 @@ public sealed partial class PaletteContextService
             var rows = await _db.Recipes.AsNoTracking()
                 .Where(r => recipeIds.Contains(r.Id) && r.DeletedAt == null && !r.Deprecated)
                 .Select(r => new { r.Id, r.Title })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             foreach (var r in rows)
             {
                 var href = $"/cookbook/{r.Id.ToString(CultureInfo.InvariantCulture)}";

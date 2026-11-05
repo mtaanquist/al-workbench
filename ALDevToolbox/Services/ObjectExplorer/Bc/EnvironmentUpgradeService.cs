@@ -78,14 +78,14 @@ public sealed class EnvironmentUpgradeService
     {
         var headers = await _db.OeEnvironmentUpgrades.AsNoTracking()
             .Where(u => u.ClosedAt == null)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var ordered = headers
             .OrderBy(u => u.PlannedAt is null)
             .ThenBy(u => u.PlannedAt)
             .ThenByDescending(u => u.CreatedAt)
             .ToList();
-        return await SummariseAsync(ordered, ct).ConfigureAwait(false);
+        return await SummariseAsync(ordered, ct);
     }
 
     /// <summary>How many upgrades are marked done: the Archive's count, without reading their lines.</summary>
@@ -109,8 +109,8 @@ public sealed class EnvironmentUpgradeService
         var headers = await query
             .OrderByDescending(u => u.ClosedAt)
             .ThenByDescending(u => u.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
-        return await SummariseAsync(headers, ct).ConfigureAwait(false);
+            .ToListAsync(ct);
+        return await SummariseAsync(headers, ct);
     }
 
     /// <summary>
@@ -123,12 +123,12 @@ public sealed class EnvironmentUpgradeService
     public async Task<EnvironmentUpgradeDetail?> GetAsync(int upgradeId, CancellationToken ct = default)
     {
         var header = await _db.OeEnvironmentUpgrades.AsNoTracking()
-            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct);
         if (header is null) return null;
 
-        var lines = await BuildLinesAsync([header], ct).ConfigureAwait(false);
+        var lines = await BuildLinesAsync([header], ct);
         var mine = lines.GetValueOrDefault(header.Id, []);
-        var acted = await ActedUponAsync([header.Id], ct).ConfigureAwait(false);
+        var acted = await ActedUponAsync([header.Id], ct);
         return new EnvironmentUpgradeDetail(Summarise(header, mine, acted.Contains(header.Id)), mine);
     }
 
@@ -142,7 +142,7 @@ public sealed class EnvironmentUpgradeService
     /// </summary>
     public async Task<Dictionary<int, UpgradeLineOwner>> ListOpenLineOwnersAsync(CancellationToken ct = default)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
         var owners = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
@@ -150,7 +150,7 @@ public sealed class EnvironmentUpgradeService
             .Where(l => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == l.ProjectId && p.DeletedAt == null))
             .Select(l => new { l.EnvironmentId, l.UpgradeId, UpgradeName = l.Upgrade!.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // ToDictionary would throw on a duplicate; the index rules one out, but a read that
         // races a reopen is not worth an exception on a page that only draws a lock.
@@ -166,8 +166,8 @@ public sealed class EnvironmentUpgradeService
         List<OeEnvironmentUpgrade> headers, CancellationToken ct)
     {
         if (headers.Count == 0) return [];
-        var lines = await BuildLinesAsync(headers, ct).ConfigureAwait(false);
-        var acted = await ActedUponAsync(headers.Select(h => h.Id).ToList(), ct).ConfigureAwait(false);
+        var lines = await BuildLinesAsync(headers, ct);
+        var acted = await ActedUponAsync(headers.Select(h => h.Id).ToList(), ct);
         return headers.Select(h => Summarise(h, lines.GetValueOrDefault(h.Id, []), acted.Contains(h.Id))).ToList();
     }
 
@@ -182,7 +182,7 @@ public sealed class EnvironmentUpgradeService
             .Where(a => a.UpgradeId != null && upgradeIds.Contains(a.UpgradeId.Value))
             .Select(a => a.UpgradeId!.Value)
             .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false))
+            .ToListAsync(ct))
         .ToHashSet();
 
     private static EnvironmentUpgradeSummary Summarise(
@@ -211,7 +211,7 @@ public sealed class EnvironmentUpgradeService
         IReadOnlyList<OeEnvironmentUpgrade> headers, CancellationToken ct)
     {
         var ids = headers.Select(h => h.Id).ToList();
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
         var lines = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
@@ -232,17 +232,17 @@ public sealed class EnvironmentUpgradeService
                 l.Note,
                 l.AddedAt,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (lines.Count == 0) return new();
 
         var actions = (await _db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.UpgradeId != null && ids.Contains(a.UpgradeId.Value))
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .ToLookup(a => (a.UpgradeId!.Value, a.EnvironmentId));
 
         // The fleet is the mirror as the Upgrades page reads it, deleted-but-restorable
         // environments included: a line's environment deleted mid-wave is still worth seeing.
-        var fleet = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct: ct).ConfigureAwait(false))
+        var fleet = (await _fleet.ListFleetAsync(includeSoftDeleted: true, ct: ct))
             .ToDictionary(r => r.EnvironmentId);
         var byId = headers.ToDictionary(h => h.Id);
 
@@ -303,7 +303,7 @@ public sealed class EnvironmentUpgradeService
         var details = ValidateDetails(name, targetVersion, note);
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        var createdBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
+        var createdBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         var upgrade = new OeEnvironmentUpgrade
         {
             OrganizationId = orgId,
@@ -318,7 +318,7 @@ public sealed class EnvironmentUpgradeService
             UpdatedAt = now,
         };
         _db.OeEnvironmentUpgrades.Add(upgrade);
-        await SaveAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct);
 
         _logger.LogInformation(
             "User {UserId} created planned upgrade {UpgradeId} ({UpgradeName}, target {TargetVersion}).",
@@ -334,20 +334,19 @@ public sealed class EnvironmentUpgradeService
     {
         RequireOrganizationId();
         var details = ValidateDetails(name, targetVersion, note);
-        var upgrade = await LoadOpenAsync(upgradeId, ct).ConfigureAwait(false);
+        var upgrade = await LoadOpenAsync(upgradeId, ct);
 
         // A new target is a new "ready to check" to send, even if the old one went out.
         // Cleared in one transaction with the new target: cleared first and committed
         // alone, a sweep in between would announce the old target again and stamp it
         // for the new one. A set-based update, because lines this page already tracks
         // may hold a stale value the change tracker would not see as a change.
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         if (upgrade.TargetVersion != details.TargetVersion)
         {
             await _db.OeEnvironmentUpgradeLines
                 .Where(l => l.UpgradeId == upgradeId && l.CheckedAt == null)
-                .ExecuteUpdateAsync(s => s.SetProperty(l => l.UpdatedNotifiedAt, (DateTime?)null), ct)
-                .ConfigureAwait(false);
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.UpdatedNotifiedAt, (DateTime?)null), ct);
         }
         upgrade.Name = details.Name;
         upgrade.TargetVersion = details.TargetVersion;
@@ -355,8 +354,8 @@ public sealed class EnvironmentUpgradeService
         upgrade.Note = details.Note;
         upgrade.MoveDateAfterUpdate = moveDateAfterUpdate ?? upgrade.MoveDateAfterUpdate;
         upgrade.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
-        await SaveAsync(ct).ConfigureAwait(false);
-        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct);
+        await transaction.CommitAsync(ct);
 
         _logger.LogInformation(
             "User {UserId} updated planned upgrade {UpgradeId} ({UpgradeName}, target {TargetVersion}).",
@@ -372,24 +371,23 @@ public sealed class EnvironmentUpgradeService
     public async Task<int> CloseAsync(int upgradeId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var upgrade = await LoadWithLinesAsync(upgradeId, ct).ConfigureAwait(false);
+        var upgrade = await LoadWithLinesAsync(upgradeId, ct);
         if (upgrade.ClosedAt is not null)
         {
             throw Refusal("Upgrade", "This upgrade is already marked done.");
         }
-        await EnsureCanManageAllAsync(upgrade.Lines, ct).ConfigureAwait(false);
+        await EnsureCanManageAllAsync(upgrade.Lines, ct);
 
         var now = _clock.GetUtcNow().UtcDateTime;
         upgrade.ClosedAt = now;
         upgrade.ClosedByUserId = _orgContext.CurrentUserId;
-        upgrade.ClosedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
+        upgrade.ClosedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         upgrade.UpdatedAt = now;
         foreach (var line in upgrade.Lines) line.IsOpen = false;
-        await SaveAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct);
         // Done means nothing is left to check on it.
         await NotificationSubject.MarkDoneAsync(
-            _db, upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList(), now, _logger, ct)
-            .ConfigureAwait(false);
+            _db, upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList(), now, _logger, ct);
 
         var uncheckedCount = upgrade.Lines.Count(l => l.CheckedAt is null);
         _logger.LogInformation(
@@ -406,15 +404,15 @@ public sealed class EnvironmentUpgradeService
     public async Task ReopenAsync(int upgradeId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var upgrade = await LoadWithLinesAsync(upgradeId, ct).ConfigureAwait(false);
+        var upgrade = await LoadWithLinesAsync(upgradeId, ct);
         if (upgrade.ClosedAt is null)
         {
             throw Refusal("Upgrade", "This upgrade is already open.");
         }
-        await EnsureCanManageAllAsync(upgrade.Lines, ct).ConfigureAwait(false);
+        await EnsureCanManageAllAsync(upgrade.Lines, ct);
 
         var environmentIds = upgrade.Lines.Select(l => l.EnvironmentId).ToList();
-        var taken = await OpenElsewhereAsync(environmentIds, upgradeId, ct).ConfigureAwait(false);
+        var taken = await OpenElsewhereAsync(environmentIds, upgradeId, ct);
         if (taken.Count > 0)
         {
             throw Refusal("Upgrade",
@@ -429,7 +427,7 @@ public sealed class EnvironmentUpgradeService
         // "ready to check" to send now.
         var versions = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => environmentIds.Contains(e.Id))
-            .ToDictionaryAsync(e => e.Id, e => e.Version, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(e => e.Id, e => e.Version, ct);
         var now = _clock.GetUtcNow().UtcDateTime;
         foreach (var line in upgrade.Lines)
         {
@@ -440,7 +438,7 @@ public sealed class EnvironmentUpgradeService
                 line.UpdatedNotifiedAt = now;
             }
         }
-        await SaveGuardingOpenIndexAsync(ct).ConfigureAwait(false);
+        await SaveGuardingOpenIndexAsync(ct);
 
         _logger.LogInformation(
             "User {UserId} reopened planned upgrade {UpgradeId}.", _orgContext.CurrentUserId, upgradeId);
@@ -461,7 +459,7 @@ public sealed class EnvironmentUpgradeService
         var trimmedName = ValidateName(name);
 
         var source = await _db.OeEnvironmentUpgrades.AsNoTracking()
-            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct)
             ?? throw Gone();
         if (source.ClosedAt is null)
         {
@@ -469,7 +467,7 @@ public sealed class EnvironmentUpgradeService
                 "Mark this upgrade done first. Its environments stay on it while it is open, so they can't move to a new one yet.");
         }
 
-        var lines = (await BuildLinesAsync([source], ct).ConfigureAwait(false)).GetValueOrDefault(source.Id, []);
+        var lines = (await BuildLinesAsync([source], ct)).GetValueOrDefault(source.Id, []);
         var leftovers = lines.Where(l => EnvironmentUpgradeLineState.IsLeftover(l.State)).ToList();
         if (leftovers.Count == 0)
         {
@@ -479,18 +477,17 @@ public sealed class EnvironmentUpgradeService
 
         foreach (var projectId in leftovers.Select(l => l.Environment.ProjectId).Distinct())
         {
-            await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct).ConfigureAwait(false);
+            await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct);
         }
 
-        var taken = await OpenElsewhereAsync(leftovers.Select(l => l.Environment.EnvironmentId).ToList(), null, ct)
-            .ConfigureAwait(false);
+        var taken = await OpenElsewhereAsync(leftovers.Select(l => l.Environment.EnvironmentId).ToList(), null, ct);
         if (taken.Count > 0)
         {
             throw Refusal("Upgrade", $"{Describe(taken)} Take them off first, then try again.");
         }
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        var createdBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
+        var createdBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         var upgrade = new OeEnvironmentUpgrade
         {
             OrganizationId = orgId,
@@ -513,7 +510,7 @@ public sealed class EnvironmentUpgradeService
             }).ToList(),
         };
         _db.OeEnvironmentUpgrades.Add(upgrade);
-        await SaveGuardingOpenIndexAsync(ct).ConfigureAwait(false);
+        await SaveGuardingOpenIndexAsync(ct);
 
         _logger.LogInformation(
             "User {UserId} created planned upgrade {UpgradeId} ({UpgradeName}) from the {LeftoverCount} leftovers of upgrade {SourceUpgradeId}.",
@@ -528,23 +525,22 @@ public sealed class EnvironmentUpgradeService
     public async Task DeleteAsync(int upgradeId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var upgrade = await LoadWithLinesAsync(upgradeId, ct).ConfigureAwait(false);
+        var upgrade = await LoadWithLinesAsync(upgradeId, ct);
 
         var acted = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .AnyAsync(a => a.UpgradeId == upgradeId, ct).ConfigureAwait(false);
+            .AnyAsync(a => a.UpgradeId == upgradeId, ct);
         if (acted)
         {
             throw Refusal("Upgrade",
                 "Something has already been done from this upgrade, so it stays on the record. Mark it done instead.");
         }
-        await EnsureCanManageAllAsync(upgrade.Lines, ct).ConfigureAwait(false);
+        await EnsureCanManageAllAsync(upgrade.Lines, ct);
 
         var lineSubjects = upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList();
         _db.OeEnvironmentUpgrades.Remove(upgrade);
-        await SaveAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct);
         // Nothing is left to check, and the page the notices link to is gone.
-        await NotificationSubject.MarkDoneAsync(_db, lineSubjects, _clock.GetUtcNow().UtcDateTime, _logger, ct)
-            .ConfigureAwait(false);
+        await NotificationSubject.MarkDoneAsync(_db, lineSubjects, _clock.GetUtcNow().UtcDateTime, _logger, ct);
 
         _logger.LogInformation(
             "User {UserId} deleted planned upgrade {UpgradeId} ({UpgradeName}, {LineCount} environments).",
@@ -571,9 +567,9 @@ public sealed class EnvironmentUpgradeService
         {
             throw Refusal("Environments", "Pick at least one environment to add.");
         }
-        var upgrade = await LoadOpenAsync(upgradeId, ct).ConfigureAwait(false);
+        var upgrade = await LoadOpenAsync(upgradeId, ct);
 
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var environments = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => wanted.Contains(e.Id))
@@ -584,12 +580,12 @@ public sealed class EnvironmentUpgradeService
                 e.Id, e.ProjectId, e.Name, e.MissingSince, e.SoftDeletedOn, e.Status,
                 ProjectName = e.Project!.Name,
             })
-            .ToDictionaryAsync(e => e.Id, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(e => e.Id, ct);
 
         var existing = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
             .Where(l => wanted.Contains(l.EnvironmentId) && (l.UpgradeId == upgradeId || l.IsOpen))
             .Select(l => new { l.EnvironmentId, l.UpgradeId, UpgradeName = l.Upgrade!.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var added = new List<int>();
         var alreadyOn = new List<int>();
@@ -623,7 +619,7 @@ public sealed class EnvironmentUpgradeService
             if (!grant.TryGetValue(env.ProjectId, out var mayAct))
             {
                 grant[env.ProjectId] = mayAct =
-                    await _access.CanManageEnvironmentUpdatesAsync(env.ProjectId, ct).ConfigureAwait(false);
+                    await _access.CanManageEnvironmentUpdatesAsync(env.ProjectId, ct);
             }
             if (!mayAct)
             {
@@ -646,7 +642,7 @@ public sealed class EnvironmentUpgradeService
         if (added.Count > 0)
         {
             upgrade.UpdatedAt = now;
-            await SaveGuardingOpenIndexAsync(ct).ConfigureAwait(false);
+            await SaveGuardingOpenIndexAsync(ct);
         }
 
         _logger.LogInformation(
@@ -662,11 +658,10 @@ public sealed class EnvironmentUpgradeService
     public async Task RemoveLineAsync(int lineId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
+        var line = await LoadLineForWriteAsync(lineId, ct);
 
         var acted = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .AnyAsync(a => a.UpgradeId == line.UpgradeId && a.EnvironmentId == line.EnvironmentId, ct)
-            .ConfigureAwait(false);
+            .AnyAsync(a => a.UpgradeId == line.UpgradeId && a.EnvironmentId == line.EnvironmentId, ct);
         if (acted)
         {
             throw Refusal("Line",
@@ -676,9 +671,8 @@ public sealed class EnvironmentUpgradeService
         var now = _clock.GetUtcNow().UtcDateTime;
         _db.OeEnvironmentUpgradeLines.Remove(line);
         line.Upgrade!.UpdatedAt = now;
-        await SaveAsync(ct).ConfigureAwait(false);
-        await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
-            .ConfigureAwait(false);
+        await SaveAsync(ct);
+        await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct);
 
         _logger.LogInformation(
             "User {UserId} took environment {EnvironmentId} off planned upgrade {UpgradeId}.",
@@ -690,19 +684,18 @@ public sealed class EnvironmentUpgradeService
     {
         RequireOrganizationId();
         if (userId is { } assignee
-            && !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == assignee, ct).ConfigureAwait(false))
+            && !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == assignee, ct))
         {
             throw Refusal("Assignee", "That person isn't in this organisation.");
         }
-        var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
+        var line = await LoadLineForWriteAsync(lineId, ct);
 
         var now = _clock.GetUtcNow().UtcDateTime;
         if (line.AssigneeUserId != userId && line.CheckedAt is null)
         {
             // The previous checker is no longer asked. Before the save, so a sweep straight
             // after it cannot have told the new one yet.
-            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
-                .ConfigureAwait(false);
+            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct);
         }
         if (userId is not null && line.AssigneeUserId != userId && line.CheckedAt is null)
         {
@@ -711,7 +704,7 @@ public sealed class EnvironmentUpgradeService
         }
         line.AssigneeUserId = userId;
         line.Upgrade!.UpdatedAt = now;
-        await SaveAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct);
 
         _logger.LogInformation(
             "User {UserId} assigned environment {EnvironmentId} on planned upgrade {UpgradeId} to user {AssigneeUserId}.",
@@ -727,14 +720,14 @@ public sealed class EnvironmentUpgradeService
     public async Task<UpgradeLinesChangeResult> RemoveLinesAsync(
         int upgradeId, IEnumerable<int> lineIds, CancellationToken ct = default)
     {
-        var (upgrade, lines, refused) = await LoadLinesForBatchAsync(upgradeId, lineIds, ct).ConfigureAwait(false);
+        var (upgrade, lines, refused) = await LoadLinesForBatchAsync(upgradeId, lineIds, ct);
 
         var environmentIds = lines.Select(l => l.Line.EnvironmentId).ToList();
         var acted = (await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.UpgradeId == upgradeId && environmentIds.Contains(a.EnvironmentId))
             .Select(a => a.EnvironmentId)
             .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false)).ToHashSet();
+            .ToListAsync(ct)).ToHashSet();
 
         var removed = new List<int>();
         foreach (var (line, environmentName, projectName) in lines)
@@ -753,9 +746,9 @@ public sealed class EnvironmentUpgradeService
         {
             var now = _clock.GetUtcNow().UtcDateTime;
             upgrade.UpdatedAt = now;
-            await SaveAsync(ct).ConfigureAwait(false);
+            await SaveAsync(ct);
             await NotificationSubject.MarkDoneAsync(
-                _db, removed.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct).ConfigureAwait(false);
+                _db, removed.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct);
         }
 
         _logger.LogInformation(
@@ -775,11 +768,11 @@ public sealed class EnvironmentUpgradeService
     {
         RequireOrganizationId();
         if (userId is { } assignee
-            && !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == assignee, ct).ConfigureAwait(false))
+            && !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == assignee, ct))
         {
             throw Refusal("Assignee", "That person isn't in this organisation.");
         }
-        var (upgrade, lines, refused) = await LoadLinesForBatchAsync(upgradeId, lineIds, ct).ConfigureAwait(false);
+        var (upgrade, lines, refused) = await LoadLinesForBatchAsync(upgradeId, lineIds, ct);
 
         var now = _clock.GetUtcNow().UtcDateTime;
         var reassigned = new List<int>();
@@ -801,10 +794,10 @@ public sealed class EnvironmentUpgradeService
             {
                 // Before the save, so a sweep straight after it cannot have told the new one yet.
                 await NotificationSubject.MarkDoneAsync(
-                    _db, reassigned.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct).ConfigureAwait(false);
+                    _db, reassigned.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct);
             }
             upgrade.UpdatedAt = now;
-            await SaveAsync(ct).ConfigureAwait(false);
+            await SaveAsync(ct);
         }
 
         _logger.LogInformation(
@@ -830,20 +823,20 @@ public sealed class EnvironmentUpgradeService
         {
             throw Refusal("Lines", "Pick at least one environment.");
         }
-        var upgrade = await LoadOpenAsync(upgradeId, ct).ConfigureAwait(false);
+        var upgrade = await LoadOpenAsync(upgradeId, ct);
 
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var lines = await _db.OeEnvironmentUpgradeLines
             .Where(l => wanted.Contains(l.Id) && l.UpgradeId == upgradeId)
             .Where(l => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == l.ProjectId && p.DeletedAt == null))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var foundIds = lines.Select(l => l.Id).ToList();
         var names = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
             .Where(l => foundIds.Contains(l.Id))
             .Select(l => new { l.Id, EnvironmentName = l.Environment!.Name, ProjectName = l.Project!.Name })
-            .ToDictionaryAsync(l => l.Id, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(l => l.Id, ct);
 
         var refused = new Dictionary<string, string>();
         foreach (var missing in wanted.Except(foundIds))
@@ -859,7 +852,7 @@ public sealed class EnvironmentUpgradeService
             if (!grant.TryGetValue(line.ProjectId, out var mayAct))
             {
                 grant[line.ProjectId] = mayAct =
-                    await _access.CanManageEnvironmentUpdatesAsync(line.ProjectId, ct).ConfigureAwait(false);
+                    await _access.CanManageEnvironmentUpdatesAsync(line.ProjectId, ct);
             }
             if (!mayAct)
             {
@@ -912,7 +905,7 @@ public sealed class EnvironmentUpgradeService
         {
             throw Refusal("Note", $"Keep the note to {LineNoteMaxLength} characters or fewer.");
         }
-        var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
+        var line = await LoadLineForWriteAsync(lineId, ct);
 
         var now = _clock.GetUtcNow().UtcDateTime;
         // A line already ticked keeps its stamp: ticking it again is not a second check.
@@ -921,7 +914,7 @@ public sealed class EnvironmentUpgradeService
         {
             line.CheckedAt = now;
             line.CheckedByUserId = _orgContext.CurrentUserId;
-            line.CheckedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
+            line.CheckedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         }
         else if (isChecked == false)
         {
@@ -931,11 +924,10 @@ public sealed class EnvironmentUpgradeService
         }
         if (setNote) line.Note = trimmedNote;
         line.Upgrade!.UpdatedAt = now;
-        await SaveAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct);
         if (newlyChecked)
         {
-            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
-                .ConfigureAwait(false);
+            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct);
         }
 
         _logger.LogInformation(
@@ -1028,7 +1020,7 @@ public sealed class EnvironmentUpgradeService
     {
         ForgetTrackedUpgrades();
         var upgrade = await _db.OeEnvironmentUpgrades
-            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct)
             ?? throw Gone();
         if (upgrade.ClosedAt is not null) throw ClosedRefusal();
         return upgrade;
@@ -1040,7 +1032,7 @@ public sealed class EnvironmentUpgradeService
         ForgetTrackedUpgrades();
         return await _db.OeEnvironmentUpgrades
             .Include(u => u.Lines)
-            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(u => u.Id == upgradeId, ct)
             ?? throw Gone();
     }
 
@@ -1052,17 +1044,17 @@ public sealed class EnvironmentUpgradeService
     private async Task<OeEnvironmentUpgradeLine> LoadLineForWriteAsync(int lineId, CancellationToken ct)
     {
         ForgetTrackedUpgrades();
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var line = await _db.OeEnvironmentUpgradeLines
             .Include(l => l.Upgrade)
             .Where(l => l.Id == lineId)
             .Where(l => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == l.ProjectId && p.DeletedAt == null))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw Refusal("Line", NoLongerOnUpgrade);
         if (line.Upgrade!.ClosedAt is not null) throw ClosedRefusal();
-        await _access.EnsureCanManageEnvironmentUpdatesAsync(line.ProjectId, ct).ConfigureAwait(false);
+        await _access.EnsureCanManageEnvironmentUpdatesAsync(line.ProjectId, ct);
         return line;
     }
 
@@ -1074,7 +1066,7 @@ public sealed class EnvironmentUpgradeService
     {
         foreach (var projectId in lines.Select(l => l.ProjectId).Distinct())
         {
-            await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct).ConfigureAwait(false);
+            await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct);
         }
     }
 
@@ -1088,7 +1080,7 @@ public sealed class EnvironmentUpgradeService
                         && (exceptUpgradeId == null || l.UpgradeId != exceptUpgradeId))
             .OrderBy(l => l.Environment!.Name)
             .Select(l => new TakenEnvironment(l.Environment!.Name, l.Project!.Name, l.Upgrade!.Name))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
     private static string Describe(List<TakenEnvironment> taken)
     {
@@ -1105,7 +1097,7 @@ public sealed class EnvironmentUpgradeService
     {
         try
         {
-            await SaveAsync(ct).ConfigureAwait(false);
+            await SaveAsync(ct);
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
@@ -1125,7 +1117,7 @@ public sealed class EnvironmentUpgradeService
     {
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch
         {

@@ -22,7 +22,7 @@ public static class SweptOrganizations
         var rows = await db.Organizations.AsNoTracking()
             .Where(o => !o.IsPending)
             .Select(o => new { o.Id, o.IsSystem })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows.Select(o => (o.Id, o.IsSystem)).ToList();
     }
 }

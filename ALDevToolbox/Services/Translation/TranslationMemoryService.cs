@@ -194,7 +194,7 @@ public sealed class TranslationMemoryService
                 .Where(e => srcHashes.Contains(e.SourceHash)
                     && srcLangs.Contains(e.SourceLanguage)
                     && tgtLangs.Contains(e.TargetLanguage))
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             var existingByKey = existing.ToDictionary(
                 e => $"{e.SourceLanguage}\u001F{e.TargetLanguage}\u001F{e.SourceHash}\u001F{e.TargetHash}",
                 StringComparer.Ordinal);
@@ -243,7 +243,7 @@ public sealed class TranslationMemoryService
 
             try
             {
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
             }
             finally
             {
@@ -284,7 +284,7 @@ public sealed class TranslationMemoryService
         if (string.IsNullOrEmpty(tgt)) return new List<TranslationSuggestion>();
         var src = string.IsNullOrWhiteSpace(sourceLanguage) ? null : NormaliseLanguage(sourceLanguage);
         var srcHash = Hash(sourceText);
-        var memory = VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false));
+        var memory = VisibleTo(await HiddenRepositoriesAsync(ct));
 
         var exact = await memory
             .Where(e => e.DeletedAt == null && e.TargetLanguage == tgt
@@ -295,7 +295,7 @@ public sealed class TranslationMemoryService
             .Select(e => new TranslationSuggestion(
                 e.Id, e.TargetText, e.Origin, e.Kind, 1.0, e.Score, 0, false,
                 e.SourceRepository, e.SourcePath))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var results = new List<TranslationSuggestion>(exact);
         var seenTargets = new HashSet<string>(exact.Select(r => r.TargetText), StringComparer.Ordinal);
@@ -325,7 +325,7 @@ public sealed class TranslationMemoryService
                 .ThenByDescending(x => x.Score)
                 .ThenByDescending(x => x.TargetText)
                 .Take(limit * 3)
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
 
             foreach (var f in fuzzy)
             {
@@ -346,7 +346,7 @@ public sealed class TranslationMemoryService
             var mine = await _db.TranslationMemoryVotes.AsNoTracking()
                 .Where(v => v.UserId == userId && ids.Contains(v.EntryId))
                 .Select(v => new { v.EntryId, v.Value })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             if (mine.Count > 0)
             {
                 var byEntry = mine.ToDictionary(v => v.EntryId, v => (int)v.Value);
@@ -392,7 +392,7 @@ public sealed class TranslationMemoryService
         if (byHash.Count == 0) return result;
 
         var hashes = byHash.Keys.ToList();
-        var memory = VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false));
+        var memory = VisibleTo(await HiddenRepositoriesAsync(ct));
         foreach (var hashChunk in hashes.Chunk(500))
         {
             ct.ThrowIfCancellationRequested();
@@ -403,7 +403,7 @@ public sealed class TranslationMemoryService
                     && set.Contains(e.SourceHash))
                 .OrderByDescending(e => e.Score).ThenByDescending(e => e.HitCount).ThenByDescending(e => e.LastSeenAt)
                 .Select(e => new { e.Id, e.SourceText, e.TargetText, e.Origin, e.Kind, e.Score, e.SourceRepository, e.SourcePath })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
 
             foreach (var r in rows)
             {
@@ -452,13 +452,13 @@ public sealed class TranslationMemoryService
             // anyone that solution is hidden from, the same as in search (#1547).
             // AsNoTracking: Score is never mutated through the tracked entity — the
             // atomic UPDATE owns it.
-            var entryExists = await VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false))
-                .AnyAsync(e => e.Id == entryId, ct).ConfigureAwait(false);
+            var entryExists = await VisibleTo(await HiddenRepositoriesAsync(ct))
+                .AnyAsync(e => e.Id == entryId, ct);
             if (!entryExists)
                 throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
 
             var vote = await _db.TranslationMemoryVotes
-                .FirstOrDefaultAsync(v => v.EntryId == entryId && v.UserId == userId, ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(v => v.EntryId == entryId && v.UserId == userId, ct);
             var oldValue = vote?.Value ?? 0;
             var delta = newValue - oldValue;
 
@@ -484,12 +484,12 @@ public sealed class TranslationMemoryService
                 vote.UpdatedAt = now;
             }
 
-            await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
             try
             {
                 // The vote-row insert can violate the (EntryId, UserId) unique
                 // index if a concurrent same-user request inserted first.
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
 
                 if (delta != 0)
                 {
@@ -497,8 +497,7 @@ public sealed class TranslationMemoryService
                         .Where(e => e.Id == entryId)
                         .ExecuteUpdateAsync(s => s
                             .SetProperty(e => e.Score, e => e.Score + delta)
-                            .SetProperty(e => e.UpdatedAt, now), ct)
-                        .ConfigureAwait(false);
+                            .SetProperty(e => e.UpdatedAt, now), ct);
                 }
 
                 // Read our own write inside the transaction so the returned score
@@ -506,9 +505,9 @@ public sealed class TranslationMemoryService
                 var newScore = await _db.TranslationMemory.AsNoTracking()
                     .Where(e => e.Id == entryId)
                     .Select(e => e.Score)
-                    .FirstAsync(ct).ConfigureAwait(false);
+                    .FirstAsync(ct);
 
-                await tx.CommitAsync(ct).ConfigureAwait(false);
+                await tx.CommitAsync(ct);
                 return new VoteResult(entryId, newScore, newValue);
             }
             // A Postgres unique-violation here is the (entry_id, user_id) index
@@ -518,7 +517,7 @@ public sealed class TranslationMemoryService
                 // A concurrent vote from the same user inserted the row first.
                 // Roll back, drop the failed insert from the tracker, and retry:
                 // the reload sees their row and we re-derive the delta from it.
-                await tx.RollbackAsync(ct).ConfigureAwait(false);
+                await tx.RollbackAsync(ct);
                 _db.ChangeTracker.Clear();
             }
         }
@@ -534,10 +533,10 @@ public sealed class TranslationMemoryService
     {
         RequireOrganizationId();
         // Hidden-solution pairs answer "not found", as in search and VoteAsync (#1547).
-        var visible = await VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false))
-            .AnyAsync(e => e.Id == entryId, ct).ConfigureAwait(false);
+        var visible = await VisibleTo(await HiddenRepositoriesAsync(ct))
+            .AnyAsync(e => e.Id == entryId, ct);
         var entry = visible
-            ? await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct).ConfigureAwait(false)
+            ? await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct)
             : null;
         if (entry is null)
             throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
@@ -545,7 +544,7 @@ public sealed class TranslationMemoryService
         {
             entry.DeletedAt = DateTime.UtcNow;
             entry.UpdatedAt = entry.DeletedAt.Value;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _logger.LogInformation("Translation memory entry {EntryId} soft-deleted.", entryId);
         }
     }
@@ -554,13 +553,13 @@ public sealed class TranslationMemoryService
     public async Task RestoreAsync(long entryId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var entry = await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct).ConfigureAwait(false)
+        var entry = await _db.TranslationMemory.FirstOrDefaultAsync(e => e.Id == entryId, ct)
             ?? throw new InvalidOperationException($"Translation memory entry {entryId} not found in this organisation.");
         if (entry.DeletedAt is not null)
         {
             entry.DeletedAt = null;
             entry.UpdatedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _logger.LogInformation("Translation memory entry {EntryId} restored.", entryId);
         }
     }
@@ -577,7 +576,7 @@ public sealed class TranslationMemoryService
         RequireOrganizationId();
         var userId = _orgContext.CurrentUserId;
 
-        var query = VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false));
+        var query = VisibleTo(await HiddenRepositoriesAsync(ct));
         if (!q.IncludeDeleted) query = query.Where(e => e.DeletedAt == null);
         if (!string.IsNullOrWhiteSpace(q.TargetLanguage))
         {
@@ -614,7 +613,7 @@ public sealed class TranslationMemoryService
         // load time), and nobody pages to the end of that: "more than 10,000" is
         // all the number is for once it gets that big.
         int? total = q.CountTotal
-            ? await query.Take(MemorySearchQuery.CountLimit + 1).CountAsync(ct).ConfigureAwait(false)
+            ? await query.Take(MemorySearchQuery.CountLimit + 1).CountAsync(ct)
             : null;
         var totalIsCapped = total > MemorySearchQuery.CountLimit;
         if (totalIsCapped) total = MemorySearchQuery.CountLimit;
@@ -635,7 +634,7 @@ public sealed class TranslationMemoryService
                 e.Kind, e.Origin, e.SourceRepository, e.SourcePath,
                 e.HitCount, e.Score, e.CreatedAt, e.LastSeenAt, e.DeletedAt,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var hasMore = rows.Count > take;
         if (hasMore) rows.RemoveAt(take);
@@ -647,7 +646,7 @@ public sealed class TranslationMemoryService
             myVotes = (await _db.TranslationMemoryVotes.AsNoTracking()
                 .Where(v => v.UserId == userId && ids.Contains(v.EntryId))
                 .Select(v => new { v.EntryId, v.Value })
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
                 .ToDictionary(v => v.EntryId, v => (int)v.Value);
         }
 
@@ -688,16 +687,16 @@ public sealed class TranslationMemoryService
     /// </summary>
     private async Task<List<string>> HiddenRepositoriesAsync(CancellationToken ct)
     {
-        var snapshot = await _projectAccess.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct);
         if (snapshot.BypassesVisibility) return [];
 
         var hidden = await RepositoryNamesAsync(
-            _db.OeProjects.Where(ProjectAccess.LockedProjectPredicate(snapshot)), ct).ConfigureAwait(false);
+            _db.OeProjects.Where(ProjectAccess.LockedProjectPredicate(snapshot)), ct);
         if (hidden.Count == 0) return [];
 
         var visible = await RepositoryNamesAsync(
             _db.OeProjects.Where(p => p.DeletedAt == null).Where(ProjectAccess.VisibleProjectPredicate(snapshot)),
-            ct).ConfigureAwait(false);
+            ct);
         hidden.ExceptWith(visible);
         return hidden.ToList();
     }
@@ -709,7 +708,7 @@ public sealed class TranslationMemoryService
         var urls = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == RepositoryProvider.GitHub && projectIds.Contains(r.ProjectId))
             .Select(r => r.Url)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var url in urls)

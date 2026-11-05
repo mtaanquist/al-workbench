@@ -64,11 +64,10 @@ public sealed class TeamService
         var userId = _orgContext.CurrentUserId;
         if (userId is null) return false;
 
-        if (await IsOrgAdminAsync(userId.Value, ct).ConfigureAwait(false)) return true;
+        if (await IsOrgAdminAsync(userId.Value, ct)) return true;
 
         return await _db.TeamMembers.AsNoTracking()
-            .AnyAsync(m => m.TeamId == teamId && m.UserId == userId.Value && m.IsManager, ct)
-            .ConfigureAwait(false);
+            .AnyAsync(m => m.TeamId == teamId && m.UserId == userId.Value && m.IsManager, ct);
     }
 
     /// <summary>
@@ -77,7 +76,7 @@ public sealed class TeamService
     /// </summary>
     public async Task EnsureCanManageTeamAsync(int teamId, CancellationToken ct = default)
     {
-        if (!await CanManageTeamAsync(teamId, ct).ConfigureAwait(false))
+        if (!await CanManageTeamAsync(teamId, ct))
         {
             throw new ProjectAccessDeniedException(
                 "Only a team manager or an organisation admin can change this team.");
@@ -93,13 +92,13 @@ public sealed class TeamService
     {
         if (_orgContext.IsSiteAdmin) return true;
         var userId = _orgContext.CurrentUserId;
-        return userId is not null && await IsOrgAdminAsync(userId.Value, ct).ConfigureAwait(false);
+        return userId is not null && await IsOrgAdminAsync(userId.Value, ct);
     }
 
     private async Task EnsureCanAdministerTeamsAsync(CancellationToken ct,
         string refusal = "Only an organisation admin can create or delete teams.")
     {
-        if (!await CanAdministerTeamsAsync(ct).ConfigureAwait(false))
+        if (!await CanAdministerTeamsAsync(ct))
         {
             throw new ProjectAccessDeniedException(refusal);
         }
@@ -110,7 +109,7 @@ public sealed class TeamService
         await _db.Users.AsNoTracking()
             .Where(u => u.Id == userId)
             .Select(u => u.Role)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false) == UserRole.Admin;
+            .FirstOrDefaultAsync(ct) == UserRole.Admin;
 
     // ---------------------------------------------------------------- reads
 
@@ -213,9 +212,9 @@ public sealed class TeamService
     public async Task<int> CreateTeamAsync(string name, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        await EnsureCanAdministerTeamsAsync(ct).ConfigureAwait(false);
+        await EnsureCanAdministerTeamsAsync(ct);
 
-        var clean = await ValidateNameAsync(name, existingId: null, ct).ConfigureAwait(false);
+        var clean = await ValidateNameAsync(name, existingId: null, ct);
 
         var now = DateTime.UtcNow;
         var team = new Team
@@ -226,7 +225,7 @@ public sealed class TeamService
             UpdatedAt = now,
         };
         _db.Teams.Add(team);
-        await SaveTranslatingNameClashAsync(ct).ConfigureAwait(false);
+        await SaveTranslatingNameClashAsync(ct);
 
         _logger.LogInformation("Created team {TeamId} ({Name}) for org {OrgId}.", team.Id, clean, orgId);
         return team.Id;
@@ -236,16 +235,16 @@ public sealed class TeamService
     public async Task RenameTeamAsync(int id, string name, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        await EnsureCanManageTeamAsync(id, ct).ConfigureAwait(false);
+        await EnsureCanManageTeamAsync(id, ct);
 
         var team = await _db.Teams.FirstOrDefaultAsync(t => t.Id == id, ct)
             ?? throw Validation("Name", "This team no longer exists.");
 
-        var clean = await ValidateNameAsync(name, existingId: id, ct).ConfigureAwait(false);
+        var clean = await ValidateNameAsync(name, existingId: id, ct);
         var previous = team.Name;
         team.Name = clean;
         team.UpdatedAt = DateTime.UtcNow;
-        await SaveTranslatingNameClashAsync(ct).ConfigureAwait(false);
+        await SaveTranslatingNameClashAsync(ct);
 
         _logger.LogInformation("Renamed team {TeamId} from {PreviousName} to {Name}.", id, previous, clean);
     }
@@ -265,7 +264,7 @@ public sealed class TeamService
     public async Task DeleteTeamAsync(int id, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        await EnsureCanAdministerTeamsAsync(ct).ConfigureAwait(false);
+        await EnsureCanAdministerTeamsAsync(ct);
 
         // The "only team" check below reads and the delete writes; two deletes, or a delete
         // and an access save, could each pass it and leave a Private or Read-only solution
@@ -333,7 +332,7 @@ public sealed class TeamService
     public async Task<int> AddMemberAsync(int teamId, int userId, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        await EnsureCanManageTeamAsync(teamId, ct).ConfigureAwait(false);
+        await EnsureCanManageTeamAsync(teamId, ct);
 
         var teamExists = await _db.Teams.AsNoTracking().AnyAsync(t => t.Id == teamId, ct);
         if (!teamExists) throw Validation("UserId", "This team no longer exists.");
@@ -371,7 +370,7 @@ public sealed class TeamService
     public async Task RemoveMemberAsync(int teamId, int memberId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        await EnsureCanManageTeamAsync(teamId, ct).ConfigureAwait(false);
+        await EnsureCanManageTeamAsync(teamId, ct);
 
         var member = await _db.TeamMembers.FirstOrDefaultAsync(m => m.Id == memberId && m.TeamId == teamId, ct);
         if (member is null) return;
@@ -391,7 +390,7 @@ public sealed class TeamService
     public async Task SetManagerAsync(int teamId, int memberId, bool isManager, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        await EnsureCanManageTeamAsync(teamId, ct).ConfigureAwait(false);
+        await EnsureCanManageTeamAsync(teamId, ct);
 
         var member = await _db.TeamMembers.FirstOrDefaultAsync(m => m.Id == memberId && m.TeamId == teamId, ct);
         if (member is null) return;
@@ -422,7 +421,7 @@ public sealed class TeamService
     {
         RequireOrganizationId();
         await EnsureCanAdministerTeamsAsync(ct,
-            "Only an organisation admin can decide who schedules Business Central updates.").ConfigureAwait(false);
+            "Only an organisation admin can decide who schedules Business Central updates.");
 
         var member = await _db.TeamMembers.FirstOrDefaultAsync(m => m.Id == memberId && m.TeamId == teamId, ct);
         if (member is null) throw Validation("MemberId", "That person is no longer on this team.");
@@ -469,7 +468,7 @@ public sealed class TeamService
     {
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {

@@ -199,33 +199,33 @@ public sealed class ReleaseImportRequestService
         // ── Legacy C/AL TXT: stage to disk, queue, ingest in bg ────
         if (isCalImport)
         {
-            var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+            var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
             return await StageAndQueueNewAsync(
                 releaseId,
                 new PendingUpload(submission.CalTxtFile!, CalTxtTempPrefix, ".txt", "C/AL file"),
                 path => new ReleaseImportSource.CalTxt(path!, calEncoding),
-                storeSymbolReference: false, ct).ConfigureAwait(false);
+                storeSymbolReference: false, ct);
         }
 
         // ── URL download: queue, ingest in the background ──────────
         if (dvdUrl.Length > 0)
         {
-            await _dvdDownloader.ValidateUrlForQueueAsync(dvdUrl, ct).ConfigureAwait(false);
-            var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+            await _dvdDownloader.ValidateUrlForQueueAsync(dvdUrl, ct);
+            var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
             return await StageAndQueueNewAsync(
                 releaseId, upload: null, _ => new ReleaseImportSource.Url(dvdUrl),
-                storeSymbolReference, ct).ConfigureAwait(false);
+                storeSymbolReference, ct);
         }
 
         // ── Folder-ZIP upload: stage to disk, queue, ingest in bg ──
         if (folderZip is not null)
         {
-            var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+            var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
             return await StageAndQueueNewAsync(
                 releaseId,
                 new PendingUpload(folderZip, FolderZipTempPrefix, ".zip", "ZIP"),
                 path => new ReleaseImportSource.StagedZip(path!, IsDvd: false),
-                storeSymbolReference, ct).ConfigureAwait(false);
+                storeSymbolReference, ct);
         }
 
         // ── Individual files: small/fast, stays synchronous ────────
@@ -243,7 +243,7 @@ public sealed class ReleaseImportRequestService
                 ProjectName: projectName,
                 StoreSymbolReference: storeSymbolReference);
 
-            var summary = await _importer.ImportReleaseAsync(request, ct).ConfigureAwait(false);
+            var summary = await _importer.ImportReleaseAsync(request, ct);
             return new ReleaseImportOutcome.Imported(summary);
         }
         finally
@@ -285,7 +285,7 @@ public sealed class ReleaseImportRequestService
         // From the flip on the release reads as importing; until the job row says so,
         // this tracker tells a build waiting on it that someone is (#1180).
         using var tracking = _importer.Ingests.Track(releaseId);
-        await _importer.BeginAmendAsync(releaseId, ct).ConfigureAwait(false);
+        await _importer.BeginAmendAsync(releaseId, ct);
 
         string? stagedPath = null;
         long? jobRowId = null;
@@ -294,8 +294,8 @@ public sealed class ReleaseImportRequestService
             try
             {
                 stagedPath = pairs is null
-                    ? await StageUploadToTempAsync(folderZip!, AddModulesTempPrefix, ".zip", ct).ConfigureAwait(false)
-                    : await StagePairsToTempZipAsync(pairs, ct).ConfigureAwait(false);
+                    ? await StageUploadToTempAsync(folderZip!, AddModulesTempPrefix, ".zip", ct)
+                    : await StagePairsToTempZipAsync(pairs, ct);
             }
             catch (IOException ex)
             {
@@ -307,18 +307,18 @@ public sealed class ReleaseImportRequestService
 
             var source = new ReleaseImportSource.AddModules(stagedPath);
             var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing modules for a release");
-            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct);
             await _queue.EnqueueAsync(
                 new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId.Value),
-                ct).ConfigureAwait(false);
+                ct);
             _logger.LogInformation("Queued {Count} module upload(s) for release {ReleaseId}.", pairs?.Count ?? 1, releaseId);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Adding modules to release {ReleaseId} stopped before it was queued; handing it back.", releaseId);
-            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, AddModulesNotQueuedMessage).ConfigureAwait(false);
-            await _importer.RestoreAmendedReleaseAsync(releaseId).ConfigureAwait(false);
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, AddModulesNotQueuedMessage);
+            await _importer.RestoreAmendedReleaseAsync(releaseId);
             throw;
         }
     }
@@ -346,11 +346,11 @@ public sealed class ReleaseImportRequestService
             {
                 var (app, source) = pairs[i];
                 var appName = Path.GetFileName(app.FileName);
-                await CopyIntoAsync(zip, $"{i:D3}/{appName}", app, ct).ConfigureAwait(false);
+                await CopyIntoAsync(zip, $"{i:D3}/{appName}", app, ct);
                 if (source is not null)
                 {
                     var sourceName = Path.GetFileNameWithoutExtension(appName) + ".Source.zip";
-                    await CopyIntoAsync(zip, $"{i:D3}/{sourceName}", source, ct).ConfigureAwait(false);
+                    await CopyIntoAsync(zip, $"{i:D3}/{sourceName}", source, ct);
                 }
             }
         }
@@ -366,7 +366,7 @@ public sealed class ReleaseImportRequestService
             var entry = zip.CreateEntry(name, CompressionLevel.NoCompression);
             await using var to = entry.Open();
             await using var from = file.OpenRead();
-            await from.CopyToAsync(to, ct).ConfigureAwait(false);
+            await from.CopyToAsync(to, ct);
         }
     }
 
@@ -387,8 +387,8 @@ public sealed class ReleaseImportRequestService
         // unknown id: its saved source is read and then discarded, so there is
         // nothing to reuse, and the reopen reads the release and answers not
         // found. Asked first and always, so the two run the same queries.
-        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
-        var latest = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct);
+        var latest = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct);
         var origin = visible ? latest : null;
 
         // Project builds re-run from the project id alone — no URL, no
@@ -408,13 +408,13 @@ public sealed class ReleaseImportRequestService
             // The release reads as importing from the reopen on, before its job is
             // queued: a build polling it must not take it for abandoned (#1180).
             using var rebuilding = _importer.Ingests.Track(releaseId);
-            await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false))
+            await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct))
             {
-                await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
-                await rebuild.CommitAsync(ct).ConfigureAwait(false);
+                await _importer.ReopenForRebuildAsync(releaseId, ct);
+                await rebuild.CommitAsync(ct);
             }
             // Wipes the previous attempt first, and fails the build if it cannot queue it.
-            await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
+            await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
 
@@ -460,7 +460,7 @@ public sealed class ReleaseImportRequestService
         }
         if (urlToUse is not null)
         {
-            await _dvdDownloader.ValidateUrlForQueueAsync(urlToUse, ct).ConfigureAwait(false);
+            await _dvdDownloader.ValidateUrlForQueueAsync(urlToUse, ct);
         }
 
         // Flip failed → ingesting (validates state) and wipe the previous
@@ -469,7 +469,7 @@ public sealed class ReleaseImportRequestService
         // the job is queued only after it: until then nothing else says the release
         // is being worked on, so a build polling it would take it for abandoned (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
-        await _importer.ReopenForRetryAsync(releaseId, visible, ct).ConfigureAwait(false);
+        await _importer.ReopenForRetryAsync(releaseId, visible, ct);
 
         // From the reopen on the release reads as importing, but nothing works on it
         // until its job is queued. Anything that stops the steps below (leaving the
@@ -483,7 +483,7 @@ public sealed class ReleaseImportRequestService
         long? jobRowId = null;
         try
         {
-            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            await _management.ClearIngestedDataAsync(releaseId, ct);
 
             ReleaseImportSource source;
             if (artifactUrl is not null)
@@ -496,7 +496,7 @@ public sealed class ReleaseImportRequestService
             }
             else if (hasFolderZip)
             {
-                stagedPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
+                stagedPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct);
                 if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
                 // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
                 // otherwise honour the original staged flag (defaults to the
@@ -506,7 +506,7 @@ public sealed class ReleaseImportRequestService
             }
             else
             {
-                stagedPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
+                stagedPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct);
                 if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
                 source = new ReleaseImportSource.CalTxt(stagedPath, submission.CalEncoding);
             }
@@ -514,17 +514,17 @@ public sealed class ReleaseImportRequestService
             // EnqueueImportAsync's two steps, inline so a row written but never queued
             // (the request ended while the queue was full) can be failed below.
             var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
-            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, submission.StoreSymbolReference, ct);
             await _queue.EnqueueAsync(
                 new ReleaseImportJob(releaseId, identity, source, submission.StoreSymbolReference, jobRowId.Value),
-                ct).ConfigureAwait(false);
+                ct);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Retry of release {ReleaseId} stopped before its import was queued; failing it again.", releaseId);
-            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, ReleaseImportService.RetryNotQueuedMessage).ConfigureAwait(false);
-            await _importer.FailUnqueuedRetryAsync(releaseId).ConfigureAwait(false);
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, ReleaseImportService.RetryNotQueuedMessage);
+            await _importer.FailUnqueuedRetryAsync(releaseId);
             throw;
         }
     }
@@ -553,7 +553,7 @@ public sealed class ReleaseImportRequestService
         {
             if (upload is not null)
             {
-                stagedPath = await TryStageAsync(releaseId, upload.File, upload.Prefix, upload.Extension, upload.FailedNoun, ct).ConfigureAwait(false);
+                stagedPath = await TryStageAsync(releaseId, upload.File, upload.Prefix, upload.Extension, upload.FailedNoun, ct);
                 if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             }
             var source = sourceFor(stagedPath);
@@ -561,10 +561,10 @@ public sealed class ReleaseImportRequestService
             // EnqueueImportAsync's two steps, inline so a row written but never queued
             // can be failed below.
             var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
-            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct).ConfigureAwait(false);
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct);
             await _queue.EnqueueAsync(
                 new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId.Value),
-                ct).ConfigureAwait(false);
+                ct);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
         catch (Exception ex)
@@ -573,8 +573,8 @@ public sealed class ReleaseImportRequestService
             // A written job row keeps the origin, so Retry can re-run it.
             var retryable = jobRowId is not null;
             var message = retryable ? ReleaseImportService.ImportNotQueuedRetryMessage : ReleaseImportService.ImportNotQueuedMessage;
-            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, message).ConfigureAwait(false);
-            await _importer.FailUnqueuedImportAsync(releaseId, retryable).ConfigureAwait(false);
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, message);
+            await _importer.FailUnqueuedImportAsync(releaseId, retryable);
             throw;
         }
     }
@@ -593,7 +593,7 @@ public sealed class ReleaseImportRequestService
         {
             try
             {
-                await _persistedJobs.FailUnqueuedAsync(rowId, message).ConfigureAwait(false);
+                await _persistedJobs.FailUnqueuedAsync(rowId, message);
             }
             catch (Exception rowEx)
             {
@@ -614,8 +614,8 @@ public sealed class ReleaseImportRequestService
     /// </summary>
     public async Task<int?> FindSymbolRecoveryProjectAsync(int releaseId, CancellationToken ct = default)
     {
-        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
-        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct);
+        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct);
         return visible && origin is { Kind: "project_build", ProjectId: int projectId } ? projectId : null;
     }
 
@@ -636,19 +636,19 @@ public sealed class ReleaseImportRequestService
         CancellationToken ct = default)
     {
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
-        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct).ConfigureAwait(false);
+        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct);
         try
         {
             await _queue.EnqueueAsync(
                 new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId),
-                ct).ConfigureAwait(false);
+                ct);
         }
         catch
         {
             // A row nothing will feed would block the bulk backfill for this release
             // until the next restart (#1578, OEI2-3); fail it instead.
             await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath: null,
-                "The request ended before this was queued, so it never ran. Try again.").ConfigureAwait(false);
+                "The request ended before this was queued, so it never ran. Try again.");
             throw;
         }
     }
@@ -682,7 +682,7 @@ public sealed class ReleaseImportRequestService
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a system-reference backfill");
         // Before the rows are written, so a restore from here on drops the feed (#1538).
         var epoch = _queue.Epoch;
-        var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, _queue.FedSinceUtc, ct).ConfigureAwait(false);
+        var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, _queue.FedSinceUtc, ct);
         var source = new ReleaseImportSource.Backfill();
         var jobs = rows
             .Select(r => new ReleaseImportJob(r.ReleaseId, identity, source, StoreSymbolReference: false, r.JobRowId))
@@ -720,11 +720,11 @@ public sealed class ReleaseImportRequestService
     {
         try
         {
-            return await StageUploadToTempAsync(file, prefix, extension, ct).ConfigureAwait(false);
+            return await StageUploadToTempAsync(file, prefix, extension, ct);
         }
         catch (IOException ex)
         {
-            await _importer.MarkFailedAsync(releaseId, $"Could not stage the uploaded {failedNoun} to disk: " + ex.Message, ct).ConfigureAwait(false);
+            await _importer.MarkFailedAsync(releaseId, $"Could not stage the uploaded {failedNoun} to disk: " + ex.Message, ct);
             return null;
         }
     }
@@ -743,7 +743,7 @@ public sealed class ReleaseImportRequestService
         {
             await using var fs = File.Create(tempPath);
             await using var src = file.OpenRead();
-            await src.CopyToAsync(fs, ct).ConfigureAwait(false);
+            await src.CopyToAsync(fs, ct);
         }
         catch
         {

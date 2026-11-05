@@ -92,8 +92,8 @@ public sealed class RepositoryMigrationService
     public async Task<SourceProjectListing> ListRepositoriesAsync(string? projectAddress, CancellationToken ct = default)
     {
         var project = ParseProject(projectAddress);
-        var token = await RequireTokenAsync(ct).ConfigureAwait(false);
-        var repositories = await ListAsync(project, token, ct).ConfigureAwait(false);
+        var token = await RequireTokenAsync(ct);
+        var repositories = await ListAsync(project, token, ct);
         return new SourceProjectListing(project, repositories);
     }
 
@@ -113,11 +113,10 @@ public sealed class RepositoryMigrationService
         {
             throw Refuse(RepositoriesField, "Choose at least one repository to move.");
         }
-        var migrationTarget = await BuildTargetAsync(target, ct).ConfigureAwait(false);
+        var migrationTarget = await BuildTargetAsync(target, ct);
 
         var repositories = await ListChosenAsync(project, chosen, RepositoriesField,
-            "Some of the chosen repositories are no longer in this project. Show the repositories again and choose again.", ct)
-            .ConfigureAwait(false);
+            "Some of the chosen repositories are no longer in this project. Show the repositories again and choose again.", ct);
         var identity = RequireIdentity("starting a migration preview");
 
         var job = new MigrationPreviewJob(Guid.NewGuid(), identity, project, repositories, migrationTarget);
@@ -178,7 +177,7 @@ public sealed class RepositoryMigrationService
         var target = preview.Target
             ?? throw Refuse(RepositoryField, "This preview can't be migrated any more. Preview again, then create the repository from the new preview.");
 
-        var clash = await _publisher.FindSolutionClashAsync(target.CustomerName, ct).ConfigureAwait(false);
+        var clash = await _publisher.FindSolutionClashAsync(target.CustomerName, ct);
         var request = new MigrationCreateRequest(
             (input.RepositoryName ?? string.Empty).Trim(),
             input.IsPrivate,
@@ -187,11 +186,10 @@ public sealed class RepositoryMigrationService
             preview.Repositories
                 .Where(r => r.Commit is not null)
                 .ToDictionary(r => r.Id, r => r.Commit!, StringComparer.OrdinalIgnoreCase));
-        await _publisher.CheckAsync(target.CustomerName, request, ct).ConfigureAwait(false);
+        await _publisher.CheckAsync(target.CustomerName, request, ct);
 
         var repositories = await ListChosenAsync(project, preview.Repositories.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase),
-            RepositoryField, "Some of the previewed repositories are no longer in the Azure DevOps project. Preview again.", ct)
-            .ConfigureAwait(false);
+            RepositoryField, "Some of the previewed repositories are no longer in the Azure DevOps project. Preview again.", ct);
         var identity = RequireIdentity("starting a migration");
 
         var job = new MigrationPreviewJob(Guid.NewGuid(), identity, project, repositories, target, request);
@@ -234,7 +232,7 @@ public sealed class RepositoryMigrationService
                 || (m.RepositoryFullName != null && EF.Functions.ILike(m.RepositoryFullName, pattern, "\\")));
         }
 
-        var total = await query.CountAsync(ct).ConfigureAwait(false);
+        var total = await query.CountAsync(ct);
         var rows = await query
             .OrderByDescending(m => m.CreatedAt)
             .ThenByDescending(m => m.Id)
@@ -248,7 +246,7 @@ public sealed class RepositoryMigrationService
                 StartedBy = m.CreatedByUser != null ? (m.CreatedByUser.DisplayName != "" ? m.CreatedByUser.DisplayName : m.CreatedByUser.Email) : null,
                 m.Succeeded, m.Message,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         return new RepositoryMigrationHistoryPage(
             rows.Select(m => new RepositoryMigrationHistoryRow(
@@ -273,7 +271,7 @@ public sealed class RepositoryMigrationService
         var key = (input.TemplateKey ?? string.Empty).Trim();
         var customer = (input.CustomerName ?? string.Empty).Trim();
         var shortName = (input.ShortName ?? string.Empty).Trim();
-        var template = key.Length == 0 ? null : await _templates.GetByKeyAsync(key, ct).ConfigureAwait(false);
+        var template = key.Length == 0 ? null : await _templates.GetByKeyAsync(key, ct);
         if (template is null || template.DeletedAt is not null)
         {
             errors[TemplateField] = key.Length == 0 ? "Choose the template the new repository is laid out by." : "That template no longer exists. Choose another.";
@@ -284,7 +282,7 @@ public sealed class RepositoryMigrationService
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
-        var versions = await _versions.GetActiveAsync(ct: ct).ConfigureAwait(false);
+        var versions = await _versions.GetActiveAsync(ct: ct);
         var (application, runtime) = TemplateDefaultsResolver.ResolveApplicationAndRuntime(template!, versions);
         var plan = new ProjectPlan(
             TemplateKey: template!.Key,
@@ -300,15 +298,15 @@ public sealed class RepositoryMigrationService
             IncludeExamples: false,
             SelectedExtensionPaths: [],
             SelectedModuleKeys: input.AddTemplateExtensions
-                ? await _templates.GetDefaultModuleKeysAsync(template.Key, ct).ConfigureAwait(false)
+                ? await _templates.GetDefaultModuleKeysAsync(template.Key, ct)
                 : [],
             // The customer's own tenant when their solution knows it, so the
             // launch configurations point at their environments; blank otherwise,
             // as New Workspace leaves it when nobody typed one.
-            TenantId: await TenantIdAsync(customer, ct).ConfigureAwait(false) ?? string.Empty);
-        plan = plan with { ExtensionPrefix = await _generation.ResolveExtensionPrefixAsync(plan, ct).ConfigureAwait(false) };
+            TenantId: await TenantIdAsync(customer, ct) ?? string.Empty);
+        plan = plan with { ExtensionPrefix = await _generation.ResolveExtensionPrefixAsync(plan, ct) };
 
-        var problems = await _generation.ValidateWorkspaceAsync(plan, ct).ConfigureAwait(false);
+        var problems = await _generation.ValidateWorkspaceAsync(plan, ct);
         if (problems.Count > 0)
         {
             var mapped = new Dictionary<string, string>();
@@ -326,7 +324,7 @@ public sealed class RepositoryMigrationService
         }
 
         return new MigrationTarget(template.Key, template.Name, customer, input.AddTemplateExtensions, plan,
-            await ProductionVersionAsync(customer, ct).ConfigureAwait(false));
+            await ProductionVersionAsync(customer, ct));
     }
 
     /// <summary>
@@ -347,7 +345,7 @@ public sealed class RepositoryMigrationService
                     .Select(e => e.AadTenantId)
                     .FirstOrDefault(),
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         return (solution?.BcTenantId ?? solution?.FromEnvironments)?.ToString();
     }
 
@@ -364,7 +362,7 @@ public sealed class RepositoryMigrationService
             .Where(e => e.Project!.DeletedAt == null && e.Project.Name.ToLower() == lower
                 && e.Type.ToLower() == "production" && e.MissingSince == null && e.SoftDeletedOn == null && e.Version != null)
             .Select(e => e.Version!)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return versions
             .Select(v => (Text: v, Parsed: Version.TryParse(v, out var parsed) ? parsed : null))
             .Where(v => v.Parsed is not null)
@@ -381,8 +379,8 @@ public sealed class RepositoryMigrationService
     private async Task<List<AzureDevOpsRepository>> ListChosenAsync(
         AzureDevOpsProject project, IReadOnlySet<string> ids, string field, string missing, CancellationToken ct)
     {
-        var token = await RequireTokenAsync(ct).ConfigureAwait(false);
-        var listed = await ListAsync(project, token, ct).ConfigureAwait(false);
+        var token = await RequireTokenAsync(ct);
+        var listed = await ListAsync(project, token, ct);
         var repositories = listed.Where(r => ids.Contains(r.Id)).ToList();
         if (repositories.Count != ids.Count) throw Refuse(field, missing);
         return repositories;
@@ -413,7 +411,7 @@ public sealed class RepositoryMigrationService
 
     private async Task<string> RequireTokenAsync(CancellationToken ct)
     {
-        var token = await _tokens.ResolveTokenAsync(RepositoryProvider.AzureDevOps, ct).ConfigureAwait(false);
+        var token = await _tokens.ResolveTokenAsync(RepositoryProvider.AzureDevOps, ct);
         if (string.IsNullOrEmpty(token))
         {
             throw Refuse(ProjectField,
@@ -426,7 +424,7 @@ public sealed class RepositoryMigrationService
     {
         try
         {
-            return await _azureDevOps.ListRepositoriesAsync(project, token, ct).ConfigureAwait(false);
+            return await _azureDevOps.ListRepositoriesAsync(project, token, ct);
         }
         catch (AzureDevOpsApiException ex)
         {

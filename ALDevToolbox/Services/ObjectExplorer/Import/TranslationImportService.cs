@@ -91,13 +91,13 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(xliff);
         var orgId = RequireOrganizationId();
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
-        var visible = await IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var visible = await IsReleaseVisibleAsync(releaseId, ct);
         var module = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.ReleaseId == releaseId)
             .Select(m => new { m.Id, m.Name, m.Release!.Kind })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (module is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -131,7 +131,7 @@ public class TranslationImportService
         }
 
         var inserted = await ReplaceForModuleAsync(
-            orgId, moduleId, parsed, module.Name, LearnsIntoMemory(module.Kind), ct).ConfigureAwait(false);
+            orgId, moduleId, parsed, module.Name, LearnsIntoMemory(module.Kind), ct);
         return new TranslationImportSummary(
             LanguageCode: parsed.TargetLanguage,
             ModuleName: module.Name,
@@ -155,13 +155,13 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(zip);
         var orgId = RequireOrganizationId();
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
-        var visible = await IsReleaseVisibleAsync(releaseId, ct).ConfigureAwait(false);
+        var visible = await IsReleaseVisibleAsync(releaseId, ct);
         var release = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
             .Select(r => new { r.Id, r.Kind })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (release is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -174,7 +174,7 @@ public class TranslationImportService
         var modules = await _db.OeModules.AsNoTracking()
             .Where(m => m.ReleaseId == releaseId)
             .Select(m => new { m.Id, m.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var byName = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in modules)
         {
@@ -234,7 +234,7 @@ public class TranslationImportService
             }
 
             var inserted = await ReplaceForModuleAsync(
-                orgId, moduleId, parsed, parsed.OriginalName, LearnsIntoMemory(release.Kind), ct).ConfigureAwait(false);
+                orgId, moduleId, parsed, parsed.OriginalName, LearnsIntoMemory(release.Kind), ct);
             matched++;
             totalInserted += inserted;
             matchedSummaries.Add(new TranslationImportSummary(
@@ -321,7 +321,7 @@ public class TranslationImportService
         var symbols = await _db.OeModuleSymbols.AsNoTracking()
             .Where(s => s.ModuleId == moduleId)
             .Select(s => new { s.Id, s.Name, s.Kind })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var symbolByName = new Dictionary<string, List<(long Id, string Kind)>>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in symbols)
         {
@@ -339,7 +339,7 @@ public class TranslationImportService
         // (#1261). The release amend already runs inside its own
         // transaction; this joins it rather than nesting.
         await using var tx = _db.Database.CurrentTransaction is null
-            ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
+            ? await _db.Database.BeginTransactionAsync(ct)
             : null;
 
         // Clobber existing rows for (module, language) so re-upload
@@ -349,7 +349,7 @@ public class TranslationImportService
         // accidentally double up a trans-unit.
         await _db.OeModuleTranslations
             .Where(t => t.ModuleId == moduleId && t.LanguageCode == parsed.TargetLanguage)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            .ExecuteDeleteAsync(ct);
 
         int inserted = 0;
         int pending = 0;
@@ -392,14 +392,14 @@ public class TranslationImportService
             pending++;
             if (pending >= chunkSize)
             {
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
                 _db.ChangeTracker.Clear();
                 pending = 0;
             }
         }
         if (pending > 0)
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _db.ChangeTracker.Clear();
         }
 
@@ -407,7 +407,7 @@ public class TranslationImportService
         {
             // Not cancellable: once every row is written, a request cancelled
             // at the last step should not throw the work away.
-            await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
+            await tx.CommitAsync(CancellationToken.None);
         }
 
         _logger.LogInformation(
@@ -435,7 +435,7 @@ public class TranslationImportService
                         u.TargetText,
                         AlXliffParser.BucketKind(u.Hint),
                         origin));
-                await _memory.UpsertAsync(pairs, ct).ConfigureAwait(false);
+                await _memory.UpsertAsync(pairs, ct);
             }
             catch (Exception ex)
             {

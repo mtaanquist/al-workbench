@@ -114,8 +114,8 @@ public sealed class RepositoryMigrationPublisher
     /// <exception cref="PlanValidationException">Keyed to the repository-name, repository or solution field.</exception>
     public async Task CheckAsync(string customerName, MigrationCreateRequest request, CancellationToken ct)
     {
-        var solution = await CheckSolutionAsync(customerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
-        await _repositories.CheckCanCreateAsync(request.RepositoryName, solution.JoinId, ct).ConfigureAwait(false);
+        var solution = await CheckSolutionAsync(customerName, request.ReplaceSolutionId, ct);
+        await _repositories.CheckCanCreateAsync(request.RepositoryName, solution.JoinId, ct);
     }
 
     /// <summary>
@@ -128,12 +128,12 @@ public sealed class RepositoryMigrationPublisher
         try
         {
             // Any legal name: only the refusals that do not depend on it can come back.
-            var gate = await _repositories.CheckCanCreateAsync("migration-check", solutionId: null, ct).ConfigureAwait(false);
+            var gate = await _repositories.CheckCanCreateAsync("migration-check", solutionId: null, ct);
             return new MigrationGitHubReadiness(gate.OrgLogin, null);
         }
         catch (PlanValidationException ex)
         {
-            var status = await _connection.GetStatusAsync(ct).ConfigureAwait(false);
+            var status = await _connection.GetStatusAsync(ct);
             return new MigrationGitHubReadiness(status.OrgLogin, string.Join(" ", ex.Errors.Values));
         }
     }
@@ -156,7 +156,7 @@ public sealed class RepositoryMigrationPublisher
                 p.Slug,
                 HasGitHub = p.Repositories.Any(r => r.Provider == RepositoryProvider.GitHub),
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (existing is null) return null;
         if (!existing.HasGitHub) return new MigrationSolutionClash(existing.Id, existing.Name, existing.Slug, CanJoin: true, CanReplace: false);
 
@@ -164,10 +164,10 @@ public sealed class RepositoryMigrationPublisher
             .Where(m => m.ProjectId == existing.Id && m.Succeeded && m.RepositoryFullName != null)
             .OrderByDescending(m => m.CreatedAt)
             .Select(m => new { FullName = m.RepositoryFullName!, m.RepositoryGitHubId })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         return new MigrationSolutionClash(existing.Id, existing.Name, existing.Slug, CanJoin: false,
             CanReplace: migrated is not null
-                && await RepositoryIsGoneAsync(migrated.FullName, migrated.RepositoryGitHubId, ct).ConfigureAwait(false));
+                && await RepositoryIsGoneAsync(migrated.FullName, migrated.RepositoryGitHubId, ct));
     }
 
     /// <summary>
@@ -186,21 +186,21 @@ public sealed class RepositoryMigrationPublisher
         GitHubWorkspaceRepository created;
         try
         {
-            var (joinId, replace) = await CheckSolutionAsync(job.Target.CustomerName, request.ReplaceSolutionId, ct).ConfigureAwait(false);
-            var gate = await _repositories.CheckCanCreateAsync(request.RepositoryName, joinId, ct).ConfigureAwait(false);
+            var (joinId, replace) = await CheckSolutionAsync(job.Target.CustomerName, request.ReplaceSolutionId, ct);
+            var gate = await _repositories.CheckCanCreateAsync(request.RepositoryName, joinId, ct);
             created = await _repositories.CreateAndFillAsync(
                 gate, plan, request.IsPrivate, joinId, request.AddPipelines,
                 async (token, repository, standards, author, fillCt) =>
                 {
                     made = repository;
-                    var filled = await PushAsync(job, workspace, commits, token, repository, standards, author, fillCt).ConfigureAwait(false);
+                    var filled = await PushAsync(job, workspace, commits, token, repository, standards, author, fillCt);
                     // Only once the new repository holds the code: a refusal before
                     // this point (the name is taken, the push failed) leaves the old
                     // solution where it was.
-                    if (replace is { } old) await DeleteReplacedAsync(job, old, fillCt).ConfigureAwait(false);
+                    if (replace is { } old) await DeleteReplacedAsync(job, old, fillCt);
                     return filled;
                 },
-                ct).ConfigureAwait(false);
+                ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -209,7 +209,7 @@ public sealed class RepositoryMigrationPublisher
                 : made is null
                     ? "The migration failed unexpectedly before the repository was created."
                     : $"The migration failed unexpectedly after {made.FullName} was created. Check it on GitHub, and delete it before you try again.";
-            await RecordAsync(job, sources, made, null, false, message, ct).ConfigureAwait(false);
+            await RecordAsync(job, sources, made, null, false, message, ct);
             throw;
         }
 
@@ -217,13 +217,13 @@ public sealed class RepositoryMigrationPublisher
             .OfType<string>()
             .ToList();
         await RecordAsync(job, sources, created.Repository, created.SolutionId, true,
-            warnings.Count == 0 ? null : string.Join(" ", warnings), ct).ConfigureAwait(false);
+            warnings.Count == 0 ? null : string.Join(" ", warnings), ct);
 
         _logger.LogInformation(
             "Migration {RunId} moved {RepositoryCount} repositories from {Project} into {RepoFullName} ({FileCount} files, solution {SolutionId}).",
             job.Id, job.Repositories.Count, job.Project.DisplayName, created.Repository.FullName, created.FileCount, created.SolutionId);
         var slug = created.SolutionId is { } solutionId
-            ? await _db.OeProjects.AsNoTracking().Where(p => p.Id == solutionId).Select(p => p.Slug).FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            ? await _db.OeProjects.AsNoTracking().Where(p => p.Id == solutionId).Select(p => p.Slug).FirstOrDefaultAsync(ct)
             : null;
         return new MigrationOutcome(
             created.Repository.FullName, created.Repository.HtmlUrl, created.SolutionId, created.SolutionName, slug,
@@ -243,7 +243,7 @@ public sealed class RepositoryMigrationPublisher
 
     private async Task DeleteReplacedAsync(MigrationPreviewJob job, MigrationSolutionClash old, CancellationToken ct)
     {
-        await _projects.SoftDeleteProjectAsync(old.Id, ct).ConfigureAwait(false);
+        await _projects.SoftDeleteProjectAsync(old.Id, ct);
         _logger.LogInformation(
             "Migration {RunId} deleted solution {SolutionId} ({Name}), which came from an earlier migration whose repository is gone.",
             job.Id, old.Id, old.Name);
@@ -258,7 +258,7 @@ public sealed class RepositoryMigrationPublisher
     private async Task<(int? JoinId, MigrationSolutionClash? Replace)> CheckSolutionAsync(
         string customerName, int? replaceSolutionId, CancellationToken ct)
     {
-        var clash = await FindSolutionClashAsync(customerName, ct).ConfigureAwait(false);
+        var clash = await FindSolutionClashAsync(customerName, ct);
         if (clash is null) return (null, null);
         if (clash.CanJoin) return (clash.Id, null);
         if (clash.CanReplace && replaceSolutionId == clash.Id) return (null, clash);
@@ -287,7 +287,7 @@ public sealed class RepositoryMigrationPublisher
             var path = Path.GetFullPath(Path.Combine(workspace, standard.Path));
             if (!path.StartsWith(Path.GetFullPath(workspace) + Path.DirectorySeparatorChar, StringComparison.Ordinal)) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await File.WriteAllTextAsync(path, standard.Content, ct).ConfigureAwait(false);
+            await File.WriteAllTextAsync(path, standard.Content, ct);
         }
 
         // --force on add: the preview already removed what the template's
@@ -299,14 +299,14 @@ public sealed class RepositoryMigrationPublisher
         var email = author?.Email ?? "noreply@users.noreply.github.com";
         string[] identity = ["-c", $"user.name={name}", "-c", $"user.email={email}", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"];
 
-        await RunAsync(git, ["init", "--quiet", "--initial-branch", repository.DefaultBranch, workspace], workspace, null, token, repository, ct).ConfigureAwait(false);
-        await RunAsync(git, [.. identity, "-C", workspace, "add", "--all", "--force"], workspace, null, token, repository, ct).ConfigureAwait(false);
-        await RunAsync(git, [.. identity, "-C", workspace, "commit", "--quiet", "--no-verify", "-m", CommitMessage(job, commits)], workspace, null, token, repository, ct).ConfigureAwait(false);
-        var listed = await RunAsync(git, ["-C", workspace, "ls-files", "-z"], workspace, null, token, repository, ct).ConfigureAwait(false);
+        await RunAsync(git, ["init", "--quiet", "--initial-branch", repository.DefaultBranch, workspace], workspace, null, token, repository, ct);
+        await RunAsync(git, [.. identity, "-C", workspace, "add", "--all", "--force"], workspace, null, token, repository, ct);
+        await RunAsync(git, [.. identity, "-C", workspace, "commit", "--quiet", "--no-verify", "-m", CommitMessage(job, commits)], workspace, null, token, repository, ct);
+        var listed = await RunAsync(git, ["-C", workspace, "ls-files", "-z"], workspace, null, token, repository, ct);
         var fileCount = listed.Split('\0', StringSplitOptions.RemoveEmptyEntries).Length;
         await RunAsync(git, ["-C", workspace, "push", "--quiet", PushUrl(repository), $"HEAD:refs/heads/{repository.DefaultBranch}"],
-            workspace, ProjectBuildService.GitAuthEnv(RepositoryProvider.GitHub, token), token, repository, ct).ConfigureAwait(false);
-        var head = (await RunAsync(git, ["-C", workspace, "rev-parse", "HEAD"], workspace, null, token, repository, ct).ConfigureAwait(false)).Trim();
+            workspace, ProjectBuildService.GitAuthEnv(RepositoryProvider.GitHub, token), token, repository, ct);
+        var head = (await RunAsync(git, ["-C", workspace, "rev-parse", "HEAD"], workspace, null, token, repository, ct)).Trim();
 
         _logger.LogInformation("Pushed {FileCount} files to {RepoFullName} at {Commit}.", fileCount, repository.FullName, head);
         return new RepositoryFillResult(fileCount, standards.Count, head);
@@ -316,7 +316,7 @@ public sealed class RepositoryMigrationPublisher
         string git, string[] args, string workDir, IReadOnlyDictionary<string, string>? env, string token,
         GitHubRepositorySummary repository, CancellationToken ct)
     {
-        var result = await _processes.RunAsync(new ProcessRunRequest(git, args, workDir, env, GitTimeout), ct).ConfigureAwait(false);
+        var result = await _processes.RunAsync(new ProcessRunRequest(git, args, workDir, env, GitTimeout), ct);
         if (result.Succeeded) return result.StdOut;
 
         var detail = RepositoryMigrationPreviewer.GitDetail(result, token);
@@ -370,18 +370,18 @@ public sealed class RepositoryMigrationPublisher
     {
         var parts = fullName.Split('/', 2);
         if (parts.Length != 2) return false;
-        var connection = await _connection.GetStatusAsync(ct).ConfigureAwait(false);
+        var connection = await _connection.GetStatusAsync(ct);
         if (connection.InstallationId is not { } installationId) return false;
         // Another GitHub organisation's repository is merely out of sight of this
         // installation, not gone, so it never makes a solution replaceable.
         if (!string.Equals(parts[0], connection.OrgLogin, StringComparison.OrdinalIgnoreCase)) return false;
         try
         {
-            var token = await _github.GetInstallationTokenAsync(installationId, ct).ConfigureAwait(false);
+            var token = await _github.GetInstallationTokenAsync(installationId, ct);
             // The app made this repository, so it can always see it while it exists.
             var found = gitHubId is { } id
-                ? await _github.GetRepositoryByIdAsync(token, id, ct).ConfigureAwait(false)
-                : await _github.GetRepositoryAsync(token, parts[0], parts[1], ct).ConfigureAwait(false);
+                ? await _github.GetRepositoryByIdAsync(token, id, ct)
+                : await _github.GetRepositoryAsync(token, parts[0], parts[1], ct);
             return found is null;
         }
         catch (GitHubApiException ex)
@@ -420,7 +420,7 @@ public sealed class RepositoryMigrationPublisher
                 Succeeded = succeeded,
                 Message = message,
             });
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
         {

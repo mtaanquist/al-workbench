@@ -72,7 +72,7 @@ public sealed class PipelinePaletteSource : IPaletteSource
         ArgumentNullException.ThrowIfNull(query);
         if (!query.IsUsable || limit <= 0) return [];
 
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
         // The latest build rides along as a correlated projection rather than a
@@ -96,7 +96,7 @@ public sealed class PipelinePaletteSource : IPaletteSource
                     .Select(b => new { b.Status, b.StartedAt, b.FinishedAt })
                     .FirstOrDefault(),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var candidates = rows.Select(r => new PaletteCandidate(
             "pipeline",

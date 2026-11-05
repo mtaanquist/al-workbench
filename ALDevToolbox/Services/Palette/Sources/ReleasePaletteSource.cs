@@ -102,7 +102,7 @@ public sealed class ReleasePaletteSource : IPaletteSource
         ArgumentNullException.ThrowIfNull(query);
         if (!query.IsUsable || limit <= 0) return [];
 
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
 
         // Deleted releases are gone; failed ones are tombstones holding no
         // objects, so opening one is a dead end. Ingesting ones are offered -
@@ -159,7 +159,7 @@ public sealed class ReleasePaletteSource : IPaletteSource
                     .OrderBy(b => b.Project!.Name)
                     .Select(b => b.Project!.Name)
                     .FirstOrDefault()))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         return candidates
             .Select(row => new PaletteCandidate(

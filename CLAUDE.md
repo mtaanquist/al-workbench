@@ -18,6 +18,7 @@ Guidance for working on this repository: the principles, fences, and conventions
 - Records for immutable data shapes (plans, DTOs, mustache contexts). Classes for EF entities — EF needs settable properties.
 - Constructor-injected dependencies stored as `private readonly`. We don't use primary constructors on services yet; stay consistent until we change them all at once.
 - `async`/`await` end-to-end. Every `Task`-returning service method takes a `CancellationToken` and threads it through.
+- No `ConfigureAwait(false)` in code that can read the signed-in user (anything holding `AppDbContext` or `IOrganizationContext`, or a service that does). During a server render the continuation would read `HttpContext.User` on a pool thread while the renderer reads it too, and `HttpContext` is not thread-safe (#1724, #1729). Hosted workers and pure transport code may keep it. `ConfigureAwaitCallerContextTests` enforces this.
 - Use `AsNoTracking()` on every read-only EF query. We've been disciplined about this so far.
 - Prefer minimal LINQ over hand-rolled loops, but don't reach for tricks (no `Aggregate`-as-fold games) when a `foreach` is clearer.
 - Use structured logging with named placeholders (`_logger.LogInformation("Generated {Workspace}…", plan.WorkspaceName)`), never string interpolation into the message template.

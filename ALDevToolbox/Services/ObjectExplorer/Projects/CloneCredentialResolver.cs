@@ -78,7 +78,7 @@ public sealed class CloneCredentialResolver
         {
             try
             {
-                var linked = await _gitHubAccess.ResolveUserTokenAsync(userId, ct).ConfigureAwait(false);
+                var linked = await _gitHubAccess.ResolveUserTokenAsync(userId, ct);
                 if (!string.IsNullOrEmpty(linked))
                 {
                     credentials.Add(new CloneCredential(linked, ConnectedAccountSource));
@@ -92,7 +92,7 @@ public sealed class CloneCredentialResolver
             }
         }
 
-        var pat = await _repoTokens.ResolveTokenAsync(provider, ct).ConfigureAwait(false);
+        var pat = await _repoTokens.ResolveTokenAsync(provider, ct);
         if (!string.IsNullOrEmpty(pat))
         {
             credentials.Add(new CloneCredential(pat, BuildTokenSource));

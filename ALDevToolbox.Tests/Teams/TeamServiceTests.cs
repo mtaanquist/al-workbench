@@ -537,6 +537,28 @@ public sealed class TeamServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Manage_checks_read_the_caller_on_the_callers_synchronization_context()
+    {
+        // The team page asks these while it prerenders, when the render reads the
+        // signed-in user on the renderer's context too (#1729). Every read of the
+        // caller, including the tenant filter's, has to stay on that context.
+        var teamId = await SeedTeamAsync("Nordics", (ManagerUserId, true));
+        ActAs(ManagerUserId);
+        var recorder = new ContextCheckingOrganizationContext(_db.OrgContext);
+
+        await Microsoft.AspNetCore.Components.Dispatcher.CreateDefault().InvokeAsync(async () =>
+        {
+            await using var ctx = _db.NewContext(recorder);
+            var svc = new TeamService(ctx, recorder, NullLogger<TeamService>.Instance);
+            (await svc.CanManageTeamAsync(teamId)).Should().BeTrue();
+            (await svc.CanAdministerTeamsAsync()).Should().BeFalse();
+        });
+
+        recorder.Reads.Should().BeGreaterThan(0);
+        recorder.OffContextReads.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_plain_member_cannot_manage_the_team()
     {
         var teamId = await SeedTeamAsync("Nordics", (MemberUserId, false));

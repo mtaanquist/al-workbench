@@ -155,8 +155,8 @@ internal static class ObjectExplorerViewerEndpoints
             var safe = SanitiseFileName(match.Label) + "-" + SanitiseFileName(match.Name) + ".SymbolReference.json";
             WriteAttachmentHeaders(ctx, safe, "application/json; charset=utf-8");
             await using var writer = new StreamWriter(ctx.Response.Body, System.Text.Encoding.UTF8, bufferSize: 64 * 1024, leaveOpen: true);
-            await writer.WriteAsync(match.Content.AsMemory(), ct).ConfigureAwait(false);
-            await writer.FlushAsync(ct).ConfigureAwait(false);
+            await writer.WriteAsync(match.Content.AsMemory(), ct);
+            await writer.FlushAsync(ct);
             return Results.Empty;
         }).RequireAuthorization();
 

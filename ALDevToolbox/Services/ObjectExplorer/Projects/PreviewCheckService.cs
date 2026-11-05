@@ -62,7 +62,7 @@ public sealed class PreviewCheckService
                 OwnerActive = p.PreviewCheckByUser != null && p.PreviewCheckByUser.Status == UserStatus.Active,
                 Country = p.Project!.DefaultArtifactCountry,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (pipelines.Count == 0) return [];
 
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
@@ -84,7 +84,7 @@ public sealed class PreviewCheckService
                     g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Id).First(),
                     g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Status).First(),
                     g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.ReleaseId).First()))
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .ToDictionary(h => (h.PipelineId, h.BcTarget));
 
         // What each pipeline's last check of each target compiled, and what its
@@ -99,24 +99,24 @@ public sealed class PreviewCheckService
                 .Where(r => lastCheckReleaseIds.Contains(r.ReleaseId) && r.Status == ProjectBuildResultStatus.Failed)
                 .Select(r => r.ReleaseId)
                 .Distinct()
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .ToHashSet();
         var pinned = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
             .Where(c => lastCheckIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
             .Select(c => new { c.ProjectBuildId, RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash })
-            .ToListAsync(ct).ConfigureAwait(false))
+            .ToListAsync(ct))
             .ToLookup(c => c.ProjectBuildId);
         var projectIds = pipelines.Select(p => p.ProjectId).Distinct().ToList();
         var repositories = (await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => projectIds.Contains(r.ProjectId))
             .Select(r => new { r.Id, r.ProjectId })
-            .ToListAsync(ct).ConfigureAwait(false))
+            .ToListAsync(ct))
             .ToLookup(r => r.ProjectId, r => r.Id);
         var repositoryIds = repositories.SelectMany(g => g).ToList();
         var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
             .Where(h => repositoryIds.Contains(h.ProjectRepositoryId) && h.DeletedAt == null)
             .Select(h => new BranchHead(h.ProjectRepositoryId, h.Branch, h.IsDefaultBranch, h.HeadSha, h.PushedAt))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var today = DateOnly.FromDateTime(nowUtc);
         var versions = new Dictionary<(string Country, string Target), string?>();
@@ -152,7 +152,7 @@ public sealed class PreviewCheckService
                 var key = (country, target);
                 if (!versions.TryGetValue(key, out var version))
                 {
-                    version = await ResolveVersionAsync(country, target, ct).ConfigureAwait(false);
+                    version = await ResolveVersionAsync(country, target, ct);
                     versions[key] = version;
                 }
                 // Microsoft has not published a preview of that version yet, or the
@@ -239,7 +239,7 @@ public sealed class PreviewCheckService
     {
         try
         {
-            var resolved = await _artifacts.ResolveTargetAsync(country, ProjectBuildTarget.ToBuildTarget(target), ct).ConfigureAwait(false);
+            var resolved = await _artifacts.ResolveTargetAsync(country, ProjectBuildTarget.ToBuildTarget(target), ct);
             return resolved?.Version;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -101,14 +101,14 @@ public sealed class TranslationMemoryIngestService
     public async Task<TranslationMemoryIngestSummary> IngestCurrentOrganisationAsync(CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var connection = await _connection.GetStatusAsync(ct).ConfigureAwait(false);
+        var connection = await _connection.GetStatusAsync(ct);
         if (!connection.IsConnected || string.IsNullOrWhiteSpace(connection.OrgLogin))
         {
             _logger.LogDebug("Org {OrgId} has no connected GitHub organisation; nothing to ingest.", orgId);
             return new TranslationMemoryIngestSummary(0, 0, 0, 0, 0);
         }
 
-        var repositories = await ResolveRepositoriesAsync(connection.OrgLogin!, ct).ConfigureAwait(false);
+        var repositories = await ResolveRepositoriesAsync(connection.OrgLogin!, ct);
         if (repositories.Count == 0)
         {
             _logger.LogDebug(
@@ -116,7 +116,7 @@ public sealed class TranslationMemoryIngestService
             return new TranslationMemoryIngestSummary(0, 0, 0, 0, 0);
         }
 
-        var token = await _github.GetInstallationTokenAsync(connection.InstallationId!.Value, ct).ConfigureAwait(false);
+        var token = await _github.GetInstallationTokenAsync(connection.InstallationId!.Value, ct);
 
         var scanned = 0;
         var read = 0;
@@ -129,7 +129,7 @@ public sealed class TranslationMemoryIngestService
             ct.ThrowIfCancellationRequested();
             try
             {
-                var result = await IngestRepositoryAsync(token, repository, ct).ConfigureAwait(false);
+                var result = await IngestRepositoryAsync(token, repository, ct);
                 scanned++;
                 read += result.FilesRead;
                 unchanged += result.FilesUnchanged;
@@ -165,8 +165,7 @@ public sealed class TranslationMemoryIngestService
     private async Task<TranslationMemoryIngestSummary> IngestRepositoryAsync(
         string token, TrackedRepository repository, CancellationToken ct)
     {
-        var tree = await _github.ListTreeAsync(token, repository.Owner, repository.Name, repository.TreeIsh, ct)
-            .ConfigureAwait(false);
+        var tree = await _github.ListTreeAsync(token, repository.Owner, repository.Name, repository.TreeIsh, ct);
         if (tree.Truncated)
         {
             // GitHub caps a recursive listing rather than failing it. Learning
@@ -208,7 +207,7 @@ public sealed class TranslationMemoryIngestService
 
         var known = await _db.TranslationMemorySources
             .Where(s => s.Repository == repository.FullName)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var knownByPath = known.ToDictionary(s => s.Path, StringComparer.Ordinal);
 
         var read = 0;
@@ -226,7 +225,7 @@ public sealed class TranslationMemoryIngestService
                 continue;
             }
 
-            var xml = await ReadFileAsync(token, repository, entry, ct).ConfigureAwait(false);
+            var xml = await ReadFileAsync(token, repository, entry, ct);
             if (xml is null) continue;
 
             var parsed = ParseOrNull(xml, repository.FullName, entry.Path);
@@ -239,7 +238,7 @@ public sealed class TranslationMemoryIngestService
                 repository.FullName,
                 entry.Path).ToList();
 
-            learned += await _memory.UpsertAsync(pairs, ct).ConfigureAwait(false);
+            learned += await _memory.UpsertAsync(pairs, ct);
             read++;
 
             if (existing is null)
@@ -263,7 +262,7 @@ public sealed class TranslationMemoryIngestService
                 // row loaded above is no longer tracked by the time we get here.
                 _db.TranslationMemorySources.Update(existing);
             }
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
 
         // A file that is no longer in the repository has no state left to keep.
@@ -274,7 +273,7 @@ public sealed class TranslationMemoryIngestService
         if (gone.Count > 0 && !tree.Truncated)
         {
             _db.TranslationMemorySources.RemoveRange(gone);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _logger.LogInformation(
                 "{Count} translation file(s) are no longer in {RepoFullName}; their ingest state was dropped.",
                 gone.Count, repository.FullName);
@@ -293,7 +292,7 @@ public sealed class TranslationMemoryIngestService
         string token, TrackedRepository repository, GitHubTreeEntry entry, CancellationToken ct)
     {
         var file = await _github.GetFileAsync(
-            token, repository.Owner, repository.Name, entry.Path, repository.TreeIsh, ct).ConfigureAwait(false);
+            token, repository.Owner, repository.Name, entry.Path, repository.TreeIsh, ct);
         if (file is not null) return file.Text;
 
         if (string.IsNullOrEmpty(entry.Sha))
@@ -303,8 +302,7 @@ public sealed class TranslationMemoryIngestService
             return null;
         }
 
-        var blob = await _github.GetBlobAsync(token, repository.Owner, repository.Name, entry.Sha, ct)
-            .ConfigureAwait(false);
+        var blob = await _github.GetBlobAsync(token, repository.Owner, repository.Name, entry.Sha, ct);
         if (blob is null)
         {
             _logger.LogDebug("{Path} in {RepoFullName} is no longer readable.", entry.Path, repository.FullName);
@@ -354,7 +352,7 @@ public sealed class TranslationMemoryIngestService
             // A repository nobody confirmed they can read is not read with the installation token.
             .Where(r => r.AccessConfirmedAt != null)
             .Select(r => new { r.OrganizationId, r.Url })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var resolved = new Dictionary<string, TrackedRepository>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
