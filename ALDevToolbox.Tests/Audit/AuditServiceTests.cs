@@ -144,6 +144,34 @@ public sealed class AuditServiceTests : IDisposable
         (await ByAsync("JXDOE")).Should().Equal(["jxdoe@cronus.example"], "the match is still case-insensitive");
     }
 
+    /// <summary>
+    /// Rows written before system writes were named say "unknown" but read as "System"
+    /// or "Not signed in", so searching for what is on screen finds them.
+    /// </summary>
+    [Fact]
+    public async Task The_changed_by_filter_finds_old_rows_by_the_label_they_are_shown_with()
+    {
+        var ts = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.AuditLog.AddRange(
+                NewEntry(ts, TestDb.DefaultOrgId, "unknown", AuditEntityType.Backup),
+                NewEntry(ts, TestDb.DefaultOrgId, "unknown", AuditEntityType.SignupRequest),
+                NewEntry(ts, TestDb.DefaultOrgId, "System (BackupScheduler)", AuditEntityType.Backup),
+                NewEntry(ts, TestDb.DefaultOrgId, "anna@cronus.example", AuditEntityType.Backup));
+            await ctx.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+
+        async Task<IEnumerable<string>> ByAsync(string actor) =>
+            (await NewService().GetPagedAsync(new AuditFilter(null, null, null, actor, null, null), 0, 50))
+                .Items.Select(AuditActor.Display);
+
+        (await ByAsync("system")).Should().BeEquivalentTo("System", "System (BackupScheduler)");
+        (await ByAsync("Not signed")).Should().BeEquivalentTo("Not signed in");
+        (await ByAsync("anna")).Should().BeEquivalentTo("anna@cronus.example");
+    }
+
     private AuditService NewService() => new(_db.NewContextFactory(), _db.OrgContext);
 
     private async Task SeedAuditRowsAsync()

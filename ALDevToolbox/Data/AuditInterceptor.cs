@@ -181,7 +181,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     /// <c>LastLoginAt</c> and nothing else, and <c>.design/auth-and-audit.md</c>
     /// already puts logins outside the audit log — they belong to
     /// <c>login_attempts</c>. Without this gate every sign-in wrote a <c>User</c>
-    /// row attributed to <c>"unknown"</c>, because the interceptor runs before the
+    /// row attributed to no one, because the interceptor runs before the
     /// auth cookie exists; on a busy org that is most of the audit log, and it
     /// crowded every real change off the /admin dashboard's activity panel.
     ///
@@ -193,15 +193,32 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         nameof(User.LastLoginAt),
     };
 
+    /// <summary>
+    /// Bookkeeping on <see cref="OrganizationSettings"/>: the release auto-import sweep
+    /// stamps <c>AutoImportLastRunAt</c> after every visit so the import page can say
+    /// when it last checked. It is not a setting anyone chose, and it wrote a daily
+    /// "changed the organisation settings" row with no person behind it, plus one more
+    /// whenever a restart re-ran the day's sweep. A save that changes anything else on
+    /// the row is still audited in full.
+    /// </summary>
+    private static readonly HashSet<string> OrganizationSettingsBookkeepingColumns = new()
+    {
+        nameof(OrganizationSettings.AutoImportLastRunAt),
+        nameof(OrganizationSettings.UpdatedAt),
+    };
+
     private readonly IHttpContextAccessor _http;
     private List<PendingAddition> _pendingAdditions = new();
+
+    /// <summary>The last off-request actor looked up, so a worker's many saves cost one query.</summary>
+    private (int UserId, string Name)? _ambientActor;
 
     public AuditInterceptor(IHttpContextAccessor http)
     {
         _http = http;
     }
 
-    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+    public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
         DbContextEventData eventData,
         InterceptionResult<int> result,
         CancellationToken cancellationToken = default)
@@ -209,17 +226,24 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         var ctx = eventData.Context;
         if (ctx is null)
         {
-            return new ValueTask<InterceptionResult<int>>(result);
+            return result;
         }
 
         // Reset on every save so we never carry rows across two SaveChanges calls.
         _pendingAdditions = new List<PendingAddition>();
 
-        var changedBy = ResolveChangedBy();
+        var entries = ctx.ChangeTracker.Entries().ToList();
+        // Most saves touch nothing audited; don't resolve an actor (which can cost a
+        // user lookup off-request) for those.
+        if (!entries.Any(e => AuditedTypeMap.ContainsKey(e.Entity.GetType())))
+        {
+            return result;
+        }
+
         var changedByUserId = ResolveUserId();
+        var changedBy = await ResolveChangedByAsync(ctx, changedByUserId, cancellationToken).ConfigureAwait(false);
         var organizationId = ResolveOrganizationId();
         var timestamp = DateTime.UtcNow;
-        var entries = ctx.ChangeTracker.Entries().ToList();
 
         foreach (var entry in entries)
         {
@@ -252,6 +276,12 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             // Column-scoped, same idea: stamping LastLoginAt is a sign-in, not an
             // edit to the account, and sign-ins are recorded in login_attempts.
             if (entry.Entity is User && IsSignInBookkeeping(entry))
+            {
+                continue;
+            }
+
+            // Column-scoped, same idea: the auto-import sweep's "last checked" stamp.
+            if (entry.Entity is OrganizationSettings && IsOrganizationSettingsBookkeeping(entry))
             {
                 continue;
             }
@@ -307,7 +337,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             }
         }
 
-        return new ValueTask<InterceptionResult<int>>(result);
+        return result;
     }
 
     public override async ValueTask<int> SavedChangesAsync(
@@ -555,6 +585,11 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         entry.State == EntityState.Modified
         && entry.Properties.Any(p => p.IsModified && OrganizationPolicyColumns.Contains(p.Metadata.Name));
 
+    private static bool IsOrganizationSettingsBookkeeping(EntityEntry entry) =>
+        entry.State == EntityState.Modified
+        && entry.Properties.Where(p => p.IsModified)
+            .All(p => OrganizationSettingsBookkeepingColumns.Contains(p.Metadata.Name));
+
     private static AuditEntityType MapEntityType(Type t) =>
         AuditedTypeMap.TryGetValue(t, out var kind)
             ? kind
@@ -562,24 +597,44 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
 
     /// <summary>
     /// Composes <c>"display_name &lt;email&gt;"</c> for the audit row when both
-    /// claims are present, falling back to the display name alone, then to
-    /// <c>"unknown"</c> for seed-time inserts (no HttpContext).
+    /// claims are present, falling back to the display name alone. With no request,
+    /// a worker doing a job for the person who asked for it (it re-installs their
+    /// identity, see <see cref="AmbientOrganizationScope"/>) names that person, read
+    /// from the database; anything else with no request is the system's, named after
+    /// the background worker in scope where there is one
+    /// (<see cref="AuditActor.SystemActor"/>). A request with no signed-in user names
+    /// the visitor as not signed in (sign-up, password reset, invite acceptance).
     /// </summary>
-    private string ResolveChangedBy()
+    private async Task<string> ResolveChangedByAsync(DbContext ctx, int? userId, CancellationToken ct)
     {
-        var principal = _http.HttpContext?.User;
-        var name = principal?.Identity?.Name;
-        var email = principal?.FindFirst(ClaimTypes.Email)?.Value;
+        var http = _http.HttpContext;
+        if (http is null)
+        {
+            if (userId is null || ctx is not AppDbContext db) return AuditActor.SystemActor();
+            if (_ambientActor is not { } cached || cached.UserId != userId.Value)
+            {
+                _ambientActor = (userId.Value, await AuditActor.ResolveAsync(db, userId, ct).ConfigureAwait(false));
+            }
+            return _ambientActor.Value.Name;
+        }
+
+        var name = http.User?.Identity?.Name;
+        var email = http.User?.FindFirst(ClaimTypes.Email)?.Value;
         if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(email))
         {
             return $"{name} <{email}>";
         }
-        return string.IsNullOrWhiteSpace(name) ? "unknown" : name;
+        return string.IsNullOrWhiteSpace(name) ? AuditActor.NotSignedIn : name;
     }
 
+    /// <summary>
+    /// The signed-in user's id; off-request, the user a worker is acting for, if any.
+    /// </summary>
     private int? ResolveUserId()
     {
-        var value = _http.HttpContext?.User?.FindFirst(HttpOrganizationContext.UserIdClaim)?.Value;
+        var http = _http.HttpContext;
+        if (http is null) return AmbientOrganizationScope.Current?.UserId;
+        var value = http.User?.FindFirst(HttpOrganizationContext.UserIdClaim)?.Value;
         return int.TryParse(value, out var id) ? id : null;
     }
 
