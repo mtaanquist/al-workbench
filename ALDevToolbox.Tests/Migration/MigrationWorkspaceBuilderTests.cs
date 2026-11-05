@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.Migration;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using static ALDevToolbox.Tests.Migration.MigrationTestFiles;
 
 namespace ALDevToolbox.Tests.Migration;
@@ -131,6 +133,65 @@ public sealed class MigrationWorkspaceBuilderTests : IDisposable
                 (WorkspaceExtensionIdentity.MigratedKind, "Test", SalesTestId, "cronus-sales/Sales/Test", "def5678"));
             config.Workspace!.WorkspaceName.Should().Be("CRONUS A/S");
         }
+    }
+
+    [Fact]
+    public async Task A_logo_left_behind_in_the_old_repository_is_replaced_by_the_workspaces_own()
+    {
+        if (!GitAvailable()) return;
+        await MigrationTestServices.SeedTemplateAsync(_db);
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId, UpdatedAt = DateTime.UtcNow };
+                ctx.OrganizationSettings.Add(settings);
+            }
+            settings.DefaultLogo = "../assets/logo.png";
+            ctx.OrganizationAssets.Add(new OrganizationAsset
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Kind = OrganizationAssetKind.Logo,
+                ContentType = "image/png",
+                Content = [0x89, 0x50],
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        // One repository keeps its logo beside the extensions, which stays behind;
+        // the other keeps it inside the extension, which comes along.
+        var mono = _temp.Sub("cronus-sales");
+        WriteFile(Path.Combine(mono, "Sales", "app.json"),
+            $$"""{ "id": "{{SalesId}}", "name": "CRONUS Sales", "publisher": "CRONUS", "version": "1.0.0.0", "logo": "../.assets/images/logo.png" }""");
+        WriteFile(Path.Combine(mono, ".assets", "images", "logo.png"), "old");
+        var single = _temp.Sub("cronus-base");
+        WriteFile(Path.Combine(single, "app.json"),
+            $$"""{ "id": "{{BaseId}}", "name": "CRONUS Base", "publisher": "CRONUS", "version": "1.0.0.0", "logo": "images/own.png" }""");
+        WriteFile(Path.Combine(single, "images", "own.png"), "own");
+
+        var sources = new[] { new ClonedSource("cronus-sales", mono, null), new ClonedSource("cronus-base", single, null) };
+        var analysis = MigrationSourceAnalyzer.Analyze(sources);
+        var destination = Path.Combine(_temp.Path, "out");
+
+        MigrationWorkspace workspace;
+        await using (var ctx = _db.NewContext())
+        {
+            workspace = await MigrationTestServices.NewBuilder(_db, ctx).BuildAsync(
+                MigrationTestServices.Target(), sources, analysis,
+                new Dictionary<string, string> { ["cronus-sales"] = "abc1234", ["cronus-base"] = "def5678" },
+                destination, null, CancellationToken.None);
+        }
+
+        File.Exists(Path.Combine(destination, "assets", "logo.png")).Should().BeTrue();
+        var sales = JsonNode.Parse(File.ReadAllText(Path.Combine(destination, "Sales", "app.json")))!;
+        sales["logo"]!.GetValue<string>().Should().Be("../assets/logo.png", "the old repository's logo was not moved");
+        File.Exists(Path.GetFullPath(Path.Combine(destination, "Sales", sales["logo"]!.GetValue<string>()))).Should().BeTrue();
+        workspace.AppJson.Single(a => a.Folder == "Sales").Changes.Should().Contain(c => c.Property == "logo");
+
+        var baseApp = JsonNode.Parse(File.ReadAllText(Path.Combine(destination, "cronus-base", "app.json")))!;
+        baseApp["logo"]!.GetValue<string>().Should().Be("images/own.png", "a logo inside the extension moves with it");
     }
 
     [Fact]

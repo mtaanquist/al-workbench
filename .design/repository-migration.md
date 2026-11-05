@@ -68,8 +68,9 @@ Nothing is written to GitHub or the database in parts 1 and 2.
 The page gains step 3, "New repository": the customer's name (it names the solution and the
 workspace, as on New Workspace), an optional short name, the template, and "Also add the
 template's own extensions" (off). `RepositoryMigrationService` turns these into a `ProjectPlan`
-at request time: the template's own id range and application version, no examples, a fresh
-tenant id, and the template's default modules only when its extensions are wanted. The plan is
+at request time: the template's own id range and application version, no examples, the
+customer's tenant id when a solution of their name knows it (its Business Central connection,
+else its environments; blank otherwise, never made up, Mads 2026-11-05), and the template's default modules only when its extensions are wanted. The plan is
 validated the way New Workspace validates it, so a bad template or name is refused before
 anything is cloned. The plan rides on the job.
 
@@ -89,7 +90,9 @@ to `MigrationWorkspaceBuilder`, which writes the workspace into the preview's te
 - **`app.json` rebuilt on the template's** (`MigrationAppJson`): the template's first extension's
   `app.json`, as generated, is the base. Always the source's, and removed when the source has
   none: `id`, `name`, `publisher`, `version`, `idRanges`/`idRange`, `dependencies`. The source's
-  when it has a value, otherwise the template's: `brief`, `description`, `logo`, `screenshots`,
+  when it has a value, otherwise the template's: `brief`, `description`, `logo` (only when the
+  file it names came along; a logo kept beside the extensions in the old repository is left behind,
+  so the template's, re-aimed at the workspace's own asset, takes its place), `screenshots`,
   `supportedLocales`, `target`, `internalsVisibleTo`, `propagateDependencies`,
   `preprocessorSymbols`, `resourceFolders`, `applicationInsightsConnectionString`,
   `applicationInsightsKey`, `keyVaultUrls`. `application`, `platform` and `runtime`: when a

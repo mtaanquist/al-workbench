@@ -83,8 +83,13 @@ public static class MigrationAppJson
     /// (26 gives application and platform 26.0.0.0, runtime 15.0); one on the same
     /// major is left alone, so a source on runtime 15.1 keeps it.
     /// </param>
+    /// <param name="fileExists">
+    /// Whether a path the source's <c>app.json</c> names (its logo) is in the new
+    /// workspace. A logo that did not come along is replaced by the template's.
+    /// Null takes every path as present.
+    /// </param>
     public static (JsonObject AppJson, IReadOnlyList<MigrationAppJsonChange> Changes) Normalize(
-        JsonObject template, JsonObject source, int? productionMajor = null)
+        JsonObject template, JsonObject source, int? productionMajor = null, Func<string, bool>? fileExists = null)
     {
         var result = (JsonObject)template.DeepClone();
         var sourceProps = new Dictionary<string, (string Key, JsonNode? Value)>(StringComparer.OrdinalIgnoreCase);
@@ -101,7 +106,9 @@ public static class MigrationAppJson
 
         foreach (var name in SourceWhenSet)
         {
-            if (sourceProps.TryGetValue(name, out var p) && IsSet(p.Value))
+            if (sourceProps.TryGetValue(name, out var p) && IsSet(p.Value)
+                && !(name == "logo" && fileExists is not null && p.Value is JsonValue logo
+                     && logo.TryGetValue<string>(out var logoPath) && !fileExists(logoPath)))
             {
                 Remove(result, name);
                 result[p.Key] = p.Value!.DeepClone();

@@ -141,10 +141,10 @@ public sealed class GitHubWorkspaceRepositoryService
 
     /// <summary>
     /// The branches every new repository gets beside its default branch, each
-    /// with a build pipeline: work moves through test and staging before it
+    /// with a build pipeline: work moves through test before it
     /// reaches the default branch.
     /// </summary>
-    public static readonly IReadOnlyList<string> WorkingBranches = ["test", "staging"];
+    public static readonly IReadOnlyList<string> WorkingBranches = ["test"];
 
     private readonly GenerationService _generation;
     private readonly GitHubRepositoryService _repositories;

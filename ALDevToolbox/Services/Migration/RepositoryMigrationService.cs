@@ -268,7 +268,10 @@ public sealed class RepositoryMigrationService
             SelectedModuleKeys: input.AddTemplateExtensions
                 ? await _templates.GetDefaultModuleKeysAsync(template.Key, ct).ConfigureAwait(false)
                 : [],
-            TenantId: Guid.NewGuid().ToString());
+            // The customer's own tenant when their solution knows it, so the
+            // launch configurations point at their environments; blank otherwise,
+            // as New Workspace leaves it when nobody typed one.
+            TenantId: await TenantIdAsync(customer, ct).ConfigureAwait(false) ?? string.Empty);
         plan = plan with { ExtensionPrefix = await _generation.ResolveExtensionPrefixAsync(plan, ct).ConfigureAwait(false) };
 
         var problems = await _generation.ValidateWorkspaceAsync(plan, ct).ConfigureAwait(false);
@@ -290,6 +293,28 @@ public sealed class RepositoryMigrationService
 
         return new MigrationTarget(template.Key, template.Name, customer, input.AddTemplateExtensions, plan,
             await ProductionVersionAsync(customer, ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The customer's Entra tenant, when a solution of their name knows it: the
+    /// one its Business Central connection is set up with, else the one its
+    /// environments were read from.
+    /// </summary>
+    private async Task<string?> TenantIdAsync(string customer, CancellationToken ct)
+    {
+        var lower = customer.ToLowerInvariant();
+        var solution = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null && p.Name.ToLower() == lower)
+            .Select(p => new
+            {
+                p.BcTenantId,
+                FromEnvironments = p.Environments
+                    .Where(e => e.AadTenantId != null && e.MissingSince == null && e.SoftDeletedOn == null)
+                    .Select(e => e.AadTenantId)
+                    .FirstOrDefault(),
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        return (solution?.BcTenantId ?? solution?.FromEnvironments)?.ToString();
     }
 
     /// <summary>

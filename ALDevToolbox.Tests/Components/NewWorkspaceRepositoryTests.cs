@@ -144,8 +144,8 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             var text = System.Text.RegularExpressions.Regex.Replace(cut.Find(".ws-repo").TextContent, @"\s+", " ");
-            text.Should().Contain("Also created the test and staging branches from main.");
-            text.Should().Contain("Build pipelines for main, test and staging are on the solution's Pipelines tab.");
+            text.Should().Contain("Also created the test branch from main.");
+            text.Should().Contain("Build pipelines for main and test are on the solution's Pipelines tab.");
             text.Should().Contain("Each builds automatically when new commits are pushed to its branch.");
             cut.Find(".ws-repo").InnerHtml.Should().MatchRegex(@"/solutions/\d+/pipelines");
         }, TimeSpan.FromSeconds(10));
