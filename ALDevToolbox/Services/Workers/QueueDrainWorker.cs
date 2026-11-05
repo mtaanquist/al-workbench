@@ -108,6 +108,8 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
         var epoch = _maintenance?.Epoch ?? 0;
         var counted = false;
         var active = false;
+        // The audit log names this worker for whatever the job writes.
+        using var actor = AuditActor.EnterBackground(GetType().Name);
         try
         {
             OnJobStarting(job);

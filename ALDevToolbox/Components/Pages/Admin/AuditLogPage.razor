@@ -119,9 +119,9 @@
                             <span class="audit__time">
                                 <Timestamp Value="@e.Timestamp" Format="yyyy-MM-dd HH:mm" />
                             </span>
-                            <span class="audit__avatar" aria-hidden="true">@Avatar.Initials(e.ChangedBy)</span>
+                            <span class="audit__avatar" aria-hidden="true">@Avatar.Initials(AuditActor.Display(e))</span>
                             <span class="audit__what">
-                                <span class="audit__who">@e.ChangedBy</span>
+                                <span class="audit__who">@AuditActor.Display(e)</span>
                                 @AuditVerb(e.Action) <AuditSubjectText EntityType="e.EntityType" EntityId="e.EntityId" EntityName="@e.EntityName" SnapshotJson="@e.SnapshotJson" />
                             </span>
                             <StatusPill Tone="@AuditActionPill(e.Action)">@e.Action</StatusPill>

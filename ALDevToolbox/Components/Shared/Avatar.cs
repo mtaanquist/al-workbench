@@ -28,6 +28,9 @@ public static class Avatar
             // rather than returning the bracket.
             who = displayName.Length > 0 ? displayName : who[(angle + 1)..].TrimEnd('>');
         }
+        // A system actor reads "System (BackupScheduler)": the worker in brackets
+        // names which part of the system, not a second word of a name.
+        if (who.StartsWith(Services.AuditActor.System + " (", StringComparison.Ordinal)) who = Services.AuditActor.System;
         var name = who.Split('@')[0];
         var parts = name.Split(new[] { ' ', '.', '-', '_' }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return "?";

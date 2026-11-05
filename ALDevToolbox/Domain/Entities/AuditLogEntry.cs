@@ -122,8 +122,11 @@ public class AuditLogEntry
     public DateTime Timestamp { get; set; }
 
     /// <summary>
-    /// <c>"display_name &lt;email&gt;"</c> of the acting user. <c>"unknown"</c>
-    /// when no signed-in user could be resolved (e.g. seed-time inserts).
+    /// <c>"display_name &lt;email&gt;"</c> of the acting user. With no signed-in user,
+    /// <c>"System (worker)"</c> or <c>"System"</c> for background and startup writes,
+    /// and <c>"Not signed in"</c> for a request made before sign-in. Rows written before
+    /// that distinction say <c>"unknown"</c>; <see cref="Services.AuditActor.Display(AuditLogEntry)"/>
+    /// words them for the screen.
     /// </summary>
     public string ChangedBy { get; set; } = string.Empty;
 

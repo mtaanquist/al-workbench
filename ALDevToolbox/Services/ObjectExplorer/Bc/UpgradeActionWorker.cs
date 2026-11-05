@@ -76,6 +76,10 @@ public sealed partial class UpgradeActionWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Writes this worker audits itself name the requester; anything else it saves
+        // is attributed to the worker rather than to no one.
+        using var actor = AuditActor.EnterBackground(nameof(UpgradeActionWorker));
+
         // Let startup migrations + seed finish before the first sweep.
         try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
         catch (OperationCanceledException) { return; }

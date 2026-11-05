@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.ObjectExplorer.Explore;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Account;
@@ -31,6 +32,7 @@ public sealed record SiteAdminAuditRow(
     int Id,
     DateTime Timestamp,
     string ChangedBy,
+    int? ChangedByUserId,
     int? OrganizationId,
     string? OrganizationName,
     AuditEntityType EntityType,
@@ -241,8 +243,9 @@ public sealed class SiteAdminService
         if (organizationId is int oid) q = q.Where(e => e.OrganizationId == oid);
         if (!string.IsNullOrWhiteSpace(actorContains))
         {
-            var needle = "%" + actorContains.Trim() + "%";
-            q = q.Where(e => EF.Functions.ILike(e.ChangedBy, needle));
+            // Escaped, so "_" and "%" match themselves, as on the per-org audit page (#1550).
+            var needle = "%" + ObjectSearchService.EscapeLike(actorContains.Trim()) + "%";
+            q = AuditActor.WhereActorMatches(q, actorContains, needle);
         }
         if (fromUtc is { } from) q = q.Where(e => e.Timestamp >= from);
         if (toUtc is { } to) q = q.Where(e => e.Timestamp <= to);
@@ -258,6 +261,7 @@ public sealed class SiteAdminService
                 e.Id,
                 e.Timestamp,
                 e.ChangedBy,
+                e.ChangedByUserId,
                 e.OrganizationId,
                 e.Organization == null ? null : e.Organization.Name,
                 e.EntityType,
