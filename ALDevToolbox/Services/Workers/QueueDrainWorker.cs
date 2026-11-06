@@ -85,6 +85,8 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var holds = _maintenance is not null && HoldsJobsDuringMaintenance;
+        // Stored log lines name this worker, whichever service writes them.
+        using var logScope = Logging.WorkerLogScope.Enter(_name);
         try
         {
             while (!stoppingToken.IsCancellationRequested)

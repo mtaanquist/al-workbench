@@ -44,6 +44,11 @@ internal sealed class SystemSettingsConfiguration : IEntityTypeConfiguration<Sys
         entity.Property(e => e.OffsiteProvider).HasColumnName("offsite_provider").IsRequired();
         entity.Property(e => e.McpEnabled).HasColumnName("mcp_enabled").IsRequired();
         entity.Property(e => e.BuildConcurrency).HasColumnName("build_concurrency");
+        entity.Property(e => e.LogRetentionDays).HasColumnName("log_retention_days").HasDefaultValue(7);
+        // The sentinel sits outside the enum, so a saved Trace is not swapped for the default.
+        entity.Property(e => e.LogMinimumLevel).HasColumnName("log_minimum_level")
+            .HasDefaultValue(Microsoft.Extensions.Logging.LogLevel.Information)
+            .HasSentinel((Microsoft.Extensions.Logging.LogLevel)(-1));
         // text[] of ToolKey names; empty-array default backfills the singleton
         // row so every tool stays on after the migration. See Domain/Tools/ToolCatalog.cs.
         entity.Property(e => e.DisabledTools)

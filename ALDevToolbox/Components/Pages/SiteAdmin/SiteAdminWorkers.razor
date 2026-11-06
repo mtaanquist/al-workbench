@@ -26,10 +26,16 @@
     <section class="card">
         <div class="card__head">
             <div><h2 class="card__title">Worker health</h2></div>
-            <a class="btn btn--sm" href="/site-admin/workers">
-                <Icon Name="refresh-cw" Width="14" Height="14" />
-                <span>Refresh</span>
-            </a>
+            <span class="u-row">
+                <a class="btn btn--sm" href="/site-admin/logs">
+                    <Icon Name="scroll-text" Width="14" Height="14" />
+                    <span>Read the logs</span>
+                </a>
+                <a class="btn btn--sm" href="/site-admin/workers">
+                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                    <span>Refresh</span>
+                </a>
+            </span>
         </div>
         @if (_heartbeats is null)
         {
@@ -70,7 +76,10 @@
                         </td>
                         <td>
                             @(row.Plain ?? Friendly(row.Name))
-                            <div class="u-muted">@row.Name</div>
+                            <div class="u-muted">
+                                @row.Name
+                                - <a href="@LogsHref(row.Name)">logs</a>
+                            </div>
                         </td>
                         <td class="u-muted"><Timestamp Value="@row.ActiveSinceUtc" Format="yyyy-MM-dd HH:mm:ss" Placeholder="Not busy" /></td>
                         <td class="u-muted"><Timestamp Value="@row.LastTickUtc" Format="yyyy-MM-dd HH:mm:ss" Placeholder="Never" /></td>
@@ -191,17 +200,20 @@
     /// An unmapped worker falls back to its type name rather than to something
     /// invented, so a new one added elsewhere degrades to today's behaviour.
     /// </remarks>
-    private static string Friendly(string name) => name switch
+    internal static string Friendly(string name) => name switch
     {
         "BackupScheduler" => "Nightly backup",
         "DeliveryScheduler" => "Scheduled deployments to Business Central",
+        "DeliveryWorker" => "Deploying to Business Central",
         "EmailOutboxScheduler" => "Sending email",
         "LoginAttemptPruneScheduler" => "Sign-in log clean-up",
         "ObjectExplorerVacuumScheduler" => "Reclaiming Object Explorer disk space",
         "OffsiteRestoreWorker" => "Downloading from off-site storage",
+        "ProjectBuildWorker" => "Running builds",
         "ProjectDiscoveryWorker" => "Preparing the pipeline editor's app list",
         "ReleaseAutoImportScheduler" => "Automatic BC release import",
         "ReleaseImportWorker" => "Importing a BC release",
+        "StoredLogWriter" => "Saving logs for the Logs page",
         "UsageSnapshotScheduler" => "Measuring storage used",
         _ => name,
     };
@@ -274,6 +286,20 @@
         {
             Plain = plain,
         };
+
+    /// <summary>
+    /// The logs page filtered to this worker. A numbered or folded row ("ProjectBuildWorker 3",
+    /// "ProjectBuildWorker x14") links to the whole family, which is what the filter offers.
+    /// </summary>
+    internal static string LogsHref(string name) =>
+        "/site-admin/logs?worker=" + Uri.EscapeDataString(Family(name));
+
+    /// <summary>A worker's name without its number: "ProjectBuildWorker 3" is a ProjectBuildWorker.</summary>
+    internal static string Family(string name)
+    {
+        var space = name.IndexOf(' ');
+        return space < 0 ? name : name[..space];
+    }
 
     private static string FormatSpan(TimeSpan span) =>
         span.TotalHours >= 1 ? $"{span.TotalHours:N0}h" :

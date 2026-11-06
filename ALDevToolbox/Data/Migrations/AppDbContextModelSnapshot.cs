@@ -25,6 +25,50 @@ namespace ALDevToolbox.Data.Migrations
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.AppLogEntry", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("category");
+
+                    b.Property<string>("Exception")
+                        .HasColumnType("text")
+                        .HasColumnName("exception");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("integer")
+                        .HasColumnName("level");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("message");
+
+                    b.Property<DateTime>("Timestamp")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("timestamp");
+
+                    b.Property<string>("Worker")
+                        .HasColumnType("text")
+                        .HasColumnName("worker");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Timestamp");
+
+                    b.HasIndex("Worker", "Id");
+
+                    b.ToTable("app_log_entries", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ApplicationVersion", b =>
                 {
                     b.Property<int>("Id")
@@ -6233,6 +6277,18 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<decimal>("IndexSizeMultiplier")
                         .HasColumnType("numeric(6,3)")
                         .HasColumnName("index_size_multiplier");
+
+                    b.Property<int>("LogMinimumLevel")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(2)
+                        .HasColumnName("log_minimum_level");
+
+                    b.Property<int>("LogRetentionDays")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(7)
+                        .HasColumnName("log_retention_days");
 
                     b.Property<bool>("McpEnabled")
                         .HasColumnType("boolean")

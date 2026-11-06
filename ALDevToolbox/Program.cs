@@ -22,6 +22,10 @@ builder.Logging.AddSimpleConsole(options =>
     options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ ";
     options.UseUtcTimestamp = true;
 });
+// A copy of each line goes to the database as well, for /site-admin/logs; the
+// writer is a hosted service in AddBackgroundWorkers. See Services/Logging/.
+builder.Services.AddSingleton<ALDevToolbox.Services.Logging.StoredLogBuffer>();
+builder.Logging.Services.AddSingleton<ILoggerProvider, ALDevToolbox.Services.Logging.StoredLogProvider>();
 
 // Service registration — one Add* per area, each in its own file under
 // Startup/. New registrations go into the matching Add* method rather than

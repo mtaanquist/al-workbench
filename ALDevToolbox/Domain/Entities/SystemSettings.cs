@@ -246,5 +246,18 @@ public class SystemSettings
     /// </summary>
     public int? BuildConcurrency { get; set; }
 
+    /// <summary>
+    /// How many days of stored log lines <c>/site-admin/logs</c> keeps (1 to 30).
+    /// See <see cref="ALDevToolbox.Services.Logging.StoredLogWriter"/>.
+    /// </summary>
+    public int LogRetentionDays { get; set; } = 7;
+
+    /// <summary>
+    /// The least severe log line that is stored: Information, Warning or Error, or
+    /// None to store nothing. Lines below it still reach the container's own log.
+    /// </summary>
+    public Microsoft.Extensions.Logging.LogLevel LogMinimumLevel { get; set; } =
+        Microsoft.Extensions.Logging.LogLevel.Information;
+
     public DateTime UpdatedAt { get; set; }
 }

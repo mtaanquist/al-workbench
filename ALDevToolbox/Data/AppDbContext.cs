@@ -133,6 +133,10 @@ public class AppDbContext : DbContext
     public DbSet<PendingSignup> PendingSignups => Set<PendingSignup>();
     public DbSet<PasswordResetToken> PasswordResetTokens => Set<PasswordResetToken>();
     public DbSet<LoginAttempt> LoginAttempts => Set<LoginAttempt>();
+    // Stored log lines for /site-admin/logs. Site-wide and read only by the SiteAdmin
+    // console, so deliberately NOT scoped by the tenant query filter - with no filter
+    // on the table there is nothing for its reads to escape.
+    public DbSet<AppLogEntry> AppLogEntries => Set<AppLogEntry>();
     // Transactional email waiting to be sent (issue #790). Written by pre-auth
     // flows that have no organisation in scope and read by a cross-org SiteAdmin
     // console, so deliberately NOT scoped by the tenant query filter - and with

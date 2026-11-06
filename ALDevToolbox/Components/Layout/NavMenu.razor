@@ -344,6 +344,12 @@
                                     <span class="nav-item__label">Workers</span>
                                 </NavLink>
                                 break;
+                            case (SiteAdminGroup, "logs"):
+                                <NavLink class="nav-item" href="/site-admin/logs" Match="NavLinkMatch.Prefix" ActiveClass="is-active">
+                                    <Icon Name="scroll-text" Width="17" Height="17" Css="nav-item__icon" />
+                                    <span class="nav-item__label">Logs</span>
+                                </NavLink>
+                                break;
                             case (SiteAdminGroup, "settings"):
                                 <NavLink class="nav-item" href="/site-admin/settings" Match="NavLinkMatch.Prefix" ActiveClass="is-active">
                                     <Icon Name="server-cog" Width="17" Height="17" Css="nav-item__icon" />
@@ -491,7 +497,7 @@
         (AssistantGroup, ["mcp"]),
         (AdminGroup, ["dashboard", "templates", "modules", "customer-modules", "catalogue", "cookbook",
             "app-versions", "object-explorer", "translation-memory", "administration", "audit"]),
-        (SiteAdminGroup, ["users", "audit", "backup-storage", "connections", "email", "workers", "settings"]),
+        (SiteAdminGroup, ["users", "audit", "backup-storage", "connections", "email", "workers", "logs", "settings"]),
     ];
 
     /// <summary>The shipped order in the cookie's format, for "Reset to default".</summary>

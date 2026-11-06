@@ -67,6 +67,9 @@ public static class BackgroundWorkerRegistration
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
+        // Writes the stored log lines for /site-admin/logs and deletes the ones past
+        // the retention setting. The provider that feeds it is added in Program.cs.
+        services.AddHostedService<ALDevToolbox.Services.Logging.StoredLogWriter>();
         // Removes expired, revoked and redeemed OAuth tokens and the dead
         // authorizations behind them, which nothing else deletes. See #1259.
         services.AddHostedService<ALDevToolbox.Services.OAuth.OAuthTokenPruneScheduler>();

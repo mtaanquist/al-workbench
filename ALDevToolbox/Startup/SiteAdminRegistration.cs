@@ -24,6 +24,7 @@ public static class SiteAdminRegistration
         services.AddSingleton(sp => BackupOptions.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         services.AddSingleton(sp => SmtpFallbackOptions.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         services.AddScoped<SystemSettingsService>();
+        services.AddScoped<ALDevToolbox.Services.Logging.StoredLogService>();
         services.AddScoped<SiteAdminService>();
         services.AddScoped<BackupService>();
         services.AddScoped<PerTenantBackupService>();

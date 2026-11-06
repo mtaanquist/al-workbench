@@ -78,6 +78,8 @@ public abstract class PolledScheduler : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Stored log lines name this scheduler, whichever service writes them.
+        using var logScope = Logging.WorkerLogScope.Enter(_name);
         if (_disableEnvVar is not null && Environment.GetEnvironmentVariable(_disableEnvVar) == "1")
         {
             _logger.LogInformation("{Scheduler} disabled via {EnvVar}=1.", _name, _disableEnvVar);

@@ -150,6 +150,27 @@ internal static class SiteAdminEndpoints
                     "/site-admin/settings/builds"))
             .RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
+        app.MapPost("/site-admin/settings/logs/save", async (
+            HttpContext ctx, SystemSettingsService settings, IAntiforgery antiforgery, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var form = await ctx.Request.ReadFormAsync(ct);
+            // An unparseable value becomes one the service refuses, so the message
+            // comes from the one place the rules live.
+            var days = int.TryParse(form["LogRetentionDays"], out var d) ? d : 0;
+            var level = Enum.TryParse<LogLevel>(form["LogMinimumLevel"], ignoreCase: false, out var l)
+                && Enum.IsDefined(l) ? l : LogLevel.Trace;
+            try
+            {
+                await settings.SaveStoredLogSettingsAsync(new StoredLogSettingsInput(days, level), ct);
+                ctx.Response.Redirect($"/site-admin/settings/logs?{RouteConstants.OkQuery}=saved");
+            }
+            catch (PlanValidationException ex)
+            {
+                RedirectFirstError(ctx, "/site-admin/settings/logs", ex);
+            }
+        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
+
         app.MapPost("/site-admin/settings/entra/save", async (
             HttpContext ctx, SystemSettingsService settings, IAntiforgery antiforgery, CancellationToken ct) =>
         {
