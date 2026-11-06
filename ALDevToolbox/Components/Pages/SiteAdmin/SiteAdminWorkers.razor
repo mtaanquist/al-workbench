@@ -23,7 +23,7 @@
         </SubtitleContent>
     </PageHead>
 
-    <section class="card">
+    <section class="card workers__card">
         <div class="card__head">
             <div><h2 class="card__title">Worker health</h2></div>
             <a class="btn btn--sm" href="/site-admin/workers">
@@ -50,6 +50,7 @@
         }
         else
         {
+            <div class="workers__scroll">
             <table class="data-table data-table--edge">
                 <thead>
                     <tr>
@@ -83,10 +84,11 @@
                 }
                 </tbody>
             </table>
+            </div>
         }
     </section>
 
-    <section class="card">
+    <section class="card workers__card">
         <div class="card__head">
             <div>
                 <h2 class="card__title">Object Explorer imports</h2>
@@ -126,11 +128,12 @@
                                 failed <Timestamp Value="@f.CompletedAt" Format="yyyy-MM-dd HH:mm:ss" />
                             </span>
                         </div>
-                        <pre>@f.ErrorMessage</pre>
+                        <pre class="workers__error">@f.ErrorMessage</pre>
                     </div>
                 </div>
             }
 
+            <div class="workers__scroll">
             <table class="data-table data-table--edge">
                 <thead>
                     <tr>
@@ -162,6 +165,7 @@
                 }
                 </tbody>
             </table>
+            </div>
         }
     </section>
 </div>
