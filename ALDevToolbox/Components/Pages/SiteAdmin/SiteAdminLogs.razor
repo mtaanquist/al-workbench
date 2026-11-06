@@ -55,7 +55,7 @@
         }
         <form method="get" action="/site-admin/logs" class="card filter-grid" onchange="this.submit()">
             <label class="field">
-                <span class="field__label">From</span>
+                <span class="field__label">Source</span>
                 <SelectBox>
                     <select class="select" name="worker">
                         <option value="@StoredLogService.AnyWorker" selected="@(_worker == StoredLogService.AnyWorker)">All background work</option>
@@ -85,8 +85,12 @@
                        aria-keyshortcuts="F3" title="Search the messages (F3)" />
             </label>
             <label class="field">
-                <span class="field__label">Since</span>
+                <span class="field__label">From</span>
                 <input class="input" type="datetime-local" name="from" value="@FromInput" />
+            </label>
+            <label class="field">
+                <span class="field__label">To</span>
+                <input class="input" type="datetime-local" name="to" value="@ToInput" min="@FromInput" />
             </label>
         </form>
     </Notices>
@@ -168,6 +172,7 @@
     [SupplyParameterFromQuery(Name = "q")] public string? Text { get; set; }
     /// <summary>As the date picker posts it: wall-clock time in the display zone.</summary>
     [SupplyParameterFromQuery(Name = "from")] public string? FromInput { get; set; }
+    [SupplyParameterFromQuery(Name = "to")] public string? ToInput { get; set; }
     [SupplyParameterFromQuery(Name = "before")] public long? BeforeId { get; set; }
 
     private StoredLogPage? _page;
@@ -177,7 +182,7 @@
 
     private bool IsFiltered =>
         _worker != StoredLogService.AnyWorker || _level != LogLevel.Information
-        || !string.IsNullOrWhiteSpace(Text) || !string.IsNullOrEmpty(FromInput);
+        || !string.IsNullOrWhiteSpace(Text) || !string.IsNullOrEmpty(FromInput) || !string.IsNullOrEmpty(ToInput);
 
     protected override async Task OnInitializedAsync()
     {
@@ -187,7 +192,7 @@
         _workers = WorkerOptions(Heartbeats.All().Select(h => h.Name), _worker);
         await Zone.EnsureLoadedAsync();
         _page = await Logs.SearchAsync(new StoredLogQuery(
-            _worker, _level, Text, Zone.ParseInput(FromInput), BeforeId));
+            _worker, _level, Text, Zone.ParseInput(FromInput), BeforeId, ToUtc(ToInput)));
     }
 
     /// <summary>
@@ -206,6 +211,16 @@
             .Select(n => (n, SiteAdminWorkers.Friendly(n)))
             .OrderBy(o => o.Item2, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    /// <summary>
+    /// The picker stops at the minute, so "to 10:15" means up to the end of that minute:
+    /// a line logged at 10:15:40 belongs in the range the person picked.
+    /// </summary>
+    private DateTime? ToUtc(string? input)
+    {
+        var to = Zone.ParseInput(input);
+        return to is { Second: 0, Millisecond: 0 } ? to.Value.AddMinutes(1).AddTicks(-1) : to;
     }
 
     private static string Source(AppLogEntry e)
@@ -236,6 +251,7 @@
         if (_level != LogLevel.Information) query.Add("level=" + _level);
         if (!string.IsNullOrWhiteSpace(Text)) query.Add("q=" + Uri.EscapeDataString(Text));
         if (!string.IsNullOrEmpty(FromInput)) query.Add("from=" + Uri.EscapeDataString(FromInput));
+        if (!string.IsNullOrEmpty(ToInput)) query.Add("to=" + Uri.EscapeDataString(ToInput));
         if (before is long b) query.Add("before=" + b);
         return "/site-admin/logs?" + string.Join("&", query);
     }

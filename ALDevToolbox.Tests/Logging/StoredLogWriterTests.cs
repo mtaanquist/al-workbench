@@ -86,6 +86,24 @@ public sealed class StoredLogWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task Search_keeps_to_the_time_range()
+    {
+        await SeedAsync(
+            Entry(Now.AddHours(-3), "before"),
+            Entry(Now.AddHours(-2), "inside"),
+            Entry(Now.AddHours(-1), "after"));
+
+        var page = await NewService(siteAdmin: true).SearchAsync(
+            Query(StoredLogService.AnySource) with
+            {
+                FromUtc = Now.AddHours(-2).AddMinutes(-5).UtcDateTime,
+                ToUtc = Now.AddHours(-2).UtcDateTime,
+            });
+
+        Messages(page).Should().Equal("inside");
+    }
+
+    [Fact]
     public async Task Search_pages_newest_first_by_line()
     {
         var entries = Enumerable.Range(0, StoredLogService.PageSize + 3)

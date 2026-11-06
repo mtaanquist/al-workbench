@@ -14,13 +14,15 @@ namespace ALDevToolbox.Services.Logging;
 /// <param name="MinimumLevel">The least severe level returned.</param>
 /// <param name="Text">Words the message, the error or the source must contain; case does not matter.</param>
 /// <param name="FromUtc">The earliest line returned.</param>
+/// <param name="ToUtc">The latest line returned, inclusive.</param>
 /// <param name="BeforeId">Return only lines older than this one: the pager's cursor.</param>
 public sealed record StoredLogQuery(
     string Worker,
     LogLevel MinimumLevel,
     string? Text,
     DateTime? FromUtc,
-    long? BeforeId);
+    long? BeforeId,
+    DateTime? ToUtc = null);
 
 /// <summary>One page of stored lines, newest first, and whether older ones exist.</summary>
 public sealed record StoredLogPage(IReadOnlyList<AppLogEntry> Rows, bool HasOlder);
@@ -75,6 +77,7 @@ public sealed class StoredLogService
             rows = rows.Where(e => e.Level >= minimum);
         }
         if (query.FromUtc is { } from) rows = rows.Where(e => e.Timestamp >= from);
+        if (query.ToUtc is { } to) rows = rows.Where(e => e.Timestamp <= to);
         if (query.BeforeId is { } before) rows = rows.Where(e => e.Id < before);
         if (!string.IsNullOrWhiteSpace(query.Text))
         {
