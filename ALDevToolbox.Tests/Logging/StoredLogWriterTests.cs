@@ -57,10 +57,59 @@ public sealed class StoredLogWriterTests : IDisposable
             Entry(Now.AddDays(-2), "kept"));
         await using var writer = NewWriter();
 
-        (await writer.SweepAsync(CancellationToken.None)).Should().Be(2);
+        (await writer.SweepAsync(CancellationToken.None)).Should().Be((2, true));
 
         await using var ctx = _db.NewContext();
         (await ctx.AppLogEntries.Select(e => e.Message).ToListAsync()).Should().Equal("kept");
+    }
+
+    [Fact]
+    public async Task A_large_sweep_stops_after_its_slices_and_finishes_on_the_next_poll()
+    {
+        // Lowering the retention can leave millions of rows to delete; one poll must not
+        // hold the writer for all of them.
+        _buffer.Apply(LogLevel.Information, 1);
+        await SeedAsync(Enumerable.Range(0, 5).Select(i => Entry(Now.AddDays(-2).AddMinutes(i), $"old {i}"))
+            .Append(Entry(Now, "kept")).ToArray());
+        await using var writer = NewWriter(deleteBatchSize: 2);
+
+        (await writer.SweepAsync(CancellationToken.None)).Should().Be((4, false), "two slices of two, and more is left");
+        (await writer.SweepAsync(CancellationToken.None)).Should().Be((1, true));
+
+        await using var ctx = _db.NewContext();
+        (await ctx.AppLogEntries.Select(e => e.Message).ToListAsync()).Should().Equal("kept");
+    }
+
+    [Fact]
+    public async Task A_batch_that_fails_is_kept_and_written_on_a_later_poll()
+    {
+        // A database blip should not cost the lines that explain it.
+        _buffer.Add(new StoredLogLine(Now.UtcDateTime, LogLevel.Error, "A.B", null, "while the table was away", null));
+        await using var writer = NewWriter();
+        await RenameTableAsync("app_log_entries", "app_log_entries_away");
+        try
+        {
+            (await writer.FlushAsync(CancellationToken.None)).Should().Be(0);
+            _buffer.Dropped.Should().Be(0, "a failed batch is held, not dropped");
+        }
+        finally
+        {
+            await RenameTableAsync("app_log_entries_away", "app_log_entries");
+        }
+
+        (await writer.FlushAsync(CancellationToken.None)).Should().Be(1);
+
+        await using var ctx = _db.NewContext();
+        (await ctx.AppLogEntries.Select(e => e.Message).ToListAsync()).Should().Equal("while the table was away");
+    }
+
+    private async Task RenameTableAsync(string from, string to)
+    {
+        await using var conn = new Npgsql.NpgsqlConnection(_db.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"ALTER TABLE {from} RENAME TO {to}";
+        await cmd.ExecuteNonQueryAsync();
     }
 
     [Fact]
@@ -140,18 +189,25 @@ public sealed class StoredLogWriterTests : IDisposable
         (await NewService(siteAdmin: true).TableSizeBytesAsync()).Should().BePositive();
     }
 
-    private StoredLogWriter NewWriter()
+    private StoredLogWriter NewWriter(string? connectionString = null, int deleteBatchSize = 20_000)
     {
         var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:DefaultConnection"] = _db.ConnectionString })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:DefaultConnection"] = connectionString ?? _db.ConnectionString })
             .Build();
-        return new StoredLogWriter(_buffer, config, _clock, NullLogger<StoredLogWriter>.Instance, new WorkerHeartbeatRegistry());
+        return new StoredLogWriter(_buffer, config, _clock, NullLogger<StoredLogWriter>.Instance, new WorkerHeartbeatRegistry())
+        {
+            DeleteBatchSize = deleteBatchSize,
+            DeleteSlicesPerPoll = 2,
+        };
     }
 
     private StoredLogService NewService(bool siteAdmin)
     {
         var org = new TestOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId, IsSiteAdmin = siteAdmin };
-        return new StoredLogService(_db.NewContext(org), org);
+        var heartbeats = new WorkerHeartbeatRegistry();
+        heartbeats.Register("ProjectBuildWorker 1", TimeSpan.FromHours(1), null);
+        heartbeats.Register("ProjectBuildWorker 2", TimeSpan.FromHours(1), null);
+        return new StoredLogService(_db.NewContext(org), org, heartbeats);
     }
 
     private static StoredLogQuery Query(string worker, LogLevel level = LogLevel.Information, string? text = null) =>

@@ -22,5 +22,8 @@ internal sealed class AppLogEntryConfiguration : IEntityTypeConfiguration<AppLog
         entity.HasIndex(e => e.Timestamp);
         // The page pages newest first by id within one worker.
         entity.HasIndex(e => new { e.Worker, e.Id });
+        // "Warnings and errors" and "Errors only": rare lines among millions, found
+        // without walking every Information line newest first.
+        entity.HasIndex(e => new { e.Level, e.Id });
     }
 }

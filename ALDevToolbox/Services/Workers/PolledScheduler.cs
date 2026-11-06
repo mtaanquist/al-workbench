@@ -129,6 +129,8 @@ public abstract class PolledScheduler : BackgroundService
         using var allowDatabase = _maintenance?.AllowDatabase();
         // The audit log names this scheduler for whatever the tick writes.
         using var actor = AuditActor.EnterBackground(GetType().Name);
+        // Already entered for the loop; again here so a tick driven on its own is tagged too.
+        using var logScope = Logging.WorkerLogScope.Enter(_name);
         try
         {
             Heartbeat.BeginActive();

@@ -36,7 +36,21 @@ public sealed class StoredLogWriter : PolledScheduler, IAsyncDisposable
     internal const int MaxLinesPerPoll = 20_000;
 
     /// <summary>Rows per delete statement, so a large sweep never holds one long lock.</summary>
-    internal const int DeleteBatchSize = 20_000;
+    internal int DeleteBatchSize { get; init; } = 20_000;
+
+    /// <summary>
+    /// Delete statements per poll. A sweep that has millions of rows to catch up on (the
+    /// retention was just lowered) carries on over the next polls rather than holding
+    /// this one, so lines keep being written and the heartbeat never reads as stuck.
+    /// </summary>
+    internal int DeleteSlicesPerPoll { get; init; } = 5;
+
+    /// <summary>
+    /// How many polls in a row a batch may fail before it is dropped. Long enough to ride
+    /// out a database restart (about a minute); short enough that a batch the database
+    /// will never accept does not hold everything behind it for long.
+    /// </summary>
+    internal const int MaxBatchAttempts = 30;
 
     private readonly StoredLogBuffer _buffer;
     private readonly StartupReadinessState? _readiness;
@@ -44,6 +58,11 @@ public sealed class StoredLogWriter : PolledScheduler, IAsyncDisposable
     private readonly ILogger<StoredLogWriter> _logger;
     private readonly NpgsqlDataSource _dataSource;
     private DateTimeOffset? _lastSweepUtc;
+    private bool _sweeping;
+
+    /// <summary>A batch taken off the queue whose write failed, tried again on the next poll.</summary>
+    private List<StoredLogLine>? _retry;
+    private int _retryAttempts;
 
     public StoredLogWriter(
         StoredLogBuffer buffer,
@@ -76,44 +95,67 @@ public sealed class StoredLogWriter : PolledScheduler, IAsyncDisposable
         if (_readiness is { IsReady: false }) return;
         await FlushAsync(ct);
         var now = _clock.GetUtcNow();
-        if (_lastSweepUtc is null || now - _lastSweepUtc.Value >= SweepInterval)
+        if (_sweeping || _lastSweepUtc is null || now - _lastSweepUtc.Value >= SweepInterval)
         {
-            await SweepAsync(ct);
-            _lastSweepUtc = now;
+            var (_, done) = await SweepAsync(ct);
+            _sweeping = !done;
+            if (done) _lastSweepUtc = now;
         }
     }
 
     /// <summary>
-    /// Writes what is queued, a batch at a time. A batch that fails is dropped and
-    /// counted rather than retried: the failure is most likely the database being away,
-    /// and holding the batch would only grow the backlog behind it.
+    /// Writes what is queued, a batch at a time. A batch that fails is kept and tried
+    /// again first on the next poll, so a database restart loses nothing the queue can
+    /// hold meanwhile; lines are only dropped once the queue is full, or after
+    /// <see cref="MaxBatchAttempts"/> failed polls for the same batch.
     /// </summary>
     internal async Task<int> FlushAsync(CancellationToken ct)
     {
         var written = 0;
         var taken = 0;
-        var batch = new List<StoredLogLine>(BatchSize);
         while (taken < MaxLinesPerPoll)
         {
-            batch.Clear();
-            var n = _buffer.Take(batch, BatchSize);
-            if (n == 0) break;
-            taken += n;
-            if (batch.Count == 0) continue;
+            var batch = _retry;
+            if (batch is null)
+            {
+                batch = new List<StoredLogLine>(BatchSize);
+                var n = _buffer.Take(batch, BatchSize);
+                if (n == 0) break;
+                taken += n;
+                if (batch.Count == 0) continue;
+            }
+            else
+            {
+                taken += batch.Count;
+            }
             try
             {
                 await CopyAsync(batch, ct);
                 written += batch.Count;
+                _retry = null;
+                _retryAttempts = 0;
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _buffer.CountDropped(batch.Count);
-                _logger.LogWarning(ex, "Could not store {Count} log line(s); they are still in the container log.", batch.Count);
+                _retry = batch;
+                if (++_retryAttempts >= MaxBatchAttempts)
+                {
+                    _buffer.CountDropped(batch.Count);
+                    _retry = null;
+                    _retryAttempts = 0;
+                    _logger.LogWarning(ex, "Gave up storing {Count} log line(s); they are still in the container log.", batch.Count);
+                }
+                else if (_retryAttempts == 1)
+                {
+                    _logger.LogWarning(ex, "Could not store {Count} log line(s); trying again on the next poll.", batch.Count);
+                }
                 break;
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutting down mid-write: keep the batch for the final flush.
+                _retry = batch;
+                throw;
             }
         }
         return written;
@@ -142,13 +184,18 @@ public sealed class StoredLogWriter : PolledScheduler, IAsyncDisposable
     /// <summary>PostgreSQL text cannot hold a NUL character, and one would fail the whole batch.</summary>
     private static string Clean(string text) => text.Contains('\0') ? text.Replace("\0", string.Empty) : text;
 
-    /// <summary>Deletes lines older than the retention setting, a slice at a time.</summary>
-    internal async Task<int> SweepAsync(CancellationToken ct)
+    /// <summary>
+    /// Deletes lines older than the retention setting, a slice at a time, for at most
+    /// <see cref="DeleteSlicesPerPoll"/> slices. Done is true once a slice came back short,
+    /// meaning nothing past the retention is left.
+    /// </summary>
+    internal async Task<(int Deleted, bool Done)> SweepAsync(CancellationToken ct)
     {
         var cutoff = _clock.GetUtcNow().UtcDateTime.AddDays(-_buffer.RetentionDays);
         var deleted = 0;
+        var done = false;
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
-        while (true)
+        for (var slice = 0; slice < DeleteSlicesPerPoll; slice++)
         {
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
@@ -159,14 +206,18 @@ public sealed class StoredLogWriter : PolledScheduler, IAsyncDisposable
             cmd.Parameters.Add(new NpgsqlParameter { Value = DeleteBatchSize });
             var n = await cmd.ExecuteNonQueryAsync(ct);
             deleted += n;
-            if (n < DeleteBatchSize) break;
+            if (n < DeleteBatchSize)
+            {
+                done = true;
+                break;
+            }
         }
         if (deleted > 0)
         {
             // Not stored (this class's own category), but the container log has it.
             _logger.LogInformation("Deleted {Count} stored log line(s) older than {Cutoff:o}.", deleted, cutoff);
         }
-        return deleted;
+        return (deleted, done);
     }
 
     /// <summary>
@@ -176,7 +227,9 @@ public sealed class StoredLogWriter : PolledScheduler, IAsyncDisposable
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await base.StopAsync(cancellationToken);
-        if (_readiness is { IsReady: false } || Environment.GetEnvironmentVariable("DISABLE_STORED_LOGS") == "1") return;
+        // Not into a database a restore is replacing, nor before migrations made the table.
+        if (_readiness is { IsReady: false } || Maintenance is { IsActive: true }
+            || Environment.GetEnvironmentVariable("DISABLE_STORED_LOGS") == "1") return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(3));
         try { await FlushAsync(timeout.Token); }

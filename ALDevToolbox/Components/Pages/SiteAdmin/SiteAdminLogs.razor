@@ -44,6 +44,15 @@
                 </span>
             </Alert>
         }
+        @if (_page?.TimedOut == true)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    This search took too long and was stopped. Pick a shorter time range with
+                    From and To, or a single source, and try again.
+                </span>
+            </Alert>
+        }
         @if (Buffer.Dropped > 0)
         {
             <Alert Tone="AlertTone.Warn">

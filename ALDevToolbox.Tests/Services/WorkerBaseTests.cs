@@ -229,6 +229,49 @@ public sealed class WorkerBaseTests
     }
 
     [Fact]
+    public async Task QueueDrainWorker_tags_stored_log_lines_with_its_name_and_not_its_callers()
+    {
+        var queue = new TestQueue();
+        string? seen = null;
+        var worker = new TestDrainWorker(queue, new WorkerHeartbeatRegistry())
+        {
+            // A service the job awaits, not the job's own frame.
+            Body = async _ => { await Task.Yield(); seen = await ReadWorkerAsync(); },
+        };
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await queue.EnqueueAsync(new TestJob(1));
+        var loop = worker.RunLoopAsync(cts.Token);
+        await worker.Finished.Reader.ReadAsync(cts.Token);
+
+        seen.Should().Be("TestDrainWorker");
+        ALDevToolbox.Services.Logging.WorkerLogScope.Current.Should().BeNull("the name stays inside the worker's loop");
+        await cts.CancelAsync();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task PolledScheduler_tags_stored_log_lines_with_its_name_during_a_tick()
+    {
+        string? seen = null;
+        var scheduler = new TestScheduler(new WorkerHeartbeatRegistry(), "DISABLE_UNUSED_" + Guid.NewGuid().ToString("N"))
+        {
+            OnTick = async () => { seen = await ReadWorkerAsync(); },
+        };
+
+        (await scheduler.RunTickAsync(CancellationToken.None)).Should().BeTrue();
+
+        seen.Should().Be("TestScheduler");
+        ALDevToolbox.Services.Logging.WorkerLogScope.Current.Should().BeNull();
+    }
+
+    private static async Task<string?> ReadWorkerAsync()
+    {
+        await Task.Yield();
+        return ALDevToolbox.Services.Logging.WorkerLogScope.Current;
+    }
+
+    [Fact]
     public async Task PolledScheduler_names_itself_as_the_audit_actor_during_a_tick()
     {
         string? seen = null;

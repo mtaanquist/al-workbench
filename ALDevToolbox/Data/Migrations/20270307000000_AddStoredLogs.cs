@@ -45,6 +45,11 @@ namespace ALDevToolbox.Data.Migrations
                 });
 
             migrationBuilder.CreateIndex(
+                name: "IX_app_log_entries_level_id",
+                table: "app_log_entries",
+                columns: new[] { "level", "id" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_app_log_entries_timestamp",
                 table: "app_log_entries",
                 column: "timestamp");

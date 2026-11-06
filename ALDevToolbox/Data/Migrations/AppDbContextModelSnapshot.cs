@@ -64,6 +64,8 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasIndex("Timestamp");
 
+                    b.HasIndex("Level", "Id");
+
                     b.HasIndex("Worker", "Id");
 
                     b.ToTable("app_log_entries", (string)null);

@@ -294,12 +294,7 @@
     internal static string LogsHref(string name) =>
         "/site-admin/logs?worker=" + Uri.EscapeDataString(Family(name));
 
-    /// <summary>A worker's name without its number: "ProjectBuildWorker 3" is a ProjectBuildWorker.</summary>
-    internal static string Family(string name)
-    {
-        var space = name.IndexOf(' ');
-        return space < 0 ? name : name[..space];
-    }
+    internal static string Family(string name) => ALDevToolbox.Services.Logging.WorkerLogScope.Family(name);
 
     private static string FormatSpan(TimeSpan span) =>
         span.TotalHours >= 1 ? $"{span.TotalHours:N0}h" :

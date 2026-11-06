@@ -24,8 +24,12 @@ public sealed record StoredLogQuery(
     long? BeforeId,
     DateTime? ToUtc = null);
 
-/// <summary>One page of stored lines, newest first, and whether older ones exist.</summary>
-public sealed record StoredLogPage(IReadOnlyList<AppLogEntry> Rows, bool HasOlder);
+/// <summary>
+/// One page of stored lines, newest first, and whether older ones exist. TimedOut means
+/// the search gave up before finding a full page: Rows is empty, and narrowing the time
+/// range is the way forward.
+/// </summary>
+public sealed record StoredLogPage(IReadOnlyList<AppLogEntry> Rows, bool HasOlder, bool TimedOut = false);
 
 /// <summary>
 /// Reads <c>app_log_entries</c> for <c>/site-admin/logs</c>. SiteAdmin only. The table
@@ -40,13 +44,23 @@ public sealed class StoredLogService
     /// <summary>Lines per page. Paged by id rather than counted: a count over millions of rows is slow.</summary>
     public const int PageSize = 100;
 
+    /// <summary>
+    /// How long a search may run, in seconds. A text search reads every line in range
+    /// (there is no index that serves "contains"), so over a month of logs it can take a
+    /// while; past this it stops and the page asks for a narrower range rather than
+    /// holding a database connection.
+    /// </summary>
+    internal const int SearchTimeoutSeconds = 15;
+
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
+    private readonly Workers.WorkerHeartbeatRegistry _heartbeats;
 
-    public StoredLogService(AppDbContext db, IOrganizationContext orgContext)
+    public StoredLogService(AppDbContext db, IOrganizationContext orgContext, Workers.WorkerHeartbeatRegistry heartbeats)
     {
         _db = db;
         _orgContext = orgContext;
+        _heartbeats = heartbeats;
     }
 
     /// <summary>The newest lines matching <paramref name="query"/>.</summary>
@@ -66,8 +80,16 @@ public sealed class StoredLogService
                 rows = rows.Where(e => e.Worker == null);
                 break;
             default:
-                var sibling = EscapeLike(query.Worker) + " %";
-                rows = rows.Where(e => e.Worker == query.Worker || EF.Functions.Like(e.Worker!, sibling, "\\"));
+                // Exact names rather than a LIKE on the prefix, so the (worker, id) index
+                // serves it: a quiet worker's few lines are found without a table scan.
+                var family = WorkerLogScope.Family(query.Worker);
+                var names = _heartbeats.All()
+                    .Select(h => h.Name)
+                    .Where(n => WorkerLogScope.Family(n) == family)
+                    .Append(query.Worker)
+                    .Distinct()
+                    .ToList();
+                rows = rows.Where(e => names.Contains(e.Worker!));
                 break;
         }
 
@@ -88,10 +110,24 @@ public sealed class StoredLogService
                 || (e.Exception != null && EF.Functions.ILike(e.Exception, pattern, "\\")));
         }
 
-        var page = await rows
-            .OrderByDescending(e => e.Id)
-            .Take(PageSize + 1)
-            .ToListAsync(ct);
+        List<AppLogEntry> page;
+        var previousTimeout = _db.Database.GetCommandTimeout();
+        _db.Database.SetCommandTimeout(SearchTimeoutSeconds);
+        try
+        {
+            page = await rows
+                .OrderByDescending(e => e.Id)
+                .Take(PageSize + 1)
+                .ToListAsync(ct);
+        }
+        catch (Exception ex) when (IsTimeout(ex) && !ct.IsCancellationRequested)
+        {
+            return new StoredLogPage([], HasOlder: false, TimedOut: true);
+        }
+        finally
+        {
+            _db.Database.SetCommandTimeout(previousTimeout);
+        }
         var hasOlder = page.Count > PageSize;
         if (hasOlder) page.RemoveAt(page.Count - 1);
         return new StoredLogPage(page, hasOlder);
@@ -105,6 +141,15 @@ public sealed class StoredLogService
             .SqlQueryRaw<long>("SELECT pg_total_relation_size('app_log_entries') AS \"Value\"")
             .SingleAsync(ct);
     }
+
+    private static bool IsTimeout(Exception ex) => ex switch
+    {
+        TimeoutException => true,
+        Npgsql.NpgsqlException { InnerException: TimeoutException } => true,
+        Npgsql.PostgresException { SqlState: "57014" } => true,
+        { InnerException: { } inner } => IsTimeout(inner),
+        _ => false,
+    };
 
     private static string EscapeLike(string text) =>
         text.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
