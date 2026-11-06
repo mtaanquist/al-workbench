@@ -202,6 +202,7 @@ public static class NavDestinations
         new("Connections", "/site-admin/connections", "plug", "Site administration", Gate: NavGate.SiteAdmin),
         new("Email delivery", "/site-admin/email", "mail", "Site administration", Gate: NavGate.SiteAdmin),
         new("Workers", "/site-admin/workers", "monitor", "Site administration", Gate: NavGate.SiteAdmin),
+        new("Logs", "/site-admin/logs", "scroll-text", "Site administration", Gate: NavGate.SiteAdmin),
         new("Settings", "/site-admin/settings", "server-cog", "Site administration", Gate: NavGate.SiteAdmin),
 
         // ---- Reachable from the shell, but not from the sidebar ----

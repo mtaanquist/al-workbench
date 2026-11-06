@@ -66,6 +66,12 @@ public sealed record SystemSettingsInput(
     IReadOnlyList<ALDevToolbox.Domain.Tools.ToolKey> DisabledTools,
     int? BuildConcurrency);
 
+/// <summary>The stored-log settings, for <c>/site-admin/settings/logs</c>.</summary>
+public sealed record StoredLogSettingsView(int RetentionDays, LogLevel MinimumLevel, DateTime UpdatedAt);
+
+/// <summary>Input for <see cref="SystemSettingsService.SaveStoredLogSettingsAsync"/>.</summary>
+public sealed record StoredLogSettingsInput(int RetentionDays, LogLevel MinimumLevel);
+
 /// <summary>
 /// SiteAdmin-facing view of the off-site backup settings. Carries flags
 /// for whether keys are stored rather than the keys themselves; plaintext
@@ -279,6 +285,7 @@ public sealed class SystemSettingsService
     private readonly ALDevToolbox.Services.Tools.ToolAvailabilityState? _toolAvailability;
     private readonly IMemoryCache? _cache;
     private readonly ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue? _buildQueue;
+    private readonly ALDevToolbox.Services.Logging.StoredLogBuffer? _storedLogs;
 
     /// <summary>
     /// Cache key for the site banner. The banner is read on every page render
@@ -297,7 +304,8 @@ public sealed class SystemSettingsService
         ALDevToolbox.Services.Tools.ToolAvailabilityState? toolAvailability = null,
         IMemoryCache? cache = null,
         SmtpFallbackOptions? smtpFallback = null,
-        ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue? buildQueue = null)
+        ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue? buildQueue = null,
+        ALDevToolbox.Services.Logging.StoredLogBuffer? storedLogs = null)
     {
         _smtpFallback = smtpFallback ?? new SmtpFallbackOptions();
         _db = db;
@@ -316,6 +324,7 @@ public sealed class SystemSettingsService
         _toolAvailability = toolAvailability;
         _cache = cache;
         _buildQueue = buildQueue;
+        _storedLogs = storedLogs;
     }
 
     /// <summary>
@@ -329,8 +338,9 @@ public sealed class SystemSettingsService
     {
         var row = await _db.SystemSettings.AsNoTracking()
             .Where(s => s.Id == 1)
-            .Select(s => new { s.McpEnabled, s.DisabledTools, s.BuildConcurrency })
+            .Select(s => new { s.McpEnabled, s.DisabledTools, s.BuildConcurrency, s.LogMinimumLevel, s.LogRetentionDays })
             .FirstOrDefaultAsync(ct);
+        if (row is not null) _storedLogs?.Apply(row.LogMinimumLevel, row.LogRetentionDays);
         _mcpAvailability?.Set(row?.McpEnabled ?? false);
         _toolAvailability?.Set(ALDevToolbox.Domain.Tools.ToolCatalog.ParseDisabled(row?.DisabledTools));
         _buildQueue?.ApplySetting(row?.BuildConcurrency);
@@ -497,6 +507,49 @@ public sealed class SystemSettingsService
             row.McpEnabled,
             row.BuildConcurrency?.ToString() ?? "<default>");
     }
+
+    /// <summary>The stored-log settings for <c>/site-admin/settings/logs</c>.</summary>
+    public async Task<StoredLogSettingsView> GetStoredLogSettingsAsync(CancellationToken ct = default)
+    {
+        var row = await LoadAsync(ct);
+        return new StoredLogSettingsView(row.LogRetentionDays, row.LogMinimumLevel, row.UpdatedAt);
+    }
+
+    /// <summary>
+    /// Saves how long stored log lines are kept and the least severe level stored, and
+    /// applies both at once: the level to the next line logged, the retention to the
+    /// next hourly sweep. Retention is 1 to 30 days; the level is Information,
+    /// Warning, Error, or None to store nothing.
+    /// </summary>
+    public async Task SaveStoredLogSettingsAsync(StoredLogSettingsInput input, CancellationToken ct = default)
+    {
+        var errors = new Dictionary<string, string>();
+        const int fewest = ALDevToolbox.Services.Logging.StoredLogBuffer.MinRetentionDays;
+        const int most = ALDevToolbox.Services.Logging.StoredLogBuffer.MaxRetentionDays;
+        if (input.RetentionDays < fewest || input.RetentionDays > most)
+        {
+            errors["LogRetentionDays"] = $"Enter a number of days from {fewest} to {most}.";
+        }
+        if (!StoredLogLevels.Contains(input.MinimumLevel))
+        {
+            errors["LogMinimumLevel"] = "Choose which lines to keep.";
+        }
+        if (errors.Count > 0) throw new PlanValidationException(errors);
+
+        var row = await LoadAsync(ct);
+        row.LogRetentionDays = input.RetentionDays;
+        row.LogMinimumLevel = input.MinimumLevel;
+        row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        await _db.SaveChangesAsync(ct);
+        _storedLogs?.Apply(row.LogMinimumLevel, row.LogRetentionDays);
+        _logger.LogInformation(
+            "Stored log settings updated (retention_days={RetentionDays}, minimum_level={MinimumLevel}).",
+            row.LogRetentionDays, row.LogMinimumLevel);
+    }
+
+    /// <summary>The levels a SiteAdmin can choose; see <see cref="ALDevToolbox.Services.Logging.StoredLogBuffer.Normalise"/>.</summary>
+    public static readonly IReadOnlyList<LogLevel> StoredLogLevels =
+        [LogLevel.Information, LogLevel.Warning, LogLevel.Error, LogLevel.None];
 
     /// <summary>
     /// Returns the SMTP configuration the email sender should use, preferring

@@ -266,6 +266,7 @@ public sealed class OffsiteRestoreWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var actor = AuditActor.EnterBackground(nameof(OffsiteRestoreWorker));
+        using var logScope = Logging.WorkerLogScope.Enter(nameof(OffsiteRestoreWorker));
         await foreach (var jobId in _jobs.Reader.ReadAllAsync(stoppingToken))
         {
             _heartbeat.BeginActive();

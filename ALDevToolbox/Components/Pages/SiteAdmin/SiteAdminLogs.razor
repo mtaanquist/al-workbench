@@ -1,0 +1,269 @@
+@page "/site-admin/logs"
+@attribute [Authorize(Roles = HttpOrganizationContext.SiteAdminRole)]
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Domain.Entities
+@using ALDevToolbox.Services
+@using ALDevToolbox.Services.Logging
+@using ALDevToolbox.Services.Workers
+@inject StoredLogService Logs
+@inject StoredLogBuffer Buffer
+@inject WorkerHeartbeatRegistry Heartbeats
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+
+<PageTitle>Logs · Site administration · AL Workbench</PageTitle>
+
+@*
+    The app's own log, kept in the database so a site admin can read it here
+    rather than on the server. Newest first, filtered by a GET form so a view can
+    be bookmarked or linked from the workers page. Paged by "older than this line"
+    rather than by page number: counting millions of lines to print "page 3 of
+    9,000" would cost more than reading them.
+*@
+
+<ListPage Title="Logs" ShowActions="true" FiltersWhenEmpty="true"
+          Trail='@([new("Site administration", "/site-admin"), new("Logs")])'
+          IsLoading="@(_page is null)"
+          IsEmpty="@(_page is not null && _page.Rows.Count == 0)">
+    <SubtitleContent>
+        What the site has been doing, newest first: background work by default,
+        and everything else when you ask for it. Kept for @Plural(Buffer.RetentionDays, "day").
+    </SubtitleContent>
+    <Actions>
+        <a class="btn" href="/site-admin/settings/logs">
+            <Icon Name="settings" Width="16" Height="16" />
+            <span>Log settings</span>
+        </a>
+    </Actions>
+    <Notices>
+        @if (Buffer.MinimumLevel == LogLevel.None)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    New lines are not being kept. Turn it back on in
+                    <a href="/site-admin/settings/logs">log settings</a>.
+                </span>
+            </Alert>
+        }
+        @if (_page?.TimedOut == true)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    This search took too long and was stopped. Pick a shorter time range with
+                    From and To, or a single source, and try again.
+                </span>
+            </Alert>
+        }
+        @if (Buffer.Dropped > 0)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    @Buffer.Dropped.ToString("N0") line(s) could not be saved since the site last
+                    started, so there may be gaps below. The server's own log still has them.
+                </span>
+            </Alert>
+        }
+        <form method="get" action="/site-admin/logs" class="card filter-grid" onchange="this.submit()">
+            <label class="field">
+                <span class="field__label">Source</span>
+                <SelectBox>
+                    <select class="select" name="worker">
+                        <option value="@StoredLogService.AnyWorker" selected="@(_worker == StoredLogService.AnyWorker)">All background work</option>
+                        <option value="@StoredLogService.AnySource" selected="@(_worker == StoredLogService.AnySource)">Everything</option>
+                        <option value="@StoredLogService.NoWorker" selected="@(_worker == StoredLogService.NoWorker)">Web pages and start-up</option>
+                        @foreach (var (name, label) in _workers)
+                        {
+                            <option value="@name" selected="@(_worker == name)">@label</option>
+                        }
+                    </select>
+                </SelectBox>
+            </label>
+            <label class="field">
+                <span class="field__label">Show</span>
+                <SelectBox>
+                    <select class="select" name="level">
+                        <option value="@LogLevel.Information" selected="@(_level == LogLevel.Information)">Everything</option>
+                        <option value="@LogLevel.Warning" selected="@(_level == LogLevel.Warning)">Warnings and errors</option>
+                        <option value="@LogLevel.Error" selected="@(_level == LogLevel.Error)">Errors only</option>
+                    </select>
+                </SelectBox>
+            </label>
+            <label class="field">
+                <span class="field__label">Containing</span>
+                <input class="input" type="search" name="q" value="@Text" data-page-search
+                       placeholder="e.g. CRONUS or timed out"
+                       aria-keyshortcuts="F3" title="Search the messages (F3)" />
+            </label>
+            <label class="field">
+                <span class="field__label">From</span>
+                <input class="input" type="datetime-local" name="from" value="@FromInput" />
+            </label>
+            <label class="field">
+                <span class="field__label">To</span>
+                <input class="input" type="datetime-local" name="to" value="@ToInput" min="@FromInput" />
+            </label>
+        </form>
+    </Notices>
+    <Loading>
+        <LoadingBlock Text="Loading logs..." />
+    </Loading>
+    <Empty>
+        <div class="card">
+            <EmptyState Icon="funnel-x" Title="No log lines match">
+                <Text>
+                    @if (IsFiltered)
+                    {
+                        <text>Try a wider choice above, or clear the filters to see all background work.</text>
+                    }
+                    else
+                    {
+                        <text>Lines appear here a few seconds after they are written. Choose Everything above to include web pages and start-up.</text>
+                    }
+                </Text>
+                <Action>
+                    <a class="btn" href="/site-admin/logs">Clear filters</a>
+                </Action>
+            </EmptyState>
+        </div>
+    </Empty>
+    <ChildContent>
+        <div class="card">
+            <ol class="log-list">
+                @foreach (var e in _page!.Rows)
+                {
+                    <li class="log-line">
+                        <span class="log-line__meta">
+                            <span class="log-line__time"><Timestamp Value="@e.Timestamp" Format="yyyy-MM-dd HH:mm:ss" /></span>
+                            <StatusPill Tone="@LevelTone(e.Level)">@LevelLabel(e.Level)</StatusPill>
+                            <span class="log-line__source" title="@e.Category">@Source(e)</span>
+                        </span>
+                        <span class="log-line__message">@e.Message</span>
+                        @if (e.Exception is not null)
+                        {
+                            <details class="log-line__error">
+                                <summary>Error details</summary>
+                                <pre>@e.Exception</pre>
+                            </details>
+                        }
+                    </li>
+                }
+            </ol>
+        </div>
+    </ChildContent>
+    <Footer>
+        @if (BeforeId is not null || _page!.HasOlder)
+        {
+            <nav class="pager" aria-label="Log pages">
+                <span class="pager__count">@Plural(_page!.Rows.Count, "line") shown</span>
+                <span class="pager__buttons">
+                    @if (BeforeId is not null)
+                    {
+                        <a class="btn btn--sm" href="@PageUrl(null)">
+                            <Icon Name="chevrons-up" Width="14" Height="14" />
+                            <span>Newest</span>
+                        </a>
+                    }
+                    @if (_page.HasOlder)
+                    {
+                        <a class="btn btn--sm" href="@PageUrl(_page.Rows[^1].Id)">
+                            <span>Older</span>
+                            <Icon Name="chevron-right" Width="14" Height="14" />
+                        </a>
+                    }
+                </span>
+            </nav>
+        }
+    </Footer>
+</ListPage>
+
+@code {
+    [SupplyParameterFromQuery(Name = "worker")] public string? Worker { get; set; }
+    [SupplyParameterFromQuery(Name = "level")] public string? Level { get; set; }
+    [SupplyParameterFromQuery(Name = "q")] public string? Text { get; set; }
+    /// <summary>As the date picker posts it: wall-clock time in the display zone.</summary>
+    [SupplyParameterFromQuery(Name = "from")] public string? FromInput { get; set; }
+    [SupplyParameterFromQuery(Name = "to")] public string? ToInput { get; set; }
+    [SupplyParameterFromQuery(Name = "before")] public long? BeforeId { get; set; }
+
+    private StoredLogPage? _page;
+    private string _worker = StoredLogService.AnyWorker;
+    private LogLevel _level = LogLevel.Information;
+    private List<(string Name, string Label)> _workers = new();
+
+    private bool IsFiltered =>
+        _worker != StoredLogService.AnyWorker || _level != LogLevel.Information
+        || !string.IsNullOrWhiteSpace(Text) || !string.IsNullOrEmpty(FromInput) || !string.IsNullOrEmpty(ToInput);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _worker = string.IsNullOrWhiteSpace(Worker) ? StoredLogService.AnyWorker : Worker.Trim();
+        _level = Enum.TryParse<LogLevel>(Level, out var l) ? StoredLogBuffer.Normalise(l) : LogLevel.Information;
+        if (_level == LogLevel.None) _level = LogLevel.Information;
+        _workers = WorkerOptions(Heartbeats.All().Select(h => h.Name), _worker);
+        await Zone.EnsureLoadedAsync();
+        _page = await Logs.SearchAsync(new StoredLogQuery(
+            _worker, _level, Text, Zone.ParseInput(FromInput), BeforeId, ToUtc(ToInput)));
+    }
+
+    /// <summary>
+    /// One option per kind of worker: numbered siblings ("ProjectBuildWorker 3") share one,
+    /// since the filter matches them all. A worker named in the address that is not
+    /// running now still gets an option, so the select shows what is filtered.
+    /// </summary>
+    internal static List<(string Name, string Label)> WorkerOptions(IEnumerable<string> heartbeatNames, string selected)
+    {
+        var names = heartbeatNames.Select(SiteAdminWorkers.Family).ToHashSet(StringComparer.Ordinal);
+        if (selected is not (StoredLogService.AnySource or StoredLogService.AnyWorker or StoredLogService.NoWorker))
+        {
+            names.Add(selected);
+        }
+        return names
+            .Select(n => (n, SiteAdminWorkers.Friendly(n)))
+            .OrderBy(o => o.Item2, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The picker stops at the minute, so "to 10:15" means up to the end of that minute:
+    /// a line logged at 10:15:40 belongs in the range the person picked.
+    /// </summary>
+    private DateTime? ToUtc(string? input)
+    {
+        var to = Zone.ParseInput(input);
+        return to is { Second: 0, Millisecond: 0 } ? to.Value.AddMinutes(1).AddTicks(-1) : to;
+    }
+
+    private static string Source(AppLogEntry e)
+    {
+        if (e.Worker is not null) return SiteAdminWorkers.Friendly(SiteAdminWorkers.Family(e.Worker));
+        var dot = e.Category.LastIndexOf('.');
+        return dot < 0 ? e.Category : e.Category[(dot + 1)..];
+    }
+
+    internal static string LevelLabel(LogLevel level) => level switch
+    {
+        LogLevel.Critical => "Critical",
+        LogLevel.Error => "Error",
+        LogLevel.Warning => "Warning",
+        _ => "Info",
+    };
+
+    private static string LevelTone(LogLevel level) => level switch
+    {
+        >= LogLevel.Error => "danger",
+        LogLevel.Warning => "warn",
+        _ => "muted",
+    };
+
+    private string PageUrl(long? before)
+    {
+        var query = new List<string> { "worker=" + Uri.EscapeDataString(_worker) };
+        if (_level != LogLevel.Information) query.Add("level=" + _level);
+        if (!string.IsNullOrWhiteSpace(Text)) query.Add("q=" + Uri.EscapeDataString(Text));
+        if (!string.IsNullOrEmpty(FromInput)) query.Add("from=" + Uri.EscapeDataString(FromInput));
+        if (!string.IsNullOrEmpty(ToInput)) query.Add("to=" + Uri.EscapeDataString(ToInput));
+        if (before is long b) query.Add("before=" + b);
+        return "/site-admin/logs?" + string.Join("&", query);
+    }
+
+    private static string Plural(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n:N0} {noun}s";
+}

@@ -79,6 +79,7 @@ public sealed partial class UpgradeActionWorker : BackgroundService
         // Writes this worker audits itself name the requester; anything else it saves
         // is attributed to the worker rather than to no one.
         using var actor = AuditActor.EnterBackground(nameof(UpgradeActionWorker));
+        using var logScope = ALDevToolbox.Services.Logging.WorkerLogScope.Enter(nameof(UpgradeActionWorker));
 
         // Let startup migrations + seed finish before the first sweep.
         try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }

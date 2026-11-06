@@ -190,7 +190,10 @@ public sealed class BackupService
         {
             await RunPgToolAsync(
                 _pgDumpPath,
-                new[] { "-Fc", "--no-owner", "--no-privileges", "-f", targetPath },
+                // Stored log lines are left out (the table itself is kept): they
+                // can run to millions of rows, are worth nothing after a restore,
+                // and would otherwise travel in every copy, off-site ones too.
+                new[] { "-Fc", "--no-owner", "--no-privileges", "--exclude-table-data=app_log_entries", "-f", targetPath },
                 ct);
             sw.Stop();
 

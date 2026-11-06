@@ -76,6 +76,12 @@ public sealed class RawSqlBaselineTests
         ["ALDevToolbox/Services/GitHub/GitHubAccessService.cs"] = new(
             "An advisory lock keyed on the user id of a token row already read through the filter; reads and writes no rows.",
             new() { ["ResolveTokenForAsync"] = 1 }),
+        ["ALDevToolbox/Services/Logging/StoredLogService.cs"] = new(
+            "Reads the on-disk size of the site-wide app_log_entries table for the SiteAdmin console; touches no tenanted rows.",
+            new() { ["TableSizeBytesAsync"] = 1 }),
+        ["ALDevToolbox/Services/Logging/StoredLogWriter.cs"] = new(
+            "Copies log lines into, and deletes old lines from, the site-wide app_log_entries table, which has no organisation; touches no tenanted rows.",
+            new() { ["CopyAsync"] = 1, ["SweepAsync"] = 1 }),
         ["ALDevToolbox/Services/Notifications/NotificationPreferenceService.cs"] = new(
             "Upserts that write the signed-in user's id and organisation id from the principal.",
             new() { ["SetEmailForCurrentUserAsync"] = 1, ["SetInAppForCurrentUserAsync"] = 1 }),

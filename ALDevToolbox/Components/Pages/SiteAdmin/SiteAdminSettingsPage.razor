@@ -20,7 +20,7 @@
 </SettingsPage>
 
 @code {
-    public enum Tab { Smtp, Backups, Offsite, Quotas, General, Entra, GitHub, Builds, Tools }
+    public enum Tab { Smtp, Backups, Offsite, Quotas, General, Entra, GitHub, Builds, Logs, Tools }
 
     [Parameter, EditorRequired] public Tab ActiveTab { get; set; }
 
@@ -57,6 +57,7 @@
         tabs.Add(new("Microsoft sign-in", "/site-admin/settings/entra", ActiveTab == Tab.Entra));
         tabs.Add(new("GitHub",          "/site-admin/settings/github",  ActiveTab == Tab.GitHub));
         tabs.Add(new("Builds",          "/site-admin/settings/builds",  ActiveTab == Tab.Builds));
+        tabs.Add(new("Logs",            "/site-admin/settings/logs",    ActiveTab == Tab.Logs));
         tabs.Add(new("Tools",           "/site-admin/settings/tools",   ActiveTab == Tab.Tools));
         _tabs = tabs;
     }
