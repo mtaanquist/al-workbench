@@ -26,7 +26,7 @@
          Test Explorer, only the download. Recent Visual Studio drives MTP
          natively. Verified locally: all 2,623 tests still discover and run
          with both removed. -->
-    <PackageReference Include="xunit.v3" Version="4.0.2" />
+    <PackageReference Include="xunit.v3" Version="4.0.3" />
     <!-- AwesomeAssertions is the community fork of FluentAssertions, kept on
          Apache-2.0. FluentAssertions 8 moved to the Xceed Community License,
          which is non-commercial only and needs a paid per-developer seat for
@@ -51,7 +51,7 @@
     <!-- bUnit renders Blazor components without a browser. Issue #72:
          pins the three-state-list and primary-button invariants from
          CLAUDE.md that the service-layer tests can't see. -->
-    <PackageReference Include="bunit" Version="2.13.3" />
+    <PackageReference Include="bunit" Version="2.14.0" />
     <!-- Testcontainers drives the local-dev path; CI bypasses it by setting
          ALDT_TEST_POSTGRES_CONNECTION to the runner-provided service container,
          so the package is restored but not exercised on the CI runner. -->
