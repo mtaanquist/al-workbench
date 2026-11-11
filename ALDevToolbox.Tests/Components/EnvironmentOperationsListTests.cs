@@ -102,4 +102,20 @@ public sealed class EnvironmentOperationsListTests : IDisposable
         cut.WaitForAssertion(() => cut.FindAll("button").Single(b => b.TextContent.Contains("Show all 30")).Click());
         cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().HaveCount(30));
     }
+
+    [Fact]
+    public void An_operation_the_page_has_named_shows_that_name_instead_of_the_client_id()
+    {
+        var ours = Op("restart", "succeeded", by: "103da8d4-b842-46aa-9b1a-e8317721130e");
+        var theirs = Op("modify", "succeeded", by: "ops@cronus.example");
+
+        var cut = _ctx.Render<EnvironmentOperationsList>(p => p
+            .Add(c => c.Operations, new[] { ours, theirs })
+            .Add(c => c.EnvironmentName, "Production")
+            .Add(c => c.StartedBy, new Dictionary<string, string> { [ours.Id] = "AL Workbench (Ada Lovelace)" }));
+
+        var rows = cut.FindAll("tbody tr");
+        rows[0].Children[2].TextContent.Should().Be("AL Workbench (Ada Lovelace)");
+        rows[1].Children[2].TextContent.Should().Be("ops@cronus.example");
+    }
 }

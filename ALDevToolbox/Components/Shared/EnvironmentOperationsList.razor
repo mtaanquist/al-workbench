@@ -54,7 +54,7 @@
                                 <span class="env-ops__error">@op.ErrorMessage</span>
                             }
                         </td>
-                        <td>@(string.IsNullOrWhiteSpace(op.CreatedBy) ? "—" : op.CreatedBy)</td>
+                        <td>@StartedByText(op)</td>
                         <td class="env-ops__when"><Timestamp Value="@When(op)" Format="dd MMM yyyy, HH:mm" Placeholder="—" /></td>
                         <td class="u-num">@Took(op)</td>
                     </tr>
@@ -84,7 +84,17 @@
     /// <summary>Where our own record of the environment is, so the list can point at it.</summary>
     [Parameter] public string? HistoryHref { get; set; }
 
+    /// <summary>
+    /// "Started by" text the page worked out for operations this workbench started, keyed
+    /// by operation id. Anything not in it shows what Business Central recorded.
+    /// </summary>
+    [Parameter] public IReadOnlyDictionary<string, string>? StartedBy { get; set; }
+
     private bool _showAll;
+
+    private string StartedByText(BcEnvironmentOperation op) =>
+        StartedBy is not null && StartedBy.TryGetValue(op.Id, out var ours) ? ours
+        : string.IsNullOrWhiteSpace(op.CreatedBy) ? "—" : op.CreatedBy;
 
     private static string RowClass(BcEnvironmentOperation op) => BcEnvironmentOperationDisplay.Status(op).Tone switch
     {
