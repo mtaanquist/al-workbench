@@ -5111,6 +5111,14 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
 
+                    b.Property<string>("UpgradePermissionScope")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("AssignedTeams")
+                        .HasColumnName("upgrade_permission_scope");
+
                     b.HasKey("Id");
 
                     b.HasIndex("OrganizationId")

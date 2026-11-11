@@ -109,6 +109,12 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
             .HasColumnName("local_login_policy").HasConversion<string>().HasMaxLength(32)
             .IsRequired().HasDefaultValue(ALDevToolbox.Domain.ValueObjects.LocalLoginPolicy.AllowAll)
             .HasSentinel((ALDevToolbox.Domain.ValueObjects.LocalLoginPolicy)(-1));
+        // Stored by name so a level added later doesn't renumber the rows already
+        // saved. HasSentinel for the same reason as LocalLoginPolicy above.
+        entity.Property(e => e.UpgradePermissionScope)
+            .HasColumnName("upgrade_permission_scope").HasConversion<string>().HasMaxLength(32)
+            .IsRequired().HasDefaultValue(ALDevToolbox.Domain.ValueObjects.UpgradePermissionScope.AssignedTeams)
+            .HasSentinel((ALDevToolbox.Domain.ValueObjects.UpgradePermissionScope)(-1));
         // GitHub App connection. A null installation id is "not connected" and
         // is the master switch for every GitHub feature, so the other three
         // columns are only meaningful alongside it.
