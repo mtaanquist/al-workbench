@@ -88,11 +88,8 @@ public static class OAuthServerRegistration
                 // ever added, re-enable resource validation (or add an explicit
                 // audience requirement) before doing so.
                 //
-                // TODO: Revisit once OpenIddict ships native DCR / CIMD support
-                // (tracked in openiddict/openiddict-core#2404, targeted at 7.6.0)
-                // — that release will likely introduce a more idiomatic way to
-                // register resources dynamically from a CIMD application descriptor,
-                // at which point both opt-outs can come back on.
+                // Both opt-outs exist only because OpenIddict has no native CIMD
+                // support yet; #1744 tracks turning them back on when it does.
                 o.DisableResourceValidation();
                 o.IgnoreResourcePermissions();
 
