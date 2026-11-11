@@ -877,7 +877,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 if (await _access.CanManageAsync(projectId, createdByUserId, ct)) break;
                 if (await _access.CanManageEnvironmentUpdatesAsync(projectId, ct)) break;
                 throw new ProjectAccessDeniedException(
-                    "You need to manage this solution, or hold permission to manage environment updates for one of its teams.");
+                    "You need to manage this solution, or be allowed to schedule its upgrades.");
         }
     }
 

@@ -158,9 +158,9 @@
                    team-scoped capability, not a promotion. *@
                 <p class="card__sub">
                     Managers can add and remove people on this team. It doesn't change what they
-                    can do anywhere else. Members marked "Can schedule updates" may set Business
-                    Central update dates for the customers this team works on. Only an admin
-                    can change who is marked.
+                    can do anywhere else. Members marked "Can schedule upgrades" may schedule and
+                    start Business Central upgrades. Only an admin can change who is marked, and
+                    which solutions it covers.
                 </p>
             </div>
             @if (_team.Members.Count == 0)
@@ -184,7 +184,7 @@
                             <th scope="col">Name</th>
                             <th scope="col">Email</th>
                             <th scope="col">Team role</th>
-                            <th scope="col">Can schedule updates</th>
+                            <th scope="col">Can schedule upgrades</th>
                             @if (_canManage)
                             {
                                 <th scope="col" class="data-table__actions">Actions</th>

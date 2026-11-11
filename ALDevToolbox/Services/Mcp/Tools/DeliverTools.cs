@@ -238,7 +238,7 @@ public sealed class DeliverTools
         CancellationToken ct = default)
     {
         await RequireEnvironmentOpsAsync(
-            "You need permission to manage environment updates to see the Upgrades list. An administrator can grant it on one of your teams. list_environments shows the next update of every environment you can see.",
+            "You need the Can schedule upgrades permission to see the Upgrades list. An administrator can grant it on one of your teams. list_environments shows the next update of every environment you can see.",
             ct);
 
         int? projectId = string.IsNullOrWhiteSpace(solution) ? null : (await ResolveAsync(solution, ct)).Id;
@@ -298,7 +298,7 @@ public sealed class DeliverTools
         CancellationToken ct = default)
     {
         await RequireEnvironmentOpsAsync(
-            "You need permission to manage environment updates to see the planned upgrades. An administrator can grant it on one of your teams.",
+            "You need the Can schedule upgrades permission to see the planned upgrades. An administrator can grant it on one of your teams.",
             ct);
 
         var term = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
@@ -326,7 +326,7 @@ public sealed class DeliverTools
         CancellationToken ct = default)
     {
         await RequireEnvironmentOpsAsync(
-            "You need permission to manage environment updates to read a planned upgrade. An administrator can grant it on one of your teams.",
+            "You need the Can schedule upgrades permission to read a planned upgrade. An administrator can grant it on one of your teams.",
             ct);
 
         var detail = await _plannedUpgrades.GetAsync(upgradeId, ct)

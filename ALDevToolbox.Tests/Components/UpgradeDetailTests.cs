@@ -699,7 +699,7 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
         {
             PickerBox(cut, "CRONUS Norge").HasAttribute("disabled").Should().BeTrue();
-            PickerRow(cut, "CRONUS Norge").QuerySelector(".upk-why")!.TextContent.Should().Be("You can't manage this solution's updates");
+            PickerRow(cut, "CRONUS Norge").QuerySelector(".upk-why")!.TextContent.Should().Be("You can't schedule upgrades for this solution");
         });
 
         cut.WaitForAssertion(() => cut.FindAll(".upk-fill .btn").First(b => b.TextContent.StartsWith("Production")).Click());
@@ -821,7 +821,7 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         var result = new UpgradeLinesChangeResult([1], new Dictionary<string, string>
         {
             ["2"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
-            ["3"] = "You can't manage updates for CRONUS Sverige, so Production was left as it was.",
+            ["3"] = "You can't schedule upgrades for CRONUS Sverige, so Production was left as it was.",
             ["4"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
         });
 
@@ -829,7 +829,7 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
         notice.Tone.Should().Be("warn");
         notice.Text.Should().Be("Took 1 environment off the upgrade. "
-            + "You can't manage updates for CRONUS Sverige, so Production was left as it was. "
+            + "You can't schedule upgrades for CRONUS Sverige, so Production was left as it was. "
             + "2 of the environments you picked were already taken off the upgrade. Reload to see it as it is now.");
     }
 

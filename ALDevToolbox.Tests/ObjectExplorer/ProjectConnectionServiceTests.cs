@@ -4198,7 +4198,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var act = () => Svc(ctx, TokenOk()).SelectTargetVersionAsync(projectId, envId, "27.6");
 
         (await act.Should().ThrowAsync<ProjectAccessDeniedException>())
-            .Which.Message.Should().Contain("environment updates");
+            .Which.Message.Should().Contain("schedule its upgrades");
     }
 
     // ── The audit scope (fence-adjacent: see AuditInterceptor) ────────────
