@@ -101,6 +101,30 @@
 
             <div class="card__head">
                 <div>
+                    <h2 class="card__title">Who can schedule upgrades</h2>
+                    <p class="card__sub">Admins can always schedule upgrades. Anyone else needs "Can schedule upgrades" ticked on their membership of a team.</p>
+                </div>
+            </div>
+            <div class="setting-list">
+                <SettingRow Name="Can schedule upgrades applies to">
+                    <HintContent>
+                        Public solutions have no teams, so with the first choice only admins can schedule their upgrades. Choose the second if the people who do upgrades are not the teams the solutions are assigned to.
+                    </HintContent>
+                    <ChildContent>
+                        <select id="org-upgrade-permission-scope" class="input" style="max-width:360px" aria-label="Can schedule upgrades applies to"
+                                @bind="_upgradeScope" @bind:after="SaveUpgradeScopeAsync" disabled="@_upgradeScopeSaving">
+                            @foreach (var (value, label) in UpgradeScopeChoices)
+                            {
+                                <option value="@value">@label</option>
+                            }
+                        </select>
+                        <FeedbackLine Ok="@_upgradeScopeOk" Error="@_upgradeScopeError" />
+                    </ChildContent>
+                </SettingRow>
+            </div>
+
+            <div class="card__head">
+                <div>
                     <h2 class="card__title">App registration</h2>
                     <p class="card__sub">One app registration for every customer, set up once here. Each customer authorises it in their own Business Central admin center, and a solution then needs only that customer's tenant ID.</p>
                 </div>
@@ -245,6 +269,7 @@
             _production.Load(_view.DefaultWindows.ProductionStart, _view.DefaultWindows.ProductionEnd);
             _sandbox.Load(_view.DefaultWindows.SandboxStart, _view.DefaultWindows.SandboxEnd);
             _refreshInterval = _savedRefreshInterval = await OrgAdmin.GetEnvironmentRefreshIntervalAsync();
+            _upgradeScope = _savedUpgradeScope = await OrgAdmin.GetUpgradePermissionScopeAsync();
         }
         catch (ProjectAccessDeniedException ex)
         {
@@ -345,6 +370,49 @@
         finally
         {
             _saving = false;
+        }
+    }
+
+    // ── Who can schedule upgrades ───────────────────────────────────────
+
+    /// <summary>One entry per level, in the order they read from narrowest to widest.</summary>
+    private static readonly (UpgradePermissionScope Value, string Label)[] UpgradeScopeChoices =
+    [
+        (UpgradePermissionScope.AssignedTeams, "Solutions their team is assigned to"),
+        (UpgradePermissionScope.ManagedSolutions, "Every solution they can manage"),
+    ];
+
+    private UpgradePermissionScope _upgradeScope;
+    private UpgradePermissionScope _savedUpgradeScope;
+    private bool _upgradeScopeSaving;
+    private string? _upgradeScopeOk;
+    private string? _upgradeScopeError;
+
+    private async Task SaveUpgradeScopeAsync()
+    {
+        _upgradeScopeOk = _upgradeScopeError = null;
+        if (_upgradeScope == _savedUpgradeScope) return;
+        _upgradeScopeSaving = true;
+        try
+        {
+            await OrgAdmin.SetUpgradePermissionScopeAsync(_upgradeScope);
+            _savedUpgradeScope = _upgradeScope;
+            _upgradeScopeOk = "Saved. It applies to each person the next time they open a page.";
+        }
+        catch (PlanValidationException ex)
+        {
+            _upgradeScope = _savedUpgradeScope;
+            _upgradeScopeError = ex.Errors.Values.FirstOrDefault() ?? "That did not save. Choose one of the listed options.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Saving who can schedule upgrades failed.");
+            _upgradeScope = _savedUpgradeScope;
+            _upgradeScopeError = "Couldn't save who can schedule upgrades. Try again in a moment.";
+        }
+        finally
+        {
+            _upgradeScopeSaving = false;
         }
     }
 
