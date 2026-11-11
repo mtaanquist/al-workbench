@@ -476,6 +476,36 @@ public sealed class UpgradesPageTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// A parameter pass that changes nothing in the address keeps what was typed. Blazor
+    /// makes one as the first load ends, and it used to put the box back to the
+    /// address's empty search, so anything typed while the page was still loading was
+    /// wiped (#1750). Re-rendering with the same parameters makes that pass on demand.
+    /// </summary>
+    [Fact]
+    public async Task A_pass_that_changes_nothing_in_the_address_keeps_what_was_typed()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2);
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Contains("Archive"))
+                .QuerySelector(".pill-tab__count").Should().NotBeNull("the first load is not finished until the archive is counted");
+        });
+        cut.Find(".cmdbar__search input").Input("CRONUS ");
+
+        cut.Render();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("CRONUS ");
+            cut.FindAll(".data-table tbody tr").Should().ContainSingle();
+        });
+    }
+
+    /// <summary>
     /// The table waits for typing to pause instead of redrawing per keystroke, and the
     /// box keeps the latest text throughout.
     /// </summary>
