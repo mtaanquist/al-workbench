@@ -992,7 +992,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         if (Guid.TryParse(project.BcClientId, out var projectClient)) ours.Add(projectClient);
 
         var mine = operations
-            .Where(o => Guid.TryParse(o.CreatedBy?.Trim(), out var by) && ours.Contains(by))
+            .Where(o => !string.IsNullOrWhiteSpace(o.Id)
+                        && Guid.TryParse(o.CreatedBy?.Trim(), out var by) && ours.Contains(by))
             .ToList();
         if (mine.Count == 0) return labels;
 
@@ -1004,13 +1005,15 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var byId = new Dictionary<Guid, string>();
         var deliveries = await _db.OeProjectDeliveryResults.AsNoTracking()
             .Where(r => r.OperationId != null && ids.Contains(r.OperationId.Value)
-                        && r.ProjectDelivery!.ProjectId == projectId)
+                        && r.ProjectDelivery!.ProjectId == projectId
+                        && r.ProjectDelivery.EnvironmentName.ToLower() == env.Name.ToLower())
             .Select(r => new { Id = r.OperationId!.Value, Who = r.ProjectDelivery!.TriggeredByUser!.DisplayName })
             .ToListAsync(ct);
         foreach (var d in deliveries) byId.TryAdd(d.Id, d.Who ?? string.Empty);
 
         var actions = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => a.ProjectId == projectId && a.BcOperationId != null && ids.Contains(a.BcOperationId.Value))
+            .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                        && a.BcOperationId != null && ids.Contains(a.BcOperationId.Value))
             .Select(a => new { Id = a.BcOperationId!.Value, a.RequestedBy })
             .ToListAsync(ct);
         foreach (var a in actions) byId.TryAdd(a.Id, UpgradeActionRow.NameOf(a.RequestedBy));
@@ -1018,10 +1021,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // The rest by time: the actions that change the environment through a call whose
         // operation id we never see.
         var earliest = mine.Min(o => o.CreatedOn ?? o.StartedOn)?.UtcDateTime - StarterMatchWindow;
-        var sent = earliest is { } from
+        var latest = mine.Max(o => o.CreatedOn ?? o.StartedOn)?.UtcDateTime + StarterMatchWindow;
+        var sent = earliest is { } from && latest is { } to
             ? await _db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
-                            && a.BcOperationId == null && a.SentAt != null && a.SentAt >= from
+                            && a.BcOperationId == null && a.SentAt != null && a.SentAt >= from && a.SentAt <= to
                             && (a.Kind == UpgradeActionKind.PushDateToLatest || a.Kind == UpgradeActionKind.RunNow
                                 || a.Kind == UpgradeActionKind.SelectVersion || a.Kind == UpgradeActionKind.RecoverEnvironment))
                 .Select(a => new { a.Id, a.Kind, SentAt = a.SentAt!.Value, a.RequestedBy })

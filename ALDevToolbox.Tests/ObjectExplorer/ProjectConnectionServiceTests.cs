@@ -2273,6 +2273,39 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task One_action_names_one_operation_and_never_one_on_another_environment()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        int otherEnvId;
+        await using (var ctx = _db.NewContext())
+        {
+            var other = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, Name = "Sandbox", Type = "Sandbox",
+            };
+            ctx.OeProjectEnvironments.Add(other);
+            await ctx.SaveChangesAsync();
+            otherEnvId = other.Id;
+        }
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime);
+        await SeedActionAsync(id, otherEnvId, UpgradeActionKind.PushDateToLatest, "Ada Lovelace <ada@cronus.example>", at.UtcDateTime.AddSeconds(30));
+
+        var first = StartedOp("modify", SolutionClientId, at.AddSeconds(5));
+        var second = StartedOp("modify", SolutionClientId, at.AddSeconds(30));
+        var notAGuid = StartedOp("modify", "SYSTEM", at);
+
+        await using var read = _db.NewContext();
+        var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [first, second, notAGuid]);
+
+        labels.Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            [first.Id] = "AL Workbench (Grace Hopper)",
+            [second.Id] = "AL Workbench",
+        });
+    }
+
+    [Fact]
     public async Task The_organisations_app_registration_is_recognised_as_well_as_the_solutions_own()
     {
         var (id, env) = await SeedConnectedEnvironmentAsync();
