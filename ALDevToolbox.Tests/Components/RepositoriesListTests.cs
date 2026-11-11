@@ -78,8 +78,8 @@ public sealed class RepositoriesListTests : IDisposable
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(
-            typeof(Microsoft.Extensions.Logging.ILogger<>),
-            typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));
+            typeof(ILogger<>),
+            typeof(NullLogger<>));
         _ctx.Services.AddSingleton<ILogger<RepositoriesList>>(new WarningLog(_pageWarnings));
 
         using var seed = _db.NewContext();
@@ -223,14 +223,16 @@ public sealed class RepositoriesListTests : IDisposable
     /// Waits until the rows carry their GitHub actions. "Check again" is on every
     /// GitHub row once the page has decided the person can act on GitHub, so it is
     /// the signal that loading is complete. When the decision went the other way,
-    /// the failure carries the warning the page logged instead of an empty menu.
+    /// the failure carries the warning the page logged (the check threw) or the
+    /// notice it shows (the check said no) instead of an empty menu.
     /// </summary>
     private void WaitForGitHubActions(IRenderedComponent<RepositoriesList> cut) =>
         cut.WaitForAssertion(
             () => cut.FindAll("button.menu__item").Select(b => b.TextContent).Should().Contain(
                 "Check again",
-                "the page shows GitHub actions once it has loaded for a linked user; it logged: {0}",
-                _pageWarnings.IsEmpty ? "nothing" : string.Join(" | ", _pageWarnings)),
+                "the page shows GitHub actions once it has loaded for a linked user; it logged: {0}; its notices: {1}",
+                _pageWarnings.IsEmpty ? "nothing" : string.Join(" | ", _pageWarnings),
+                string.Join(" | ", cut.FindAll(".alert").Select(a => a.TextContent.Trim()))),
             WaitTimeout);
 
     /// <summary>Keeps the page's warnings and errors, exception included.</summary>
@@ -248,7 +250,7 @@ public sealed class RepositoriesListTests : IDisposable
             LogLevel logLevel, EventId eventId, TState state, Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            if (IsEnabled(logLevel)) _sink.Enqueue($"{formatter(state, exception)} {exception}");
+            if (IsEnabled(logLevel)) _sink.Enqueue(exception is null ? formatter(state, null) : $"{formatter(state, exception)} {exception}");
         }
     }
 
