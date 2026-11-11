@@ -88,14 +88,8 @@ public static class OAuthServerRegistration
                 // ever added, re-enable resource validation (or add an explicit
                 // audience requirement) before doing so.
                 //
-                // TODO: Revisit once OpenIddict ships native CIMD support. Native
-                // dynamic client registration is tracked in
-                // openiddict/openiddict-core#2404, now planned for 8.0 (as of
-                // 7.8.0, Nov 2026, no 7.x release has it). The maintainer has said
-                // CIMD itself is "too early" and has no milestone. When it lands it
-                // will likely bring a more idiomatic way to register resources from
-                // a CIMD application descriptor, at which point both opt-outs can
-                // come back on.
+                // Both opt-outs exist only because OpenIddict has no native CIMD
+                // support yet; #1744 tracks turning them back on when it does.
                 o.DisableResourceValidation();
                 o.IgnoreResourcePermissions();
 

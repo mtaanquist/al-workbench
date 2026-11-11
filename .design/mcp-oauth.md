@@ -295,12 +295,9 @@ which we are not. If a second protected resource is ever added, turn
 resource validation back on (or add an explicit audience requirement)
 first.
 
-Revisit when OpenIddict adds native CIMD support. Native dynamic client
-registration is tracked in openiddict/openiddict-core#2404, now planned
-for 8.0; as of 7.8.0 (Nov 2026) no 7.x release has it, and the maintainer
-has said CIMD itself is too early to schedule. When it lands it will likely
-surface a more idiomatic way to register resources from a CIMD application
-descriptor, at which point both opt-outs can come back on.
+Both opt-outs, and the CIMD resolver itself, exist only because OpenIddict
+has no native CIMD support yet. Issue #1744 tracks the upstream status and
+what to change when it lands.
 
 ## Consent screen
 
