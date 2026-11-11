@@ -48,7 +48,7 @@
     <!-- S3-compatible client for the off-site backup target. Works against
          AWS S3 as well as MinIO / Cloudflare R2 / Backblaze B2 (set
          OffsiteForcePathStyle=true for the non-AWS providers). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.104.11" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.12" />
     <!-- Azure Blob Storage off-site backup target, selectable alongside the
          S3-compatible client above (system_settings.offsite_provider). -->
     <PackageReference Include="Azure.Storage.Blobs" Version="12.30.1" />
@@ -58,14 +58,14 @@
          the core types and the ASP.NET Core integration helpers. -->
     <PackageReference Include="Fido2.AspNet" Version="4.3.2" />
     <!-- 4.* floats over CVE-patched releases (GHSA-9j88-vvj5-vhgr, GHSA-g7hc-96xr-gvvx). -->
-    <PackageReference Include="MailKit" Version="4.18.2" />
+    <PackageReference Include="MailKit" Version="5.0.0" />
     <!-- Markdown renderer for recipe authoring instructions. CommonMark + GFM
          (autolinks, fenced code, tables). Safe HTML output by default; we
          render through a sanitising pipeline in MarkdownRenderer. -->
     <PackageReference Include="Markdig" Version="1.6.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.14" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.14" />
-    <PackageReference Include="MimeKit" Version="4.18.2" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.15" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.15" />
+    <PackageReference Include="MimeKit" Version="5.0.0" />
     <!-- Model Context Protocol — bearer-token HTTP server mounted at /mcp,
          consumed by AI clients (Claude Desktop, Cursor, VS Code Copilot
          agent mode, Claude Code). See .design/mcp.md / docs/mcp-clients.md. -->
@@ -84,7 +84,7 @@
          10.0.x patch can land in one project's restore before the other's and
          the mismatch fails the test build with CS1705. Bump in lockstep with
          the EF Core refs in ALDevToolbox.Tests.csproj. -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.14">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.15">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
