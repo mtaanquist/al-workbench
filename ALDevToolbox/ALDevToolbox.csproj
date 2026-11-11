@@ -48,7 +48,7 @@
     <!-- S3-compatible client for the off-site backup target. Works against
          AWS S3 as well as MinIO / Cloudflare R2 / Backblaze B2 (set
          OffsiteForcePathStyle=true for the non-AWS providers). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.104.8" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.11" />
     <!-- Azure Blob Storage off-site backup target, selectable alongside the
          S3-compatible client above (system_settings.offsite_provider). -->
     <PackageReference Include="Azure.Storage.Blobs" Version="12.30.1" />
@@ -62,23 +62,23 @@
     <!-- Markdown renderer for recipe authoring instructions. CommonMark + GFM
          (autolinks, fenced code, tables). Safe HTML output by default; we
          render through a sanitising pipeline in MarkdownRenderer. -->
-    <PackageReference Include="Markdig" Version="1.5.1" />
+    <PackageReference Include="Markdig" Version="1.6.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.14" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.14" />
     <PackageReference Include="MimeKit" Version="4.18.2" />
     <!-- Model Context Protocol — bearer-token HTTP server mounted at /mcp,
          consumed by AI clients (Claude Desktop, Cursor, VS Code Copilot
          agent mode, Claude Code). See .design/mcp.md / docs/mcp-clients.md. -->
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.3.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.4.0" />
     <!-- OpenIddict — OAuth 2.1 authorization server + resource-server
          validation for the MCP endpoint. Lets Claude.ai's directory and
          custom-connector flow add the workbench via DCR (RFC 7591) and CIMD,
          neither of which work with a user-pasted static bearer. The PAT
          bearer path stays in place for desktop/CLI clients. See
          .design/mcp-oauth.md and docs/mcp. -->
-    <PackageReference Include="OpenIddict.AspNetCore" Version="7.7.2" />
-    <PackageReference Include="OpenIddict.EntityFrameworkCore" Version="7.7.2" />
-    <PackageReference Include="OpenIddict.Validation.AspNetCore" Version="7.7.2" />
+    <PackageReference Include="OpenIddict.AspNetCore" Version="7.8.0" />
+    <PackageReference Include="OpenIddict.EntityFrameworkCore" Version="7.8.0" />
+    <PackageReference Include="OpenIddict.Validation.AspNetCore" Version="7.8.0" />
     <!-- Pinned to an exact patch (not 10.*) so the app and the test project
          always compile against the SAME EF Core version. Left floating, a new
          10.0.x patch can land in one project's restore before the other's and
@@ -101,7 +101,7 @@
          1.6.0 scoped that to a net6.0-windows7.0 target and later dropped the
          split, so every Dependabot run wanted to step over the pin (#780). -->
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="3.2.1" />
-    <PackageReference Include="Tomlyn" Version="2.10.1" />
+    <PackageReference Include="Tomlyn" Version="2.11.1" />
   </ItemGroup>
 
   <ItemGroup>
