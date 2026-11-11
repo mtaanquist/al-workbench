@@ -476,6 +476,36 @@ public sealed class UpgradesPageTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// A parameter pass that changes nothing in the address keeps what was typed. Blazor
+    /// makes one as the first load ends, and it used to put the box back to the
+    /// address's empty search, so anything typed while the page was still loading was
+    /// wiped (#1750). Re-rendering with the same parameters makes that pass on demand.
+    /// </summary>
+    [Fact]
+    public async Task A_pass_that_changes_nothing_in_the_address_keeps_what_was_typed()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2);
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Contains("Archive"))
+                .QuerySelector(".pill-tab__count").Should().NotBeNull("the first load is not finished until the archive is counted");
+        });
+        cut.Find(".cmdbar__search input").Input("CRONUS ");
+
+        cut.Render();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("CRONUS ");
+            cut.FindAll(".data-table tbody tr").Should().ContainSingle();
+        });
+    }
+
+    /// <summary>
     /// The table waits for typing to pause instead of redrawing per keystroke, and the
     /// box keeps the latest text throughout.
     /// </summary>
@@ -537,6 +567,47 @@ public sealed class UpgradesPageTests : IAsyncDisposable
 
         clock.Advance(TimeSpan.FromMinutes(3));
         cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(0, "a page left open must not re-read forever"));
+    }
+
+    /// <summary>
+    /// A re-read that fails stops the re-reading, and says so with a way to reload,
+    /// rather than leaving the table quietly stale (#1755).
+    /// </summary>
+    [Fact]
+    public async Task A_failed_re_read_says_the_page_may_be_out_of_date_and_offers_a_reload()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().ContainSingle());
+        cut.WaitForAssertion(() => BarButton(cut, "Refresh").Click());
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(1, "the refresh sets the re-read going"));
+
+        await using (var db = _db.NewContext())
+        {
+            // The next re-read cannot find the environments.
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_environments RENAME TO oe_project_environments_gone");
+        }
+        clock.Advance(TimeSpan.FromSeconds(20));
+
+        cut.WaitForAssertion(() =>
+        {
+            var notice = cut.Find(".upg-notice");
+            notice.TextContent.Should().Contain("Live updates stopped, so this page may be out of date.");
+            notice.QuerySelectorAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Reload now");
+        }, TimeSpan.FromSeconds(5));
+        clock.PendingTimers.Should().Be(0, "a failed re-read stops the re-reading");
+
+        // Once the page can read again, Reload now brings it up to date and the warning goes.
+        await using (var db = _db.NewContext())
+        {
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_environments_gone RENAME TO oe_project_environments");
+        }
+        cut.Find(".upg-notice button").Click();
+        cut.WaitForAssertion(() => cut.FindAll(".upg-notice").Should().BeEmpty(), TimeSpan.FromSeconds(5));
+        cut.FindAll(".data-table tbody tr").Should().ContainSingle();
     }
 
     // ── The solution's short name (#966) ───────────────────────────────

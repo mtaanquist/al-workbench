@@ -387,6 +387,29 @@ public sealed class ReleasePipelinesBrowserTests : IAsyncDisposable
         cut.WaitForAssertion(() => cut.Find("#rs-title").TextContent.Should().Be("Reschedule deployment"));
     }
 
+    /// <summary>
+    /// While something ships the list re-reads itself; a re-read that fails says the
+    /// list may be out of date rather than leaving it quietly stale (#1755).
+    /// </summary>
+    [Fact]
+    public async Task A_failed_live_update_says_the_list_may_be_out_of_date()
+    {
+        var s = await SeedFleetAsync();
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+        cut.WaitForAssertion(() => cut.FindAll("table.rp-list__wide tbody tr.is-running").Should().NotBeEmpty());
+
+        await using (var db = _db.NewContext())
+        {
+            // The next re-read cannot find the deployments.
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_deliveries RENAME TO oe_project_deliveries_gone");
+        }
+
+        cut.WaitForAssertion(
+            () => cut.Markup.Should().Contain(ReleasePipelinesBrowser.LiveUpdatesStopped),
+            TimeSpan.FromSeconds(15));
+    }
+
     [Fact]
     public async Task Each_row_says_what_is_shipping_what_failed_and_what_is_blocked_most_urgent_first()
     {
