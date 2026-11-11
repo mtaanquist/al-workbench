@@ -273,7 +273,11 @@
         }
         catch (Exception ex)
         {
-            Log.LogWarning(ex, "Could not tell whether GitHub is connected; the refresh button stays hidden.");
+            // Not knowing is not the same as "nothing is connected": hiding the button
+            // here would leave an editor with no button and no reason (#1752). Offer it,
+            // and let the refresh say what went wrong if it goes wrong again.
+            Log.LogWarning(ex, "Could not tell whether GitHub is connected; offering the refresh button anyway.");
+            _canRefreshFromRepositories = true;
         }
     }
 
