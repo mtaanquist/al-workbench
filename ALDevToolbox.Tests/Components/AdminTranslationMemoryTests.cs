@@ -166,7 +166,30 @@ public sealed class AdminTranslationMemoryTests : IDisposable
 
         cut.WaitForAssertion(() =>
             cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
-                .Should().BeTrue());
+                .Should().BeTrue("the organisation is connected; the page logged:\n"
+                    + _logs.ErrorsForFailureMessage(LogLevel.Warning)));
+    }
+
+    /// <summary>
+    /// A connection check that fails is not an answer, so it must not hide the button
+    /// the way "nothing is connected" does (#1752): the refresh reports its own failure.
+    /// </summary>
+    [Fact]
+    public async Task Refresh_from_repositories_is_still_offered_when_the_connection_check_fails()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            // The connection check reads the site's GitHub App settings; take them away.
+            await ctx.Database.ExecuteSqlRawAsync("ALTER TABLE system_settings RENAME TO system_settings_gone");
+        }
+
+        var cut = _ctx.Render<AdminTranslationMemory>();
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
+                .Should().BeTrue("the page logged:\n"
+                    + _logs.ErrorsForFailureMessage(LogLevel.Warning)));
+        _logs.Messages.Should().Contain(m => m.Contains("Could not tell whether GitHub is connected"));
     }
 
     [Fact]
@@ -179,6 +202,8 @@ public sealed class AdminTranslationMemoryTests : IDisposable
 
         cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
             .Should().BeFalse("a button whose only answer would be 'nothing is connected' is worse than none");
+        // And hidden because the check said so, not because it failed.
+        _logs.Messages.Should().NotContain(m => m.Contains("Could not tell whether GitHub is connected"));
     }
 
     [Fact]
