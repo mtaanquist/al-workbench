@@ -210,7 +210,18 @@ public sealed class RepositoriesListTests : IDisposable
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
         var cut = _ctx.Render<RepositoriesList>();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+        // Waits for the notice rather than the list: a GitHub check that threw would
+        // also leave the actions out, but it shows no notice, so this cannot pass by
+        // accident.
+        cut.WaitForAssertion(
+            () =>
+            {
+                cut.Markup.Should().Contain(RepoA);
+                cut.FindAll(".alert").Should().NotBeEmpty(
+                    "the page says why the GitHub actions are missing; it logged: {0}",
+                    _pageWarnings.IsEmpty ? "nothing" : string.Join(" | ", _pageWarnings));
+            },
+            WaitTimeout);
 
         cut.FindAll("button.menu__item").Select(b => b.TextContent).Should()
             .NotContain(t => t.Contains("pull request") || t.Contains("Check again"));
