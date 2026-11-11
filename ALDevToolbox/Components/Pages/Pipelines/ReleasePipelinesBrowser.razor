@@ -67,6 +67,10 @@
                 <span>@error</span>
             </Alert>
         }
+        @if (_liveUpdatesStopped)
+        {
+            <Alert Tone="AlertTone.Warn" Role="status"><span>@LiveUpdatesStopped</span></Alert>
+        }
         @if (_notice is { } notice)
         {
             <Alert Tone="AlertTone.Info" Role="status"><span>@notice</span></Alert>
@@ -494,6 +498,9 @@
     private ConfirmDialog? _archiveConfirm;
     private ConfirmDialog? _disableConfirm;
     private string? _error;
+    // Its own flag, not _error: other actions clear _error on success while the list is
+    // still stale, and only a fresh read of the list makes the warning untrue.
+    private bool _liveUpdatesStopped;
     // The solutions this person manages: Disable, Enable, Archive and Restore are offered
     // only on their rows. Nobody deletes a deployment pipeline: its history stays (#1466).
     private HashSet<int> _manageable = [];
@@ -538,6 +545,7 @@
         var projects = await Projects.ListProjectsAsync();
         _projectOptions = projects.Select(p => new PipelineProjectOption(p.Id, p.Name)).ToList();
         Apply(await Releases.ListReleasePipelineOverviewAsync(includeArchived: true));
+        _liveUpdatesStopped = false;
         _manageable = await Releases.ListManageableProjectIdsAsync(_all.Select(r => r.ProjectId).Distinct().ToList());
         EnsurePolling();
     }
@@ -921,6 +929,7 @@
         try
         {
             _notice = null;
+            _error = null;
             if (!await _rescheduleDialog.OpenAsync(deliveryId, secretExpiresAt: null))
             {
                 await ReloadAsync();
@@ -1069,7 +1078,7 @@
         {
             await InvokeAsync(() =>
             {
-                _error = LiveUpdatesStopped;
+                _liveUpdatesStopped = true;
                 StateHasChanged();
             });
         }
@@ -1106,7 +1115,7 @@
                 }
 
                 if (token.IsCancellationRequested) break;
-                await InvokeAsync(() => { Apply(rows); StateHasChanged(); });
+                await InvokeAsync(() => { Apply(rows); _liveUpdatesStopped = false; StateHasChanged(); });
                 if (!rows.Any(r => r.LiveDelivery is not null)) break;
             }
         }

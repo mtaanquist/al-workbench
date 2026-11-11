@@ -1070,7 +1070,12 @@
     }
 
     /// <summary>Re-reads the fleet now, for someone who doesn't want to wait for the next poll.</summary>
-    private async Task ReloadNowAsync() => await LoadAsync();
+    private async Task ReloadNowAsync()
+    {
+        await LoadAsync();
+        // The page is current again, so a warning that it may be stale no longer holds.
+        if (_notice?.Text == LiveUpdatesStopped) _notice = null;
+    }
 
     // ── Polling while a refresh is outstanding ──────────────────────────
     //

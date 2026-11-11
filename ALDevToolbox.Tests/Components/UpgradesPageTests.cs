@@ -569,6 +569,15 @@ public sealed class UpgradesPageTests : IAsyncDisposable
             notice.QuerySelectorAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Reload now");
         }, TimeSpan.FromSeconds(5));
         clock.PendingTimers.Should().Be(0, "a failed re-read stops the re-reading");
+
+        // Once the page can read again, Reload now brings it up to date and the warning goes.
+        await using (var db = _db.NewContext())
+        {
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_environments_gone RENAME TO oe_project_environments");
+        }
+        cut.Find(".upg-notice button").Click();
+        cut.WaitForAssertion(() => cut.FindAll(".upg-notice").Should().BeEmpty(), TimeSpan.FromSeconds(5));
+        cut.FindAll(".data-table tbody tr").Should().ContainSingle();
     }
 
     // ── The solution's short name (#966) ───────────────────────────────
