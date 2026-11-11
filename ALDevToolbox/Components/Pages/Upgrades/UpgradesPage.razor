@@ -711,6 +711,10 @@
     protected override async Task OnParametersSetAsync()
     {
         if (_denied || !_initialised) return;
+        // Only when the address changed. Blazor runs this once more as the first load
+        // ends, and re-reading then put the box back to the address's search, wiping
+        // whatever had been typed while the page was still loading (#1750).
+        if (QueryKey == _readQuery) return;
         var was = _view;
         ReadQuery();
         if (_view != was && Running)
@@ -737,8 +741,14 @@
         await _calls.LeaveAsync();
     }
 
+    /// <summary>The address's filters as last read into the page, so a pass that changes none of them changes nothing.</summary>
+    private (string?, string?, string?, string?) _readQuery;
+
+    private (string?, string?, string?, string?) QueryKey => (ViewName, Query, TypeFilter, WaitingFilter);
+
     private void ReadQuery()
     {
+        _readQuery = QueryKey;
         _view = ParseView(ViewName);
         _search = (Query ?? string.Empty).Trim();
         _type = (TypeFilter ?? string.Empty).Trim();
