@@ -14,6 +14,7 @@ using Bunit;
 using Bunit.TestDoubles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Organizations;
@@ -43,6 +44,12 @@ public sealed class UntrackedRepositoriesPanelTests : IDisposable
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
 
+    /// <summary>
+    /// What the panel logged. It catches a failed readiness check and simply stays
+    /// hidden, so without this a test that times out cannot say why (#1753).
+    /// </summary>
+    private readonly CapturingLoggerProvider _logs = new();
+
     public UntrackedRepositoriesPanelTests()
     {
         var auth = _ctx.AddAuthorization();
@@ -61,10 +68,8 @@ public sealed class UntrackedRepositoriesPanelTests : IDisposable
         _db.AddRepositoryReadProbe(_ctx.Services);
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
-        _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
-        _ctx.Services.AddSingleton(
-            typeof(Microsoft.Extensions.Logging.ILogger<>),
-            typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));
+        _ctx.Services.AddSingleton<ILoggerFactory>(LoggerFactory.Create(b => b.AddProvider(_logs)));
+        _ctx.Services.AddSingleton(typeof(ILogger<>), typeof(Logger<>));
 
         using var seed = _db.NewContext();
         seed.Users.Add(new User
@@ -95,8 +100,13 @@ public sealed class UntrackedRepositoriesPanelTests : IDisposable
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
         var cut = _ctx.Render<UntrackedRepositoriesPanel>();
+        // Once the readiness read has come back (the panel renders before it and once
+        // after), or "empty" would only mean "not decided yet".
+        cut.WaitForState(() => cut.RenderCount >= 2, WaitTimeout);
 
         cut.Markup.Trim().Should().BeEmpty("someone who cannot use this must not be shown machinery explaining it");
+        // Hidden because the check said no, not because it failed.
+        _logs.Messages.Should().NotContain(m => m.Contains("Could not tell whether"));
     }
 
     [Fact]
@@ -234,8 +244,11 @@ public sealed class UntrackedRepositoriesPanelTests : IDisposable
     private static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>Waits until the panel has rendered the repository row.</summary>
-    private static void WaitForListed(IRenderedComponent<UntrackedRepositoriesPanel> cut, string fullName) =>
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(fullName), WaitTimeout);
+    private void WaitForListed(IRenderedComponent<UntrackedRepositoriesPanel> cut, string fullName) =>
+        cut.WaitForAssertion(
+            () => cut.Markup.Should().Contain(fullName, "the panel logged:\n{0}",
+                string.Join("\n", _logs.Messages)),
+            WaitTimeout);
 
     /// <summary>A GitHub the acting user can open <paramref name="visible"/> on, and nothing else.</summary>
     private static FakeGitHubApi VisibleApi(params string[] visible)

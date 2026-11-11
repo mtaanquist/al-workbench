@@ -116,6 +116,9 @@ public sealed partial class GitHubTools
                     listing.Truncated
                         ? $"The organisation has more repositories on GitHub than this server reads, so a repository past the first {GitHubAppClient.MaxInstallationRepositories} by GitHub's order may be missing here."
                         : null,
+                    listing.Incomplete
+                        ? "GitHub stopped answering (usually a rate limit) while this list was checked against what the user can open, so some repositories may be missing. Try again in a minute."
+                        : null,
                 }.Where(n => n is not null)) is { Length: > 0 } note ? note : null);
         }
         catch (GitHubApiException ex)

@@ -481,10 +481,19 @@ public sealed class GitHubAccessService
     /// parallel calls is how you meet a secondary rate limit.</para>
     /// </summary>
     public async Task<IReadOnlyList<string>> FilterAccessibleAsync(
+        int userId, IEnumerable<string> repoFullNames, CancellationToken ct = default) =>
+        (await FilterAccessibleWithStateAsync(userId, repoFullNames, ct)).Visible;
+
+    /// <summary>
+    /// <see cref="FilterAccessibleAsync"/>, plus how many names were left out because
+    /// GitHub stopped answering before they were asked about, so a list can say it may
+    /// be missing some rather than look complete (#1754).
+    /// </summary>
+    public async Task<GitHubAccessibleRepositories> FilterAccessibleWithStateAsync(
         int userId, IEnumerable<string> repoFullNames, CancellationToken ct = default)
     {
         var candidates = repoFullNames?.Where(n => !string.IsNullOrWhiteSpace(n)).ToList() ?? [];
-        if (candidates.Count == 0) return [];
+        if (candidates.Count == 0) return new([], 0);
 
         // One resolve up front: no link means no repositories, and asking GitHub
         // once per row about a token we do not have is pure latency.
@@ -493,7 +502,7 @@ public sealed class GitHubAccessService
             _logger.LogInformation(
                 "User {UserId} has no usable GitHub link, so none of the {RepositoryCount} repositories are offered.",
                 userId, candidates.Count);
-            return [];
+            return new([], 0);
         }
 
         var reachable = await ReachableInstallationRepositoriesAsync(userId, ct);
@@ -534,7 +543,7 @@ public sealed class GitHubAccessService
         _logger.LogInformation(
             "User {UserId} can see {VisibleCount} of {RepositoryCount} repositories in the connected organisation.",
             userId, visible.Count, candidates.Count);
-        return visible;
+        return new(visible, unanswered);
     }
 
     /// <summary>
@@ -856,4 +865,14 @@ public sealed class GitHubAccessService
         _answers[key] = (answer, _clock.GetUtcNow());
         return answer;
     }
+}
+
+/// <summary>
+/// The repositories a person can open, and how many GitHub was not asked about
+/// because it had stopped answering. <see cref="Unanswered"/> above zero means the
+/// list may be missing some (#1754).
+/// </summary>
+public sealed record GitHubAccessibleRepositories(IReadOnlyList<string> Visible, int Unanswered)
+{
+    public bool Incomplete => Unanswered > 0;
 }

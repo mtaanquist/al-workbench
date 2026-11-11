@@ -1080,7 +1080,12 @@
     }
 
     /// <summary>Re-reads the fleet now, for someone who doesn't want to wait for the next poll.</summary>
-    private async Task ReloadNowAsync() => await LoadAsync();
+    private async Task ReloadNowAsync()
+    {
+        await LoadAsync();
+        // The page is current again, so a warning that it may be stale no longer holds.
+        if (_notice?.Text == LiveUpdatesStopped) _notice = null;
+    }
 
     // ── Polling while a refresh is outstanding ──────────────────────────
     //
@@ -1120,6 +1125,9 @@
     private bool PollPaused =>
         Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true || _appCadence?.IsOpen == true;
 
+    internal const string LiveUpdatesStopped =
+        "Live updates stopped, so this page may be out of date.";
+
     private async Task PollTickAsync()
     {
         if (_calls.IsGone || Clock.GetUtcNow().UtcDateTime > _pollUntilUtc)
@@ -1147,9 +1155,20 @@
         }
         catch (Exception ex)
         {
-            // A failed poll is not worth breaking the page over; stop asking.
+            // A failed poll is not worth breaking the page over; stop asking, and say so,
+            // or the page goes quietly stale (#1755).
             Log.LogWarning(ex, "The upgrades page stopped polling for refreshed environments.");
             StopPolling();
+            if (_calls.IsGone) return;
+            try
+            {
+                await InvokeAsync(() =>
+                {
+                    _notice = new UpgradeNotice(LiveUpdatesStopped, "warn", ShowReloadNow: true);
+                    StateHasChanged();
+                });
+            }
+            catch (ObjectDisposedException) { /* the page went while we were saying so */ }
         }
     }
 

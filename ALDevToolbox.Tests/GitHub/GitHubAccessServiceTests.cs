@@ -661,6 +661,50 @@ public sealed class GitHubAccessServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains("repos/cronus-dk/gamma"));
     }
 
+    /// <summary>
+    /// #1754: the names left out unasked are counted, so a list built from them can
+    /// say it may be missing some instead of looking complete.
+    /// </summary>
+    [Fact]
+    public async Task Filtering_says_how_many_were_left_out_once_github_stops_answering()
+    {
+        await ConfigureDeploymentAsync();
+        var api = LinkableApi()
+            .On(HttpMethod.Get, "repos/cronus-dk/alpha", HttpStatusCode.OK, "{}")
+            .OnWithHeaders(HttpMethod.Get, "repos/cronus-dk/beta", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+                [("retry-after", "60"), ("x-ratelimit-remaining", "4987")]))
+            .On(HttpMethod.Get, "repos/cronus-dk/gamma", HttpStatusCode.OK, "{}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        await service.LinkAsync("the-code");
+
+        var result = await service.FilterAccessibleWithStateAsync(
+            UserId, ["cronus-dk/alpha", "cronus-dk/beta", "cronus-dk/gamma"]);
+
+        result.Visible.Should().Equal("cronus-dk/alpha");
+        result.Unanswered.Should().Be(2, "beta got no answer and gamma was never asked");
+        result.Incomplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Filtering_that_got_every_answer_is_complete()
+    {
+        await ConfigureDeploymentAsync();
+        var api = LinkableApi()
+            .On(HttpMethod.Get, "repos/cronus-dk/alpha", HttpStatusCode.OK, "{}")
+            .On(HttpMethod.Get, "repos/cronus-dk/beta", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        await service.LinkAsync("the-code");
+
+        var result = await service.FilterAccessibleWithStateAsync(UserId, ["cronus-dk/alpha", "cronus-dk/beta"]);
+
+        result.Visible.Should().Equal("cronus-dk/alpha");
+        result.Incomplete.Should().BeFalse("a definite no is an answer");
+    }
+
     [Fact]
     public async Task Asking_the_same_question_twice_in_one_burst_only_asks_github_once()
     {
