@@ -623,7 +623,7 @@ public sealed class EnvironmentUpgradeService
             }
             if (!mayAct)
             {
-                refused[key] = $"You can't manage updates for {env.ProjectName}.";
+                refused[key] = $"You can't schedule upgrades for {env.ProjectName}.";
                 continue;
             }
 
@@ -857,7 +857,7 @@ public sealed class EnvironmentUpgradeService
             if (!mayAct)
             {
                 refused[Key(line.Id)] =
-                    $"You can't manage updates for {name.ProjectName}, so {name.EnvironmentName} was left as it was.";
+                    $"You can't schedule upgrades for {name.ProjectName}, so {name.EnvironmentName} was left as it was.";
                 continue;
             }
             allowed.Add(new BatchLine(line, name.EnvironmentName, name.ProjectName));

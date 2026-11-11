@@ -180,14 +180,14 @@ public static class McpToolCatalog
         new McpToolDescriptor("list_environment_history", Operations,
             "Lists what was done to an environment from the workbench, and by whom.", false, ToolKey.Projects),
         new McpToolDescriptor("list_upgrades", Operations,
-            "Lists the platform updates coming to each environment, and when. Needs permission to "
-            + "manage environment updates.", false, ToolKey.Projects),
+            "Lists the platform updates coming to each environment, and when. Needs the "
+            + "Can schedule upgrades permission.", false, ToolKey.Projects),
         new McpToolDescriptor("list_planned_upgrades", Operations,
             "Lists the planned upgrades, open and done, with how far each one has got. Needs "
-            + "permission to manage environment updates.", false, ToolKey.Projects),
+            + "the Can schedule upgrades permission.", false, ToolKey.Projects),
         new McpToolDescriptor("get_upgrade", Operations,
             "Shows one planned upgrade: each environment on it, where its update has got, and who "
-            + "checked it. Needs permission to manage environment updates.", false, ToolKey.Projects),
+            + "checked it. Needs the Can schedule upgrades permission.", false, ToolKey.Projects),
         new McpToolDescriptor("list_recent_deployments", Operations,
             "Lists recent deployments across all your customers, and why any of them failed.", false, ToolKey.Releases),
         new McpToolDescriptor("list_customer_contacts", Operations,

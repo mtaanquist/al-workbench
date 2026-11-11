@@ -258,7 +258,7 @@
         {
             return new($"On {owner.UpgradeName}", "upk-why upk-why--other");
         }
-        if (!row.CanAct) return new("You can't manage this solution's updates", "upk-why");
+        if (!row.CanAct) return new("You can't schedule upgrades for this solution", "upk-why");
         return null;
     }
 

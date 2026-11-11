@@ -147,7 +147,7 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
 
         result.Added.Should().Equal(allowed);
         result.Refused.Should().ContainKey(notAllowed.ToString())
-            .WhoseValue.Should().Contain("can't manage updates");
+            .WhoseValue.Should().Contain("can't schedule upgrades");
     }
 
     [Fact]

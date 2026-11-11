@@ -348,7 +348,7 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var act = () => NewTools(ctx).ListUpgradesAsync();
 
-        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("environment updates");
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("Can schedule upgrades");
     }
 
     // ── Planned upgrades ────────────────────────────────────────────────
@@ -473,9 +473,9 @@ public sealed class DeliverToolsTests : IDisposable
         var tools = NewTools(ctx);
 
         (await ((Func<Task>)(() => tools.ListPlannedUpgradesAsync())).Should().ThrowAsync<McpException>())
-            .Which.Message.Should().Contain("environment updates");
+            .Which.Message.Should().Contain("Can schedule upgrades");
         (await ((Func<Task>)(() => tools.GetUpgradeAsync(id))).Should().ThrowAsync<McpException>())
-            .Which.Message.Should().Contain("environment updates");
+            .Which.Message.Should().Contain("Can schedule upgrades");
     }
 
     // ── list_recent_deliveries ──────────────────────────────────────────

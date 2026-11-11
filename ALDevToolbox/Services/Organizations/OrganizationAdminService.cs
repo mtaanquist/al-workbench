@@ -550,6 +550,55 @@ public sealed class OrganizationAdminService
     }
 
     /// <summary>
+    /// Where this organisation's "Can schedule upgrades" grant counts
+    /// (<see cref="OrganizationSettings.UpgradePermissionScope"/>). An org with no
+    /// settings row reads as the default, <see cref="UpgradePermissionScope.AssignedTeams"/>.
+    /// </summary>
+    public async Task<UpgradePermissionScope> GetUpgradePermissionScopeAsync(CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        return await _db.OrganizationSettings.AsNoTracking()
+            .Where(s => s.OrganizationId == orgId)
+            .Select(s => (UpgradePermissionScope?)s.UpgradePermissionScope)
+            .FirstOrDefaultAsync(ct) ?? UpgradePermissionScope.AssignedTeams;
+    }
+
+    /// <summary>
+    /// Sets where this organisation's "Can schedule upgrades" grant counts. A value that
+    /// is not a defined level is refused under <c>UpgradePermissionScope</c>. Takes
+    /// effect for each member on their next page load, when their access is read again.
+    /// Audited through the interceptor like the other settings columns. See
+    /// <c>.design/teams-and-visibility.md</c>, "The environment-update grant".
+    /// </summary>
+    public async Task SetUpgradePermissionScopeAsync(UpgradePermissionScope scope, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        if (!Enum.IsDefined(scope))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["UpgradePermissionScope"] = "Choose one of the listed options.",
+            });
+        }
+
+        var row = await _db.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
+        if (row is null)
+        {
+            row = new OrganizationSettings { OrganizationId = orgId };
+            _db.OrganizationSettings.Add(row);
+        }
+        else if (row.UpgradePermissionScope == scope)
+        {
+            return;
+        }
+        row.UpgradePermissionScope = scope;
+        row.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _config.InvalidateCache(orgId);
+        _logger.LogInformation("Org {OrgId} set upgrade_permission_scope = {Scope}.", orgId, scope);
+    }
+
+    /// <summary>
     /// The current org's per-tool state for Administration → Tools: whether MCP
     /// is on, and the stored disabled-tool set (kept whole, including tools that
     /// are hidden site-wide, so a later site re-enable keeps this org's choice).
