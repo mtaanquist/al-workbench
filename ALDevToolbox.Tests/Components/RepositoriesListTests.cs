@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using ALDevToolbox.Components.Pages.Repositories;
 using ALDevToolbox.Domain.Entities;
@@ -17,6 +18,7 @@ using Bunit;
 using Bunit.TestDoubles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Components;
@@ -46,6 +48,13 @@ public sealed class RepositoriesListTests : IDisposable
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
 
+    /// <summary>
+    /// What the page logged. It swallows a failed load and a failed GitHub check
+    /// (logging a warning and leaving the actions out), so without this a test that
+    /// finds no actions cannot say why (#1742).
+    /// </summary>
+    private readonly ConcurrentQueue<string> _pageWarnings = new();
+
     public RepositoriesListTests()
     {
         var auth = _ctx.AddAuthorization();
@@ -69,8 +78,9 @@ public sealed class RepositoriesListTests : IDisposable
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(
-            typeof(Microsoft.Extensions.Logging.ILogger<>),
-            typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));
+            typeof(ILogger<>),
+            typeof(NullLogger<>));
+        _ctx.Services.AddSingleton<ILogger<RepositoriesList>>(new WarningLog(_pageWarnings));
 
         using var seed = _db.NewContext();
         seed.Users.Add(new User
@@ -149,7 +159,7 @@ public sealed class RepositoriesListTests : IDisposable
         _db.AddGitHubServices(_ctx.Services, WritableApi());
 
         var cut = _ctx.Render<RepositoriesList>();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+        WaitForGitHubActions(cut);
         await cut.Find("button.menu__item:contains('Create app.json pull request')").ClickAsync(new());
 
         cut.WaitForAssertion(
@@ -179,7 +189,7 @@ public sealed class RepositoriesListTests : IDisposable
         _db.AddGitHubServices(_ctx.Services, WritableApi());
 
         var cut = _ctx.Render<RepositoriesList>();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+        WaitForGitHubActions(cut);
 
         var behind = cut.FindAll("tbody tr").Single(r => r.TextContent.Contains("payment-import"));
         behind.TextContent.Should().Contain("2 files to update");
@@ -200,7 +210,18 @@ public sealed class RepositoriesListTests : IDisposable
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
         var cut = _ctx.Render<RepositoriesList>();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+        // Waits for the notice rather than the list: a GitHub check that threw would
+        // also leave the actions out, but it shows no notice, so this cannot pass by
+        // accident.
+        cut.WaitForAssertion(
+            () =>
+            {
+                cut.Markup.Should().Contain(RepoA);
+                cut.FindAll(".alert").Should().NotBeEmpty(
+                    "the page says why the GitHub actions are missing; it logged: {0}",
+                    _pageWarnings.IsEmpty ? "nothing" : string.Join(" | ", _pageWarnings));
+            },
+            WaitTimeout);
 
         cut.FindAll("button.menu__item").Select(b => b.TextContent).Should()
             .NotContain(t => t.Contains("pull request") || t.Contains("Check again"));
@@ -208,6 +229,41 @@ public sealed class RepositoriesListTests : IDisposable
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Waits until the rows carry their GitHub actions. "Check again" is on every
+    /// GitHub row once the page has decided the person can act on GitHub, so it is
+    /// the signal that loading is complete. When the decision went the other way,
+    /// the failure carries the warning the page logged (the check threw) or the
+    /// notice it shows (the check said no) instead of an empty menu.
+    /// </summary>
+    private void WaitForGitHubActions(IRenderedComponent<RepositoriesList> cut) =>
+        cut.WaitForAssertion(
+            () => cut.FindAll("button.menu__item").Select(b => b.TextContent).Should().Contain(
+                "Check again",
+                "the page shows GitHub actions once it has loaded for a linked user; it logged: {0}; its notices: {1}",
+                _pageWarnings.IsEmpty ? "nothing" : string.Join(" | ", _pageWarnings),
+                string.Join(" | ", cut.FindAll(".alert").Select(a => a.TextContent.Trim()))),
+            WaitTimeout);
+
+    /// <summary>Keeps the page's warnings and errors, exception included.</summary>
+    private sealed class WarningLog : ILogger<RepositoriesList>
+    {
+        private readonly ConcurrentQueue<string> _sink;
+
+        public WarningLog(ConcurrentQueue<string> sink) => _sink = sink;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel)) _sink.Enqueue(exception is null ? formatter(state, null) : $"{formatter(state, exception)} {exception}");
+        }
+    }
 
     private static FakeGitHubApi WritableApi()
     {
