@@ -33,7 +33,8 @@ public sealed record UntrackedRepositoryRow(
 public sealed record UntrackedRepositoriesView(
     IReadOnlyList<UntrackedRepositoryRow> Rows,
     string? OrgLogin,
-    string? SuggestedCountry);
+    string? SuggestedCountry,
+    bool Incomplete = false);
 
 /// <summary>
 /// Finds the AL repositories in the connected GitHub organisation that no
@@ -356,8 +357,8 @@ public sealed class RepositoryDiscoveryService
             return new UntrackedRepositoriesView([], status.OrgLogin, country);
         }
 
-        var visible = (await _access.FilterAccessibleAsync(userId, untracked.Select(c => c.FullName), ct))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var filtered = await _access.FilterAccessibleWithStateAsync(userId, untracked.Select(c => c.FullName), ct);
+        var visible = filtered.Visible.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var rows = untracked
             .Where(c => visible.Contains(c.FullName))
@@ -373,7 +374,7 @@ public sealed class RepositoryDiscoveryService
         _logger.LogInformation(
             "Offering {OfferedCount} untracked AL repositories of {CandidateCount} to user {UserId}.",
             rows.Count, candidates.Count, userId);
-        return new UntrackedRepositoriesView(rows, status.OrgLogin, country);
+        return new UntrackedRepositoriesView(rows, status.OrgLogin, country, filtered.Incomplete);
     }
 
     // ── What a person decides ────────────────────────────────────────────

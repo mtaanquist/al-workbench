@@ -132,8 +132,8 @@ public sealed class GitHubRepositoryService
         var token = await _github.GetInstallationTokenAsync(installationId.Value, ct);
         var listing = await _github.ListInstallationRepositoriesAsync(token, ct);
         var all = listing.Repositories;
-        var visible = await _access.FilterAccessibleAsync(userId, all.Select(r => r.FullName), ct);
-        var allowed = visible.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var filtered = await _access.FilterAccessibleWithStateAsync(userId, all.Select(r => r.FullName), ct);
+        var allowed = filtered.Visible.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var offered = all
             .Where(r => allowed.Contains(r.FullName))
@@ -143,7 +143,7 @@ public sealed class GitHubRepositoryService
         _logger.LogInformation(
             "Offering {OfferedCount} of the installation's {RepositoryCount} repositories to user {UserId}.",
             offered.Count, all.Count, userId);
-        return new GitHubInstallationRepositories(offered, listing.Truncated);
+        return new GitHubInstallationRepositories(offered, listing.Truncated, filtered.Incomplete);
     }
 
     /// <summary>

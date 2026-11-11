@@ -46,10 +46,15 @@ public sealed record GitHubUserTokens(
 /// the rest" and "there are more than we read", and the two are not the same
 /// thing to say to a person looking at a repository that is missing from a
 /// list.</para>
+///
+/// <para><see cref="Incomplete"/> is a third reason a repository can be missing:
+/// GitHub stopped answering while the list was narrowed to what the person can
+/// open, so the ones it was not asked about were left out (#1754).</para>
 /// </summary>
 public sealed record GitHubInstallationRepositories(
     IReadOnlyList<GitHubRepositorySummary> Repositories,
-    bool Truncated);
+    bool Truncated,
+    bool Incomplete = false);
 
 /// <summary>Who a user-to-server token belongs to: GitHub's stable numeric id and the renameable login.</summary>
 public sealed record GitHubUserIdentity(long Id, string Login);
