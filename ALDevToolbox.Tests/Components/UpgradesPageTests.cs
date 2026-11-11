@@ -539,6 +539,38 @@ public sealed class UpgradesPageTests : IAsyncDisposable
         cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(0, "a page left open must not re-read forever"));
     }
 
+    /// <summary>
+    /// A re-read that fails stops the re-reading, and says so with a way to reload,
+    /// rather than leaving the table quietly stale (#1755).
+    /// </summary>
+    [Fact]
+    public async Task A_failed_re_read_says_the_page_may_be_out_of_date_and_offers_a_reload()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().ContainSingle());
+        cut.WaitForAssertion(() => BarButton(cut, "Refresh").Click());
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(1, "the refresh sets the re-read going"));
+
+        await using (var db = _db.NewContext())
+        {
+            // The next re-read cannot find the environments.
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_environments RENAME TO oe_project_environments_gone");
+        }
+        clock.Advance(TimeSpan.FromSeconds(20));
+
+        cut.WaitForAssertion(() =>
+        {
+            var notice = cut.Find(".upg-notice");
+            notice.TextContent.Should().Contain("Live updates stopped, so this page may be out of date.");
+            notice.QuerySelectorAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Reload now");
+        }, TimeSpan.FromSeconds(5));
+        clock.PendingTimers.Should().Be(0, "a failed re-read stops the re-reading");
+    }
+
     // ── The solution's short name (#966) ───────────────────────────────
 
     [Fact]

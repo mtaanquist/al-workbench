@@ -935,6 +935,8 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Failed to open the reschedule dialog for delivery {DeliveryId}.", deliveryId);
+            // Not left silent, or the click looks like it did nothing (#1755).
+            _error = "Couldn't open the reschedule dialog. Try again, and if it keeps failing tell an administrator.";
         }
     }
 
@@ -1060,6 +1062,23 @@
 
     // ── Live polling while something ships ───────────────────────────────────
 
+    private async Task ShowLiveUpdatesStoppedAsync()
+    {
+        if (_calls.IsGone) return;
+        try
+        {
+            await InvokeAsync(() =>
+            {
+                _error = LiveUpdatesStopped;
+                StateHasChanged();
+            });
+        }
+        catch (ObjectDisposedException) { /* the page went while we were saying so */ }
+    }
+
+    internal const string LiveUpdatesStopped =
+        "Live updates stopped, so this list may be out of date. Reload the page to see the latest.";
+
     private void EnsurePolling()
     {
         // A load that comes back after the page has gone must not start a timer.
@@ -1096,6 +1115,8 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Deployment pipeline list poll failed.");
+            // Say so, or the list goes quietly stale while a deployment runs (#1755).
+            await ShowLiveUpdatesStoppedAsync();
         }
         finally
         {
