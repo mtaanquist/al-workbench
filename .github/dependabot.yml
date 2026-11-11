@@ -4,6 +4,10 @@
 # regenerates packages.lock.json, so a bump is a reviewable diff rather than a
 # surprise on main. See the Restore step in build.yml for why locked mode is
 # not used.
+#
+# GitHub Actions bumps are grouped too. main requires branches to be up to date
+# before merge, so every separate PR means another "Update branch" and CI run
+# after each merge; two PRs a week keeps that to one.
 version: 2
 updates:
   - package-ecosystem: nuget
@@ -20,3 +24,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    groups:
+      github-actions:
+        patterns:
+          - "*"
