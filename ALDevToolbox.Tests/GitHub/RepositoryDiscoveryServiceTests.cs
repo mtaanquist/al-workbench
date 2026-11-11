@@ -286,6 +286,41 @@ public sealed class RepositoryDiscoveryServiceTests : IDisposable
         view.Rows.Select(r => r.FullName).Should().Equal(RepoB);
     }
 
+    /// <summary>
+    /// GitHub stopping partway through is not "every repository you can see has a
+    /// solution": the view says the list may be missing some (#1754).
+    /// </summary>
+    [Fact]
+    public async Task A_list_github_stopped_answering_part_way_through_is_marked_incomplete()
+    {
+        await ReadyAsync();
+        await SeedCandidatesAsync();
+        var api = SweepableApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(RepoA))
+            .OnWithHeaders(HttpMethod.Get, $"/repos/{RepoB}", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+                [("retry-after", "60"), ("x-ratelimit-remaining", "4987")]));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var view = await service.ListUntrackedAsync();
+
+        view.Incomplete.Should().BeTrue();
+        view.Rows.Select(r => r.FullName).Should().NotContain(RepoB);
+    }
+
+    [Fact]
+    public async Task A_list_with_every_answer_is_not_marked_incomplete()
+    {
+        await ReadyAsync();
+        await SeedCandidatesAsync();
+        var (service, ctx) = NewService(VisibleToUserApi(RepoB));
+        await using var _ = ctx;
+
+        (await service.ListUntrackedAsync()).Incomplete.Should().BeFalse("a 404 is a definite no");
+    }
+
     [Fact]
     public async Task An_ignored_candidate_is_not_offered()
     {

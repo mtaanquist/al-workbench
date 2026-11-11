@@ -90,6 +90,12 @@
                 </span>
             </Alert>
         }
+        else if (_rows.Count == 0 && _incomplete)
+        {
+            @* Not "every repository has a solution": that would be a claim about the
+               ones GitHub was never asked about (#1754). *@
+            <p class="field__hint">@IncompleteNote <button type="button" class="btn btn--sm" @onclick="ReloadAsync">Try again</button></p>
+        }
         else if (_rows.Count == 0)
         {
             <p class="untracked-repos__none">
@@ -161,6 +167,10 @@
                     </li>
                 }
             </ul>
+            @if (_incomplete)
+            {
+                <p class="field__hint">@IncompleteNote <button type="button" class="btn btn--sm" @onclick="ReloadAsync">Try again</button></p>
+            }
         }
     </section>
 }
@@ -175,6 +185,10 @@
     private string? _orgLogin;
     private string? _suggestedCountry;
     private IReadOnlyList<UntrackedRepositoryRow> _rows = [];
+    private bool _incomplete;
+
+    private const string IncompleteNote =
+        "GitHub stopped answering partway through, so some repositories may be missing here.";
 
     private int? _trackingId;
     private bool _creating;
@@ -239,6 +253,7 @@
         {
             var view = await ReadAsync(s => s.ListUntrackedAsync(_gone.Token));
             _rows = view.Rows;
+            _incomplete = view.Incomplete;
             _orgLogin = view.OrgLogin;
             _suggestedCountry = view.SuggestedCountry;
         }
