@@ -20,14 +20,14 @@ internal sealed class OrganizationConfiguration : IEntityTypeConfiguration<Organ
         entity.Property(e => e.McpEnabled).HasColumnName("mcp_enabled").IsRequired().HasDefaultValue(true);
         // text[] of ToolKey names; empty-array default so existing orgs backfill
         // with every tool on. See Domain/Tools/ToolCatalog.cs.
-        entity.Property(e => e.DisabledTools)
+        entity.PrimitiveCollection(e => e.DisabledTools)
             .HasColumnName("disabled_tools")
             .HasColumnType("text[]")
             .HasDefaultValueSql("'{}'::text[]")
             .IsRequired();
         // Same shape as disabled_tools: the tools that ask for a recent
         // second factor before use. See StepUpAuth.
-        entity.Property(e => e.StepUpTools)
+        entity.PrimitiveCollection(e => e.StepUpTools)
             .HasColumnName("step_up_tools")
             .HasColumnType("text[]")
             .HasDefaultValueSql("'{}'::text[]")

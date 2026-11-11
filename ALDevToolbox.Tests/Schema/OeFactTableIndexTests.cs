@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace ALDevToolbox.Tests.Schema;
 
@@ -36,7 +37,7 @@ public sealed class OeFactTableIndexTests
         foreach (var entity in entities)
         {
             var bare = entity.GetIndexes()
-                .Where(i => i.Properties.Count == 1 && i.Properties[0].GetColumnName() == "organization_id")
+                .Where(i => i.Properties.Count == 1 && ((IReadOnlyProperty)i.Properties[0]).GetColumnName() == "organization_id")
                 .ToList();
             bare.Should().BeEmpty($"{entity.GetTableName()} must not index organization_id alone (#691)");
 
@@ -69,7 +70,7 @@ public sealed class OeFactTableIndexTests
         var uncovered = ctx.Model.GetEntityTypes()
             .Where(e => e.GetTableName() is not null && !FactTables.Contains(e.GetTableName()))
             .SelectMany(e => e.GetForeignKeys().Select(fk => (Entity: e, Fk: fk)))
-            .Where(x => !x.Entity.GetIndexes().Any(i => Covers(i.Properties, x.Fk.Properties))
+            .Where(x => !x.Entity.GetIndexes().Any(i => Covers(i.Properties.Cast<IReadOnlyProperty>().ToList(), x.Fk.Properties))
                         && !x.Entity.GetKeys().Any(k => Covers(k.Properties, x.Fk.Properties)))
             .Select(x => $"{x.Entity.GetTableName()}({string.Join(",", x.Fk.Properties.Select(p => p.GetColumnName()))})")
             .OrderBy(s => s)

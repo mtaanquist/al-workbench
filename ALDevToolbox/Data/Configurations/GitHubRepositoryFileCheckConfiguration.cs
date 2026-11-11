@@ -13,8 +13,8 @@ internal sealed class GitHubRepositoryFileCheckConfiguration : IEntityTypeConfig
         entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
         entity.Property(e => e.OrganizationId).HasColumnName("organization_id").IsRequired();
         entity.Property(e => e.Repository).HasColumnName("repository").HasMaxLength(300).IsRequired();
-        entity.Property(e => e.MissingPaths).HasColumnName("missing_paths").IsRequired();
-        entity.Property(e => e.ChangedPaths).HasColumnName("changed_paths").IsRequired();
+        entity.PrimitiveCollection(e => e.MissingPaths).HasColumnName("missing_paths").IsRequired();
+        entity.PrimitiveCollection(e => e.ChangedPaths).HasColumnName("changed_paths").IsRequired();
         entity.Property(e => e.PullRequestNumber).HasColumnName("pull_request_number");
         entity.Property(e => e.PullRequestUrl).HasColumnName("pull_request_url").HasMaxLength(500);
         entity.Property(e => e.CheckedAt).HasColumnName("checked_at").IsRequired();

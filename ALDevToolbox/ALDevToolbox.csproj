@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- The project prizes nullable discipline, so fail the build on nullable
@@ -63,8 +63,8 @@
          (autolinks, fenced code, tables). Safe HTML output by default; we
          render through a sanitising pipeline in MarkdownRenderer. -->
     <PackageReference Include="Markdig" Version="1.5.1" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.14" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.14" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="11.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="11.0.0-rc.3.26522.148" />
     <PackageReference Include="MimeKit" Version="4.18.2" />
     <!-- Model Context Protocol — bearer-token HTTP server mounted at /mcp,
          consumed by AI clients (Claude Desktop, Cursor, VS Code Copilot
@@ -84,11 +84,11 @@
          10.0.x patch can land in one project's restore before the other's and
          the mismatch fails the test build with CS1705. Bump in lockstep with
          the EF Core refs in ALDevToolbox.Tests.csproj. -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.14">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="11.0.0-rc.3.26522.148">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="11.0.0-rc.3" />
     <!-- TOTP (RFC 6238) primitives — pure managed, no native deps. -->
     <PackageReference Include="Otp.NET" Version="1.4.1" />
     <!-- QR PNG for the TOTP setup page so we don't ship a JS QR library. This

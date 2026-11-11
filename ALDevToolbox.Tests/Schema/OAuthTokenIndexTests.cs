@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace ALDevToolbox.Tests.Schema;
 
@@ -22,7 +23,7 @@ public sealed class OAuthTokenIndexTests
         var tokens = ctx.Model.GetEntityTypes().Single(e => e.GetTableName() == "oauth_tokens");
 
         tokens.GetIndexes()
-            .Should().Contain(i => i.Properties[0].GetColumnName() == "subject"
+            .Should().Contain(i => ((IReadOnlyProperty)i.Properties[0]).GetColumnName() == "subject"
                 && i.GetDatabaseName() == "ix_oauth_tokens_subject");
     }
 }

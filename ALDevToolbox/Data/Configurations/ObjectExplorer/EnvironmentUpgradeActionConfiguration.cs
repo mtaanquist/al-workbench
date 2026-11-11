@@ -62,7 +62,7 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // A booked AppSource update (#1001): the app's name for the lists, and the
         // prerequisites the person agreed to, which the worker holds Business Central to.
         entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);
-        entity.Property(e => e.PrerequisiteAppIds).HasColumnName("update_prerequisite_app_ids").HasColumnType("uuid[]");
+        entity.PrimitiveCollection(e => e.PrerequisiteAppIds).HasColumnName("update_prerequisite_app_ids").HasColumnType("uuid[]");
 
         // No concurrency-token column: see the entity's remarks. The one race on this
         // table — the worker claiming a row while somebody cancels it — is decided by a

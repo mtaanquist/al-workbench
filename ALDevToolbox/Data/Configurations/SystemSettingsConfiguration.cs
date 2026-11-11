@@ -51,7 +51,7 @@ internal sealed class SystemSettingsConfiguration : IEntityTypeConfiguration<Sys
             .HasSentinel((Microsoft.Extensions.Logging.LogLevel)(-1));
         // text[] of ToolKey names; empty-array default backfills the singleton
         // row so every tool stays on after the migration. See Domain/Tools/ToolCatalog.cs.
-        entity.Property(e => e.DisabledTools)
+        entity.PrimitiveCollection(e => e.DisabledTools)
             .HasColumnName("disabled_tools")
             .HasColumnType("text[]")
             .HasDefaultValueSql("'{}'::text[]")

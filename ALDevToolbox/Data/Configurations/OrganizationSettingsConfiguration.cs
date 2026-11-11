@@ -27,7 +27,7 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
         // text[] gives us native Postgres array semantics; the value comparer
         // round-trips through a List<string> on the C# side without needing a
         // JSON value converter.
-        entity.Property(e => e.DefaultSupportedCountries)
+        entity.PrimitiveCollection(e => e.DefaultSupportedCountries)
             .HasColumnName("default_supported_countries")
             .HasColumnType("text[]")
             .IsRequired();
@@ -82,7 +82,7 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
             .HasColumnName("agents_may_deploy_to_production").IsRequired().HasDefaultValue(false);
         // text[] like default_supported_countries; empty array default so the
         // NOT NULL column backfills on existing rows (empty = all providers allowed).
-        entity.Property(e => e.AllowedRepositoryProviders)
+        entity.PrimitiveCollection(e => e.AllowedRepositoryProviders)
             .HasColumnName("allowed_repository_providers")
             .HasColumnType("text[]")
             .HasDefaultValueSql("'{}'::text[]")
@@ -91,7 +91,7 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
             .HasColumnName("entra_enabled").IsRequired().HasDefaultValue(false);
         // text[] like default_supported_countries; empty array default so the
         // NOT NULL column backfills on existing rows.
-        entity.Property(e => e.EntraAllowedTenantIds)
+        entity.PrimitiveCollection(e => e.EntraAllowedTenantIds)
             .HasColumnName("entra_allowed_tenant_ids")
             .HasColumnType("text[]")
             .HasDefaultValueSql("'{}'::text[]")
