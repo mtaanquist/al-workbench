@@ -970,6 +970,7 @@
                         <EnvironmentOperationsList Operations="_operations"
                                                    EnvironmentName="@Row.EnvironmentName"
                                                    AppName="AppNameFor"
+                                                   StartedBy="_operationStarters"
                                                    HistoryHref="@TabHref(Section.History)" />
                     }
                 }
@@ -1215,6 +1216,7 @@
     private int? _loadedId;
 
     private List<BcEnvironmentOperation>? _operations;
+    private Dictionary<string, string>? _operationStarters;
     private bool _operationsLoading;
     private string? _operationsError;
     private DateTime? _operationsFetchedAt;
@@ -1432,6 +1434,27 @@
         }
     }
 
+    /// <summary>
+    /// Names the operations this workbench started, from our own records. Only a nicer
+    /// label: if it fails, the list shows what Business Central said.
+    /// </summary>
+    private async Task LoadOperationStartersAsync(List<BcEnvironmentOperation> operations)
+    {
+        try
+        {
+            _operationStarters = await Read(ct => Connection.DescribeOperationStartersAsync(Row.ProjectId, Id, operations, ct));
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Failed to name who started the operations for environment {EnvId}.", Id);
+            _operationStarters = null;
+        }
+    }
+
     private async Task LoadOperationsAsync()
     {
         _operationsLoading = true;
@@ -1441,6 +1464,7 @@
         {
             _operations = await Read(ct => Connection.ListEnvironmentOperationsAsync(Row.ProjectId, Id, ct));
             _operationsFetchedAt = Clock.GetUtcNow().UtcDateTime;
+            await LoadOperationStartersAsync(_operations);
         }
         catch (PlanValidationException ex)
         {

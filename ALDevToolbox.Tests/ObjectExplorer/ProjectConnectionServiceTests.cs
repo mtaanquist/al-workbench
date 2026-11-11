@@ -2178,6 +2178,170 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             .Which.Errors.Values.Should().Contain("Business Central refused: no admin access.");
     }
 
+    // ── Naming who started an operation ──────────────────────────────────
+
+    private const string SolutionClientId = "11111111-2222-3333-4444-555555555555";
+
+    private static BcEnvironmentOperation StartedOp(string type, string createdBy, DateTimeOffset at, Guid? id = null) => new(
+        (id ?? Guid.NewGuid()).ToString(), type, "succeeded", at, at, at.AddMinutes(1),
+        createdBy, string.Empty, new Dictionary<string, string>());
+
+    private async Task<(int ProjectId, OeProjectEnvironment Env)> SeedConnectedEnvironmentAsync()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        var admin = new FakeAdminClient { OnList = () => new[] { new BcEnvironment("Production", "Production") } };
+        return (id, await RefreshAndReadRowAsync(id, admin));
+    }
+
+    private async Task SeedActionAsync(
+        int projectId, int envId, UpgradeActionKind kind, string requestedBy, DateTime sentAt, Guid? operationId = null)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            EnvironmentId = envId,
+            Kind = kind,
+            Status = UpgradeActionStatus.Sent,
+            RequestedBy = requestedBy,
+            RequestedAt = sentAt,
+            ExecuteAfter = sentAt,
+            SentAt = sentAt,
+            BcOperationId = operationId,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task An_operation_started_by_our_app_registration_reads_as_AL_Workbench_with_who_asked()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        var installId = Guid.NewGuid();
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.UploadApp, "Ada Lovelace <ada@cronus.example>", at.UtcDateTime, installId);
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime.AddHours(2).AddSeconds(20));
+
+        var install = StartedOp("environmentAppInstall", SolutionClientId.ToUpperInvariant(), at.AddMinutes(10), installId);
+        var dateMove = StartedOp("modify", SolutionClientId, at.AddHours(2));
+        var restart = StartedOp("restart", SolutionClientId, at.AddHours(5));
+        var someoneElse = StartedOp("modify", "ops@cronus.example", at.AddHours(2));
+
+        await using var read = _db.NewContext();
+        var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(
+            id, env.Id, [install, dateMove, restart, someoneElse]);
+
+        labels.Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            [install.Id] = "AL Workbench (Ada Lovelace)",
+            [dateMove.Id] = "AL Workbench (Grace Hopper)",
+            [restart.Id] = "AL Workbench",
+        });
+    }
+
+    [Fact]
+    public async Task An_install_from_a_pipeline_deployment_names_whoever_started_the_deployment()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var operationId = Guid.NewGuid();
+        await SeedDeliveredAppAsync(id, env.Name, Guid.NewGuid(), operationId, OwnerUserId);
+        string owner;
+        await using (var ctx = _db.NewContext())
+            owner = await ctx.Users.AsNoTracking().Where(u => u.Id == OwnerUserId).Select(u => u.DisplayName).SingleAsync();
+
+        var install = StartedOp("environmentAppInstall", SolutionClientId, new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero), operationId);
+
+        await using var read = _db.NewContext();
+        (await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [install]))
+            .Should().ContainKey(install.Id).WhoseValue.Should().Be($"AL Workbench ({owner})");
+    }
+
+    [Fact]
+    public async Task An_action_sent_well_apart_from_the_operation_does_not_name_its_starter()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime.AddMinutes(10));
+
+        var dateMove = StartedOp("modify", SolutionClientId, at);
+
+        await using var read = _db.NewContext();
+        (await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [dateMove]))
+            .Should().ContainKey(dateMove.Id).WhoseValue.Should().Be("AL Workbench");
+    }
+
+    [Fact]
+    public async Task One_action_names_one_operation_and_never_one_on_another_environment()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        int otherEnvId;
+        await using (var ctx = _db.NewContext())
+        {
+            var other = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, Name = "Sandbox", Type = "Sandbox",
+            };
+            ctx.OeProjectEnvironments.Add(other);
+            await ctx.SaveChangesAsync();
+            otherEnvId = other.Id;
+        }
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime);
+        await SeedActionAsync(id, otherEnvId, UpgradeActionKind.PushDateToLatest, "Ada Lovelace <ada@cronus.example>", at.UtcDateTime.AddSeconds(30));
+
+        var first = StartedOp("modify", SolutionClientId, at.AddSeconds(5));
+        var second = StartedOp("modify", SolutionClientId, at.AddSeconds(30));
+        var notAGuid = StartedOp("modify", "SYSTEM", at);
+
+        await using var read = _db.NewContext();
+        var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [first, second, notAGuid]);
+
+        labels.Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            [first.Id] = "AL Workbench (Grace Hopper)",
+            [second.Id] = "AL Workbench",
+        });
+    }
+
+    [Fact]
+    public async Task The_organisations_app_registration_is_recognised_as_well_as_the_solutions_own()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        const string orgClient = "103da8d4-b842-46aa-9b1a-e8317721130e";
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.OrganizationSettings.SingleOrDefaultAsync(o => o.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                ctx.OrganizationSettings.Add(settings);
+            }
+            settings.BcClientId = orgClient;
+            await ctx.SaveChangesAsync();
+        }
+
+        try
+        {
+            var op = StartedOp("restart", orgClient, new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero));
+            var stranger = StartedOp("restart", Guid.NewGuid().ToString(), new DateTimeOffset(2026, 9, 3, 9, 0, 0, TimeSpan.Zero));
+
+            await using var read = _db.NewContext();
+            var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [op, stranger]);
+
+            labels.Should().ContainKey(op.Id).WhoseValue.Should().Be("AL Workbench");
+            labels.Should().NotContainKey(stranger.Id);
+        }
+        finally
+        {
+            // The rest of the class expects an organisation without a registration of its own.
+            await using var reset = _db.NewContext();
+            await reset.OrganizationSettings.Where(o => o.OrganizationId == TestDb.DefaultOrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.BcClientId, (string?)null));
+        }
+    }
+
     private static BcEnvironmentOperation Operation(string type, int day) => new(
         Guid.NewGuid().ToString(), type, "succeeded",
         new DateTimeOffset(2026, 9, day, 8, 0, 0, TimeSpan.Zero), null, null,
@@ -3257,7 +3421,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     /// <summary>Records a delivery that put <paramref name="appId"/> onto the environment.</summary>
-    private async Task SeedDeliveredAppAsync(int projectId, string environmentName, Guid appId)
+    private async Task SeedDeliveredAppAsync(
+        int projectId, string environmentName, Guid appId, Guid? operationId = null, int? triggeredByUserId = null)
     {
         await using var ctx = _db.NewContext();
         var pipeline = new OePipeline
@@ -3289,13 +3454,14 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId,
             ReleasePipelineId = releasePipeline.Id, ProjectBuildId = build.Id,
-            EnvironmentName = environmentName, ScheduledFor = DateTime.UtcNow,
+            EnvironmentName = environmentName, ScheduledFor = DateTime.UtcNow, TriggeredByUserId = triggeredByUserId,
             Status = ProjectDeliveryStatus.HandedOff, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         };
         delivery.Results.Add(new OeProjectDeliveryResult
         {
             OrganizationId = TestDb.DefaultOrgId, Ordering = 0, AppName = "CRONUS Workbench",
             AppVersion = "2.0.0.0", AppId = appId.ToString(), Status = ProjectDeliveryResultStatus.Scheduled,
+            OperationId = operationId,
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         ctx.OeProjectDeliveries.Add(delivery);

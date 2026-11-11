@@ -942,6 +942,131 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
     }
 
+    /// <summary>What the Operations list says in place of our own app registration's client id.</summary>
+    public const string WorkbenchStarter = "AL Workbench";
+
+    /// <summary>
+    /// How far apart our record of a send and Business Central's record of the operation
+    /// it created may be and still be taken as the same thing, for the actions that do
+    /// not keep the operation id (a date move, a start, a recovery).
+    /// </summary>
+    internal static readonly TimeSpan StarterMatchWindow = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// The "Started by" text for the operations this workbench started, keyed by
+    /// operation id. Business Central names the starter by the app registration's client
+    /// id, which reads as noise; an operation started by the organisation's registration,
+    /// or the solution's own, reads "AL Workbench" instead, and "AL Workbench (name)" when
+    /// our own records say who asked for it.
+    /// <para>
+    /// Who asked comes from the operation id where we kept it (a pipeline deployment's
+    /// installs, a booked install or app update), and otherwise from the nearest action
+    /// sent within <see cref="StarterMatchWindow"/> of the operation that is the same
+    /// kind of change. Operations started by anyone else are left out, so the caller
+    /// shows what Business Central said. Database only; no call to Business Central.
+    /// </para>
+    /// </summary>
+    public async Task<Dictionary<string, string>> DescribeOperationStartersAsync(
+        int projectId, int environmentId, IReadOnlyList<BcEnvironmentOperation> operations, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        await _access.EnsureCanViewAsync(projectId, ct);
+
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var project = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => new { p.BcClientId })
+            .FirstOrDefaultAsync(ct);
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.ProjectId == projectId)
+            .Select(e => new { e.Name })
+            .FirstOrDefaultAsync(ct);
+        if (project is null || env is null) return labels;
+
+        var orgClientId = await _db.OrganizationSettings.AsNoTracking()
+            .Where(o => o.OrganizationId == orgId)
+            .Select(o => o.BcClientId)
+            .FirstOrDefaultAsync(ct);
+        var ours = new HashSet<Guid>();
+        if (Guid.TryParse(orgClientId, out var orgClient)) ours.Add(orgClient);
+        if (Guid.TryParse(project.BcClientId, out var projectClient)) ours.Add(projectClient);
+
+        var mine = operations
+            .Where(o => !string.IsNullOrWhiteSpace(o.Id)
+                        && Guid.TryParse(o.CreatedBy?.Trim(), out var by) && ours.Contains(by))
+            .ToList();
+        if (mine.Count == 0) return labels;
+
+        var ids = mine.Select(o => Guid.TryParse(o.Id, out var id) ? id : Guid.Empty)
+            .Where(id => id != Guid.Empty).Distinct().ToList();
+
+        // Exact matches first: the operation ids we kept when Business Central accepted
+        // a package or an app update.
+        var byId = new Dictionary<Guid, string>();
+        var deliveries = await _db.OeProjectDeliveryResults.AsNoTracking()
+            .Where(r => r.OperationId != null && ids.Contains(r.OperationId.Value)
+                        && r.ProjectDelivery!.ProjectId == projectId
+                        && r.ProjectDelivery.EnvironmentName.ToLower() == env.Name.ToLower())
+            .Select(r => new { Id = r.OperationId!.Value, Who = r.ProjectDelivery!.TriggeredByUser!.DisplayName })
+            .ToListAsync(ct);
+        foreach (var d in deliveries) byId.TryAdd(d.Id, d.Who ?? string.Empty);
+
+        var actions = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                        && a.BcOperationId != null && ids.Contains(a.BcOperationId.Value))
+            .Select(a => new { Id = a.BcOperationId!.Value, a.RequestedBy })
+            .ToListAsync(ct);
+        foreach (var a in actions) byId.TryAdd(a.Id, UpgradeActionRow.NameOf(a.RequestedBy));
+
+        // The rest by time: the actions that change the environment through a call whose
+        // operation id we never see.
+        var earliest = mine.Min(o => o.CreatedOn ?? o.StartedOn)?.UtcDateTime - StarterMatchWindow;
+        var latest = mine.Max(o => o.CreatedOn ?? o.StartedOn)?.UtcDateTime + StarterMatchWindow;
+        var sent = earliest is { } from && latest is { } to
+            ? await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                            && a.BcOperationId == null && a.SentAt != null && a.SentAt >= from && a.SentAt <= to
+                            && (a.Kind == UpgradeActionKind.PushDateToLatest || a.Kind == UpgradeActionKind.RunNow
+                                || a.Kind == UpgradeActionKind.SelectVersion || a.Kind == UpgradeActionKind.RecoverEnvironment))
+                .Select(a => new { a.Id, a.Kind, SentAt = a.SentAt!.Value, a.RequestedBy })
+                .ToListAsync(ct)
+            : [];
+        var claimed = new HashSet<int>();
+
+        foreach (var op in mine)
+        {
+            string? who = null;
+            if (Guid.TryParse(op.Id, out var opId) && byId.TryGetValue(opId, out var exact))
+            {
+                who = exact;
+            }
+            else if ((op.CreatedOn ?? op.StartedOn) is { } at && OperationTypeFor(op.Type) is { } kinds)
+            {
+                var when = at.UtcDateTime;
+                var nearest = sent
+                    .Where(a => kinds.Contains(a.Kind) && !claimed.Contains(a.Id)
+                                && (a.SentAt - when).Duration() <= StarterMatchWindow)
+                    .OrderBy(a => (a.SentAt - when).Duration())
+                    .FirstOrDefault();
+                if (nearest is not null)
+                {
+                    claimed.Add(nearest.Id);
+                    who = UpgradeActionRow.NameOf(nearest.RequestedBy);
+                }
+            }
+            labels[op.Id] = string.IsNullOrWhiteSpace(who) ? WorkbenchStarter : $"{WorkbenchStarter} ({who.Trim()})";
+        }
+        return labels;
+    }
+
+    /// <summary>The kinds of action that produce an operation of this Business Central type.</summary>
+    private static UpgradeActionKind[]? OperationTypeFor(string type) => type.ToLowerInvariant() switch
+    {
+        "modify" => [UpgradeActionKind.PushDateToLatest, UpgradeActionKind.RunNow, UpgradeActionKind.SelectVersion],
+        "recover" => [UpgradeActionKind.RecoverEnvironment],
+        _ => null,
+    };
+
     /// <summary>
     /// Who is signed in to the environment right now, longest-running operation first -
     /// which is the one somebody on the phone about a locked posting run is looking for.
