@@ -287,15 +287,20 @@ we couldn't diagnose without deeper instrumentation. Rather than pile on
 more workarounds, both validators are turned off.
 
 This is safe in our threat model: ALDevToolbox only ever issues tokens
-for the `/mcp` resource, the audience is still recorded on the issued
-token, and `Services/OAuth/McpBearerPolicy.cs` enforces the audience on
-every incoming `/mcp` request. Both validators were defence-in-depth for
-servers fronting multiple resources, which we are not.
+for the `/mcp` resource and the audience is still recorded on the issued
+token. Note that `Services/OAuth/McpBearerPolicy.cs` does **not** check the
+audience: it only requires authentication and the user/org claims. Both
+validators were defence-in-depth for servers fronting multiple resources,
+which we are not. If a second protected resource is ever added, turn
+resource validation back on (or add an explicit audience requirement)
+first.
 
-Revisit when OpenIddict adds native DCR / CIMD support
-(openiddict/openiddict-core#2404, targeted at 7.6.0) — that release will
-likely surface a more idiomatic way to register resources from a CIMD
-application descriptor, at which point both opt-outs can come back on.
+Revisit when OpenIddict adds native CIMD support. Native dynamic client
+registration is tracked in openiddict/openiddict-core#2404, now planned
+for 8.0; as of 7.8.0 (Nov 2026) no 7.x release has it, and the maintainer
+has said CIMD itself is too early to schedule. When it lands it will likely
+surface a more idiomatic way to register resources from a CIMD application
+descriptor, at which point both opt-outs can come back on.
 
 ## Consent screen
 
