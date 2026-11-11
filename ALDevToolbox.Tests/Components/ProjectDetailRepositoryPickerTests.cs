@@ -17,6 +17,7 @@ using Bunit;
 using Bunit.TestDoubles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Organizations;
@@ -44,6 +45,12 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+
+    /// <summary>
+    /// What the page logged. It catches a failed GitHub readiness check and quietly
+    /// leaves the picker out, so a missing picker needs this to say why (#1753).
+    /// </summary>
+    private readonly CapturingLoggerProvider _logs = new();
     private readonly BunitJSModuleInterop _tabs;
 
     public ProjectDetailRepositoryPickerTests()
@@ -93,9 +100,8 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
         _ctx.Services.AddSingleton<Microsoft.AspNetCore.Http.IHttpContextAccessor>(
             new Microsoft.AspNetCore.Http.HttpContextAccessor());
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
-        _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
-        _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>),
-            typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));
+        _ctx.Services.AddSingleton<ILoggerFactory>(LoggerFactory.Create(b => b.AddProvider(_logs)));
+        _ctx.Services.AddSingleton(typeof(ILogger<>), typeof(Logger<>));
 
         using var seed = _db.NewContext();
         seed.Users.Add(new User
@@ -266,6 +272,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
         await OpenReposTabAsync(cut);
 
         cut.FindAll(".repo-picker").Should().BeEmpty();
+        AssertGitHubCheckDidNotFail();
         cut.Markup.Should().NotContain("GitHub");
         ButtonLabels(cut).Should().Contain("Add repository", "the tab is exactly what it was before");
     }
@@ -302,6 +309,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
         await OpenReposTabAsync(cut);
 
         cut.FindAll(".repo-picker").Should().BeEmpty();
+        AssertGitHubCheckDidNotFail();
         ButtonLabels(cut).Should().Contain("Add repository");
     }
 
@@ -319,6 +327,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
         await OpenReposTabAsync(cut);
 
         cut.FindAll(".repo-picker").Should().BeEmpty();
+        AssertGitHubCheckDidNotFail();
         await ClickAsync(cut, "Add repository");
         cut.FindAll("input[aria-label='Repository URL']").Should().ContainSingle();
     }
@@ -357,6 +366,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
         await OpenReposTabAsync(cut);
 
         cut.FindAll(".repo-picker").Should().BeEmpty();
+        AssertGitHubCheckDidNotFail();
     }
 
     /// <summary>Generate stays the app's only primary button; this tab adds none.</summary>
@@ -473,10 +483,20 @@ public sealed class ProjectDetailRepositoryPickerTests : IAsyncDisposable
         await cut.InvokeAsync(() => tab.Click());
     }
 
+    /// <summary>
+    /// The picker was left out because the page decided so, not because its GitHub
+    /// check threw - a check that throws also leaves it out, silently.
+    /// </summary>
+    private void AssertGitHubCheckDidNotFail() =>
+        _logs.Messages.Should().NotContain(m => m.Contains("can pick repositories from GitHub"));
+
     /// <summary>Reaches for the picker, waits for the list, and clicks one row.</summary>
-    private static async Task PickAsync(IRenderedComponent<ProjectDetail> cut, string name)
+    private async Task PickAsync(IRenderedComponent<ProjectDetail> cut, string name)
     {
-        await cut.WaitForElement("input#pd-repo-pick").FocusAsync(new());
+        cut.WaitForAssertion(() => cut.FindAll("input#pd-repo-pick").Should().NotBeEmpty(
+            "the picker shows once the page knows GitHub is ready; the page logged:\n{0}",
+            string.Join("\n", _logs.Messages)));
+        await cut.Find("input#pd-repo-pick").FocusAsync(new());
         cut.WaitForState(() => cut.FindAll("button.repo-picker__result")
             .Any(b => b.TextContent.Contains(name)));
         var row = cut.FindAll("button.repo-picker__result").First(b => b.TextContent.Contains(name));
