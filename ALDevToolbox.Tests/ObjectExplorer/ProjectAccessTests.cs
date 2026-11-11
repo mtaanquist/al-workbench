@@ -1341,4 +1341,126 @@ public sealed class ProjectAccessTests : IDisposable
         recorder.Reads.Should().BeGreaterThan(0);
         recorder.OffContextReads.Should().BeEmpty();
     }
+
+    // ── Where "Can schedule upgrades" counts (org setting) ──────────────
+
+    private async Task GrantUpgradesAsync(int teamId, int userId)
+    {
+        await using var ctx = _db.NewContext();
+        var member = await ctx.TeamMembers.FirstAsync(m => m.TeamId == teamId && m.UserId == userId);
+        member.ManagesUpdates = true;
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task SetUpgradeScopeAsAdminAsync(UpgradePermissionScope scope)
+    {
+        var previous = _db.OrgContext.CurrentUserId;
+        var previousSiteAdmin = _db.OrgContext.IsSiteAdmin;
+        ActAs(AdminUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationAdminService(ctx).SetUpgradePermissionScopeAsync(scope);
+        }
+        ActAs(previous, previousSiteAdmin);
+    }
+
+    /// <summary>Asks both forms, the per-project check and the list predicate, and insists they agree.</summary>
+    private async Task<bool> CanScheduleUpgradesAsAsync(int projectId, int userId)
+    {
+        ActAs(userId);
+        await using var ctx = _db.NewContext();
+        var access = Access(ctx);
+        var can = await access.CanManageEnvironmentUpdatesAsync(projectId);
+        var snapshot = await access.GetSnapshotAsync();
+        var listed = await ctx.OeProjects.AsNoTracking()
+            .Where(ProjectAccess.UpdateOpsProjectPredicate(snapshot))
+            .AnyAsync(p => p.Id == projectId);
+        listed.Should().Be(can, $"the list form has to agree with CanManageEnvironmentUpdatesAsync for user {userId}");
+        return can;
+    }
+
+    [Theory]
+    [InlineData(UpgradePermissionScope.AssignedTeams)]
+    [InlineData(UpgradePermissionScope.ManagedSolutions)]
+    public async Task Upgrade_scope_matrix(UpgradePermissionScope scope)
+    {
+        var ops = await SeedTeamAsync("Operations", TeamMemberUserId);
+        var other = await SeedTeamAsync("Development", OtherTeamUserId, PlainUserId);
+        await GrantUpgradesAsync(ops, TeamMemberUserId);
+
+        var publicProject = await SeedProjectAsync("CRONUS Public");
+        var opsReadOnly = await SeedProjectAsync("CRONUS Ops");
+        var otherReadOnly = await SeedProjectAsync("CRONUS Dev");
+        var otherPrivate = await SeedProjectAsync("CRONUS Private");
+        await SetAccessAsOwnerAsync(opsReadOnly, ProjectVisibility.ReadOnly, ops);
+        await SetAccessAsOwnerAsync(otherReadOnly, ProjectVisibility.ReadOnly, other);
+        await SetAccessAsOwnerAsync(otherPrivate, ProjectVisibility.Private, other);
+        await SetUpgradeScopeAsAdminAsync(scope);
+
+        var wide = scope == UpgradePermissionScope.ManagedSolutions;
+
+        (await CanScheduleUpgradesAsAsync(publicProject, TeamMemberUserId)).Should()
+            .Be(wide, "a Public solution has no teams, so only the wider scope reaches it");
+        (await CanScheduleUpgradesAsAsync(opsReadOnly, TeamMemberUserId)).Should()
+            .BeTrue("the grant is on a team assigned to it");
+        (await CanScheduleUpgradesAsAsync(otherReadOnly, TeamMemberUserId)).Should()
+            .BeFalse("a Read-only solution of another team is not one she may manage");
+        (await CanScheduleUpgradesAsAsync(otherPrivate, TeamMemberUserId)).Should()
+            .BeFalse("a Private solution of another team is not one she may manage");
+
+        // Without the grant, no scope lets anyone in - not even on a solution they manage.
+        (await CanScheduleUpgradesAsAsync(publicProject, PlainUserId)).Should().BeFalse();
+        (await CanScheduleUpgradesAsAsync(otherReadOnly, PlainUserId)).Should().BeFalse();
+
+        // Admins act everywhere whichever scope is chosen.
+        (await CanScheduleUpgradesAsAsync(otherPrivate, AdminUserId)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The wider scope follows manage, and owning a solution is manage - so an owner
+    /// holding the grant on some team reaches their own Private solution of another team.
+    /// </summary>
+    [Theory]
+    [InlineData(UpgradePermissionScope.AssignedTeams, false)]
+    [InlineData(UpgradePermissionScope.ManagedSolutions, true)]
+    public async Task Upgrade_scope_reaches_the_owners_own_solution_only_when_wide(UpgradePermissionScope scope, bool expected)
+    {
+        var ops = await SeedTeamAsync("Operations", OwnerUserId);
+        var other = await SeedTeamAsync("Development", OtherTeamUserId);
+        await GrantUpgradesAsync(ops, OwnerUserId);
+        var owned = await SeedProjectAsync("CRONUS Owned");
+        await SetAccessAsOwnerAsync(owned, ProjectVisibility.Private, other);
+        await SetUpgradeScopeAsAdminAsync(scope);
+
+        (await CanScheduleUpgradesAsAsync(owned, OwnerUserId)).Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task Upgrade_scope_defaults_to_assigned_teams_and_round_trips()
+    {
+        ActAs(AdminUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await _db.NewOrganizationAdminService(ctx).GetUpgradePermissionScopeAsync())
+                .Should().Be(UpgradePermissionScope.AssignedTeams);
+        }
+
+        await SetUpgradeScopeAsAdminAsync(UpgradePermissionScope.ManagedSolutions);
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await _db.NewOrganizationAdminService(ctx).GetUpgradePermissionScopeAsync())
+                .Should().Be(UpgradePermissionScope.ManagedSolutions);
+        }
+    }
+
+    [Fact]
+    public async Task Upgrade_scope_refuses_a_value_that_is_not_a_level()
+    {
+        ActAs(AdminUserId);
+        await using var ctx = _db.NewContext();
+        var act = () => _db.NewOrganizationAdminService(ctx).SetUpgradePermissionScopeAsync((UpgradePermissionScope)42);
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("UpgradePermissionScope");
+    }
 }

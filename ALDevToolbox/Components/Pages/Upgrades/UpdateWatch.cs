@@ -392,7 +392,7 @@ public sealed class UpdateWatch : IDisposable
         catch (ProjectAccessDeniedException)
         {
             End(environmentId, new Ending(
-                "Stopped watching - you can no longer change this solution's updates.", "muted", Stopped: true));
+                "Stopped watching - you can no longer schedule upgrades for this solution.", "muted", Stopped: true));
             return false;
         }
         catch (Exception ex)
