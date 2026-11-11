@@ -202,7 +202,7 @@ Two levels, deliberately different:
 
 | Capability | Who |
 |---|---|
-| Create a team, delete a team, set a member's "Can schedule updates" flag | Org Admin, SiteAdmin |
+| Create a team, delete a team, set a member's "Can schedule upgrades" flag | Org Admin, SiteAdmin |
 | Rename, add / remove members, promote or demote a manager | The above, plus a member of that team with `IsManager` |
 
 - `CanManageTeamAsync(teamId)` / `EnsureCanManageTeamAsync(teamId)` resolve in that
@@ -270,6 +270,17 @@ to.
   everywhere. A Public project with no teams therefore has no non-admin operators at
   all, which is the intended shape: the fleet page's grant follows the same team
   assignments that already decide who sees the customer.
+- **Where the flag counts is an org choice** (`organization_settings.upgrade_permission_scope`,
+  Administration → Business Central, labelled "Can schedule upgrades applies to"). The
+  default, `AssignedTeams`, is the rule above. `ManagedSolutions` is for a company small
+  enough that the team assignments don't follow who does upgrades: holding the flag on
+  *any* team lets you act on every project you may manage (`CanManageAsync`), which takes
+  in every Public project and the Read-only and Private ones whose teams you are on. It
+  never reaches past manage, so a Private project stays closed to anyone outside its
+  teams. The levels are an enum stored by name; `ProjectAccess.CanManageEnvironmentUpdatesAsync`
+  and `UpdateOpsProjectPredicate` switch over it and must be kept in step when one is
+  added. The scope is read into the access snapshot only for a member who holds the flag
+  and is not an admin, since it changes no one else's answer.
 - **Deliberately not a fourth `UserRole`.** A new role would ripple through the
   hard-coded role lists, label switches, invite pages and MCP checks in ~30 files and
   would still not compose with per-project visibility. The flag touches almost none

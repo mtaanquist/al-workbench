@@ -81,12 +81,18 @@ public sealed class ProjectAccess
     /// <see cref="TeamMember.ManagesUpdates"/> — the teams through which they may run
     /// Business Central platform-update actions.
     /// </param>
+    /// <param name="UpgradeScope">
+    /// The org's <see cref="OrganizationSettings.UpgradePermissionScope"/>: whether
+    /// <paramref name="UpdateOpsTeamIds"/> counts only on those teams' solutions or on
+    /// every solution the caller may manage.
+    /// </param>
     public sealed record AccessSnapshot(
         int? UserId,
         bool IsSiteAdmin,
         bool IsOrgAdmin,
         IReadOnlySet<int> TeamIds,
-        IReadOnlySet<int> UpdateOpsTeamIds)
+        IReadOnlySet<int> UpdateOpsTeamIds,
+        UpgradePermissionScope UpgradeScope = UpgradePermissionScope.AssignedTeams)
     {
         /// <summary>True when the caller sees every project regardless of its visibility.</summary>
         public bool BypassesVisibility => IsSiteAdmin || IsOrgAdmin;
@@ -129,12 +135,27 @@ public sealed class ProjectAccess
             .Select(m => new { m.TeamId, m.ManagesUpdates })
             .ToListAsync(ct);
 
+        var updateOpsTeamIds = memberships.Where(m => m.ManagesUpdates).Select(m => m.TeamId).ToHashSet();
+
+        // Only read when it can change an answer: admins act everywhere, and a member
+        // without the grant acts nowhere, whatever the org chose.
+        var upgradeScope = UpgradePermissionScope.AssignedTeams;
+        if (!isOrgAdmin && !_orgContext.IsSiteAdmin && updateOpsTeamIds.Count > 0)
+        {
+            var orgId = _orgContext.CurrentOrganizationId;
+            upgradeScope = await _db.OrganizationSettings.AsNoTracking()
+                .Where(s => s.OrganizationId == orgId)
+                .Select(s => (UpgradePermissionScope?)s.UpgradePermissionScope)
+                .FirstOrDefaultAsync(ct) ?? UpgradePermissionScope.AssignedTeams;
+        }
+
         return _snapshot = new AccessSnapshot(
             userId,
             _orgContext.IsSiteAdmin,
             isOrgAdmin,
             memberships.Select(m => m.TeamId).ToHashSet(),
-            memberships.Where(m => m.ManagesUpdates).Select(m => m.TeamId).ToHashSet());
+            updateOpsTeamIds,
+            upgradeScope);
     }
 
     // ── Manage axis ─────────────────────────────────────────────────────
@@ -233,9 +254,21 @@ public sealed class ProjectAccess
         if (snapshot.IsOrgAdmin) return true;
         if (snapshot.UpdateOpsTeamIds.Count == 0) return false;
 
-        var teamIds = snapshot.UpdateOpsTeamIds.ToList();
-        return await _db.OeProjectTeams.AsNoTracking()
-            .AnyAsync(t => t.ProjectId == projectId && teamIds.Contains(t.TeamId), ct);
+        switch (snapshot.UpgradeScope)
+        {
+            case UpgradePermissionScope.AssignedTeams:
+                var teamIds = snapshot.UpdateOpsTeamIds.ToList();
+                return await _db.OeProjectTeams.AsNoTracking()
+                    .AnyAsync(t => t.ProjectId == projectId && teamIds.Contains(t.TeamId), ct);
+
+            case UpgradePermissionScope.ManagedSolutions:
+                // A project outside this org reads as null and grants nothing.
+                var row = await GetProjectRowAsync(projectId, ct);
+                return row is not null && await CanManageAsync(projectId, row.CreatedByUserId, ct);
+
+            default:
+                throw new InvalidOperationException($"Unknown upgrade permission scope {snapshot.UpgradeScope}.");
+        }
     }
 
     /// <summary>
@@ -247,7 +280,7 @@ public sealed class ProjectAccess
         if (!await CanManageEnvironmentUpdatesAsync(projectId, ct))
         {
             throw new ProjectAccessDeniedException(
-                "You need permission to manage environment updates for this solution's team.");
+                "You can't schedule upgrades for this solution. An admin can give you the Can schedule upgrades permission.");
         }
     }
 
@@ -269,8 +302,18 @@ public sealed class ProjectAccess
         // Written out longhand, like the other predicates in this file: EF has to
         // translate the whole tree to SQL and an invoked expression variable doesn't
         // survive that trip. Keep this in step with CanManageEnvironmentUpdatesAsync.
-        var updateOpsTeamIds = snapshot.UpdateOpsTeamIds.ToList();
-        return p => p.Teams.Any(t => updateOpsTeamIds.Contains(t.TeamId));
+        switch (snapshot.UpgradeScope)
+        {
+            case UpgradePermissionScope.AssignedTeams:
+                var updateOpsTeamIds = snapshot.UpdateOpsTeamIds.ToList();
+                return p => p.Teams.Any(t => updateOpsTeamIds.Contains(t.TeamId));
+
+            case UpgradePermissionScope.ManagedSolutions:
+                return ManageProjectPredicate(snapshot);
+
+            default:
+                throw new InvalidOperationException($"Unknown upgrade permission scope {snapshot.UpgradeScope}.");
+        }
     }
 
     /// <summary>
