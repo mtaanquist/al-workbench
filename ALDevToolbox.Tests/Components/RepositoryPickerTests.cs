@@ -275,6 +275,36 @@ public sealed class RepositoryPickerTests : IDisposable
         });
     }
 
+    /// <summary>
+    /// When GitHub stops answering before any repository came back, the picker says so
+    /// once, and does not tell the user to go and ask for access they may already have.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_list_github_stopped_answering_for_does_not_send_the_user_to_ask_for_access()
+    {
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
+                HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson())
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson("cronus-dk/solution-a", "cronus-dk/solution-b"))
+            .OnWithHeaders(HttpMethod.Get, "/repos/cronus-dk/solution-a", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+                [("retry-after", "60"), ("x-ratelimit-remaining", "4987")]));
+        await ReadyAsync(api);
+        _db.AddGitHubServices(_ctx.Services, api);
+
+        var cut = _ctx.Render<RepositoryPicker>();
+        await cut.WaitForElement("input").FocusAsync(new());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("GitHub stopped answering before any repositories came back");
+            cut.Markup.Should().NotContain("You cannot open any of");
+            cut.FindAll("button").Count(b => b.TextContent.Trim() == "Try again").Should().Be(1);
+        });
+    }
+
     [Fact]
     public async Task A_ready_picker_lists_the_repositories_once_the_user_reaches_for_it()
     {
