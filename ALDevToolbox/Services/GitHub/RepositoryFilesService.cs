@@ -230,7 +230,24 @@ public sealed class RepositoryFilesService
             return new WorkspaceFilesPullRequest(null, false, 0,
                 ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused.");
         }
+        catch (GitHubApiException ex) when ((int)ex.StatusCode is >= 400 and < 500)
+        {
+            // GitHub answered and said no. Saying so beats "could not reach GitHub",
+            // which sent people looking for an outage that was a permission all along.
+            // A 5xx is an outage, and keeps the page's try-again answer.
+            _logger.LogWarning(ex, "GitHub refused the workspace files pull request on {RepoFullName}.", fullName);
+            return new WorkspaceFilesPullRequest(null, false, 0, RefusalText(ex));
+        }
     }
+
+    /// <summary>What to tell the person when GitHub refused a write, in words they can act on.</summary>
+    private static string RefusalText(GitHubApiException ex) => ex.StatusCode switch
+    {
+        System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.NotFound =>
+            "GitHub did not allow the change. Check that your GitHub account can write to this repository "
+            + "and that AL Workbench's GitHub App has access to it, then try again. Nothing was changed.",
+        _ => $"GitHub refused the change: {ex.Message.TrimEnd('.')}. Nothing was changed.",
+    };
 
     // ===== Reading =====
 
@@ -491,12 +508,12 @@ public sealed class RepositoryFilesService
         }
 
         var baseTree = await _github.GetCommitTreeShaAsync(token, repo.Owner, repo.Name, parent, ct);
-        var tree = await _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct);
+        var tree = await GuardWorkflowsAsync(() => _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct), written);
         var commit = await _github.CreateCommitAsync(token, repo.Owner, repo.Name, PullRequestTitle, tree, parent, ct: ct);
 
         if (open is null)
         {
-            if (!await _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct))
+            if (!await GuardWorkflowsAsync(() => _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
             {
                 throw Refuse($"Branch {branch} appeared on '{repo.FullName}' while this was being prepared. Try again and the workbench will pick the next name.");
             }
@@ -510,12 +527,50 @@ public sealed class RepositoryFilesService
             return new WorkspaceFilesPullRequest(created, true, written.Count, null);
         }
 
-        if (!await _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct))
+        if (!await GuardWorkflowsAsync(() => _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
         {
             throw Refuse($"Branch {branch} on '{repo.FullName}' moved on while this was being prepared, so nothing was committed. Try again.");
         }
         return new WorkspaceFilesPullRequest(open, false, written.Count, null);
     }
+
+    /// <summary>
+    /// Runs one write, turning GitHub's refusal to take a change to a workflow file into
+    /// the permission that is missing. GitHub refuses a tree that adds or changes a file
+    /// under <c>.github/workflows/</c> unless the GitHub App may write workflow files, with
+    /// a bare 403 "Resource not accessible by integration". The default standards include
+    /// <c>refresh-test.yml</c>, so this is the refusal an organisation meets first, while
+    /// an app.json pull request goes through on the same account. The branch moves are
+    /// guarded too, as GitHub has been seen to check there instead.
+    /// </summary>
+    private static async Task<T> GuardWorkflowsAsync<T>(Func<Task<T>> write, IReadOnlyList<string> written)
+    {
+        try
+        {
+            return await write();
+        }
+        catch (GitHubApiException ex) when (!ex.IsRateLimited && IsWorkflowRefusal(ex, written))
+        {
+            var workflows = written.Where(IsWorkflowFile).ToList();
+            throw Refuse(
+                $"GitHub will not let AL Workbench change workflow files ({string.Join(", ", workflows)}). "
+                + "Ask whoever set up GitHub for AL Workbench to give its GitHub App permission to write workflow files, "
+                + "and an owner of your GitHub organisation to accept the new permission, then try again.");
+        }
+    }
+
+    private static bool IsWorkflowFile(string path) =>
+        path.StartsWith(".github/workflows/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// GitHub says "refusing to allow a GitHub App to create or update workflow ... without
+    /// `workflows` permission" when it names the cause; a plain 403 or 404 on a commit that
+    /// carries a workflow file has no other likely reason.
+    /// </summary>
+    private static bool IsWorkflowRefusal(GitHubApiException ex, IReadOnlyList<string> written) =>
+        written.Any(IsWorkflowFile)
+        && (ex.Message.Contains("workflow", StringComparison.OrdinalIgnoreCase)
+            || ex.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.NotFound);
 
     private const int MaxBranchAttempts = 5;
 

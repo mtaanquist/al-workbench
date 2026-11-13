@@ -72,9 +72,21 @@ public sealed class GitHubCheckRunService
         var parts = repositoryFullName.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 2) return null;
 
+        string token;
         try
         {
-            var token = await _github.GetInstallationTokenAsync(installationId, ct);
+            token = await _github.GetInstallationTokenAsync(installationId, ct);
+        }
+        catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException)
+        {
+            _logger.LogWarning(ex,
+                "Could not open a check run on {Repository} at {HeadSha}; the build runs anyway.",
+                repositoryFullName, headSha);
+            return null;
+        }
+
+        try
+        {
             return await _github.CreateCheckRunAsync(
                 token, parts[0], parts[1],
                 name: CheckRunName(solutionName),
@@ -83,6 +95,16 @@ public sealed class GitHubCheckRunService
                 detailsUrl: DetailsUrl(projectId),
                 externalId: projectId?.ToString(),
                 ct: ct);
+        }
+        catch (GitHubApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden && !ex.IsRateLimited)
+        {
+            // Said in full because the bare 403 reads like the build failed: it is a
+            // permission an organisation owner grants, and the build is unaffected.
+            _logger.LogWarning(ex,
+                "Could not open a check run on {Repository} at {HeadSha}: the GitHub App is not allowed to report build results on pull requests "
+                + "(Checks: read and write, accepted on the installation). The build runs anyway.",
+                repositoryFullName, headSha);
+            return null;
         }
         catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException)
         {
