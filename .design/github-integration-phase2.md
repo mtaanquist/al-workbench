@@ -1399,6 +1399,11 @@ organisation has them now. `RepositoryFilesService` owns it.
 - **The pull request** is opened with the person's own account on `aldt/workspace-files`,
   added to while open, and started again from the default branch once merged or closed. It
   writes only the files that differ.
+- **A refusal says what GitHub said.** GitHub refuses a branch that adds or changes a file
+  under `.github/workflows/` unless the GitHub App may write workflow files, and the
+  default standards include one (`refresh-test.yml`), so that refusal names the files and
+  the permission. Any other refusal shows GitHub's own message, not "could not reach
+  GitHub".
 
 ## #633 MCP parity for the GitHub workflows
 

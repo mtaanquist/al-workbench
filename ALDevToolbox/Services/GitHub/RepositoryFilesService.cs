@@ -230,6 +230,15 @@ public sealed class RepositoryFilesService
             return new WorkspaceFilesPullRequest(null, false, 0,
                 ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused.");
         }
+        catch (GitHubApiException ex)
+        {
+            // GitHub answered and said no. Its own sentence is the most useful thing to
+            // show: "could not reach GitHub" sent people looking for an outage that was
+            // a permission all along.
+            _logger.LogWarning(ex, "GitHub refused the workspace files pull request on {RepoFullName}.", fullName);
+            return new WorkspaceFilesPullRequest(null, false, 0,
+                $"GitHub refused the change: {ex.Message.TrimEnd('.')}. Nothing was opened.");
+        }
     }
 
     // ===== Reading =====
@@ -496,7 +505,7 @@ public sealed class RepositoryFilesService
 
         if (open is null)
         {
-            if (!await _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct))
+            if (!await MoveBranchAsync(() => _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
             {
                 throw Refuse($"Branch {branch} appeared on '{repo.FullName}' while this was being prepared. Try again and the workbench will pick the next name.");
             }
@@ -510,12 +519,47 @@ public sealed class RepositoryFilesService
             return new WorkspaceFilesPullRequest(created, true, written.Count, null);
         }
 
-        if (!await _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct))
+        if (!await MoveBranchAsync(() => _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
         {
             throw Refuse($"Branch {branch} on '{repo.FullName}' moved on while this was being prepared, so nothing was committed. Try again.");
         }
         return new WorkspaceFilesPullRequest(open, false, written.Count, null);
     }
+
+    /// <summary>
+    /// Points the branch at the new commit, turning GitHub's refusal to take a change to
+    /// a workflow file into the permission that is missing. GitHub checks that only when
+    /// the branch moves, so a commit that adds <c>.github/workflows/refresh-test.yml</c>
+    /// is built without complaint and then refused here, while a pull request touching
+    /// only <c>app.json</c> goes through on the same account.
+    /// </summary>
+    private static async Task<bool> MoveBranchAsync(Func<Task<bool>> move, IReadOnlyList<string> written)
+    {
+        try
+        {
+            return await move();
+        }
+        catch (GitHubApiException ex) when (!ex.IsRateLimited && IsWorkflowRefusal(ex, written))
+        {
+            var workflows = written.Where(IsWorkflowFile).ToList();
+            throw Refuse(
+                $"GitHub will not let AL Workbench change workflow files ({string.Join(", ", workflows)}). "
+                + "Ask whoever set up GitHub for AL Workbench to give its GitHub App permission to write workflow files, then try again.");
+        }
+    }
+
+    internal static bool IsWorkflowFile(string path) =>
+        path.StartsWith(".github/workflows/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// GitHub says "refusing to allow a GitHub App to create or update workflow ... without
+    /// `workflows` permission" when it names the cause; a plain 403 or 404 on a commit that
+    /// carries a workflow file has no other likely reason.
+    /// </summary>
+    private static bool IsWorkflowRefusal(GitHubApiException ex, IReadOnlyList<string> written) =>
+        written.Any(IsWorkflowFile)
+        && (ex.Message.Contains("workflow", StringComparison.OrdinalIgnoreCase)
+            || ex.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.NotFound);
 
     private const int MaxBranchAttempts = 5;
 

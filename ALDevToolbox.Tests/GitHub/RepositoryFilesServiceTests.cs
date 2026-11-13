@@ -208,6 +208,43 @@ public sealed class RepositoryFilesServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains("/git/blobs"));
     }
 
+    [Fact]
+    public async Task A_refused_workflow_file_names_the_permission_the_GitHub_App_is_missing()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync();
+        var expected = await ExpectedAsync();
+        var api = WritableApi(expected, except: StandardPath)
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Forbidden,
+                "{\"message\":\"refusing to allow a GitHub App to create or update workflow `.github/workflows/build.yml` without `workflows` permission\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = await service.OpenPullRequestAsync(Repo);
+
+        result.PullRequest.Should().BeNull();
+        result.Refusal.Should().Contain(StandardPath).And.Contain("permission to write workflow files");
+        api.Calls.Should().NotContain(c => c.StartsWith("POST") && c.EndsWith("/pulls"));
+    }
+
+    [Fact]
+    public async Task Any_other_refusal_says_what_GitHub_answered_rather_than_that_it_could_not_be_reached()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync();
+        var expected = await ExpectedAsync();
+        var api = WritableApi(expected, except: StandardPath)
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/trees", HttpStatusCode.UnprocessableEntity,
+                "{\"message\":\"Repository rule violations found.\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = await service.OpenPullRequestAsync(Repo);
+
+        result.PullRequest.Should().BeNull();
+        result.Refusal.Should().Be("GitHub refused the change: Repository rule violations found. Nothing was opened.");
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private (RepositoryFilesService Service, AppDbContext Context) NewService(FakeGitHubApi api)
