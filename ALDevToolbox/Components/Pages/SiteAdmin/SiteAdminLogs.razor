@@ -25,8 +25,8 @@
           IsLoading="@(_page is null)"
           IsEmpty="@(_page is not null && _page.Rows.Count == 0)">
     <SubtitleContent>
-        What the site has been doing, newest first: background work by default,
-        and everything else when you ask for it. Kept for @Plural(Buffer.RetentionDays, "day").
+        What the site has been doing, newest first: warnings and errors from background
+        work and web pages alike. Kept for @Plural(Buffer.RetentionDays, "day").
     </SubtitleContent>
     <Actions>
         <a class="btn" href="/site-admin/settings/logs">
@@ -67,8 +67,8 @@
                 <span class="field__label">Source</span>
                 <SelectBox>
                     <select class="select" name="worker">
-                        <option value="@StoredLogService.AnyWorker" selected="@(_worker == StoredLogService.AnyWorker)">All background work</option>
                         <option value="@StoredLogService.AnySource" selected="@(_worker == StoredLogService.AnySource)">Everything</option>
+                        <option value="@StoredLogService.AnyWorker" selected="@(_worker == StoredLogService.AnyWorker)">All background work</option>
                         <option value="@StoredLogService.NoWorker" selected="@(_worker == StoredLogService.NoWorker)">Web pages and start-up</option>
                         @foreach (var (name, label) in _workers)
                         {
@@ -185,19 +185,21 @@
     [SupplyParameterFromQuery(Name = "before")] public long? BeforeId { get; set; }
 
     private StoredLogPage? _page;
-    private string _worker = StoredLogService.AnyWorker;
-    private LogLevel _level = LogLevel.Information;
+    private string _worker = StoredLogService.AnySource;
+    /// <summary>Warnings and errors: what someone opening the page is usually looking for (#1766).</summary>
+    private const LogLevel DefaultLevel = LogLevel.Warning;
+    private LogLevel _level = DefaultLevel;
     private List<(string Name, string Label)> _workers = new();
 
     private bool IsFiltered =>
-        _worker != StoredLogService.AnyWorker || _level != LogLevel.Information
+        _worker != StoredLogService.AnySource || _level != DefaultLevel
         || !string.IsNullOrWhiteSpace(Text) || !string.IsNullOrEmpty(FromInput) || !string.IsNullOrEmpty(ToInput);
 
     protected override async Task OnInitializedAsync()
     {
-        _worker = string.IsNullOrWhiteSpace(Worker) ? StoredLogService.AnyWorker : Worker.Trim();
-        _level = Enum.TryParse<LogLevel>(Level, out var l) ? StoredLogBuffer.Normalise(l) : LogLevel.Information;
-        if (_level == LogLevel.None) _level = LogLevel.Information;
+        _worker = string.IsNullOrWhiteSpace(Worker) ? StoredLogService.AnySource : Worker.Trim();
+        _level = Enum.TryParse<LogLevel>(Level, out var l) ? StoredLogBuffer.Normalise(l) : DefaultLevel;
+        if (_level == LogLevel.None) _level = DefaultLevel;
         _workers = WorkerOptions(Heartbeats.All().Select(h => h.Name), _worker);
         await Zone.EnsureLoadedAsync();
         _page = await Logs.SearchAsync(new StoredLogQuery(
@@ -257,7 +259,7 @@
     private string PageUrl(long? before)
     {
         var query = new List<string> { "worker=" + Uri.EscapeDataString(_worker) };
-        if (_level != LogLevel.Information) query.Add("level=" + _level);
+        if (_level != DefaultLevel) query.Add("level=" + _level);
         if (!string.IsNullOrWhiteSpace(Text)) query.Add("q=" + Uri.EscapeDataString(Text));
         if (!string.IsNullOrEmpty(FromInput)) query.Add("from=" + Uri.EscapeDataString(FromInput));
         if (!string.IsNullOrEmpty(ToInput)) query.Add("to=" + Uri.EscapeDataString(ToInput));
