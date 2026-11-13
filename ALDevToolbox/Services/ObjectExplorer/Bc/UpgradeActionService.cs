@@ -219,6 +219,66 @@ public sealed class UpgradeActionService
     }
 
     /// <summary>
+    /// Stops waiting for the update a start set off, by hand: for a start Business Central
+    /// accepted but never began - during an outage at Microsoft, say - which would otherwise
+    /// read Booked until the worker gives up on it a day later, or for ever once it is past
+    /// the worker's follow window. The row becomes <c>Failed</c> with
+    /// <see cref="PlatformUpdateResult.Dismissed"/>, so the upgrade's line reads not updated
+    /// and can be ticked, started again or left for a later upgrade. Nothing is sent to
+    /// Business Central and nobody is notified. Gated like the start itself. Refused once
+    /// the update has been seen to end, and - compare-and-set - when the worker settles it
+    /// in the meantime. See <c>.design/environment-updates.md</c>, "Following a started update".
+    /// </summary>
+    public async Task StopWaitingForUpdateAsync(int actionId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+
+        var action = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Id == actionId)
+            .Select(a => new { a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status, a.UpdateResult, a.TargetVersion })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "That update no longer exists.",
+            });
+
+        await _access.EnsureCanManageEnvironmentUpdatesAsync(action.ProjectId, ct);
+
+        if (action.Kind != UpgradeActionKind.RunNow || action.Status != UpgradeActionStatus.Sent || action.UpdateResult is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "This update isn't waiting for Business Central any more, so there is nothing to stop waiting for.",
+            });
+        }
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var by = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
+        var to = string.IsNullOrWhiteSpace(action.TargetVersion) ? string.Empty : $" to {action.TargetVersion}";
+        var outcome = $"{UpgradeActionRow.NameOf(by)} stopped waiting for the update{to}: Business Central hadn't begun it.";
+
+        var updated = await _db.OeEnvironmentUpgradeActions
+            .Where(a => a.Id == actionId && a.Status == UpgradeActionStatus.Sent && a.UpdateResult == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.UpdateResult, PlatformUpdateResult.Dismissed)
+                .SetProperty(a => a.UpdateCheckedAt, now)
+                .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                .SetProperty(a => a.Outcome, outcome), ct);
+
+        if (updated == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "Business Central has just reported how this update went. Refresh to see it.",
+            });
+        }
+
+        _logger.LogInformation(
+            "User {UserId} stopped waiting for the update started by action {ActionId} on environment {EnvironmentId}.",
+            _orgContext.CurrentUserId, actionId, action.EnvironmentId);
+    }
+
+    /// <summary>
     /// Cancels a scheduled action that hasn't fired. Refuses anything already sent,
     /// failed or cancelled, and — the race that matters — anything the worker has
     /// already claimed: the claim stamps <c>sent_at</c> while the row is still pending,
