@@ -1228,8 +1228,17 @@
     /// both wait on it, and an outage at Microsoft can leave it waiting for a day or more.
     /// </summary>
     private static UpgradeActionRow? WaitingStart(EnvironmentUpgradeLineRow line) =>
-        line.State == UpgradeLineState.Booked && line.Environment.CanAct
-        && line.LastAction is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, UpdateResult: null, SentAt: not null } start
+        line.Environment.CanAct && LongWaitingStart(line) is { } start ? start : null;
+
+    /// <summary>
+    /// The start on a Booked line that Business Central accepted longer ago than the page's
+    /// watch lasts, and has not been seen to begin; null otherwise. A younger one is still
+    /// being watched, and Business Central may simply not have got to it yet.
+    /// </summary>
+    private static UpgradeActionRow? LongWaitingStart(EnvironmentUpgradeLineRow line) =>
+        line.State == UpgradeLineState.Booked
+        && line.LastAction is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, UpdateResult: null, SentAt: { } sent } start
+        && sent <= DateTime.UtcNow - UpdateWatch.For
             ? start
             : null;
 
@@ -1237,7 +1246,7 @@
     {
         if (_stopWaitingConfirm is null) return;
         var name = $"{line.Environment.ProjectName} {line.Environment.EnvironmentName}";
-        var message = "Business Central accepted the start, but hasn't begun the update. "
+        var message = "Business Central accepted the start, but there is no sign yet that it has begun the update. "
             + "The line will show as not updated, so you can tick it, start the update again or leave it for a later upgrade. "
             + "Nothing is changed in Business Central.";
         if (!await _stopWaitingConfirm.OpenAsync($"Stop waiting for the update on {name}?", message, "Stop waiting", "btn--danger")) return;
@@ -1478,17 +1487,14 @@
         }
         // A start too old to watch that Business Central still hasn't begun: say that, not
         // "Updating...", so a start lost in an outage doesn't read as an update under way.
-        if (_detail?.Lines.FirstOrDefault(l => l.Environment.EnvironmentId == environmentId) is
-            {
-                State: UpgradeLineState.Booked,
-                LastAction: { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, UpdateResult: null, SentAt: { } waitingSince },
-            })
+        if (_detail?.Lines.FirstOrDefault(l => l.Environment.EnvironmentId == environmentId) is { } waitingLine
+            && LongWaitingStart(waitingLine) is { SentAt: { } waitingSince })
         {
             return __builder =>
             {
                 <div class="upd-note upd-note--muted" role="status">
                     <Icon Name="clock" Width="12" Height="12" />
-                    <span>Started <Timestamp Value="@waitingSince" Relative="true" />, Business Central hasn't begun the update yet</span>
+                    <span>Started <Timestamp Value="@waitingSince" Relative="true" />. No sign yet that Business Central has begun the update.</span>
                 </div>
             };
         }

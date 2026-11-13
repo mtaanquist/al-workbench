@@ -110,17 +110,32 @@ public sealed partial class UpgradeActionWorker
                 var operations = await connections.ListEnvironmentOperationsAsync(start.ProjectId, start.EnvironmentId, ct)
                     .ConfigureAwait(false);
                 operation = MatchUpdateOperation(operations, start.SentAt, start.TargetVersion, start.NextStartAt);
+                read = true;
                 // No update yet, but the environment's settings were changed after the
                 // start: somebody may have moved the update to a later date, in the admin
                 // centre or from another page. Only then is the environment re-read, so a
                 // start that is simply waiting costs one request per look, not three.
                 if (operation is null && start.NextStartAt is null && ChangedAfter(operations, start.SentAt))
                 {
-                    var reading = await connections.RefreshEnvironmentAsync(start.ProjectId, start.EnvironmentId, ct)
-                        .ConfigureAwait(false);
-                    movedTo = MovedLater(reading, start.SentAt);
+                    // A failed re-read only means the move isn't seen this time: the
+                    // operations did answer, so the day towards NeverStarted still counts.
+                    try
+                    {
+                        var reading = await connections.RefreshEnvironmentAsync(start.ProjectId, start.EnvironmentId, ct)
+                            .ConfigureAwait(false);
+                        movedTo = MovedLater(reading, start.SentAt);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogInformation(
+                            "Couldn't re-read environment {EnvironmentId} to see whether the update started by action {ActionId} was moved: {Message}",
+                            start.EnvironmentId, start.Id, ex.Message);
+                    }
                 }
-                read = true;
             }
             else
             {

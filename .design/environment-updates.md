@@ -379,8 +379,8 @@ settle anything; any other status is read as still going.
   counts as moved when the next update's date is now more than an hour past the start and
   Business Central is not busy with the environment. The line goes back to Planned and shows the
   new date, and the update is then an ordinary one waiting for that date.
-- **Stopped by hand**: on the upgrade's page a Booked line whose start Business Central has not
-  begun offers "Stop waiting for the update". It records `Dismissed` and `Failed`, sends nothing
+- **Stopped by hand**: on the upgrade's page a Booked line whose start is older than the page's
+  45-minute watch and still not seen to begin offers "Stop waiting for the update". It records `Dismissed` and `Failed`, sends nothing
   to Business Central and notifies nobody, so the line reads Failed and can be ticked, started
   again or left for an upgrade made from the leftovers. Gated like the start; refused once the
   update has been seen to end. This is the way out when Microsoft accepts a start and then never
@@ -388,8 +388,9 @@ settle anything; any other status is read as still going.
   follower otherwise leaves Booked.
 
 The page's own watch (#982) only joins a sent start younger than its 45-minute span. An older
-one that is still Booked says "Started 16 hours ago, Business Central hasn't begun the update
-yet" instead of being watched afresh, as "Updating...", on every visit.
+one that is still Booked says "Started 16 hours ago. No sign yet that Business Central has begun
+the update." instead of being watched afresh, as "Updating...", on every visit, and only then offers
+"Stop waiting for the update".
 
 On an ending the environment is re-read, so its version and next update are fresh (which is what
 turns the line Updated and tells whoever checks it). A success is only recorded once that re-read

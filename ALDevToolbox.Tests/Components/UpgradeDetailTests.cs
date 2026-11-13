@@ -620,7 +620,7 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         var cut = Render(id);
 
         cut.WaitForAssertion(() =>
-            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Business Central hasn't begun the update yet")
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("No sign yet that Business Central has begun the update")
                 .And.NotContain("Updating..."));
 
         Row(cut, "CRONUS Danmark").QuerySelectorAll("button.menu__item")
@@ -630,10 +630,34 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn").Last().Click());
 
         cut.WaitForAssertion(() =>
-            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Failed").And.NotContain("hasn't begun the update yet"));
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Failed").And.NotContain("No sign yet"));
         await using var read = _f.Db.NewContext();
         (await read.OeEnvironmentUpgradeActions.SingleAsync(a => a.UpgradeId == id)).UpdateResult
             .Should().Be(PlatformUpdateResult.Dismissed);
+    }
+
+    [Fact]
+    public async Task A_fresh_start_offers_no_way_to_stop_waiting_while_it_is_watched()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddMinutes(-5);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent, TargetVersion = "28.5",
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() => Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Updating... started"));
+        Row(cut, "CRONUS Danmark").TextContent.Should().NotContain("No sign yet").And.NotContain("Stop waiting");
     }
 
     [Fact]

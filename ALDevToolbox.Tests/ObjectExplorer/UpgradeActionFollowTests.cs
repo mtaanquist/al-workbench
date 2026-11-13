@@ -303,6 +303,34 @@ public sealed class UpgradeActionFollowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_re_read_that_fails_after_a_settings_change_still_counts_towards_never_started()
+    {
+        var (_, _, actionId, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddHours(3), toVersion: null, type: "Modify")];
+        _f.Admin.OnEnvironment = null; // the re-read throws, as during an outage
+
+        _f.Clock.Advance(UpgradeActionWorker.NeverStartedAfter);
+        await FollowAsync();
+
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().Be(PlatformUpdateResult.NeverStarted,
+            "the operations answered, so the start must not stay Booked for ever");
+    }
+
+    [Fact]
+    public async Task An_environment_busy_with_its_update_is_not_a_move()
+    {
+        var (_, _, actionId, sent) = await StartAsync();
+        var later = new DateTimeOffset(sent).AddDays(7);
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddHours(3), toVersion: null, type: "Modify")];
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Upgrading", Version = "28.2.1.0" };
+        _f.Admin.OnUpdates = () => [UpgradeActionTestFixture.Update(later, later.AddDays(20))];
+
+        await FollowAsync();
+
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Stopping_waiting_by_hand_fails_the_start_quietly_and_lets_the_line_be_ticked()
     {
         var (_, _, actionId, _) = await StartAsync();
