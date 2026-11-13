@@ -299,6 +299,17 @@ public enum PlatformUpdateResult
     NeverStarted,
     /// <summary>Started again before Business Central began the update: the later start is the one followed.</summary>
     Superseded,
+    /// <summary>
+    /// The update's date was moved later before Business Central began it, so it runs then,
+    /// as an ordinary update, rather than now. Nobody is told: somebody moved it on purpose.
+    /// </summary>
+    Rescheduled,
+    /// <summary>
+    /// Somebody stopped waiting for it by hand (a start Business Central accepted but never
+    /// began, say during an outage at Microsoft). The row is <c>Failed</c>, so the upgrade's
+    /// line reads not updated and can be ticked or started again.
+    /// </summary>
+    Dismissed,
 }
 
 public enum UpgradeActionStatus

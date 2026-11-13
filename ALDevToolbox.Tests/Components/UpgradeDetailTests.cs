@@ -592,6 +592,76 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
             Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Updating... started"));
     }
 
+    /// <summary>
+    /// A start Business Central never began (an outage at Microsoft) used to be watched
+    /// afresh on every visit, reading "Updating... started 16 hours ago" for as long as it
+    /// stayed unanswered. Past the watch's span it now says it is waiting, and offers to
+    /// stop waiting, which turns the line not updated so it can be ticked.
+    /// </summary>
+    [Fact]
+    public async Task An_old_start_that_never_began_says_it_is_waiting_and_can_be_stopped()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddHours(-16);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent, TargetVersion = "28.5",
+                RequestedByUserId = UpgradeActionTestFixture.FlagUserId,
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("No sign yet that Business Central has begun the update")
+                .And.NotContain("Updating..."));
+
+        var stop = Row(cut, "CRONUS Danmark").QuerySelectorAll("button.menu__item")
+            .Single(b => b.TextContent.Contains("Stop waiting for the update"));
+        stop.HasAttribute("disabled").Should().BeFalse("the upgrade being in progress must not hold it back");
+        stop.Click();
+        cut.WaitForAssertion(() =>
+            cut.Find(".confirm-dialog__title").TextContent.Should().Be("Stop waiting for the update on CRONUS Danmark Production?"));
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn").Last().Click());
+
+        cut.WaitForAssertion(() =>
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Failed").And.NotContain("No sign yet"));
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.SingleAsync(a => a.UpgradeId == id)).UpdateResult
+            .Should().Be(PlatformUpdateResult.Dismissed);
+    }
+
+    [Fact]
+    public async Task A_fresh_start_offers_no_way_to_stop_waiting_while_it_is_watched()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddMinutes(-5);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent, TargetVersion = "28.5",
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() => Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Updating... started"));
+        Row(cut, "CRONUS Danmark").TextContent.Should().NotContain("No sign yet").And.NotContain("Stop waiting");
+    }
+
     [Fact]
     public async Task A_watch_tick_skips_while_the_page_holds_its_gate_and_reads_once_it_is_free()
     {
