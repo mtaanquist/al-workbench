@@ -37,6 +37,14 @@ public sealed partial class UpgradeActionWorker
     /// </summary>
     internal static readonly TimeSpan DateMoveAfterUpdate = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// How much later than the start the environment's next update date has to be for the
+    /// start to count as moved. A start sets the date to the moment it was sent, so a
+    /// later date is somebody's (or Microsoft's) move; the margin keeps rounding of that
+    /// date from reading as one.
+    /// </summary>
+    internal static readonly TimeSpan MovedLaterBy = TimeSpan.FromHours(1);
+
     /// <summary>The most starts one organisation has asked about per sweep, so a fleet-wide wave spreads over sweeps.</summary>
     internal const int FollowPerSweep = 20;
 
@@ -92,6 +100,7 @@ public sealed partial class UpgradeActionWorker
         var unsettled = db.OeEnvironmentUpgradeActions.Where(a => a.Id == start.Id && a.UpdateResult == null);
 
         BcEnvironmentOperation? operation = null;
+        DateTime? movedTo = null;
         var read = false;
         try
         {
@@ -101,6 +110,16 @@ public sealed partial class UpgradeActionWorker
                 var operations = await connections.ListEnvironmentOperationsAsync(start.ProjectId, start.EnvironmentId, ct)
                     .ConfigureAwait(false);
                 operation = MatchUpdateOperation(operations, start.SentAt, start.TargetVersion, start.NextStartAt);
+                // No update yet, but the environment's settings were changed after the
+                // start: somebody may have moved the update to a later date, in the admin
+                // centre or from another page. Only then is the environment re-read, so a
+                // start that is simply waiting costs one request per look, not three.
+                if (operation is null && start.NextStartAt is null && ChangedAfter(operations, start.SentAt))
+                {
+                    var reading = await connections.RefreshEnvironmentAsync(start.ProjectId, start.EnvironmentId, ct)
+                        .ConfigureAwait(false);
+                    movedTo = MovedLater(reading, start.SentAt);
+                }
                 read = true;
             }
             else
@@ -127,7 +146,7 @@ public sealed partial class UpgradeActionWorker
                 start.Id, start.EnvironmentId);
         }
 
-        var ending = Settle(operation, read, start, now);
+        var ending = Settle(operation, read, start, now, movedTo);
         if (ending is null)
         {
             await unsettled.ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdateCheckedAt, now), ct).ConfigureAwait(false);
@@ -141,7 +160,8 @@ public sealed partial class UpgradeActionWorker
         // success is only recorded once that read has worked: recorded without it, the
         // line would stop reading Booked while the mirror still showed the old version,
         // and read as if nothing had happened. A failure is recorded either way.
-        if (result != PlatformUpdateResult.Superseded)
+        // A moved start was re-read just now, to find out it had moved.
+        if (result is not (PlatformUpdateResult.Superseded or PlatformUpdateResult.Rescheduled))
         {
             var refreshed = false;
             try
@@ -261,8 +281,12 @@ public sealed partial class UpgradeActionWorker
     /// What one look at the operations settles, or null when the update is still to end:
     /// no operation yet (and the day not up), one still running, or no answer at all.
     /// </summary>
+    /// <param name="movedTo">
+    /// The environment's next update date when it has been moved past the start since it was
+    /// sent (<see cref="MovedLater"/>); null when it hasn't, or wasn't looked at.
+    /// </param>
     internal static (PlatformUpdateResult Result, UpgradeActionStatus Status, string Outcome)? Settle(
-        BcEnvironmentOperation? operation, bool read, FollowedStart start, DateTime now)
+        BcEnvironmentOperation? operation, bool read, FollowedStart start, DateTime now, DateTime? movedTo = null)
     {
         if (operation is null)
         {
@@ -274,6 +298,14 @@ public sealed partial class UpgradeActionWorker
             {
                 return (PlatformUpdateResult.Superseded, UpgradeActionStatus.Sent,
                     "Started again before Business Central began the update, so the later start is the one followed.");
+            }
+            // Moved to a later date before Business Central began it: it is an ordinary
+            // update waiting for its date now, not a start that never happened. Nobody is
+            // told, since somebody moved it on purpose, and the line goes back to waiting.
+            if (movedTo is { } later)
+            {
+                return (PlatformUpdateResult.Rescheduled, UpgradeActionStatus.Sent,
+                    $"The update{To(start.TargetVersion)} was moved to {later.ToString("d MMM yyyy", System.Globalization.CultureInfo.InvariantCulture)} before Business Central began it, so it runs then instead.");
             }
             if (now - start.SentAt < NeverStartedAfter) return null;
             return (PlatformUpdateResult.NeverStarted, UpgradeActionStatus.Failed,
@@ -303,6 +335,31 @@ public sealed partial class UpgradeActionWorker
                 return null;
         }
     }
+
+    /// <summary>
+    /// True when the environment's settings were changed after the start was sent: a
+    /// <c>Modify</c> operation created more than <see cref="OperationClockSlack"/> after it.
+    /// The start's own write is a <c>Modify</c> too, created just before the start is
+    /// recorded as sent; the slack keeps that one out when the clocks disagree.
+    /// </summary>
+    internal static bool ChangedAfter(IEnumerable<BcEnvironmentOperation> operations, DateTime sentAtUtc)
+    {
+        var after = new DateTimeOffset(DateTime.SpecifyKind(sentAtUtc, DateTimeKind.Utc)) + OperationClockSlack;
+        return operations.Any(o => string.Equals(o.Type?.Trim(), "Modify", StringComparison.OrdinalIgnoreCase)
+                                   && o.CreatedOn is { } created && created > after);
+    }
+
+    /// <summary>
+    /// The environment's next update date, when a fresh read shows it moved later than the
+    /// start (by more than <see cref="MovedLaterBy"/>) and Business Central is not busy
+    /// with the environment; otherwise null.
+    /// </summary>
+    internal static DateTime? MovedLater(BcEnvironmentReading reading, DateTime sentAtUtc) =>
+        reading.NextUpdateDate is { } next
+        && next > sentAtUtc + MovedLaterBy
+        && !EnvironmentUpgradeLineState.IsUpdating(reading.Status, reading.NextUpdateStatus)
+            ? next
+            : null;
 
     private static string To(string? version) => string.IsNullOrWhiteSpace(version) ? string.Empty : $" to {version}";
 

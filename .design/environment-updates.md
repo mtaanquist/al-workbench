@@ -372,6 +372,24 @@ settle anything; any other status is read as still going.
 - **No update operation a day after the start**: `NeverStarted`, also `Failed`, saying the update
   was never begun. Only a read that answered counts towards that day; reads that failed say
   nothing about the update.
+- **Moved to a later date before it began**: `Rescheduled`, the row stays `Sent` and nobody is
+  told, since somebody moved it on purpose (in the admin centre or from another page). Seen as a
+  `Modify` operation created after the start (less the start's own write, with the same two
+  minutes of slack), which is the only time the follower re-reads the environment; the start
+  counts as moved when the next update's date is now more than an hour past the start and
+  Business Central is not busy with the environment. The line goes back to Planned and shows the
+  new date, and the update is then an ordinary one waiting for that date.
+- **Stopped by hand**: on the upgrade's page a Booked line whose start Business Central has not
+  begun offers "Stop waiting for the update". It records `Dismissed` and `Failed`, sends nothing
+  to Business Central and notifies nobody, so the line reads Failed and can be ticked, started
+  again or left for an upgrade made from the leftovers. Gated like the start; refused once the
+  update has been seen to end. This is the way out when Microsoft accepts a start and then never
+  runs it (the November 2026 outage), and for a start past the two-day follow window, which the
+  follower otherwise leaves Booked.
+
+The page's own watch (#982) only joins a sent start younger than its 45-minute span. An older
+one that is still Booked says "Started 16 hours ago, Business Central hasn't begun the update
+yet" instead of being watched afresh, as "Updating...", on every visit.
 
 On an ending the environment is re-read, so its version and next update are fresh (which is what
 turns the line Updated and tells whoever checks it). A success is only recorded once that re-read

@@ -528,6 +528,7 @@
 
     <ConfirmDialog @ref="_deleteConfirm" Title="Delete this upgrade?" ConfirmLabel="Delete upgrade" ConfirmIcon="trash-2" />
     <ConfirmDialog @ref="_removeConfirm" ConfirmLabel="Remove" ConfirmIcon="trash-2" />
+    <ConfirmDialog @ref="_stopWaitingConfirm" ConfirmLabel="Stop waiting" />
 }
 
 @code {
@@ -574,6 +575,7 @@
     private ConfirmDialog? _markDoneConfirm;
     private ConfirmDialog? _deleteConfirm;
     private ConfirmDialog? _removeConfirm;
+    private ConfirmDialog? _stopWaitingConfirm;
 
     /// <summary>The lines the Mark done confirm names, taken when it opens.</summary>
     private List<EnvironmentUpgradeLineRow> _markDoneUnchecked = new();
@@ -611,7 +613,8 @@
     private bool DialogOpen =>
         _runner?.IsDialogOpen == true || _picker?.IsOpen == true || _details?.IsOpen == true
         || _text?.IsOpen == true || _assign?.IsOpen == true
-        || _markDoneConfirm?.IsOpen == true || _deleteConfirm?.IsOpen == true || _removeConfirm?.IsOpen == true;
+        || _markDoneConfirm?.IsOpen == true || _deleteConfirm?.IsOpen == true || _removeConfirm?.IsOpen == true
+        || _stopWaitingConfirm?.IsOpen == true;
 
     protected override async Task OnInitializedAsync()
     {
@@ -680,11 +683,16 @@
     /// way, and <c>JoinUnderWay</c> cannot see these. Without a watch the line reads Booked
     /// until the nightly refresh. One that has already ended here is left alone, so a line
     /// that stays Booked after its update does not start a new watch on every re-read.
+    /// Only a start sent within the watch's own span: an older one Business Central still
+    /// hasn't begun is left to the worker that follows every start, and its line says it is
+    /// waiting (<see cref="WaitingStart"/>) rather than "Updating..." from hours ago on
+    /// every visit.
     /// </summary>
     private Dictionary<int, DateTime> SentStartsToFollow() =>
         _detail!.Lines
             .Where(l => l.State == UpgradeLineState.Booked && l.Environment.CanAct && !l.Environment.IsSoftDeleted
                         && l.LastAction is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, SentAt: not null }
+                        && l.LastAction.SentAt > DateTime.UtcNow - UpdateWatch.For
                         && !_watch!.Watching.ContainsKey(l.Environment.EnvironmentId)
                         && !_watch.Ended.ContainsKey(l.Environment.EnvironmentId))
             .ToDictionary(l => l.Environment.EnvironmentId, l => l.LastAction!.SentAt!.Value);
@@ -1214,6 +1222,37 @@
         }
     }
 
+    /// <summary>
+    /// The start on a Booked line that Business Central accepted and has not been seen to
+    /// begin, when the person may act on the line; null otherwise. The watch and the worker
+    /// both wait on it, and an outage at Microsoft can leave it waiting for a day or more.
+    /// </summary>
+    private static UpgradeActionRow? WaitingStart(EnvironmentUpgradeLineRow line) =>
+        line.State == UpgradeLineState.Booked && line.Environment.CanAct
+        && line.LastAction is { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, UpdateResult: null, SentAt: not null } start
+            ? start
+            : null;
+
+    private async Task StopWaitingAsync(EnvironmentUpgradeLineRow line, UpgradeActionRow start)
+    {
+        if (_stopWaitingConfirm is null) return;
+        var name = $"{line.Environment.ProjectName} {line.Environment.EnvironmentName}";
+        var started = start.SentAt is { } sent
+            ? $"on {UpgradeActionRunner.LocalTime(line.Environment, sent):d MMM 'at' HH:mm} ({UpgradeActionRunner.ZoneLabel(line.Environment.TimeZone)})"
+            : "earlier";
+        var message = $"The update was started {started}, but Business Central hasn't begun it. "
+            + "The line will show as not updated, so you can tick it, start the update again or leave it for a later upgrade. "
+            + "Nothing is changed in Business Central.";
+        if (!await _stopWaitingConfirm.OpenAsync($"Stop waiting for the update on {name}?", message, "Stop waiting", "btn--danger")) return;
+
+        _runner?.ClearResults();
+        if (await WriteAsync(() => Actions.StopWaitingForUpdateAsync(start.Id)))
+        {
+            _watch?.Forget(line.Environment.EnvironmentId);
+            _notice = new UpgradeNotice($"Stopped waiting for the update on {name}.", "info", false);
+        }
+    }
+
     // ── Cells ───────────────────────────────────────────────────────────
 
     /// <summary>A line's own commands, the same menu in the table and on the phone card.</summary>
@@ -1228,6 +1267,10 @@
             @if (BookingFor(line) is { } booking)
             {
                 <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => CancelBookingAsync(booking.Id)">Cancel booking</button>
+            }
+            @if (WaitingStart(line) is { } waiting)
+            {
+                <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => StopWaitingAsync(line, waiting)">Stop waiting for the update...</button>
             }
             <div class="menu__sep"></div>
             <button type="button" class="menu__item menu__item--danger" role="menuitem"
@@ -1433,6 +1476,22 @@
                     {
                         <a class="upd-note__link" href="@($"/environments/{environmentId}/operations")">See what happened →</a>
                     }
+                </div>
+            };
+        }
+        // A start too old to watch that Business Central still hasn't begun: say that, not
+        // "Updating...", so a start lost in an outage doesn't read as an update under way.
+        if (_detail?.Lines.FirstOrDefault(l => l.Environment.EnvironmentId == environmentId) is
+            {
+                State: UpgradeLineState.Booked,
+                LastAction: { Kind: UpgradeActionKind.RunNow, Status: UpgradeActionStatus.Sent, UpdateResult: null, SentAt: { } waitingSince },
+            })
+        {
+            return __builder =>
+            {
+                <div class="upd-note upd-note--muted" role="status">
+                    <Icon Name="clock" Width="12" Height="12" />
+                    <span>Started <Timestamp Value="@waitingSince" Relative="true" />, Business Central hasn't begun the update yet</span>
                 </div>
             };
         }

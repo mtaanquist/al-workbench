@@ -1,4 +1,5 @@
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Tests.Infrastructure;
@@ -240,6 +241,124 @@ public sealed class UpgradeActionFollowTests : IDisposable
         older.Status.Should().Be(UpgradeActionStatus.Sent);
         (await _f.ReadActionAsync(secondId)).UpdateResult.Should().Be(PlatformUpdateResult.Failed);
         _f.Emails.Sent.Should().ContainSingle("one failed update is one notice, not one per start");
+    }
+
+    // ── A start moved later, or given up on by hand ─────────────────────
+
+    [Fact]
+    public async Task A_start_moved_to_a_later_date_is_rescheduled_quietly_and_waits_again()
+    {
+        // Microsoft never began the update, and a colleague moved it out a week in the admin centre.
+        var (_, _, actionId, sent) = await StartAsync();
+        var movedTo = new DateTimeOffset(sent).AddDays(7);
+        _f.Admin.OnOperations = () =>
+        [
+            Op("Succeeded", sent.AddSeconds(-5), toVersion: null, type: "Modify"),  // the start's own write
+            Op("Succeeded", sent.AddHours(3), toVersion: null, type: "Modify"),     // the move
+        ];
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Active", Version = "28.2.1.0" };
+        _f.Admin.OnUpdates = () => [UpgradeActionTestFixture.Update(movedTo, movedTo.AddDays(20))];
+
+        await FollowAsync();
+
+        var row = await _f.ReadActionAsync(actionId);
+        row.UpdateResult.Should().Be(PlatformUpdateResult.Rescheduled);
+        row.Status.Should().Be(UpgradeActionStatus.Sent);
+        row.Outcome.Should().Contain("was moved to").And.Contain("before Business Central began it");
+        _f.Emails.Sent.Should().BeEmpty("somebody moved it on purpose");
+
+        await using var ctx = _f.Db.NewContext();
+        var line = (await _f.Upgrades(ctx).GetAsync(_upgradeId))!.Lines.Single();
+        line.State.Should().Be(UpgradeLineState.Planned, "the update is waiting for its new date, not booked to start now");
+        line.Environment.NextUpdateDate.Should().Be(movedTo.UtcDateTime, "the re-read mirrored the new date");
+    }
+
+    [Fact]
+    public async Task A_settings_change_that_left_the_date_alone_is_not_a_move()
+    {
+        var (_, _, actionId, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddHours(3), toVersion: null, type: "Modify")];
+        _f.Admin.OnEnvironment = name => new BcEnvironment(name, "Production") { Status = "Active", Version = "28.2.1.0" };
+        _f.Admin.OnUpdates = () => [UpgradeActionTestFixture.Update(new DateTimeOffset(sent), new DateTimeOffset(sent).AddDays(20))];
+
+        await FollowAsync();
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().BeNull();
+
+        _f.Clock.Advance(UpgradeActionWorker.NeverStartedAfter);
+        await FollowAsync();
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().Be(PlatformUpdateResult.NeverStarted);
+    }
+
+    [Fact]
+    public async Task The_starts_own_settings_write_does_not_make_the_worker_re_read_the_environment()
+    {
+        var (_, _, actionId, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(1), toVersion: null, type: "Modify")];
+        _f.Admin.OnEnvironment = null; // a re-read would throw, and the day would never be counted
+
+        _f.Clock.Advance(UpgradeActionWorker.NeverStartedAfter);
+        await FollowAsync();
+
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().Be(PlatformUpdateResult.NeverStarted);
+    }
+
+    [Fact]
+    public async Task Stopping_waiting_by_hand_fails_the_start_quietly_and_lets_the_line_be_ticked()
+    {
+        var (_, _, actionId, _) = await StartAsync();
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Svc(ctx).StopWaitingForUpdateAsync(actionId);
+        }
+
+        var row = await _f.ReadActionAsync(actionId);
+        row.UpdateResult.Should().Be(PlatformUpdateResult.Dismissed);
+        row.Status.Should().Be(UpgradeActionStatus.Failed);
+        row.Outcome.Should().Be("Anna Jensen stopped waiting for the update to 28.5: Business Central hadn't begun it.");
+        _f.Emails.Sent.Should().BeEmpty();
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var line = (await _f.Upgrades(ctx).GetAsync(_upgradeId))!.Lines.Single();
+            line.State.Should().Be(UpgradeLineState.Failed, "it was never updated, and a failed line can be ticked or started again");
+            await _f.Upgrades(ctx).SetCheckedAsync(line.LineId, true);
+        }
+
+        // The worker leaves it alone from now on, even a day later.
+        _f.Admin.OnOperations = () => [];
+        _f.Clock.Advance(UpgradeActionWorker.NeverStartedAfter);
+        await FollowAsync();
+        _f.Admin.OperationReads.Should().Be(0);
+        _f.Emails.Sent.Should().BeEmpty();
+
+        await using var verify = _f.Db.NewContext();
+        (await _f.Upgrades(verify).GetAsync(_upgradeId))!.Lines.Single().State.Should().Be(UpgradeLineState.Checked);
+    }
+
+    [Fact]
+    public async Task Stopping_waiting_is_refused_once_the_update_has_ended()
+    {
+        var (_, _, actionId, sent) = await StartAsync();
+        _f.Admin.OnOperations = () => [Op("Succeeded", sent.AddMinutes(5))];
+        await FollowAsync();
+
+        await using var ctx = _f.Db.NewContext();
+        var act = () => _f.Svc(ctx).StopWaitingForUpdateAsync(actionId);
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Action");
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().Be(PlatformUpdateResult.Succeeded);
+    }
+
+    [Fact]
+    public async Task Stopping_waiting_needs_the_update_grant()
+    {
+        var (_, _, actionId, _) = await StartAsync();
+        _f.ActAs(UpgradeActionTestFixture.PlainTeamUserId);
+
+        await using var ctx = _f.Db.NewContext();
+        var act = () => _f.Svc(ctx).StopWaitingForUpdateAsync(actionId);
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _f.ReadActionAsync(actionId)).UpdateResult.Should().BeNull();
     }
 
     // ── The line ────────────────────────────────────────────────────────
