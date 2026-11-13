@@ -230,16 +230,24 @@ public sealed class RepositoryFilesService
             return new WorkspaceFilesPullRequest(null, false, 0,
                 ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused.");
         }
-        catch (GitHubApiException ex)
+        catch (GitHubApiException ex) when ((int)ex.StatusCode is >= 400 and < 500)
         {
-            // GitHub answered and said no. Its own sentence is the most useful thing to
-            // show: "could not reach GitHub" sent people looking for an outage that was
-            // a permission all along.
+            // GitHub answered and said no. Saying so beats "could not reach GitHub",
+            // which sent people looking for an outage that was a permission all along.
+            // A 5xx is an outage, and keeps the page's try-again answer.
             _logger.LogWarning(ex, "GitHub refused the workspace files pull request on {RepoFullName}.", fullName);
-            return new WorkspaceFilesPullRequest(null, false, 0,
-                $"GitHub refused the change: {ex.Message.TrimEnd('.')}. Nothing was opened.");
+            return new WorkspaceFilesPullRequest(null, false, 0, RefusalText(ex));
         }
     }
+
+    /// <summary>What to tell the person when GitHub refused a write, in words they can act on.</summary>
+    private static string RefusalText(GitHubApiException ex) => ex.StatusCode switch
+    {
+        System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.NotFound =>
+            "GitHub did not allow the change. Check that your GitHub account can write to this repository "
+            + "and that AL Workbench's GitHub App has access to it, then try again. Nothing was changed.",
+        _ => $"GitHub refused the change: {ex.Message.TrimEnd('.')}. Nothing was changed.",
+    };
 
     // ===== Reading =====
 
@@ -551,7 +559,7 @@ public sealed class RepositoryFilesService
         }
     }
 
-    internal static bool IsWorkflowFile(string path) =>
+    private static bool IsWorkflowFile(string path) =>
         path.StartsWith(".github/workflows/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>

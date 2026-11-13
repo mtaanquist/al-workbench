@@ -1403,8 +1403,8 @@ organisation has them now. `RepositoryFilesService` owns it.
   under `.github/workflows/` unless the GitHub App may write workflow files, and the
   default standards include one (`refresh-test.yml`), so that refusal names the files and
   the permission (granted on the app, then accepted by an organisation owner). Any other
-  refusal shows GitHub's own message, not "could not reach
-  GitHub".
+  403 or 404 asks the person to check their own and the app's access to the repository, and
+  other 4xx answers show GitHub's message. Only a 5xx still reads as "could not reach GitHub".
 
 ## #633 MCP parity for the GitHub workflows
 

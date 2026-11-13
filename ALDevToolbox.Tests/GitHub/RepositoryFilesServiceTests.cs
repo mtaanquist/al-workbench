@@ -242,7 +242,44 @@ public sealed class RepositoryFilesServiceTests : IDisposable
         var result = await service.OpenPullRequestAsync(Repo);
 
         result.PullRequest.Should().BeNull();
-        result.Refusal.Should().Be("GitHub refused the change: Repository rule violations found. Nothing was opened.");
+        result.Refusal.Should().Be("GitHub refused the change: Repository rule violations found. Nothing was changed.");
+    }
+
+    [Fact]
+    public async Task A_refused_branch_with_no_workflow_file_asks_about_access_not_the_workflow_permission()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync();
+        var expected = await ExpectedAsync();
+        var changed = expected.First(f => !f.Path.StartsWith(".github/", StringComparison.Ordinal) && !f.IsWorkspaceSettings);
+        var api = WritableApi(expected, except: changed.Path);
+        api.On(HttpMethod.Get, $"/repos/{Repo}/contents/{StandardPath}", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson(StandardPath, StandardContent))
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Forbidden,
+                "{\"message\":\"Resource not accessible by integration\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = await service.OpenPullRequestAsync(Repo);
+
+        result.PullRequest.Should().BeNull();
+        result.Refusal.Should().StartWith("GitHub did not allow the change.").And.NotContain("workflow");
+    }
+
+    [Fact]
+    public async Task A_GitHub_outage_is_not_reported_as_a_refusal()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync();
+        var expected = await ExpectedAsync();
+        var api = WritableApi(expected, except: StandardPath)
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/trees", HttpStatusCode.BadGateway, null);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var act = () => service.OpenPullRequestAsync(Repo);
+
+        await act.Should().ThrowAsync<GitHubApiException>();
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────
