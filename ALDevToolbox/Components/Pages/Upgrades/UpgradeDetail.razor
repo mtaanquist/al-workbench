@@ -1237,10 +1237,7 @@
     {
         if (_stopWaitingConfirm is null) return;
         var name = $"{line.Environment.ProjectName} {line.Environment.EnvironmentName}";
-        var started = start.SentAt is { } sent
-            ? $"on {UpgradeActionRunner.LocalTime(line.Environment, sent):d MMM 'at' HH:mm} ({UpgradeActionRunner.ZoneLabel(line.Environment.TimeZone)})"
-            : "earlier";
-        var message = $"The update was started {started}, but Business Central hasn't begun it. "
+        var message = "Business Central accepted the start, but hasn't begun the update. "
             + "The line will show as not updated, so you can tick it, start the update again or leave it for a later upgrade. "
             + "Nothing is changed in Business Central.";
         if (!await _stopWaitingConfirm.OpenAsync($"Stop waiting for the update on {name}?", message, "Stop waiting", "btn--danger")) return;
