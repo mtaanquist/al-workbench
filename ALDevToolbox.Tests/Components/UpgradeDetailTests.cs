@@ -623,8 +623,10 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
             Row(cut, "CRONUS Danmark").TextContent.Should().Contain("No sign yet that Business Central has begun the update")
                 .And.NotContain("Updating..."));
 
-        Row(cut, "CRONUS Danmark").QuerySelectorAll("button.menu__item")
-            .Single(b => b.TextContent.Contains("Stop waiting for the update")).Click();
+        var stop = Row(cut, "CRONUS Danmark").QuerySelectorAll("button.menu__item")
+            .Single(b => b.TextContent.Contains("Stop waiting for the update"));
+        stop.HasAttribute("disabled").Should().BeFalse("the upgrade being in progress must not hold it back");
+        stop.Click();
         cut.WaitForAssertion(() =>
             cut.Find(".confirm-dialog__title").TextContent.Should().Be("Stop waiting for the update on CRONUS Danmark Production?"));
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn").Last().Click());

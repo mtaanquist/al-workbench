@@ -602,6 +602,15 @@
     private bool Busy => _working || Running || _watch?.IsTicking == true;
 
     /// <summary>
+    /// What holds a line's own menu back: a write or a run of the page's own, not a watch
+    /// tick. Every entry there waits for the page's gate before it touches the context
+    /// (<see cref="GatedAsync"/>), so a click during a tick simply runs once the tick is
+    /// done. Waiting on the tick as well greyed the menu out for most of every ten seconds
+    /// while several updates were watched, which is exactly when somebody needs it.
+    /// </summary>
+    private bool RowBusy => _working || Running;
+
+    /// <summary>
     /// The page's one lock on its scoped <c>DbContext</c>. Every write of its own - and every
     /// dialog that reads or writes behind it, the picker and the runner included - holds it
     /// through its re-read; a watch tick takes it without waiting and skips when it is held
@@ -1266,21 +1275,21 @@
     {
         var env = line.Environment;
         <RowActions Label="@($"Actions for {env.ProjectName} {env.EnvironmentName}")">
-            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => MoveAsync([env], one: true)">Move date...</button>
-            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => StartAsync([env], one: true)">Start update...</button>
-            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => VersionAsync([env], one: true)">Change the next version...</button>
-            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => AssignManyAsync([line])">Assign to...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@RowBusy" @onclick="() => MoveAsync([env], one: true)">Move date...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@RowBusy" @onclick="() => StartAsync([env], one: true)">Start update...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@RowBusy" @onclick="() => VersionAsync([env], one: true)">Change the next version...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@RowBusy" @onclick="() => AssignManyAsync([line])">Assign to...</button>
             @if (BookingFor(line) is { } booking)
             {
-                <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => CancelBookingAsync(booking.Id)">Cancel booking</button>
+                <button type="button" class="menu__item" role="menuitem" disabled="@RowBusy" @onclick="() => CancelBookingAsync(booking.Id)">Cancel booking</button>
             }
             @if (WaitingStart(line) is { } waiting)
             {
-                <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => StopWaitingAsync(line, waiting)">Stop waiting for the update...</button>
+                <button type="button" class="menu__item" role="menuitem" disabled="@RowBusy" @onclick="() => StopWaitingAsync(line, waiting)">Stop waiting for the update...</button>
             }
             <div class="menu__sep"></div>
             <button type="button" class="menu__item menu__item--danger" role="menuitem"
-                    disabled="@(IsSent(line) || Busy)"
+                    disabled="@(IsSent(line) || RowBusy)"
                     title="@(IsSent(line) ? "Something has already been done to this environment from this upgrade, so it stays on it." : null)"
                     @onclick="() => RemoveAsync([line])">Remove from upgrade</button>
         </RowActions>
