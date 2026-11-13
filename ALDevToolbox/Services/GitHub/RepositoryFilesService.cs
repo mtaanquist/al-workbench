@@ -500,12 +500,12 @@ public sealed class RepositoryFilesService
         }
 
         var baseTree = await _github.GetCommitTreeShaAsync(token, repo.Owner, repo.Name, parent, ct);
-        var tree = await _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct);
+        var tree = await GuardWorkflowsAsync(() => _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct), written);
         var commit = await _github.CreateCommitAsync(token, repo.Owner, repo.Name, PullRequestTitle, tree, parent, ct: ct);
 
         if (open is null)
         {
-            if (!await MoveBranchAsync(() => _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
+            if (!await GuardWorkflowsAsync(() => _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
             {
                 throw Refuse($"Branch {branch} appeared on '{repo.FullName}' while this was being prepared. Try again and the workbench will pick the next name.");
             }
@@ -519,7 +519,7 @@ public sealed class RepositoryFilesService
             return new WorkspaceFilesPullRequest(created, true, written.Count, null);
         }
 
-        if (!await MoveBranchAsync(() => _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
+        if (!await GuardWorkflowsAsync(() => _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, commit, ct), written))
         {
             throw Refuse($"Branch {branch} on '{repo.FullName}' moved on while this was being prepared, so nothing was committed. Try again.");
         }
@@ -527,24 +527,27 @@ public sealed class RepositoryFilesService
     }
 
     /// <summary>
-    /// Points the branch at the new commit, turning GitHub's refusal to take a change to
-    /// a workflow file into the permission that is missing. GitHub checks that only when
-    /// the branch moves, so a commit that adds <c>.github/workflows/refresh-test.yml</c>
-    /// is built without complaint and then refused here, while a pull request touching
-    /// only <c>app.json</c> goes through on the same account.
+    /// Runs one write, turning GitHub's refusal to take a change to a workflow file into
+    /// the permission that is missing. GitHub refuses a tree that adds or changes a file
+    /// under <c>.github/workflows/</c> unless the GitHub App may write workflow files, with
+    /// a bare 403 "Resource not accessible by integration". The default standards include
+    /// <c>refresh-test.yml</c>, so this is the refusal an organisation meets first, while
+    /// an app.json pull request goes through on the same account. The branch moves are
+    /// guarded too, as GitHub has been seen to check there instead.
     /// </summary>
-    private static async Task<bool> MoveBranchAsync(Func<Task<bool>> move, IReadOnlyList<string> written)
+    private static async Task<T> GuardWorkflowsAsync<T>(Func<Task<T>> write, IReadOnlyList<string> written)
     {
         try
         {
-            return await move();
+            return await write();
         }
         catch (GitHubApiException ex) when (!ex.IsRateLimited && IsWorkflowRefusal(ex, written))
         {
             var workflows = written.Where(IsWorkflowFile).ToList();
             throw Refuse(
                 $"GitHub will not let AL Workbench change workflow files ({string.Join(", ", workflows)}). "
-                + "Ask whoever set up GitHub for AL Workbench to give its GitHub App permission to write workflow files, then try again.");
+                + "Ask whoever set up GitHub for AL Workbench to give its GitHub App permission to write workflow files, "
+                + "and an owner of your GitHub organisation to accept the new permission, then try again.");
         }
     }
 

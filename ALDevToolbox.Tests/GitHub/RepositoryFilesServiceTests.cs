@@ -215,8 +215,8 @@ public sealed class RepositoryFilesServiceTests : IDisposable
         await SeedSolutionAsync();
         var expected = await ExpectedAsync();
         var api = WritableApi(expected, except: StandardPath)
-            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Forbidden,
-                "{\"message\":\"refusing to allow a GitHub App to create or update workflow `.github/workflows/build.yml` without `workflows` permission\"}");
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/trees", HttpStatusCode.Forbidden,
+                "{\"message\":\"Resource not accessible by integration\"}");
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
 
@@ -224,7 +224,7 @@ public sealed class RepositoryFilesServiceTests : IDisposable
 
         result.PullRequest.Should().BeNull();
         result.Refusal.Should().Contain(StandardPath).And.Contain("permission to write workflow files");
-        api.Calls.Should().NotContain(c => c.StartsWith("POST") && c.EndsWith("/pulls"));
+        api.Calls.Should().NotContain(c => c.StartsWith("POST") && (c.EndsWith("/git/refs") || c.EndsWith("/pulls")));
     }
 
     [Fact]
