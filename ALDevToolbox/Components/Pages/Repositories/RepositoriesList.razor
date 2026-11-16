@@ -569,14 +569,21 @@
         if (targets.Count == 0) return;
 
         var adoptVersions = false;
-        _offers = targets.SelectMany(r => r.Offers.Select(o => (ShortName(r), o))).ToList();
+        // A repository shared by two solutions is two rows here but one pull request.
+        var offering = targets.Where(r => r.Offers.Count > 0)
+            .DistinctBy(r => r.FullName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        _offers = offering.SelectMany(r => r.Offers.Select(o => (ShortName(r), o))).ToList();
         if (_offers.Count > 0)
         {
-            _offersSpanRepositories = targets.Count(r => r.Offers.Count > 0) > 1;
+            _offersSpanRepositories = offering.Count > 1;
             _offerTitle = targets.Count == 1
                 ? (targets[0].PullRequest is null ? "Create app.json pull request" : "Update the app.json pull request")
                 : $"Create {targets.Count} app.json pull requests";
             _adoptVersions = false;
+            // The dialog reads its title from this page's parameters: render them first.
+            StateHasChanged();
+            await Task.Yield();
             if (!await _offerDialog!.OpenAsync()) return;
             adoptVersions = _adoptVersions;
         }
