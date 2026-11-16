@@ -146,7 +146,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         var found = await service.ScanForReleaseAsync(releaseId);
 
-        found.Should().Be(3, "application, platform, and the dependency once");
+        found.Should().Be(4, "application, platform, the dependency once, and the offer to number the app after BC");
         await using var read = _db.NewContext();
         var rows = await read.GitHubRepositoryDrift.AsNoTracking().ToListAsync();
         rows.Select(r => r.Field).Should().OnlyHaveUniqueItems();
@@ -164,11 +164,11 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         var found = await service.ScanForReleaseAsync(releaseId);
 
-        found.Should().Be(3);
+        found.Should().Be(4);
         await using var read = _db.NewContext();
         var rows = await read.GitHubRepositoryDrift.OrderBy(d => d.Field).ToListAsync();
         rows.Select(r => r.Field).Should().Equal(
-            "application", "dependency:" + SystemAppId, "platform");
+            "application", "dependency:" + SystemAppId, "platform", "version-adopt");
         rows.Should().OnlyContain(r => r.Repository == RepoA && r.Path == "app.json" && r.ReleaseId == releaseId);
         // The application is a minimum, so the release's four-part build number
         // is not what a person would have typed.
@@ -200,7 +200,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
             api.Calls.Should().BeEmpty("nothing is read until the other scan is done");
         }
 
-        (await scanning.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Should().Be(3);
+        (await scanning.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Should().Be(4);
     }
 
     [Fact]
@@ -322,22 +322,76 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task An_app_that_numbers_itself_keeps_its_version()
+    public async Task An_app_that_numbers_itself_is_only_offered_the_switch_and_keeps_its_version_unless_asked()
     {
-        // BehindManifest is version 1.0.0.0 on BC 27: not the convention, so only the
-        // application, platform and dependency move.
+        // BehindManifest is version 1.0.0.0 on BC 27: not the convention. The scan records
+        // what the switch would be, but nothing lists it as behind and a pull request
+        // leaves the version alone unless the person opening it says so.
         await ReadyAsync();
         await SeedCatalogueAsync("28.2.0.0");
         await SeedSolutionAsync(RepoA);
         var releaseId = await SeedReleaseAsync();
-        var (service, ctx) = NewService(ScannableApi(RepoA));
+        var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
+        await using (scanCtx) await scanner.ScanForReleaseAsync(releaseId);
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.GitHubRepositoryDrift.AnyAsync(r => r.Field == "version")).Should().BeFalse();
+            var offer = await read.GitHubRepositoryDrift.SingleAsync(r => r.Field == "version-adopt");
+            offer.Current.Should().Be("1.0.0.0");
+            offer.Proposed.Should().Be("28.2.0.0");
+        }
+
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        (await service.GetSummaryAsync()).Repositories.Single().Files.Single().Changes
+            .Should().NotContain(c => c.Field == "version-adopt");
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
+        CommittedBlob(api).Should().Contain("\"version\": \"1.0.0.0\"");
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
+            .Should().NotContain("App version");
+    }
+
+    [Fact]
+    public async Task An_app_that_numbers_itself_switches_when_the_person_asks()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
+        await using (scanCtx) await scanner.ScanForReleaseAsync(releaseId);
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
         await using var _ = ctx;
 
-        await service.ScanForReleaseAsync(releaseId);
+        (await service.OpenUpdatePullRequestsAsync([RepoA], adoptVersions: true)).Single().Refusal.Should().BeNull();
 
-        await using var read = _db.NewContext();
-        (await read.GitHubRepositoryDrift.AnyAsync(r => r.Field == "version")).Should().BeFalse();
+        CommittedBlob(api).Should().Be(BehindManifest
+            .Replace("\"version\": \"1.0.0.0\"", "\"version\": \"28.2.0.0\"")
+            .Replace("\"application\": \"27.0.0.0\"", "\"application\": \"28.2.0.0\"")
+            .Replace("\"platform\": \"27.0.0.0\"", "\"platform\": \"28.0.0.0\"")
+            .Replace("\"version\": \"27.0.0.0\"", "\"version\": \"28.2.0.0\""));
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
+            .Should().Contain("App version: \\u00601.0.0.0\\u0060", "the body is JSON, so the backticks arrive escaped");
     }
+
+    [Theory]
+    [InlineData("1.3.0.0", "27.0.0.0", "28.2", "28.2.0.0")]
+    [InlineData("2.1", "27.0.0.0", "28.2", "28.2")]
+    public void An_app_that_numbers_itself_is_offered_the_targets_major_minor(
+        string version, string application, string target, string expected) =>
+        DependencyDriftService.ProposedAdoptedVersion(version, application, target).Should().Be(expected);
+
+    [Theory]
+    [InlineData("28.0.0.0", "28.2.0.0", "28.5")]
+    [InlineData("30.0.0.0", "28.2.0.0", "28.5")]
+    [InlineData("", "28.2.0.0", "28.5")]
+    public void Following_apps_and_apps_ahead_of_the_target_are_not_offered_the_switch(
+        string version, string application, string target) =>
+        DependencyDriftService.ProposedAdoptedVersion(version, application, target).Should().BeNull();
 
     [Theory]
     [InlineData("28.2.0.0", "28.2.0.0", "28.5", "28.5.0.0")]
@@ -476,7 +530,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         var releaseId = await SeedReleaseAsync();
 
         var (first, ctx1) = NewService(ScannableApi(RepoA));
-        await using (ctx1) (await first.ScanForReleaseAsync(releaseId)).Should().Be(3);
+        await using (ctx1) (await first.ScanForReleaseAsync(releaseId)).Should().Be(4);
 
         // Somebody bumped it by hand; the same manifest path now reads current.
         var fixedApi = BaseApi()
@@ -960,6 +1014,25 @@ public sealed class DependencyDriftServiceTests : IDisposable
         api.Credentials.Where(c => c.Call.Contains("/pulls")).Should().OnlyContain(c => c.Token == "ghu_access");
         await using var read = _db.NewContext();
         (await read.GitHubUpdatePullRequests.SingleAsync()).IsAutomatic.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_automatic_run_never_switches_an_app_to_business_centrals_numbering()
+    {
+        // Nobody is there to ask, and switching is a choice a person makes once.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
+        await using (scanCtx) await scanner.ScanForReleaseAsync(await SeedReleaseAsync());
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(1, null));
+
+        CommittedBlob(api).Should().Contain("\"version\": \"1.0.0.0\"");
     }
 
     [Fact]

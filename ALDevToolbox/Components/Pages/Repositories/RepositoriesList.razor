@@ -297,6 +297,31 @@
     </Footer>
 </ListPage>
 
+@* Asked only when an extension in the pull request numbers itself instead of after
+   Business Central. Switching is a visible change for the customer and is made once,
+   so it is never assumed: the box starts off, and the automatic run never asks. *@
+<ConfirmDialog @ref="_offerDialog" Title="@_offerTitle" ConfirmLabel="@_offerTitle"
+               ConfirmButtonClass="btn--primary" ConfirmIcon="git-pull-request" HeadIcon="git-pull-request" Wide="true">
+    <p>@(_offers.Count == 1
+            ? "This extension uses its own version number. Should this pull request also set it to the customer's Business Central version?"
+            : "These extensions use their own version numbers. Should this pull request also set them to the customer's Business Central version?")</p>
+    <ul class="repos__offers">
+        @foreach (var (repository, offer) in _offers)
+        {
+            <li>
+                <span>@(!_offersSpanRepositories || offer.Extension == repository ? offer.Extension : $"{offer.Extension} ({repository})")</span>
+                <span class="u-num u-muted">@(_adoptVersions ? $"{offer.Current} → {offer.Proposed}" : offer.Current)</span>
+            </li>
+        }
+    </ul>
+    <label class="check">
+        <input type="checkbox" checked="@_adoptVersions" @onchange="e => _adoptVersions = (bool)(e.Value ?? false)" />
+        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+        <span>@OfferLabel()</span>
+    </label>
+    <p class="field__hint">@OfferHint()</p>
+</ConfirmDialog>
+
 @code {
     private List<RepositoryListRow>? _rows;
     private bool _loadFailed;
@@ -308,6 +333,30 @@
     private bool _onlyUpdates;
     private string _search = string.Empty;
     private string? _error;
+
+    // The question asked before opening when an extension numbers itself.
+    private ConfirmDialog? _offerDialog;
+    private List<(string Repository, AppVersionOffer Offer)> _offers = new();
+    private bool _offersSpanRepositories;
+    private string _offerTitle = string.Empty;
+    private bool _adoptVersions;
+
+    /// <summary>"Also set its version to 28.5.0.0", naming the version when every offer agrees on one.</summary>
+    private string OfferLabel()
+    {
+        var target = _offers.Select(o => o.Offer.Proposed).Distinct().ToList();
+        var subject = _offers.Count == 1 ? "its version" : "their versions";
+        return target.Count == 1 ? $"Also set {subject} to {target[0]}" : $"Also set {subject} to the customer's Business Central version";
+    }
+
+    private string OfferHint()
+    {
+        var target = _offers.Select(o => o.Offer.Proposed).Distinct().ToList();
+        var seen = target.Count == 1 ? target[0] : "the new version";
+        var them = _offers.Count == 1 ? "it" : "them";
+        var their = _offers.Count == 1 ? "its current version number" : "their current version numbers";
+        return $"Customers will see {seen} in Business Central, and later Business Central updates keep {them} in step. Leave unticked to keep {their}.";
+    }
 
     /// <summary>What the last action on a row came to, shown under its name until the next one.</summary>
     private sealed record RowResult(string Text, string? Href, bool IsProblem);
@@ -518,6 +567,20 @@
     {
         var targets = rows.Where(r => r.FullName is not null).ToList();
         if (targets.Count == 0) return;
+
+        var adoptVersions = false;
+        _offers = targets.SelectMany(r => r.Offers.Select(o => (ShortName(r), o))).ToList();
+        if (_offers.Count > 0)
+        {
+            _offersSpanRepositories = targets.Count(r => r.Offers.Count > 0) > 1;
+            _offerTitle = targets.Count == 1
+                ? (targets[0].PullRequest is null ? "Create app.json pull request" : "Update the app.json pull request")
+                : $"Create {targets.Count} app.json pull requests";
+            _adoptVersions = false;
+            if (!await _offerDialog!.OpenAsync()) return;
+            adoptVersions = _adoptVersions;
+        }
+
         _busy = true;
         _openingAll = targets.Count > 1;
         _error = null;
@@ -526,7 +589,7 @@
         {
             await using var scope = Scopes.CreateAsyncScope();
             var drift = scope.ServiceProvider.GetRequiredService<DependencyDriftService>();
-            var results = await drift.OpenUpdatePullRequestsAsync(targets.Select(r => r.FullName!).ToList());
+            var results = await drift.OpenUpdatePullRequestsAsync(targets.Select(r => r.FullName!).ToList(), adoptVersions);
             foreach (var row in targets)
             {
                 var result = results.FirstOrDefault(r => string.Equals(r.Repository, row.FullName, StringComparison.OrdinalIgnoreCase));

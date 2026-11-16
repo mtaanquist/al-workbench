@@ -73,7 +73,9 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
         await AmendAsync(releaseId, DriftingApi());
 
         await using var read = _db.NewContext();
-        var rows = await read.GitHubRepositoryDrift.ToListAsync();
+        // The app numbers itself (1.0.0.0), so beside the application there is only the
+        // offer to switch it, which is not something it is behind on.
+        var rows = await read.GitHubRepositoryDrift.Where(d => d.Field != "version-adopt").ToListAsync();
         rows.Should().ContainSingle()
             .Which.Should().Match<GitHubRepositoryDrift>(
                 d => d.Repository == RepoA && d.Field == "application"
