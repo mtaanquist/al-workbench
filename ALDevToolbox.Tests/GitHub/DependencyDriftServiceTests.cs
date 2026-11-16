@@ -232,6 +232,98 @@ public sealed class DependencyDriftServiceTests : IDisposable
         (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
     }
 
+    /// <summary>A manifest a wave behind whose own version follows the Business Central it was built for.</summary>
+    private const string FollowingManifest = """
+        {
+          "id": "1c0ffee0-0000-4000-8000-000000000004",
+          "name": "Payment Import",
+          "publisher": "CRONUS",
+          "version": "27.0.3.0",
+          "application": "27.0.0.0",
+          "platform": "27.0.0.0"
+        }
+        """;
+
+    [Fact]
+    public async Task An_app_versioned_after_its_business_central_moves_with_the_application()
+    {
+        // The house convention: an app's Major.Minor say which Business Central it was
+        // built for. Pipeline numbering only adds to Build, so if the update did not
+        // move the version, an app on 28.2 would carry on calling itself 27.0.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var scanApi = BaseApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", FollowingManifest));
+        var (scanner, scanCtx) = NewService(scanApi);
+        await using (scanCtx) (await scanner.ScanForReleaseAsync(releaseId)).Should().Be(3);
+
+        await using (var read = _db.NewContext())
+        {
+            var version = await read.GitHubRepositoryDrift.SingleAsync(r => r.Field == "version");
+            version.Current.Should().Be("27.0.3.0");
+            version.Proposed.Should().Be("28.2.0.0", "a new Major.Minor starts its own Build and Revision");
+        }
+
+        var api = WritableApi(RepoA, manifest: FollowingManifest);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var file = (await service.GetSummaryAsync()).Repositories.Single().Files.Single();
+        file.Changes.Should().ContainSingle(c => c.Field == "version").Which.Label.Should().Be("App version");
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
+        CommittedBlob(api).Should().Be(FollowingManifest
+            .Replace("\"version\": \"27.0.3.0\"", "\"version\": \"28.2.0.0\"")
+            .Replace("\"application\": \"27.0.0.0\"", "\"application\": \"28.2.0.0\"")
+            .Replace("\"platform\": \"27.0.0.0\"", "\"platform\": \"28.0.0.0\""));
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
+            .Should().Contain("App version");
+    }
+
+    [Fact]
+    public async Task An_app_that_numbers_itself_keeps_its_version()
+    {
+        // BehindManifest is version 1.0.0.0 on BC 27: not the convention, so only the
+        // application, platform and dependency move.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var (service, ctx) = NewService(ScannableApi(RepoA));
+        await using var _ = ctx;
+
+        await service.ScanForReleaseAsync(releaseId);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubRepositoryDrift.AnyAsync(r => r.Field == "version")).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("28.2.0.0", "28.2.0.0", "28.5", "28.5.0.0")]
+    [InlineData("28.2.17.3", "28.2.0.0", "28.5.12345.0", "28.5.0.0")]
+    [InlineData("28.0.0.0", "28.2.0.0", "28.5", "28.5.0.0")]
+    [InlineData("27.5.0.0", "27.0.0.0", "28.0", "28.0.0.0")]
+    [InlineData("28.2", "28.2.0.0", "28.5", "28.5")]
+    public void The_proposed_app_version_takes_the_targets_major_minor(
+        string version, string application, string target, string expected) =>
+        DependencyDriftService.ProposedAppVersion(version, application, target).Should().Be(expected);
+
+    [Theory]
+    [InlineData("1.3.0.0", "27.0.0.0", "28.2")]
+    [InlineData("28.5.0.0", "28.2.0.0", "28.5")]
+    [InlineData("28.6.0.0", "28.2.0.0", "28.5")]
+    [InlineData("", "28.2.0.0", "28.5")]
+    [InlineData("not-a-version", "28.2.0.0", "28.5")]
+    public void An_app_version_that_does_not_follow_or_is_already_there_is_not_proposed(
+        string version, string application, string target) =>
+        DependencyDriftService.ProposedAppVersion(version, application, target).Should().BeNull();
+
     [Fact]
     public async Task A_dependency_written_with_fewer_parts_than_the_catalogue_is_not_behind()
     {

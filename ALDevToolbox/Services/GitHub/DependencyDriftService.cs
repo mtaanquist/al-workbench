@@ -14,7 +14,7 @@ using ALDevToolbox.Services.Templates;
 namespace ALDevToolbox.Services.GitHub;
 
 /// <summary>One value in one manifest that is behind, as a page renders it.</summary>
-/// <param name="Field">The stored field key - <c>application</c>, <c>platform</c> or <c>dependency:&lt;id&gt;</c>.</param>
+/// <param name="Field">The stored field key - <c>application</c>, <c>platform</c>, <c>version</c> or <c>dependency:&lt;id&gt;</c>.</param>
 /// <param name="Label">What that field is called in front of a person.</param>
 /// <param name="Current">What the manifest says now.</param>
 /// <param name="Proposed">What the pull request would put there.</param>
@@ -178,6 +178,9 @@ public sealed class DependencyDriftService
 
     /// <summary>The field key for the manifest's <c>platform</c>.</summary>
     public const string PlatformField = "platform";
+
+    /// <summary>The field key for the manifest's own <c>version</c>, moved along with <c>application</c>; see <see cref="ProposedAppVersion"/>.</summary>
+    public const string VersionField = "version";
 
     /// <summary>What a dependency's field key starts with; the app id follows it.</summary>
     public const string DependencyFieldPrefix = "dependency:";
@@ -589,6 +592,11 @@ public sealed class DependencyDriftService
         if (manifest.Application is { } application && IsBehindByRelease(application, applicationTarget))
         {
             yield return (ApplicationField, application, ProposedVersion(applicationTarget, application));
+
+            if (ProposedAppVersion(manifest.Version, application, applicationTarget) is { } version)
+            {
+                yield return (VersionField, manifest.Version, version);
+            }
         }
 
         if (platformTarget is not null
@@ -618,6 +626,36 @@ public sealed class DependencyDriftService
     private static bool IsBehindByRelease(string current, string target) =>
         BcVersionComparer.Instance.Compare(
             BcArtifactIndex.ToMajorMinor(current), BcArtifactIndex.ToMajorMinor(target)) < 0;
+
+    /// <summary>
+    /// The app's own new version when it follows the Business Central version it is
+    /// built for, as the house convention has it: an app on <c>28.2.x.x</c> that targets
+    /// application <c>28.2</c> is moved to <c>28.5.0.0</c> along with the application,
+    /// so its Major.Minor keep saying what it was built for. Null when the app does not
+    /// follow that convention or is already there.
+    ///
+    /// <para><strong>Following means the same major.</strong> An app whose major is
+    /// not the application's (a <c>1.3.0.0</c> on BC 27) numbers itself, and is left
+    /// alone. The minor is not compared, so an app that fell behind its application
+    /// before (<c>28.0</c> on application <c>28.2</c>) is brought back in line too.</para>
+    ///
+    /// <para><strong>Build and Revision go back to 0.</strong> A new Major.Minor starts
+    /// its own count, and a pipeline that numbers builds adds its build number on top,
+    /// so the next build is still higher than anything installed. Never lowered: an app
+    /// already at or past the target's Major.Minor gets nothing.</para>
+    /// </summary>
+    internal static string? ProposedAppVersion(string? version, string application, string target)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return null;
+        if (!TryMajor(version, out var versionMajor) || !TryMajor(application, out var applicationMajor)) return null;
+        if (versionMajor != applicationMajor) return null;
+        if (!IsBehindByRelease(version, target)) return null;
+        return ProposedVersion(target, version);
+    }
+
+    private static bool TryMajor(string version, out int major) =>
+        int.TryParse(version.Trim().Split('.')[0], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out major);
 
     /// <summary>
     /// The new value, written the way the old one was: the target's
@@ -1030,6 +1068,7 @@ public sealed class DependencyDriftService
     {
         if (field == ApplicationField) return "Business Central application";
         if (field == PlatformField) return "Business Central platform";
+        if (field == VersionField) return "App version";
         if (!field.StartsWith(DependencyFieldPrefix, StringComparison.Ordinal)) return field;
 
         var id = field[DependencyFieldPrefix.Length..];
@@ -1614,6 +1653,14 @@ public sealed class DependencyDriftService
                 ? (true, AppJsonValueEditor.ReplaceRootProperty(text, PlatformField, change.Proposed))
                 : (false, null);
         }
+        if (change.Field == VersionField)
+        {
+            // Compared at Major.Minor: somebody's own bump of the Build since the scan
+            // is still behind a new minor, and an app already moved on is left alone.
+            return !string.IsNullOrWhiteSpace(manifest.Version) && IsBehindByRelease(manifest.Version, change.Proposed)
+                ? (true, AppJsonValueEditor.ReplaceRootProperty(text, VersionField, change.Proposed))
+                : (false, null);
+        }
         if (!change.Field.StartsWith(DependencyFieldPrefix, StringComparison.Ordinal)) return (false, null);
 
         var id = change.Field[DependencyFieldPrefix.Length..];
@@ -1628,7 +1675,7 @@ public sealed class DependencyDriftService
     private static string? Rewrite(string text, GitHubRepositoryDrift change) =>
         AppJsonValueEditor.RewriteWholeDocument(text, root =>
         {
-            if (change.Field is ApplicationField or PlatformField)
+            if (change.Field is ApplicationField or PlatformField or VersionField)
             {
                 root[change.Field] = change.Proposed;
                 return;
