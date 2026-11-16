@@ -238,6 +238,14 @@ public sealed class DependencyDriftServiceTests : IDisposable
           "id": "1c0ffee0-0000-4000-8000-000000000004",
           "name": "Payment Import",
           "publisher": "CRONUS",
+          "dependencies": [
+            {
+              "id": "63ca2fa4-4f03-4f2b-a480-172fef340d3f",
+              "name": "System Application",
+              "publisher": "Microsoft",
+              "version": "28.2.0.0"
+            }
+          ],
           "version": "27.0.3.0",
           "application": "27.0.0.0",
           "platform": "27.0.0.0"
@@ -284,6 +292,33 @@ public sealed class DependencyDriftServiceTests : IDisposable
             .Replace("\"platform\": \"27.0.0.0\"", "\"platform\": \"28.0.0.0\""));
         api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
             .Should().Contain("App version");
+    }
+
+    [Fact]
+    public async Task An_app_version_moved_on_by_hand_since_the_scan_is_left_alone()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        await using (var seed = _db.NewContext())
+        {
+            seed.GitHubRepositoryDrift.Add(new GitHubRepositoryDrift
+            {
+                OrganizationId = _orgId, Repository = RepoA, Path = "app.json", Field = "version",
+                Current = "27.0.3.0", Proposed = "28.2.0.0", ReleaseId = releaseId, DetectedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var movedOn = FollowingManifest.Replace("\"version\": \"27.0.3.0\"", "\"version\": \"28.3.0.0\"");
+        var api = WritableApi(RepoA, manifest: movedOn);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = (await service.OpenUpdatePullRequestsAsync([RepoA])).Single();
+
+        result.Refusal.Should().Contain("already up to date", "a version is never lowered");
+        api.Calls.Should().NotContain(c => c.Contains("/git/blobs"));
     }
 
     [Fact]
