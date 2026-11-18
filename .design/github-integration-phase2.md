@@ -1168,7 +1168,7 @@ year's Business Central after a new release lands in the Object Explorer.
   anybody should be offered a pull request for, and "replace everything" is also
   what makes drift somebody has fixed by hand disappear on its own. The unique
   index is `(organization_id, repository, path, field)`; `field` is
-  `application`, `platform` or `dependency:<app id>`, the id normalised the way
+  `application`, `platform`, `version`, `version-adopt` or `dependency:<app id>`, the id normalised the way
   AL means it (braces and case are decoration). The row hangs off `oe_releases`
   with a cascade, which is why the table is in `TenantTableCatalog.ContentTables`
   rather than excluded as a cache - a per-tenant restore that deleted the
@@ -1183,6 +1183,20 @@ year's Business Central after a new release lands in the Object Explorer.
   well-known-dependency catalogue's default. A manifest with no `application` is
   skipped whole: it states no Business Central to be behind of. So is a
   dependency entry that states no version - there would be nothing to edit.
+- **The app's own `version` follows its `application`.** The house convention is
+  that an app's Major.Minor say which Business Central it was built for, and the
+  pipeline's build numbering only adds to Build, so nothing else would move them.
+  When `application` is behind and the app's `version` has the same major as the
+  old `application`, `version` is proposed too: the target's Major.Minor with Build
+  and Revision back at 0 (`28.2.3.0` on application 28.2 becomes `28.5.0.0` when the
+  target is 28.5). A version already at or past the target is never lowered.
+- **An app that numbers itself is offered the switch, never given it.** One whose
+  major differs (`1.3.0.0` on BC 27) gets a `version-adopt` row instead: the same
+  proposal, kept out of the list of what is behind. When a person opens the pull
+  request from the Repositories list and any app in it has such a row, a dialog lists
+  them with a checkbox, off by default, to switch them in the same pull request. After
+  the switch the app follows the convention and the bullet above keeps it in step.
+  The automatic run never switches anything: nobody is there to ask.
 - **The scan reads the same manifests repository discovery does**, through
   `RepositoryDiscoveryService.ManifestPaths` on one recursive tree read per
   repository, so the two features cannot come to disagree about what a

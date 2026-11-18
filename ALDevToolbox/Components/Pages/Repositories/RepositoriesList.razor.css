@@ -46,3 +46,25 @@
         display: none;
     }
 }
+
+/* The extensions the open-pull-request question lists, name left and versions right. */
+.repos__offers {
+    list-style: none;
+    margin: var(--space-2) 0 var(--space-3);
+    padding: 0;
+    display: grid;
+    gap: var(--space-1);
+}
+
+.repos__offers li {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: var(--space-1) var(--space-3);
+}
+
+@media (max-width: 640px) {
+    .repos__offers li {
+        flex-direction: column;
+    }
+}

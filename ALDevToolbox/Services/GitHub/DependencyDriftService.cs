@@ -14,7 +14,7 @@ using ALDevToolbox.Services.Templates;
 namespace ALDevToolbox.Services.GitHub;
 
 /// <summary>One value in one manifest that is behind, as a page renders it.</summary>
-/// <param name="Field">The stored field key - <c>application</c>, <c>platform</c> or <c>dependency:&lt;id&gt;</c>.</param>
+/// <param name="Field">The stored field key - <c>application</c>, <c>platform</c>, <c>version</c> or <c>dependency:&lt;id&gt;</c>.</param>
 /// <param name="Label">What that field is called in front of a person.</param>
 /// <param name="Current">What the manifest says now.</param>
 /// <param name="Proposed">What the pull request would put there.</param>
@@ -178,6 +178,17 @@ public sealed class DependencyDriftService
 
     /// <summary>The field key for the manifest's <c>platform</c>.</summary>
     public const string PlatformField = "platform";
+
+    /// <summary>The field key for the manifest's own <c>version</c>, moved along with <c>application</c>; see <see cref="ProposedAppVersion"/>.</summary>
+    public const string VersionField = "version";
+
+    /// <summary>
+    /// The field key for the manifest's own <c>version</c> when the app numbers itself
+    /// rather than after Business Central; see <see cref="ProposedAdoptedVersion"/>. Only
+    /// a person opening the pull request by hand can ask for it, and it is left out
+    /// otherwise: switching an app to Business Central's numbering is a choice, made once.
+    /// </summary>
+    public const string AdoptVersionField = "version-adopt";
 
     /// <summary>What a dependency's field key starts with; the app id follows it.</summary>
     public const string DependencyFieldPrefix = "dependency:";
@@ -589,6 +600,15 @@ public sealed class DependencyDriftService
         if (manifest.Application is { } application && IsBehindByRelease(application, applicationTarget))
         {
             yield return (ApplicationField, application, ProposedVersion(applicationTarget, application));
+
+            if (ProposedAppVersion(manifest.Version, application, applicationTarget) is { } version)
+            {
+                yield return (VersionField, manifest.Version, version);
+            }
+            else if (ProposedAdoptedVersion(manifest.Version, application, applicationTarget) is { } adopted)
+            {
+                yield return (AdoptVersionField, manifest.Version, adopted);
+            }
         }
 
         if (platformTarget is not null
@@ -618,6 +638,52 @@ public sealed class DependencyDriftService
     private static bool IsBehindByRelease(string current, string target) =>
         BcVersionComparer.Instance.Compare(
             BcArtifactIndex.ToMajorMinor(current), BcArtifactIndex.ToMajorMinor(target)) < 0;
+
+    /// <summary>
+    /// The app's own new version when it follows the Business Central version it is
+    /// built for, as the house convention has it: an app on <c>28.2.x.x</c> that targets
+    /// application <c>28.2</c> is moved to <c>28.5.0.0</c> along with the application,
+    /// so its Major.Minor keep saying what it was built for. Null when the app does not
+    /// follow that convention or is already there.
+    ///
+    /// <para><strong>Following means the same major.</strong> An app whose major is
+    /// not the application's (a <c>1.3.0.0</c> on BC 27) numbers itself, and is left
+    /// alone. The minor is not compared, so an app that fell behind its application
+    /// before (<c>28.0</c> on application <c>28.2</c>) is brought back in line too.</para>
+    ///
+    /// <para><strong>Build and Revision go back to 0.</strong> A new Major.Minor starts
+    /// its own count, and a pipeline that numbers builds adds its build number on top,
+    /// so the next build is still higher than anything installed. Never lowered: an app
+    /// already at or past the target's Major.Minor gets nothing.</para>
+    /// </summary>
+    internal static string? ProposedAppVersion(string? version, string application, string target)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return null;
+        if (!TryMajor(version, out var versionMajor) || !TryMajor(application, out var applicationMajor)) return null;
+        if (versionMajor != applicationMajor) return null;
+        if (!IsBehindByRelease(version, target)) return null;
+        return ProposedVersion(target, version);
+    }
+
+    /// <summary>
+    /// The version an app that numbers itself would take if it switched to Business
+    /// Central's numbering: the target's Major.Minor with Build and Revision at 0, as
+    /// <see cref="ProposedAppVersion"/> gives a following app. Null when the app already
+    /// follows (that is <see cref="ProposedAppVersion"/>'s case), its version cannot be
+    /// read, or the switch would lower it - an app on 30.0 targeting BC 28 is left alone.
+    /// </summary>
+    internal static string? ProposedAdoptedVersion(string? version, string application, string target)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return null;
+        if (!TryMajor(version, out var versionMajor) || !TryMajor(application, out var applicationMajor)) return null;
+        if (versionMajor == applicationMajor) return null;
+        if (!IsBehindByRelease(version, target)) return null;
+        return ProposedVersion(target, version);
+    }
+
+    private static bool TryMajor(string version, out int major) =>
+        int.TryParse(version.Trim().Split('.')[0], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out major);
 
     /// <summary>
     /// The new value, written the way the old one was: the target's
@@ -917,7 +983,10 @@ public sealed class DependencyDriftService
     public async Task<DependencyDriftSummary> GetSummaryAsync(CancellationToken ct = default)
     {
         RequireOrganizationId();
+        // An offer to switch an app's numbering is asked about when the pull request is
+        // opened, not listed as something the repository is behind on.
         var rows = await _db.GitHubRepositoryDrift.AsNoTracking()
+            .Where(d => d.Field != AdoptVersionField)
             .OrderBy(d => d.Repository).ThenBy(d => d.Path).ThenBy(d => d.Field)
             .ToListAsync(ct);
         if (rows.Count == 0) return new DependencyDriftSummary([], [], null);
@@ -1030,6 +1099,7 @@ public sealed class DependencyDriftService
     {
         if (field == ApplicationField) return "Business Central application";
         if (field == PlatformField) return "Business Central platform";
+        if (field is VersionField or AdoptVersionField) return "App version";
         if (!field.StartsWith(DependencyFieldPrefix, StringComparison.Ordinal)) return field;
 
         var id = field[DependencyFieldPrefix.Length..];
@@ -1046,8 +1116,12 @@ public sealed class DependencyDriftService
     /// rest: every repository asked for comes back with either a pull request
     /// or a reason.
     /// </summary>
+    /// <param name="adoptVersions">
+    /// Whether apps that number themselves also switch to Business Central's numbering
+    /// (<see cref="AdoptVersionField"/>). The person is asked; the automatic run never does it.
+    /// </param>
     public async Task<IReadOnlyList<DependencyDriftPullRequest>> OpenUpdatePullRequestsAsync(
-        IReadOnlyList<string> repositories, CancellationToken ct = default)
+        IReadOnlyList<string> repositories, bool adoptVersions = false, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var userId = RequireUserId();
@@ -1079,7 +1153,7 @@ public sealed class DependencyDriftService
                 results.Add(new DependencyDriftPullRequest(name, null, false, 0, RateLimitedRefusal, IsRateLimited: true));
                 continue;
             }
-            var result = await TryOpenOneAsync(token, name, visible, automatic: false, ct);
+            var result = await TryOpenOneAsync(token, name, visible, automatic: false, adoptVersions, ct);
             if (result.PullRequest is { } pullRequest)
             {
                 // A version opened by hand replaces an older automatic one just the same.
@@ -1174,7 +1248,7 @@ public sealed class DependencyDriftService
         foreach (var name in due)
         {
             ct.ThrowIfCancellationRequested();
-            var result = await TryOpenOneAsync(token, name, visible, automatic: true, ct);
+            var result = await TryOpenOneAsync(token, name, visible, automatic: true, adoptVersions: false, ct);
             if (result.PullRequest is { } pullRequest)
             {
                 if (result.IsNewPullRequest) opened++;
@@ -1402,11 +1476,11 @@ public sealed class DependencyDriftService
 
     /// <summary><see cref="OpenOneAsync"/>, with every refusal turned into an answer rather than an exception.</summary>
     private async Task<DependencyDriftPullRequest> TryOpenOneAsync(
-        string token, string name, IReadOnlySet<string> visible, bool automatic, CancellationToken ct)
+        string token, string name, IReadOnlySet<string> visible, bool automatic, bool adoptVersions, CancellationToken ct)
     {
         try
         {
-            return await OpenOneAsync(token, name, visible, automatic, ct);
+            return await OpenOneAsync(token, name, visible, automatic, adoptVersions, ct);
         }
         catch (PlanValidationException ex)
         {
@@ -1429,7 +1503,7 @@ public sealed class DependencyDriftService
     }
 
     private async Task<DependencyDriftPullRequest> OpenOneAsync(
-        string token, string fullName, IReadOnlySet<string> visible, bool automatic, CancellationToken ct)
+        string token, string fullName, IReadOnlySet<string> visible, bool automatic, bool adoptVersions, CancellationToken ct)
     {
         if (!visible.Contains(fullName))
         {
@@ -1439,6 +1513,7 @@ public sealed class DependencyDriftService
 
         var rows = await _db.GitHubRepositoryDrift.AsNoTracking()
             .Where(d => d.Repository == fullName)
+            .Where(d => adoptVersions || d.Field != AdoptVersionField)
             .OrderBy(d => d.Path).ThenBy(d => d.Field)
             .ToListAsync(ct);
         if (rows.Count == 0)
@@ -1614,6 +1689,14 @@ public sealed class DependencyDriftService
                 ? (true, AppJsonValueEditor.ReplaceRootProperty(text, PlatformField, change.Proposed))
                 : (false, null);
         }
+        if (change.Field is VersionField or AdoptVersionField)
+        {
+            // Compared at Major.Minor: somebody's own bump of the Build since the scan
+            // is still behind a new minor, and an app already moved on is left alone.
+            return !string.IsNullOrWhiteSpace(manifest.Version) && IsBehindByRelease(manifest.Version, change.Proposed)
+                ? (true, AppJsonValueEditor.ReplaceRootProperty(text, "version", change.Proposed))
+                : (false, null);
+        }
         if (!change.Field.StartsWith(DependencyFieldPrefix, StringComparison.Ordinal)) return (false, null);
 
         var id = change.Field[DependencyFieldPrefix.Length..];
@@ -1631,6 +1714,11 @@ public sealed class DependencyDriftService
             if (change.Field is ApplicationField or PlatformField)
             {
                 root[change.Field] = change.Proposed;
+                return;
+            }
+            if (change.Field is VersionField or AdoptVersionField)
+            {
+                root["version"] = change.Proposed;
                 return;
             }
 

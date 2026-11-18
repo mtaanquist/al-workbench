@@ -66,6 +66,26 @@ public sealed class RepositoryListServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task An_app_that_numbers_itself_is_an_offer_not_a_change()
+    {
+        await SeedSolutionAsync(RepoA, "CRONUS A/S payments", production: "28.2.45123.0");
+        await SeedDriftAsync(RepoA, "application", "27.0.0.0", "28.2.0.0");
+        await SeedDriftAsync(RepoA, DependencyDriftService.AdoptVersionField, "1.3.0.0", "28.2.0.0");
+
+        var row = (await ListAsync()).Should().ContainSingle().Subject;
+
+        row.Changes.Should().ContainSingle(c => c.Field == "application");
+        row.Offers.Should().ContainSingle().Which.Should().Be(new AppVersionOffer("payment-import", "1.3.0.0", "28.2.0.0"));
+    }
+
+    [Theory]
+    [InlineData("app.json", "payment-import")]
+    [InlineData("Payments/app.json", "Payments")]
+    [InlineData("src/Payments/app.json", "Payments")]
+    public void An_extension_is_named_by_its_folder_or_the_repository(string path, string expected) =>
+        RepositoryListService.ExtensionName(path, "cronus-dk/payment-import").Should().Be(expected);
+
+    [Fact]
     public async Task An_up_to_date_repository_still_shows_its_version_with_nothing_to_update()
     {
         await SeedSolutionAsync(RepoB, "CRONUS A/S warehouse", production: "28.2.45123.0");
