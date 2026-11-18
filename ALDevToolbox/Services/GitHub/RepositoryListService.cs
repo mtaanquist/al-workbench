@@ -60,14 +60,26 @@ public sealed record RepositoryListRow(
     DateTime? CheckedAt,
     IReadOnlyList<DependencyDriftChange> Changes,
     RepositoryListPullRequest? PullRequest,
-    RepositoryListFiles? Files = null)
+    RepositoryListFiles? Files = null,
+    IReadOnlyList<AppVersionOffer>? VersionOffers = null)
 {
+    /// <summary>
+    /// The extensions here that number themselves rather than after Business Central,
+    /// and what they would become if the person opening the pull request chooses to
+    /// switch them. Not part of <see cref="Changes"/>: nothing is behind until they ask.
+    /// </summary>
+    public IReadOnlyList<AppVersionOffer> Offers => VersionOffers ?? [];
+
     /// <summary>The customer's Business Central as <c>major.minor</c>, the way the Solutions list shows it.</summary>
     public string? BcVersion => Environment is null ? null : BcArtifactIndex.ToMajorMinor(Environment.Version);
 
     /// <summary>True when an update pull request would change something.</summary>
     public bool HasAppJsonUpdate => Changes.Count > 0;
 }
+
+/// <summary>One extension that could switch to Business Central's numbering in the update pull request.</summary>
+/// <param name="Extension">What the person knows it by: its folder, or the repository's name for a root app.json.</param>
+public sealed record AppVersionOffer(string Extension, string Current, string Proposed);
 
 /// <summary>
 /// The rows behind the Repositories list (issue #1719): every repository on a solution
@@ -193,11 +205,16 @@ public sealed class RepositoryListService
             }
 
             var check = fullName is not null && checks.TryGetValue(fullName, out var c) ? c : null;
-            var changes = fullName is not null && findings.TryGetValue(fullName, out var found)
-                ? found.Select(d => new DependencyDriftChange(
-                        d.Field, DependencyDriftService.FieldLabel(d.Field, dependencyNames), d.Current, d.Proposed))
-                    .ToList()
-                : [];
+            var found = fullName is not null && findings.TryGetValue(fullName, out var rowsFound) ? rowsFound : [];
+            var changes = found
+                .Where(d => d.Field != DependencyDriftService.AdoptVersionField)
+                .Select(d => new DependencyDriftChange(
+                    d.Field, DependencyDriftService.FieldLabel(d.Field, dependencyNames), d.Current, d.Proposed))
+                .ToList();
+            var offers = found
+                .Where(d => d.Field == DependencyDriftService.AdoptVersionField)
+                .Select(d => new AppVersionOffer(ExtensionName(d.Path, fullName!), d.Current, d.Proposed))
+                .ToList();
 
             RepositoryListPullRequest? pullRequest = null;
             if (changes.Count > 0 && fullName is not null)
@@ -236,12 +253,25 @@ public sealed class RepositoryListService
                             ? new RepositoryListPullRequest(number, url)
                             : null,
                         files.CheckedAt)
-                    : null));
+                    : null,
+                offers));
         }
 
         return rows
             .OrderBy(r => r.SolutionName, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(r => r.Repository, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    /// <summary>
+    /// An extension as the person knows it: the folder its <c>app.json</c> sits in, or the
+    /// repository's own name when the manifest is at the root.
+    /// </summary>
+    internal static string ExtensionName(string path, string fullName)
+    {
+        var folder = Path.GetDirectoryName(path.Replace('\\', '/'))?.Replace('\\', '/');
+        if (!string.IsNullOrEmpty(folder)) return folder.Split('/')[^1];
+        var slash = fullName.LastIndexOf('/');
+        return slash >= 0 ? fullName[(slash + 1)..] : fullName;
     }
 }
