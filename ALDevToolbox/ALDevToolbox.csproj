@@ -56,7 +56,7 @@
     <PackageReference Include="DiffPlex" Version="1.9.0" />
     <!-- Fido2NetLib (passkeys / WebAuthn). The .AspNet meta package pulls in
          the core types and the ASP.NET Core integration helpers. -->
-    <PackageReference Include="Fido2.AspNet" Version="4.3.2" />
+    <PackageReference Include="Fido2.AspNet" Version="4.3.3" />
     <!-- 4.* floats over CVE-patched releases (GHSA-9j88-vvj5-vhgr, GHSA-g7hc-96xr-gvvx). -->
     <PackageReference Include="MailKit" Version="5.0.0" />
     <!-- Markdown renderer for recipe authoring instructions. CommonMark + GFM

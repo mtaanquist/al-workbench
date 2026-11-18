@@ -36,12 +36,12 @@
       },
       "Fido2.AspNet": {
         "type": "Direct",
-        "requested": "[4.3.2, )",
-        "resolved": "4.3.2",
-        "contentHash": "+umwqTHdfXPcefIK7pqRFE8N3fiu1SV5uf/9roLaS2TIl3eLEWXWoQ9MPmvVWyW9D42E9Rw2jKMqMVtuljKT4w==",
+        "requested": "[4.3.3, )",
+        "resolved": "4.3.3",
+        "contentHash": "5LHprp4d3IEooCHFA/ErP9jZYWEar8tHOOwruLeISrVkwSKQMxGeLiwzJax2hdqdqV4IBhHkrDiZ5i09jDyRuw==",
         "dependencies": {
-          "Fido2": "4.3.2",
-          "Fido2.Models": "4.3.2"
+          "Fido2": "4.3.3",
+          "Fido2.Models": "4.3.3"
         }
       },
       "MailKit": {
@@ -231,18 +231,18 @@
       },
       "Fido2": {
         "type": "Transitive",
-        "resolved": "4.3.2",
-        "contentHash": "HcMs7cmzy+pvhUZr/LkJiLZzJHFKUrT4Ky5QH320phEHjukKxvTozC4FK7fAbwmcg3oe4naUUYaG7FkgUzm1GQ==",
+        "resolved": "4.3.3",
+        "contentHash": "++G8ohXlhp9AH49FXIvYqziXUAEpuCtT+z5HBevX6+Pl6sYz9zfDHGTgvne6t3UEhM0hudesgMudyNG7RlpaEA==",
         "dependencies": {
-          "Fido2.Models": "4.3.2",
+          "Fido2.Models": "4.3.3",
           "Microsoft.IdentityModel.JsonWebTokens": "8.2.0",
           "NSec.Cryptography": "25.4.0"
         }
       },
       "Fido2.Models": {
         "type": "Transitive",
-        "resolved": "4.3.2",
-        "contentHash": "N9kvnuAtRXhezfs3cOo+eqI6MeQDr///s75NQUHPizM1/RkPahY9HmHbEzmr8B9gVESo9uyVorjvtrAqVeUz/w==",
+        "resolved": "4.3.3",
+        "contentHash": "G/Q8MYgptOwMrbWgDoGsy90u3J5GTdNAHub8aZRg/mQrUETzB5CqFzstGdTXE9UhL0qD6sRynOoPUnqCwKRnMw==",
         "dependencies": {
           "Microsoft.Bcl.Memory": "9.0.14"
         }
