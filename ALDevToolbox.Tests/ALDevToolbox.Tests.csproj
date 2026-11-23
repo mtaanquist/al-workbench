@@ -43,7 +43,7 @@
          lockstep with Microsoft.EntityFrameworkCore.Design in ALDevToolbox.csproj. -->
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.15" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.15" />
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.4" />
     <!-- WebApplicationFactory boots Program.cs end-to-end so the routing layer
          is exercised. Used by Routing/EndpointAmbiguityTests to detect route
          collisions at build time instead of at request time. -->
@@ -55,7 +55,7 @@
     <!-- Testcontainers drives the local-dev path; CI bypasses it by setting
          ALDT_TEST_POSTGRES_CONNECTION to the runner-provided service container,
          so the package is restored but not exercised on the CI runner. -->
-    <PackageReference Include="Testcontainers.PostgreSql" Version="4.16.0" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.17.0" />
   </ItemGroup>
 
   <ItemGroup>
