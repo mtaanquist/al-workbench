@@ -265,7 +265,7 @@
                                     <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                                     <span>Only release and deploy extensions that changed</span>
                                 </label>
-                                <small class="field__hint">If nothing in an extension's folder has changed since this pipeline last built it, it keeps its earlier .app file and version. It's left out of the release, and deployments don't reinstall it. Extensions that depend on a changed one are always rebuilt.</small>
+                                <small class="field__hint">If nothing in an extension's folder has changed since this pipeline last built it, it keeps its earlier .app file and version. It's left out of the release, and deployments don't reinstall it. An extension that depends on a changed one is compiled again to check it still builds. If it does, it keeps its earlier version; if not, the build reports it as failed.</small>
                             </div>
                             @if (_releaseRepositories is { Count: > 0 })
                             {

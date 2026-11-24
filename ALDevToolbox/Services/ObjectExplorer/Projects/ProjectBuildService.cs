@@ -487,50 +487,65 @@ public sealed class ProjectBuildService
             var artifacts = new List<PendingArtifact>();
             List<StoredSymbolPackage>? storedSymbols = null;
             List<InstalledAppFact>? installedApps = null;
+
+            // Puts an unchanged app's earlier .app into this build in place of a new
+            // one: into the symbols folder for the apps that depend on it, the upload
+            // and the build's artifacts. The log line is given the earlier file's name.
+            async Task<bool> CarryEarlierAppAsync(DiscoveredApp app, CarriedApp earlier, Func<string, string> logLine)
+            {
+                var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
+                    .Where(a => a.Id == earlier.ArtifactId)
+                    .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
+                    .FirstOrDefaultAsync(ct);
+                if (kept is null)
+                {
+                    // The earlier build was removed while this one ran. Building again
+                    // finds no earlier build and gives the app a new version.
+                    results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                        ProjectBuildResultStatus.Failed,
+                        $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
+                        RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    return false;
+                }
+                await File.WriteAllBytesAsync(Path.Combine(symbolsDir, SafeAppFileName(app.Manifest)), kept.Content, ct);
+                uploads.Add(new AppFileUpload(
+                    FileName: kept.FileName,
+                    AppStream: new MemoryStream(kept.Content, writable: false),
+                    SourceZipStream: null));
+                // Deliver exactly the .app the earlier build produced, so an
+                // environment already on it sees the same version and skips it.
+                artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
+                    kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
+                logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}", logLine(kept.FileName)));
+                results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                    ProjectBuildResultStatus.Compiled, null,
+                    RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                return true;
+            }
+
             foreach (var app in TopologicalOrder(discovered))
             {
                 ct.ThrowIfCancellationRequested();
-                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
+                carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier);
+                if (earlier is { CompileFirst: false })
                 {
-                    // Unchanged, and so is every sibling it depends on (FindUnchangedAppsAsync
-                    // carries nothing whose dependency changed): compiling it again would only
-                    // produce what the earlier build already did, so its .app is used as it is
-                    // (#1140). It goes into the symbols folder for the apps that depend on it.
-                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
-                        .Where(a => a.Id == earlier.ArtifactId)
-                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
-                        .FirstOrDefaultAsync(ct);
-                    if (kept is null)
-                    {
-                        // The earlier build was removed while this one ran. Building again
-                        // finds no earlier build and gives the app a new version.
-                        results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
-                            ProjectBuildResultStatus.Failed,
-                            $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
-                            RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
-                        continue;
-                    }
-                    await File.WriteAllBytesAsync(Path.Combine(symbolsDir, SafeAppFileName(app.Manifest)), kept.Content, ct);
-                    uploads.Add(new AppFileUpload(
-                        FileName: kept.FileName,
-                        AppStream: new MemoryStream(kept.Content, writable: false),
-                        SourceZipStream: null));
-                    // Deliver exactly the .app the earlier build produced, so an
-                    // environment already on it sees the same version and skips it.
-                    artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
-                        kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
-                    logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}",
-                        $"Not compiled: nothing in it or in the extensions it depends on changed since build #{earlier.OriginBuildId}, so this build uses that build's {kept.FileName}."));
-                    results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
-                        ProjectBuildResultStatus.Compiled, null,
-                        RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    // Unchanged, and so is every sibling it depends on: compiling it again
+                    // would only produce what the earlier build already did, so its .app is
+                    // used as it is (#1140).
+                    await CarryEarlierAppAsync(app, earlier, file =>
+                        $"Not compiled: nothing in it or in the extensions it depends on changed since build #{earlier.OriginBuildId}, so this build uses that build's {file}.");
                     continue;
                 }
 
                 var (compiled, compileLog) = await CompileAsync(app, symbolsDir, compiler, ct);
-                if (!string.IsNullOrWhiteSpace(compileLog))
+                // A check's compiler output shares its section with the note on what was
+                // carried (below), so the log has one section per extension.
+                if (!string.IsNullOrWhiteSpace(compileLog) && (earlier is null || compiled is null))
                 {
                     logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}", compileLog));
+                }
+                if (!string.IsNullOrWhiteSpace(compileLog))
+                {
                     foreach (var diagnostic in AlcOutputParser.Parse(compileLog))
                     {
                         // The compiler names the file by its absolute path inside
@@ -568,6 +583,24 @@ public sealed class ProjectBuildService
                     results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
                         ProjectBuildResultStatus.Failed, missingMessage ?? $"Compilation failed (see the build report for {app.Manifest.Name}).",
                         RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    continue;
+                }
+                if (earlier is not null)
+                {
+                    // Unchanged itself, but compiled because something it depends on
+                    // changed, to prove it still builds against that. It did, so the new
+                    // output is set aside and the earlier .app is delivered as it was:
+                    // Business Central recompiles an installed app when what it depends on
+                    // is upgraded, and this compile was that same check, run first.
+                    var checkedLog = compileLog;
+                    if (!await CarryEarlierAppAsync(app, earlier, file =>
+                            $"Compiled against the changed extensions it depends on to check it still builds, and it does. Nothing in it changed since build #{earlier.OriginBuildId}, so this build uses that build's {file} instead of a new version."
+                            + (string.IsNullOrWhiteSpace(checkedLog) ? string.Empty : "\n\n" + checkedLog)))
+                    {
+                        // Nothing is delivered for it, so its dependents must not compile
+                        // against the check's output either.
+                        File.Delete(compiled);
+                    }
                     continue;
                 }
                 // Read the .app into memory so the upload survives the temp-root
@@ -656,10 +689,12 @@ public sealed class ProjectBuildService
     /// to carry. An app counts as changed when the pipeline has no earlier build of it,
     /// when that build targeted another Business Central version, when the pipeline
     /// publishes to GitHub and the app never made it into a release, when git can't say
-    /// (the earlier commit is not in this clone's history, say), when any file under its
-    /// folder differs, or when an app in this build it depends on changed or was built
-    /// after it, so it is never left compiled against an older sibling than the one
-    /// deployed beside it. Writes one <b>Changes</b> log section saying which is which.
+    /// (the earlier commit is not in this clone's history, say), or when any file under its
+    /// folder differs. An unchanged app whose earlier build was not checked against the
+    /// very siblings it depends on in this build (one changed, was compiled again, or is
+    /// itself being checked) is carried with <see cref="CarriedApp.CompileFirst"/>: it is
+    /// compiled against them first, so it is never delivered beside a sibling it no
+    /// longer builds against. Writes one <b>Changes</b> log section saying which is which.
     /// </summary>
     private async Task<Dictionary<string, CarriedApp>> FindUnchangedAppsAsync(
         OeProjectBuild build, IReadOnlyList<DiscoveredApp> apps, bool publishesToGitHub, List<PendingLog> logs, CancellationToken ct)
@@ -697,6 +732,17 @@ public sealed class ProjectBuildService
         // GitHub, an app whose build never made a release (the publish failed, or
         // publishing was set up later) is built again so it reaches one.
         int Origin(int artifactBuildId, int? carriedFrom) => carriedFrom ?? artifactBuildId;
+
+        // What each of those builds delivered for each app, by the build that compiled
+        // the bytes. Every app in a finished build was compiled or checked against the
+        // siblings delivered beside it, so a sibling delivered there with the same
+        // origin as now is one the app is already known to build against.
+        var deliveredWith = (await _db.OeProjectBuildArtifacts.AsNoTracking()
+                .Where(a => a.AppId != null && ids.Contains(a.AppId) && buildIds.Contains(a.ProjectBuildId))
+                .Select(a => new { a.ProjectBuildId, AppId = a.AppId!, a.CarriedFromBuildId })
+                .ToListAsync(ct))
+            .GroupBy(a => (a.ProjectBuildId, a.AppId))
+            .ToDictionary(g => g.Key, g => g.Select(a => Origin(a.ProjectBuildId, a.CarriedFromBuildId)).ToHashSet());
         var released = new HashSet<int>();
         if (publishesToGitHub)
         {
@@ -745,21 +791,20 @@ public sealed class ProjectBuildService
                 lines.Add($"{name}: changed (build #{prior.ProjectBuildId} did not record its commit).");
                 continue;
             }
-            // A sibling it depends on that changed, or that was compiled after it: either
-            // way its own .app was compiled against something other than what is deployed.
-            var dependencyIds = app.Manifest.Dependencies.Select(d => NormalizeAppId(d.Id)).ToHashSet(StringComparer.Ordinal);
-            var newerSibling = apps.FirstOrDefault(a =>
+            // A sibling it depends on, directly or through another sibling, that changed,
+            // that is being checked itself, or whose bytes the earlier build did not
+            // deliver beside it: its .app was compiled against something other than what
+            // this build delivers, so it is checked. Transitively, because a checked
+            // sibling keeps its old origin and so hides a change further down.
+            var dependencyIds = DependencyClosure(app, apps);
+            var changedSibling = apps.FirstOrDefault(a =>
             {
                 var siblingId = NormalizeAppId(a.Manifest.Id);
                 if (!dependencyIds.Contains(siblingId)) return false;
-                if (!unchanged.TryGetValue(siblingId, out var sibling)) return true;
-                return sibling.OriginBuildId > origin;
+                if (!unchanged.TryGetValue(siblingId, out var sibling) || sibling.CompileFirst) return true;
+                return !(deliveredWith.TryGetValue((prior.ProjectBuildId, siblingId), out var beside)
+                         && beside.Contains(sibling.OriginBuildId));
             });
-            if (newerSibling is not null)
-            {
-                lines.Add($"{name}: rebuilt, because {newerSibling.Manifest.Name} changed.");
-                continue;
-            }
 
             var folder = Path.GetRelativePath(app.Repo.Dir, app.ProjectDir).Replace('\\', '/');
             var diff = await _processRunner.RunAsync(new ProcessRunRequest(
@@ -785,6 +830,15 @@ public sealed class ProjectBuildService
                 lines.Add($"{name}: changed (its app.json could not be set back to {prior.AppVersion}).");
                 continue;
             }
+            if (changedSibling is not null)
+            {
+                unchanged[id] = new CarriedApp(prior.Id, origin, prior.AppVersion, CompileFirst: true);
+                var siblingState = unchanged.TryGetValue(NormalizeAppId(changedSibling.Manifest.Id), out var s)
+                    ? s.CompileFirst ? "depends on a changed extension" : $"was built again after build #{prior.ProjectBuildId}"
+                    : "changed";
+                lines.Add($"{name}: unchanged since build #{origin}, but {changedSibling.Manifest.Name} {siblingState}. It is compiled to check it still builds; if it does, it keeps {prior.AppVersion} and is not published again.");
+                continue;
+            }
             unchanged[id] = new CarriedApp(prior.Id, origin, prior.AppVersion);
             lines.Add($"{name}: unchanged since build #{origin}, so it keeps {prior.AppVersion} and is not published again.");
         }
@@ -795,10 +849,33 @@ public sealed class ProjectBuildService
     }
 
     /// <summary>
-    /// An unchanged app's earlier artifact, carried into this build in place of the one
-    /// it compiles, and the build that compiled those bytes.
+    /// The ids of the apps in <paramref name="apps"/> that <paramref name="app"/> depends
+    /// on, directly or through each other.
     /// </summary>
-    private sealed record CarriedApp(int ArtifactId, int OriginBuildId, string Version);
+    private static HashSet<string> DependencyClosure(DiscoveredApp app, IReadOnlyList<DiscoveredApp> apps)
+    {
+        var byId = new Dictionary<string, DiscoveredApp>(StringComparer.Ordinal);
+        foreach (var a in apps) byId.TryAdd(NormalizeAppId(a.Manifest.Id), a);
+        var closure = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<DiscoveredApp>([app]);
+        while (pending.TryPop(out var next))
+        {
+            foreach (var dependency in next.Manifest.Dependencies)
+            {
+                var id = NormalizeAppId(dependency.Id);
+                if (byId.TryGetValue(id, out var sibling) && closure.Add(id)) pending.Push(sibling);
+            }
+        }
+        return closure;
+    }
+
+    /// <summary>
+    /// An unchanged app's earlier artifact, carried into this build in place of the one
+    /// it compiles, and the build that compiled those bytes. <paramref name="CompileFirst"/>
+    /// when a sibling it depends on changed: it is compiled against that sibling as a
+    /// check, and carried only if that succeeds (a failure fails it as any compile does).
+    /// </summary>
+    private sealed record CarriedApp(int ArtifactId, int OriginBuildId, string Version, bool CompileFirst = false);
 
     /// <summary>
     /// The kinds of build that can number their apps: a pipeline's own build against the
