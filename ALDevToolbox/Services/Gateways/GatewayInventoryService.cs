@@ -212,7 +212,12 @@ public sealed class GatewayInventoryService
             return;
         }
 
-        row.ReadError = null;
+        // The script answered but Business Central would not report the instance itself
+        // (most often: the gateway's account is not a local administrator). What else was
+        // read still applies below; the reason is what the environment page shows.
+        row.ReadError = reported.State is null && reported.Unavailable.TryGetValue("instance", out var instanceWhy) && !Blank(instanceWhy)
+            ? Text($"Business Central did not report on {name}: {instanceWhy}")
+            : null;
         row.ReadAt = now;
         row.UnavailableJson = JsonSerializer.Serialize(
             (reported.Unavailable ?? new Dictionary<string, string>())

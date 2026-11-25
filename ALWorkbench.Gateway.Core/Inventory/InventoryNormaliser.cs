@@ -22,6 +22,24 @@ namespace ALWorkbench.Gateway.Core.Inventory;
 /// </summary>
 public static class InventoryNormaliser
 {
+    /// <summary>Added to Business Central's own "you need to be a member of the local Administrators group" refusal.</summary>
+    public const string AdministratorsHint =
+        " The gateway's service account must be a member of the local Administrators group on that server; running the gateway's setup again adds it.";
+
+    /// <summary>
+    /// Why a tier counts as not read although the script answered: Business Central would
+    /// not report the instance itself (refused, timed out, unknown), so there is no state.
+    /// Null when the instance was read.
+    /// </summary>
+    public static string? NotRead(GatewayInstanceInventory inventory)
+    {
+        ArgumentNullException.ThrowIfNull(inventory);
+        if (inventory.Error is { } error) return error;
+        return inventory.State is null && inventory.Unavailable.TryGetValue("instance", out var why)
+            ? $"Business Central did not report on {inventory.Name}: {why}"
+            : null;
+    }
+
     /// <summary>A tier nothing could be read from, with the reason.</summary>
     public static GatewayInstanceInventory Failed(EffectiveInstance tier, string error, string? powerShell = null)
     {
@@ -61,17 +79,13 @@ public static class InventoryNormaliser
             }
         }
 
-        // Without the instance itself nothing else means much: the cmdlets refused or
-        // failed outright (most often the service account not being a local
-        // administrator, which Business Central's cmdlets insist on). Report it as not
-        // read, with Business Central's own reason, rather than as a tier with no state.
-        if (Text(root["state"]) is null && unavailable.TryGetValue("instance", out var instanceWhy))
+        // Business Central's cmdlets refuse anyone outside the local Administrators group
+        // and say so; add what to do about it. The rest of the round (the Windows service,
+        // the configuration) is still kept: see NotRead.
+        if (unavailable.TryGetValue("instance", out var instanceWhy)
+            && instanceWhy.Contains("Administrators", StringComparison.OrdinalIgnoreCase))
         {
-            var hint = instanceWhy.Contains("Administrators", StringComparison.OrdinalIgnoreCase)
-                ? " The gateway's service account must be a member of the local Administrators group on that server; running the gateway's setup again adds it."
-                : string.Empty;
-            return Failed(tier, $"Business Central did not report on {tier.Tier.Instance}: {instanceWhy}{hint}",
-                PowerShellWord(Text(root["powerShell"])));
+            unavailable["instance"] = instanceWhy + AdministratorsHint;
         }
 
         var (tenants, tenantsCut) = Tenants(root["tenants"]);

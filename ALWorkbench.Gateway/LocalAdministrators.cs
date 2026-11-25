@@ -32,20 +32,23 @@ internal static class LocalAdministrators
     /// <summary>The group's name on this computer, e.g. "Administrators" or "Administratorer".</summary>
     public static string GroupName => ((NTAccount)Group.Translate(typeof(NTAccount))).Value.Split('\\')[^1];
 
-    /// <summary>Adds the account. Already being a member is not an error.</summary>
-    public static void Add(string account) => Change(account, add: true);
+    /// <summary>Adds the account. True when it was added, false when it was a member already.</summary>
+    public static bool Add(string account) => Change(account, add: true);
 
     /// <summary>Removes the account. Not being a member is not an error.</summary>
     public static void Remove(string account) => Change(account, add: false);
 
-    /// <summary>Whether the account is a direct member of the group. Null when the account cannot be resolved.</summary>
+    /// <summary>
+    /// Whether the account is a direct member of the group. Null when the account cannot
+    /// be resolved. Membership through a nested group is not seen.
+    /// </summary>
     public static bool? IsMember(string account)
     {
         if (Resolve(account) is not { } sid) return null;
         var status = NetLocalGroupGetMembers(null, GroupName, 0, out var buffer, MaxPreferredLength, out var read, out _, IntPtr.Zero);
         try
         {
-            if (status != NerrSuccess) throw new Win32Exception(status);
+            if (status != NerrSuccess) throw new LocalAdministratorsException($"Could not list the members of the local {GroupName} group: {Describe(status)}");
             var size = Marshal.SizeOf<LocalGroupMembersInfo0>();
             for (var i = 0; i < read; i++)
             {
@@ -60,9 +63,9 @@ internal static class LocalAdministrators
         }
     }
 
-    private static void Change(string account, bool add)
+    private static bool Change(string account, bool add)
     {
-        var sid = Resolve(account) ?? throw new InvalidOperationException($"Windows does not know the account {account}.");
+        var sid = Resolve(account) ?? throw new LocalAdministratorsException($"Windows does not know the account {account}.");
         var bytes = new byte[sid.BinaryLength];
         sid.GetBinaryForm(bytes, 0);
         var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
@@ -72,14 +75,25 @@ internal static class LocalAdministrators
             var status = add
                 ? NetLocalGroupAddMembers(null, GroupName, 0, ref member, 1)
                 : NetLocalGroupDelMembers(null, GroupName, 0, ref member, 1);
-            if (status is NerrSuccess or ErrorMemberInAlias or ErrorMemberNotInAlias) return;
-            throw new Win32Exception(status, $"Could not {(add ? "add" : "remove")} {account} {(add ? "to" : "from")} the local {GroupName} group: {new Win32Exception(status).Message}");
+            if (status == NerrSuccess) return true;
+            if (status is ErrorMemberInAlias or ErrorMemberNotInAlias) return false;
+            throw new LocalAdministratorsException(
+                $"Could not {(add ? "add" : "remove")} {account} {(add ? "to" : "from")} the local {GroupName} group: {Describe(status)}");
         }
         finally
         {
             handle.Free();
         }
     }
+
+    /// <summary>Win32 codes have Windows' own text; the network API's own (2100 and up) do not.</summary>
+    private static string Describe(int status) => status switch
+    {
+        2220 => "the group was not found (error 2220).",
+        2221 => "the account was not found (error 2221).",
+        >= 2100 and < 2999 => $"network management error {status}.",
+        _ => $"{new Win32Exception(status).Message} (error {status}).",
+    };
 
     private static SecurityIdentifier? Resolve(string account)
     {
@@ -111,4 +125,12 @@ internal static class LocalAdministrators
 
     [DllImport("netapi32.dll")]
     private static extern int NetApiBufferFree(IntPtr buffer);
+}
+
+/// <summary>A change to, or a read of, the local Administrators group that Windows refused; the message says why.</summary>
+internal sealed class LocalAdministratorsException : Exception
+{
+    public LocalAdministratorsException(string message) : base(message)
+    {
+    }
 }

@@ -32,6 +32,17 @@ internal static class ServiceInstaller
     private const string Description =
         "Connects this network's Business Central service tiers to AL Workbench. It only calls out to AL Workbench over HTTPS; nothing connects in.";
 
+    /// <summary>
+    /// The account the installed service really logs on as (its <c>ObjectName</c>),
+    /// which can differ from what install recorded if someone changed it in Services.
+    /// Null when the service is not installed.
+    /// </summary>
+    public static string? LogonAccount()
+    {
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{ServiceName}");
+        return key?.GetValue("ObjectName") as string is { Length: > 0 } name ? name : null;
+    }
+
     public static bool IsInstalled() =>
         ServiceController.GetServices().Any(s => string.Equals(s.ServiceName, ServiceName, StringComparison.OrdinalIgnoreCase));
 

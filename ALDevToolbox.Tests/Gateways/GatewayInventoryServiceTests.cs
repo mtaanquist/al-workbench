@@ -204,6 +204,29 @@ public sealed class GatewayInventoryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_tier_whose_instance_business_central_would_not_report_says_why_and_keeps_what_else_was_read()
+    {
+        var gateway = await GatewayAsync();
+        await ApplyAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA)))));
+
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await ApplyAsync(gateway, Report(Tier("BC250") with
+        {
+            State = null,
+            Version = null,
+            Service = new GatewayServiceInventory { State = "Stopped" },
+            Tenants = null,
+            SessionCount = null,
+            Unavailable = new Dictionary<string, string> { ["instance"] = "Access is denied." },
+        }));
+
+        var instance = (await RowsAsync()).Single();
+        instance.ReadError.Should().Be("Business Central did not report on BC250: Access is denied.");
+        instance.ServiceState.Should().Be("Stopped", "what Windows reported this round still applies");
+        instance.Tenants.Should().ContainSingle().Which.MissingSince.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Parts_the_tier_could_not_read_keep_their_last_values()
     {
         var gateway = await GatewayAsync();

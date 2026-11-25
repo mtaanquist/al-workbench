@@ -86,6 +86,9 @@ public sealed class GatewayRunner
     private bool? _approved;
     private string _fingerprint = string.Empty;
     private long _policySentVersion = -1;
+
+    /// <summary>The policy version the latest inventory round read with; -1 before the first.</summary>
+    private long _inventoryPolicyVersion = -1;
     private long? _policySentAt;
     /// <summary>When the last round of inventory ended (monotonic); null when one is due now.</summary>
     private long? _inventoryAt;
@@ -349,8 +352,9 @@ public sealed class GatewayRunner
         if (sendPolicy)
         {
             // An edited gateway.toml can list a tier the last round did not read, or
-            // stop listing one: read them again now rather than at the next round.
-            if (_policySentVersion != -1 && policy.Version != _policySentVersion) RequestInventory();
+            // stop listing one: read them again now rather than at the next round,
+            // unless a round already ran on this version.
+            if (_policySentVersion != -1 && policy.Version != _policySentVersion && policy.Version != Volatile.Read(ref _inventoryPolicyVersion)) RequestInventory();
             _policySentVersion = policy.Version;
             _policySentAt = _clock.Timestamp();
         }
@@ -566,6 +570,7 @@ public sealed class GatewayRunner
     {
         await Task.Yield();
         var snapshot = _policy.Refresh();
+        Volatile.Write(ref _inventoryPolicyVersion, snapshot.Version);
         if (snapshot.Report.State == GatewayPolicyStates.Unsafe)
         {
             InventoryDone(GatewayInventoryLimits.Interval);

@@ -115,7 +115,7 @@ public sealed class GatewayInventoryParsingTests
     }
 
     [Fact]
-    public void A_tier_whose_cmdlets_refuse_the_service_account_is_reported_as_not_read_with_the_reason()
+    public void A_tier_whose_cmdlets_refuse_the_service_account_counts_as_not_read_with_the_reason()
     {
         // What BC 25 answers when the gateway's account is not a local administrator:
         // every part refused, the service itself still readable.
@@ -135,8 +135,9 @@ public sealed class GatewayInventoryParsingTests
 
         var inventory = InventoryNormaliser.FromScriptOutput(output, Tier("BC250"));
 
-        inventory.Error.Should().Contain("BC250").And.Contain(denied)
+        InventoryNormaliser.NotRead(inventory).Should().Contain("BC250").And.Contain(denied)
             .And.Contain("must be a member of the local Administrators group");
+        inventory.Service!.State.Should().Be("Running", "what Windows reported is still kept");
         inventory.State.Should().BeNull();
     }
 

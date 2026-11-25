@@ -243,8 +243,9 @@ begin
     { A first install creates the service. It starts once the gateway is registered. }
     WizardForm.StatusLabel.Caption := 'Installing the AL Workbench Gateway service...';
     if not Exec(ExpandConstant('{app}\{#Exe}'), 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-      MsgBox('The gateway was copied, but its Windows service could not be installed. Open a command prompt with ' +
-        '"Run as administrator", go to ' + ExpandConstant('{app}') + ' and run "ALWorkbench.Gateway install" to see why.',
+      MsgBox('The gateway was copied, but installing its Windows service did not finish. Open a command prompt with ' +
+        '"Run as administrator", go to ' + ExpandConstant('{app}') + ' and run "ALWorkbench.Gateway install" to see why; ' +
+        'running it again finishes what is left.',
         mbError, MB_OK);
   end
   else

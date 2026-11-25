@@ -71,6 +71,11 @@ internal static class GatewayProgram
             Console.Error.WriteLine(ex.Message);
             return 1;
         }
+        catch (LocalAdministratorsException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 1;
+        }
     }
 
     private static int Usage(string? command)
@@ -208,19 +213,25 @@ internal static class GatewayProgram
         {
             // Installed already (an upgrade by setup, or install run twice): only make
             // sure the account it runs as can use Business Central's cmdlets, which a
-            // gateway installed before that was required may not.
-            var installedAs = new JsonFileGatewaySettingsStore(Folder.SettingsFile).Load()?.ServiceAccount ?? ServiceInstaller.VirtualAccount;
+            // gateway installed before that was required may not. The account is the one
+            // the service really runs as, whatever install recorded.
+            var store = new JsonFileGatewaySettingsStore(Folder.SettingsFile);
+            var installedAs = ServiceInstaller.LogonAccount() ?? store.Load()?.ServiceAccount ?? ServiceInstaller.VirtualAccount;
             if (options.ContainsKey("account") && !string.Equals(account, installedAs, StringComparison.OrdinalIgnoreCase))
             {
                 Console.Error.WriteLine($"The AL Workbench Gateway service is already installed, running as {installedAs}. Run 'ALWorkbench.Gateway uninstall' first to install it as {account}.");
                 return 1;
             }
-            if (LocalAdministrators.IsMember(installedAs) == true)
+            if (!LocalAdministrators.Add(installedAs))
             {
-                Console.WriteLine($"The AL Workbench Gateway service is already installed, running as {installedAs}, which is a local administrator. Nothing to do.");
+                Console.WriteLine($"The AL Workbench Gateway service is already installed, running as {installedAs}, which is in the local {LocalAdministrators.GroupName} group. Nothing to do.");
                 return 0;
             }
-            LocalAdministrators.Add(installedAs);
+            if (store.Load() is { } recorded)
+            {
+                store.Save(recorded with { AddedToAdministrators = true });
+                DataFolderAccess.Apply(Folder, installedAs);
+            }
             Console.WriteLine($"The AL Workbench Gateway service is already installed. Added {installedAs} to the local {LocalAdministrators.GroupName} group, which Business Central's administration cmdlets require.");
             if (ServiceInstaller.IsRunning())
             {
@@ -253,8 +264,23 @@ internal static class GatewayProgram
         ServiceInstaller.Create(executable, account);
         Console.WriteLine($"Installed the service \"{ServiceInstaller.DisplayName}\", running as {account}.");
         // After the service exists: only then does a virtual account have a SID.
-        LocalAdministrators.Add(account);
-        Console.WriteLine($"Added {account} to the local {LocalAdministrators.GroupName} group, which Business Central's administration cmdlets require.");
+        try
+        {
+            var added = LocalAdministrators.Add(account);
+            settings = settings with { AddedToAdministrators = added };
+            settingsStore.Save(settings);
+            DataFolderAccess.Apply(Folder, account);
+            Console.WriteLine(added
+                ? $"Added {account} to the local {LocalAdministrators.GroupName} group, which Business Central's administration cmdlets require."
+                : $"{account} is already in the local {LocalAdministrators.GroupName} group, which Business Central's administration cmdlets require.");
+        }
+        catch (LocalAdministratorsException ex)
+        {
+            // The service exists; running install again only retries this step.
+            Console.Error.WriteLine(ex.Message);
+            Console.Error.WriteLine($"The service was installed, but without that group Business Central refuses the gateway. Fix the cause and run 'ALWorkbench.Gateway install' again{(settings.GatewayId != 0 ? ", then start the service" : string.Empty)}.");
+            return 1;
+        }
         if (settings.GatewayId != 0)
         {
             ServiceInstaller.Start();
@@ -300,16 +326,23 @@ internal static class GatewayProgram
         RequireAdministrator();
         if (ServiceInstaller.IsInstalled())
         {
-            // Before deleting the service, while a virtual account still resolves.
-            var account = new JsonFileGatewaySettingsStore(Folder.SettingsFile).Load()?.ServiceAccount ?? ServiceInstaller.VirtualAccount;
-            try
+            // Before deleting the service, while a virtual account still resolves. Only a
+            // membership the gateway added: a virtual account's is always ours (the
+            // account exists only for this service); a group managed service account may
+            // have been an administrator for other reasons before.
+            var recorded = new JsonFileGatewaySettingsStore(Folder.SettingsFile).Load();
+            var account = ServiceInstaller.LogonAccount() ?? recorded?.ServiceAccount ?? ServiceInstaller.VirtualAccount;
+            if (recorded?.AddedToAdministrators == true || string.Equals(account, ServiceInstaller.VirtualAccount, StringComparison.OrdinalIgnoreCase))
             {
-                LocalAdministrators.Remove(account);
-                Console.WriteLine($"Removed {account} from the local {LocalAdministrators.GroupName} group.");
-            }
-            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
-            {
-                Console.Error.WriteLine(ex.Message);
+                try
+                {
+                    LocalAdministrators.Remove(account);
+                    Console.WriteLine($"Removed {account} from the local {LocalAdministrators.GroupName} group.");
+                }
+                catch (LocalAdministratorsException ex)
+                {
+                    Console.Error.WriteLine(ex.Message);
+                }
             }
             ServiceInstaller.Delete();
             Console.WriteLine("Removed the AL Workbench Gateway service.");
@@ -371,17 +404,22 @@ internal static class GatewayProgram
         var failed = report.State != GatewayPolicyStates.Valid;
         if (ServiceInstaller.IsInstalled())
         {
-            var serviceAccount = new JsonFileGatewaySettingsStore(Folder.SettingsFile).Load()?.ServiceAccount ?? ServiceInstaller.VirtualAccount;
+            var serviceAccount = ServiceInstaller.LogonAccount() ?? ServiceInstaller.VirtualAccount;
             switch (LocalAdministrators.IsMember(serviceAccount))
             {
                 case true:
                     Console.WriteLine($"Service account: {serviceAccount}, a member of the local {LocalAdministrators.GroupName} group.");
                     break;
-                case false:
+                case false when string.Equals(serviceAccount, ServiceInstaller.VirtualAccount, StringComparison.OrdinalIgnoreCase):
                     Console.WriteLine($"Service account: {serviceAccount} is not a member of the local {LocalAdministrators.GroupName} group, so Business Central's");
                     Console.WriteLine("  administration cmdlets refuse it and the gateway cannot read or change any service tier.");
                     Console.WriteLine("  Run 'ALWorkbench.Gateway install' again to add it.");
                     failed = true;
+                    break;
+                case false:
+                    // A domain account can be an administrator through a group nested in this one.
+                    Console.WriteLine($"Service account: {serviceAccount} is not itself a member of the local {LocalAdministrators.GroupName} group. Unless it is");
+                    Console.WriteLine("  one through a domain group, Business Central's administration cmdlets refuse it; 'ALWorkbench.Gateway install' adds it.");
                     break;
                 default:
                     Console.WriteLine($"Service account: Windows does not know {serviceAccount}.");
@@ -389,16 +427,6 @@ internal static class GatewayProgram
                     break;
             }
             Console.WriteLine();
-        }
-
-        foreach (var instance in report.Instances)
-        {
-            Console.WriteLine($"{instance.Machine} / {instance.Name} ({instance.Environment})");
-            Console.WriteLine($"  Allowed:       {(instance.Allow.Count == 0 ? "nothing" : string.Join(", ", instance.Allow))}");
-            Console.WriteLine($"  Change hours:  {instance.ChangeHours ?? "any time"}");
-            Console.WriteLine($"  Tenants:       {string.Join(", ", instance.Tenants)}");
-            Console.WriteLine($"  Publishers:    {(instance.Publishers is null ? "any" : string.Join(", ", instance.Publishers))}");
-            Console.WriteLine($"  Unsigned apps: {(instance.AllowUnsigned ? "allowed" : "refused")}");
         }
 
         var locator = new RegistryServiceTierLocator();
