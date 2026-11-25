@@ -519,11 +519,11 @@
     {
         GatewayVersionState.OutOfDate => @<span class="gw-version-state">
             <StatusPill Tone="warn">Out of date</StatusPill>
-            <a href="#gateway-download">Update to @Build.ExpectedVersion</a>
+            <a href="/admin/administration/gateways#gateway-download">Update to @Build.ExpectedVersion</a>
         </span>,
         GatewayVersionState.Unsupported when Build.Download is not null => @<span class="gw-version-state">
             <StatusPill Tone="danger">Unsupported</StatusPill>
-            <span>AL Workbench refuses this version. <a href="#gateway-download">Update it</a></span>
+            <span>AL Workbench refuses this version. <a href="/admin/administration/gateways#gateway-download">Update it</a></span>
         </span>,
         // A local or staging AL Workbench has nothing to download, so nothing to link to.
         GatewayVersionState.Unsupported => @<span class="gw-version-state">

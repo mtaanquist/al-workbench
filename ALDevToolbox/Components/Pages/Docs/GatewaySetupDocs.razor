@@ -104,7 +104,7 @@
     </p>
     <ul>
         <li>
-            <code>shared_restart</code> (see <a href="#gs-database">[[database]]</a>). Only
+            <code>shared_restart</code> (see <a href="/docs/gateway-setup#gs-database">[[database]]</a>). Only
             AL Workbench knows which customers use which tiers, so it is AL Workbench that refuses
             a restart that would reach another customer's users.
         </li>
@@ -174,7 +174,7 @@
         in AL Workbench and how it went, in the Windows event log (Application, source
         <strong>AL Workbench Gateway</strong>) and in a file per day in
         <code>%ProgramData%\AL Workbench Gateway\logs</code>, kept for 30 days.
-        <a href="#gs-logs">Logs and event ids</a> lists what to filter on.
+        <a href="/docs/gateway-setup#gs-logs">Logs and event ids</a> lists what to filter on.
     </p>
 
     <h2 id="gs-requirements">What you need</h2>
@@ -224,7 +224,7 @@
         <li>
             <strong>For tiers on other computers:</strong> remote service control (remote
             procedure call and file sharing reachable inside your network), or PowerShell
-            remoting (WinRM) if you choose that method. See <a href="#gs-account">the service
+            remoting (WinRM) if you choose that method. See <a href="/docs/gateway-setup#gs-account">the service
             account</a>.
         </li>
     </ul>
@@ -261,7 +261,7 @@
         <li>
             <strong>Read access</strong> to the gateway's program folder, its settings file and
             your scripts - and <strong>no write access</strong> to them (see
-            <a href="#gs-rights">who may change the files</a>).
+            <a href="/docs/gateway-setup#gs-rights">who may change the files</a>).
         </li>
     </ul>
     <div class="note note--info">
@@ -353,7 +353,7 @@
         <code>C:\Program Files</code> are what the gateway needs. A folder you create elsewhere,
         such as <code>C:\ALWorkbench</code>, usually lets ordinary users add files there, and the
         gateway refuses to run from it until that is removed (see
-        <a href="#gs-rights">who may change the files</a>).
+        <a href="/docs/gateway-setup#gs-rights">who may change the files</a>).
     </p>
 
     <h3 id="gs-service">3. Install the service</h3>
@@ -421,7 +421,7 @@ ALWorkbench.Gateway install</pre>
 
     <h3 id="gs-settings-step">6. Write the settings file and check it</h3>
     <p>
-        Create <code>gateway.toml</code> in the program folder (<a href="#gs-policy">the settings
+        Create <code>gateway.toml</code> in the program folder (<a href="/docs/gateway-setup#gs-policy">the settings
         file</a> below has every setting and two examples). Then run:
     </p>
     <div class="code-block">
@@ -553,7 +553,7 @@ ALWorkbench.Gateway install</pre>
     <table>
         <thead><tr><th scope="col">Setting</th><th scope="col">Means</th></tr></thead>
         <tbody>
-            <tr><td><code>machine</code></td><td>Required. The computer the tier runs on. A computer other than this one also needs a <a href="#gs-machine">[[machine]]</a> section.</td></tr>
+            <tr><td><code>machine</code></td><td>Required. The computer the tier runs on. A computer other than this one also needs a <a href="/docs/gateway-setup#gs-machine">[[machine]]</a> section.</td></tr>
             <tr><td><code>name</code></td><td>Required. The server instance name, as <code>Get-NAVServerInstance</code> shows it, for example <code>BC250</code>.</td></tr>
             <tr>
                 <td><code>environment</code></td>
@@ -637,7 +637,7 @@ ALWorkbench.Gateway install</pre>
                     refused.
                 </td>
             </tr>
-            <tr><td><code>before</code></td><td>Optional. The full path of your own PowerShell script, run before a deployment publishes anything. See <a href="#gs-scripts">scripts</a>.</td></tr>
+            <tr><td><code>before</code></td><td>Optional. The full path of your own PowerShell script, run before a deployment publishes anything. See <a href="/docs/gateway-setup#gs-scripts">scripts</a>.</td></tr>
             <tr><td><code>after</code></td><td>Optional. The full path of your own PowerShell script, run after the tiers have restarted.</td></tr>
         </tbody>
     </table>
@@ -844,7 +844,7 @@ method = "service-manager"</pre>
         server, as an administrator:
     </p>
     <ol>
-        <li><a href="#gs-download">Download the new <code>ALWorkbench.Gateway.exe</code> and check its SHA-256.</a></li>
+        <li><a href="/docs/gateway-setup#gs-download">Download the new <code>ALWorkbench.Gateway.exe</code> and check its SHA-256.</a></li>
         <li>Stop the service: <code>sc stop ALWorkbenchGateway</code> (or Services, "AL Workbench Gateway").</li>
         <li>Replace <code>ALWorkbench.Gateway.exe</code> in its folder with the new file.</li>
         <li>Start it: <code>sc start ALWorkbenchGateway</code>.</li>
@@ -908,7 +908,7 @@ ALWorkbench.Gateway uninstall</pre>
             afterwards is refused. The service keeps running and logs event 2005 about every five
             minutes, so you can see why. To connect this server again, the Admin adds a new gateway;
             you run <code>register</code> with the new code, and they approve it. Otherwise
-            <a href="#gs-uninstall">remove it</a>.
+            <a href="/docs/gateway-setup#gs-uninstall">remove it</a>.
         </li>
         <li>
             <strong>Clock more than about a minute off.</strong> Refused the same way as revoked (event 2005, saying it is
@@ -916,7 +916,7 @@ ALWorkbench.Gateway uninstall</pre>
         </li>
         <li>
             <strong>Too old.</strong> A gateway AL Workbench no longer accepts logs event 2009 with
-            the version it needs. <a href="#gs-update">Update it</a>.
+            the version it needs. <a href="/docs/gateway-setup#gs-update">Update it</a>.
         </li>
     </ul>
 

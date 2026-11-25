@@ -8,6 +8,8 @@
     themselves stay in the page's prose, with matching ids.
 *@
 
+@inject NavigationManager Nav
+
 <div class="page">
     <PageHead Title="@Title" Subtitle="@Subtitle" />
 
@@ -28,7 +30,7 @@
             <div class="docs__toc-list">
                 @foreach (var entry in Toc)
                 {
-                    <a class="toc-link@(entry.Sub ? " toc-link--sub" : "")" href="#@entry.Anchor">@entry.Label</a>
+                    <a class="toc-link@(entry.Sub ? " toc-link--sub" : "")" href="@(Path)#@entry.Anchor">@entry.Label</a>
                 }
             </div>
         </nav>
@@ -36,6 +38,12 @@
 </div>
 
 @code {
+    /// <summary>
+    /// This page's path. The app sets <c>&lt;base href="/"&gt;</c>, so a bare <c>#anchor</c>
+    /// resolves to the home page; every in-page link carries the path.
+    /// </summary>
+    private string Path => new Uri(Nav.Uri).AbsolutePath;
+
     [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
     [Parameter] public string? Subtitle { get; set; }
 
