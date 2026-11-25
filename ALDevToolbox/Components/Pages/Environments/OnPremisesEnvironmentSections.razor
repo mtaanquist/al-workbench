@@ -226,7 +226,7 @@ else if (ShowSessions)
         else if (Sessions.Users is null && Sessions.Count is null)
         {
             <EmptyState Icon="users" Title="Sessions weren't read">
-                <Text>The gateway couldn't read the sessions at its last reading.</Text>
+                <Text>The gateway didn't count the sessions on this tenant at its last reading.</Text>
             </EmptyState>
         }
         else if (Sessions.Users is null)
@@ -545,6 +545,7 @@ else
     /// <summary>True on the Server settings tab.</summary>
     [Parameter] public bool ShowSettings { get; set; }
 
+    /// <summary>True on the Sessions tab: who is signed in instead of the service tier.</summary>
     [Parameter] public bool ShowSessions { get; set; }
 
     /// <summary>Who is signed in on the tenant; null while it is read.</summary>

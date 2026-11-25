@@ -221,6 +221,8 @@ public static class InventoryNormaliser
         var tenants = new List<GatewayTenantInventory>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var cut = false;
+        // The names travel in every post of a tier, so the limit is for the tier, not each tenant.
+        var namesLeft = GatewayInventoryLimits.MaxSessionUsers;
         foreach (var item in array)
         {
             if (item is not JsonObject tenant || Text(tenant["id"]) is not { } id || !seen.Add(id)) continue;
@@ -237,7 +239,7 @@ public static class InventoryNormaliser
                 DatabaseName = Text(tenant["databaseName"]),
                 SessionCount = Int(tenant["sessionCount"]),
                 // Personal data: kept only where the policy allows it, whatever the script sent.
-                SessionUsers = includeUsers ? Names(tenant["sessionUsers"]) : null,
+                SessionUsers = includeUsers ? Names(tenant["sessionUsers"], ref namesLeft) : null,
                 Apps = apps,
                 AppsTruncated = appsCut,
             });
@@ -246,13 +248,19 @@ public static class InventoryNormaliser
     }
 
     /// <summary>User names; Windows PowerShell can send a one-name list as the bare name.</summary>
-    private static IReadOnlyList<string>? Names(JsonNode? node) => Unwrap(node) switch
+    private static IReadOnlyList<string>? Names(JsonNode? node, ref int left)
     {
-        JsonArray names => names.Select(Text).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(GatewayInventoryLimits.MaxSessionUsers).ToList(),
-        JsonValue one when Text(one) is { } name => [name],
-        _ => null,
-    };
+        List<string>? names = Unwrap(node) switch
+        {
+            JsonArray array => array.Select(Text).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            JsonValue one when Text(one) is { } name => [name],
+            _ => null,
+        };
+        if (names is null) return null;
+        names = names.Take(Math.Max(left, 0)).ToList();
+        left -= names.Count;
+        return names;
+    }
 
     private static (IReadOnlyList<GatewayAppInventory>? Apps, bool Cut) Apps(JsonNode? node)
     {

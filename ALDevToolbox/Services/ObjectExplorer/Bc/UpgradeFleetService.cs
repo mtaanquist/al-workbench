@@ -345,7 +345,8 @@ public sealed class UpgradeFleetService
                 e.GatewayInstance!.ReadAt,
                 e.GatewayInstance.MissingSince,
                 Tenant = e.GatewayInstance.Tenants
-                    .Where(t => t.MissingSince == null && t.TenantId == e.TenantId)
+                    // Without regard to case, as linking and the inventory compare tenant ids.
+                    .Where(t => t.MissingSince == null && e.TenantId != null && t.TenantId.ToLower() == e.TenantId.ToLower())
                     .Select(t => new { t.SessionCount, t.SessionUsersJson })
                     .FirstOrDefault(),
             })

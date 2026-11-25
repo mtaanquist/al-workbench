@@ -174,7 +174,11 @@ public sealed class GatewayInventoryService
         {
             foreach (var row in instances.Where(i => i.MissingSince is null))
             {
-                if (!roster.Any(t => SameName(t.Machine, row.Machine) && SameName(t.Instance, row.Name))) row.MissingSince = now;
+                if (!roster.Any(t => SameName(t.Machine, row.Machine) && SameName(t.Instance, row.Name)))
+                {
+                    row.MissingSince = now;
+                    ForgetSessions(row.Tenants);
+                }
             }
         }
 
@@ -210,7 +214,7 @@ public sealed class GatewayInventoryService
             row.ReadError = Text(reported.Error);
             row.UnavailableJson = "{}";
             KeepOrClearServerSettings(row, reported);
-            foreach (var tenant in row.Tenants) tenant.SessionUsersJson = null;
+            ForgetSessions(row.Tenants);
             return;
         }
 
@@ -275,7 +279,7 @@ public sealed class GatewayInventoryService
         {
             // Who is signed in is personal data, and only as true as the report it came in:
             // a report that could not list the tenants drops the last names too.
-            foreach (var tenant in row.Tenants) tenant.SessionUsersJson = null;
+            ForgetSessions(row.Tenants);
         }
         if (reported.Licence is { } licence)
         {
@@ -329,10 +333,27 @@ public sealed class GatewayInventoryService
                 await ApplyAppsAsync(orgId, tenant, apps, reported.AppsTruncated, now, ct);
             }
         }
+        // A tenant this report did not carry (past a cut, or gone) keeps no names or count
+        // from an older reading.
+        ForgetSessions(instance.Tenants.Where(t => !tenants.Any(r => SameName(r.Id.Trim(), t.TenantId))));
         if (truncated) return;
         foreach (var tenant in instance.Tenants.Where(t => t.MissingSince is null))
         {
             if (!tenants.Any(t => SameName(t.Id.Trim(), tenant.TenantId))) tenant.MissingSince = now;
+        }
+    }
+
+    /// <summary>
+    /// Drops who was signed in, and how many, from tenants a report did not read: the names
+    /// are personal data and only as true as the reading they came in, and a count left
+    /// behind would read as "names not shared" beside it.
+    /// </summary>
+    private static void ForgetSessions(IEnumerable<GatewayInstanceTenant> tenants)
+    {
+        foreach (var tenant in tenants)
+        {
+            tenant.SessionUsersJson = null;
+            tenant.SessionCount = null;
         }
     }
 
@@ -517,9 +538,9 @@ public sealed class GatewayInventoryService
             {
                 errors["settings"] = $"{tier} reports more than {GatewayInventoryLimits.MaxServerSettings} server settings.";
             }
-            if (instance.Tenants?.Any(t => t.SessionUsers is { Count: > GatewayInventoryLimits.MaxSessionUsers }) == true)
+            if (instance.Tenants?.Sum(t => t.SessionUsers?.Count ?? 0) > GatewayInventoryLimits.MaxSessionUsers)
             {
-                errors["sessionUsers"] = $"{tier} reports more than {GatewayInventoryLimits.MaxSessionUsers} signed-in users on a tenant.";
+                errors["sessionUsers"] = $"{tier} reports more than {GatewayInventoryLimits.MaxSessionUsers} signed-in users.";
             }
             if (instance.PowerShell is { Length: > MaxPowerShellLength })
             {

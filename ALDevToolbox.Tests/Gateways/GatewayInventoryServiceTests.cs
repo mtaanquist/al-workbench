@@ -330,8 +330,14 @@ public sealed class GatewayInventoryServiceTests : IDisposable
         System.Text.Json.JsonSerializer.Deserialize<List<string>>(tenants[0].SessionUsersJson!).Should().Equal("CRONUS\\ANNA", "CRONUS\\BO");
         System.Text.Json.JsonSerializer.Deserialize<List<string>>(tenants[1].SessionUsersJson!).Should().BeEmpty("shared, and nobody was signed in");
 
+        // A tenant the next report does not carry keeps nothing from the older reading.
+        await ApplyAsync(gateway, Report(Tier("BC250",
+            Tenant("cronus-dk") with { SessionCount = 1, SessionUsers = ["CRONUS\\ANNA"] })));
+        var gone = (await RowsAsync()).Single().Tenants.Single(t => t.TenantId == "fabrikam");
+        (gone.SessionUsersJson, gone.SessionCount).Should().Be(((string?)null, (int?)null));
+
         await ApplyAsync(gateway, Report(Tier("BC250") with { Tenants = null }));
-        (await RowsAsync()).Single().Tenants.Should().OnlyContain(t => t.SessionUsersJson == null);
+        (await RowsAsync()).Single().Tenants.Should().OnlyContain(t => t.SessionUsersJson == null && t.SessionCount == null);
     }
 
     // ---------------------------------------------------------------- limits
