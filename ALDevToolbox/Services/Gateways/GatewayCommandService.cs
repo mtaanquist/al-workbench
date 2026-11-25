@@ -370,8 +370,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, message), ct)
-            ;
+                .SetProperty(c => c.FailureMessage, message), ct);
         if (cancelled > 0)
         {
             _logger.LogInformation("Took back gateway command {CommandId} before the gateway collected it.", commandId);
@@ -557,8 +556,7 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.Log, c =>
                     (sequence > 0 && sequence <= c.LastProgressSequence) || c.Log.Length >= MaxLogLength ? c.Log
                     : c.Log.Length + append.Length < MaxLogLength ? c.Log + append
-                    : (c.Log + append).Substring(0, MaxLogLength) + LogTruncatedMarker), ct)
-            ;
+                    : (c.Log + append).Substring(0, MaxLogLength) + LogTruncatedMarker), ct);
         return updated == 1;
     }
 
@@ -597,8 +595,7 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.FinishedAt, now)
                 .SetProperty(c => c.LastReportedAt, now)
                 .SetProperty(c => c.ResultJson, resultJson)
-                .SetProperty(c => c.FailureMessage, message), ct)
-            ;
+                .SetProperty(c => c.FailureMessage, message), ct);
         if (updated == 1)
         {
             _logger.LogInformation("Gateway {GatewayId} finished command {CommandId}: {Status}.", gatewayId, commandId, status);
@@ -637,8 +634,7 @@ public sealed class GatewayCommandService
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                     .SetProperty(c => c.FinishedAt, now)
-                    .SetProperty(c => c.FailureMessage, InterruptedMessage), ct)
-                ;
+                    .SetProperty(c => c.FailureMessage, InterruptedMessage), ct);
             if (failed > 0)
             {
                 _logger.LogWarning("Gateway {GatewayId} restarted in the middle of {Count} command(s); marked them failed.", gatewayId, failed);
@@ -650,8 +646,7 @@ public sealed class GatewayCommandService
             await _db.GatewayCommands
                 .Where(c => ids.Contains(c.Id) && c.GatewayId == gatewayId && c.Gateway!.State == GatewayState.Approved
                             && (c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running))
-                .ExecuteUpdateAsync(s => s.SetProperty(c => c.LastReportedAt, now), ct)
-                ;
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.LastReportedAt, now), ct);
         }
         return failed;
     }
@@ -800,8 +795,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Expired)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, OfflineMessage), ct)
-            ;
+                .SetProperty(c => c.FailureMessage, OfflineMessage), ct);
 
         // A gateway re-keyed by a rotation code is pending again, and whatever its old
         // key was working on cannot be collected or reported until an Admin approves
@@ -817,8 +811,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, RekeyedMessage), ct)
-            ;
+                .SetProperty(c => c.FailureMessage, RekeyedMessage), ct);
 
         var quietSince = now - SilenceLimit;
         // The gateway itself went quiet: the likelier reason, and the clearer message.
@@ -829,8 +822,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, GatewaySilentMessage), ct)
-            ;
+                .SetProperty(c => c.FailureMessage, GatewaySilentMessage), ct);
         // The gateway is alive but has stopped listing this one: it never received it
         // (the answer to the claim was lost), or lost track of it.
         var commandSilent = await _db.GatewayCommands
@@ -839,8 +831,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, CommandSilentMessage), ct)
-            ;
+                .SetProperty(c => c.FailureMessage, CommandSilentMessage), ct);
 
         // A final command is never downloaded again; keep the record, drop the bytes.
         await _db.GatewayCommandFiles
@@ -848,8 +839,7 @@ public sealed class GatewayCommandService
                         && (f.Command!.Status == GatewayCommandStatus.Succeeded
                             || f.Command.Status == GatewayCommandStatus.Failed
                             || f.Command.Status == GatewayCommandStatus.Expired))
-            .ExecuteUpdateAsync(s => s.SetProperty(f => f.Content, (byte[]?)null), ct)
-            ;
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.Content, (byte[]?)null), ct);
 
         var tokens = await _db.GatewaySeenTokens
             .Where(t => t.ExpiresAt < now)

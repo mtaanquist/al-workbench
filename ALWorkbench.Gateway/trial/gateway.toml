@@ -6,9 +6,9 @@
 # gateway.example.toml beside this file explains every setting.
 #
 # Before you start:
-#   1. Replace CHANGE-ME (three places) with this computer's name. Run "hostname"
-#      in a command prompt to see it.
-#   2. Replace BC250 (two places) with your service tier's name, as the Business
+#   1. Replace CHANGE-ME (three places) with this computer's name. Run
+#      "echo %COMPUTERNAME%" in a command prompt to see it.
+#   2. Replace BC250 (three places) with your service tier's name, as the Business
 #      Central Administration Shell shows it (Get-NAVServerInstance).
 #   3. Run "ALWorkbench.Gateway check" from a command prompt opened with
 #      "Run as administrator". It lists any mistakes in this file.
