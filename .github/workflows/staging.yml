@@ -80,6 +80,40 @@ jobs:
           Copy-Item out\ALWorkbench.Gateway.exe, out\ALWorkbench.Gateway.exe.sha256, out\gateway.example.toml package\
           Copy-Item ALWorkbench.Gateway\trial\gateway.toml, ALWorkbench.Gateway\trial\README.txt package\
 
+      - name: Build the setup program
+        # #1778. Inno Setup is free; the hosted Windows image does not always carry
+        # it, so it is installed when missing. The setup program wraps the same exe
+        # as the trial package, unsigned like it.
+        id: setup
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          # Wherever the installed major version put it, rather than a hard-coded
+          # "Inno Setup 6" that a newer package would silently move.
+          function Find-Iscc { Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not (Find-Iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $iscc = (Find-Iscc).FullName
+          if (-not $iscc) { throw "Inno Setup's compiler (ISCC.exe) was not found after installing it." }
+          Write-Host "Using $iscc"
+          & $iscc /Qp "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD\out" "/DOutputDir=$PWD\setup-out" ALWorkbench.Gateway\setup\gateway.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $file = Get-Item setup-out\ALWorkbench.Gateway.Setup-*.exe
+          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$($file.FullName).sha256", "$hash  $($file.Name)`n")
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Keep the setup program on the run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: al-workbench-gateway-setup-${{ steps.publish.outputs.version }}
+          path: setup-out/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Keep the gateway on the run
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -93,6 +127,7 @@ jobs:
         env:
           VERSION: ${{ steps.publish.outputs.version }}
           SHA256: ${{ steps.publish.outputs.sha256 }}
+          SETUP_SHA256: ${{ steps.setup.outputs.sha256 }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           @(
@@ -101,6 +136,8 @@ jobs:
             "Built from ``$env:REF_NAME`` as version ``$env:VERSION``, unsigned. Download the trial package (a zip with the program, a gateway.toml for one test service tier and a README) from this run's artifacts, kept 14 days."
             ""
             "SHA-256: ``$env:SHA256``"
+            ""
+            "The setup program (installs the gateway as a Windows service) is the ``al-workbench-gateway-setup`` artifact. SHA-256: ``$env:SETUP_SHA256``"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
   image:

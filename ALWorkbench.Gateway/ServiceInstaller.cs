@@ -64,9 +64,22 @@ internal static class ServiceInstaller
         Sc(["failureflag", ServiceName, "1"]);
     }
 
+    /// <summary>
+    /// Stops and deletes the service. A gateway in the middle of a restart group can
+    /// take as long as <see cref="GatewayProgram.ShutdownTimeout"/> to stop, so the
+    /// wait is that long; if it still has not stopped, the service is deleted anyway,
+    /// which Windows carries out once the process ends, rather than leaving a service
+    /// behind that points at a program the uninstaller is about to remove.
+    /// </summary>
     public static void Delete()
     {
-        Stop();
+        try
+        {
+            Stop(GatewayProgram.ShutdownTimeout);
+        }
+        catch (System.ServiceProcess.TimeoutException)
+        {
+        }
         Sc(["delete", ServiceName]);
     }
 
@@ -78,17 +91,19 @@ internal static class ServiceInstaller
         service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(60));
     }
 
-    public static void Stop()
+    public static void Stop() => Stop(TimeSpan.FromSeconds(60));
+
+    public static void Stop(TimeSpan wait)
     {
         if (!IsInstalled()) return;
         using var service = new ServiceController(ServiceName);
         if (service.Status is ServiceControllerStatus.Stopped or ServiceControllerStatus.StopPending)
         {
-            if (service.Status == ServiceControllerStatus.StopPending) service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(60));
+            if (service.Status == ServiceControllerStatus.StopPending) service.WaitForStatus(ServiceControllerStatus.Stopped, wait);
             return;
         }
         service.Stop();
-        service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(60));
+        service.WaitForStatus(ServiceControllerStatus.Stopped, wait);
     }
 
     public static bool IsRunning()
