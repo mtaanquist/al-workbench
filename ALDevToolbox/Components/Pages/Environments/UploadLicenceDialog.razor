@@ -154,7 +154,7 @@
             $"Import a new licence into {environmentName}",
             "For a new Business Central licence from the customer, for example after they bought more objects. "
             + "AL Workbench's gateway on the customer's server imports it, and Business Central starts using it without a restart.",
-            "Import licence", "btn--danger");
+            "Import licence", "btn--primary");
         try
         {
             _plan = await Licences.GetImportPlanAsync(environmentId);

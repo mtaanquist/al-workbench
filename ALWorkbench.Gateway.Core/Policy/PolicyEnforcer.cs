@@ -276,7 +276,6 @@ public static class PolicyEnforcer
                     ?? (database.LicenceTarget == LicenceTarget.Tenant ? Tenant(tier, request.Tenant) : null)
                     ?? (request.RestartAfterImport ? NeedAll(group, PolicyPermission.Restart) : null);
                 if (request.RestartAfterImport) touched.AddRange(group);
-                else touched.Add(tier);
                 break;
 
             case GatewayVerb.RestartGroup:

@@ -40,7 +40,7 @@ public enum LicenceImportState
     Waiting,
     /// <summary>The gateway is importing it, or restarting the service tiers.</summary>
     Running,
-    /// <summary>Imported, and every service tier was restarted.</summary>
+    /// <summary>Imported, and every service tier was restarted when that was asked for.</summary>
     Imported,
     /// <summary>Imported, but the restart or the reading afterwards had a problem.</summary>
     ImportedWithProblems,
@@ -583,7 +583,7 @@ public sealed class OnPremisesLicenceService
 
     private static string UnknownMessage(string why) =>
         $"{why}, so it is not known whether the licence was imported. Nothing was restarted. "
-        + "If the Licence card does not show the new expiry after the service tiers next restart, upload the licence again.";
+        + "If the Licence card does not show the new expiry after the gateway's next reading, upload the licence again.";
 
     private static string? RestartProblem(GatewayRestartGroupResult? restart)
     {
