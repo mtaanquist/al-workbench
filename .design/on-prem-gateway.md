@@ -552,8 +552,11 @@ its tenants (`Get-NAVTenant`; a single-tenant tier gets one tenant, `default`, w
 needed); each tenant's apps (`Get-NAVAppInfo -Tenant`, with `-TenantSpecificProperties` where the
 cmdlet has it, which adds data version and sync state); session counts per tenant
 (`Get-NAVServerSession`); and the licence as text (`Export-NAVServerLicenseInformation | Out-String`).
-User names of sessions are read only where the tier allows `session_users`, and dropped again by the
-gateway if the script returned them anyway. A stopped tier is asked only for the first three. It is
+User names of sessions are read only where the tier allows `session_users`, per tenant (the tenants
+of one tier can belong to different customers; without `-Tenant` on `Get-NAVServerSession` they are
+kept only when the tier has one tenant), and dropped again by the gateway if the script returned
+them anyway. AL Workbench keeps them on `gateway_instance_tenants.session_users` (#1787) and drops
+them with any report that did not list the tenants, since they are personal data. A stopped tier is asked only for the first three. It is
 read-only throughout: no cmdlet that changes anything is in the script.
 
 **Defensive by construction, for BC 14.** Before each part the script checks that the cmdlet, and
@@ -672,8 +675,8 @@ New tables, all org-scoped with the usual query filter:
 | `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |
 | `gateway_command_files` | Id, command id, file name, SHA-256, bytes (or a reference to the artifact row it came from) |
-| `gateway_instances` | Gateway, machine, instance name, environment (production, test, development, from the policy file), version, state, Windows service state, start mode and account, database server, instance and name, multitenant, ports, public web base URL, open sessions (and user names where `session_users` allows), PowerShell used, read error, parts not read (JSON), first reported, reported at, read at, missing since |
-| `gateway_instance_tenants` | Instance, tenant id, state, database name, open sessions, apps cut to size, apps read at, read at, missing since |
+| `gateway_instances` | Gateway, machine, instance name, environment (production, test, development, from the policy file), version, state, Windows service state, start mode and account, database server, instance and name, multitenant, ports, public web base URL, open sessions, PowerShell used, read error, parts not read (JSON), first reported, reported at, read at, missing since |
+| `gateway_instance_tenants` | Instance, tenant id, state, database name, open sessions (and user names where `session_users` allows), apps cut to size, apps read at, read at, missing since |
 | `gateway_instance_apps` | Tenant, app id, name, publisher, version, data version, scope, installed, published, sync state, missing since |
 | `gateway_instance_licences` | Instance (one each), licensee, serial number, expiry, the text as read, its SHA-256, cut to size, parse problems, read at |
 | `gateway_instance_licence_ranges` | Licence, object type, from and to id, permissions |
@@ -785,9 +788,12 @@ multitenant server. Where it differs from, or adds to, the decision above:
   on-premises, as built"). `DeliveryTargetFactory.Unavailable` now only refuses when no gateway services are
   registered; a row with no tier linked reads as a missing environment instead.
 - **What the environment page shows:** Overview (the service tier, its database, tenant, sessions,
-  licence expiry and the gateway), Apps (from the mirror) and Workbench history. Operations and
-  Sessions are Business Central online's live reads and are not offered; an address naming them lands
-  on Overview. Upload and Copy are not offered.
+  licence expiry and the gateway), Apps (from the mirror), Sessions (who was signed in on the
+  environment's tenant at the gateway's last reading, where `session_users` allows; otherwise the
+  count and who can share the names, #1787; no end-session action), Server settings (#1795) and
+  Workbench history. Operations is Business Central online's live read and is not offered; an
+  address naming it lands on Overview. Upload and Copy are not offered. Who is signed in is not in
+  the MCP tools, online or on premises.
 
 ### Readers of `OeProjectEnvironments`
 

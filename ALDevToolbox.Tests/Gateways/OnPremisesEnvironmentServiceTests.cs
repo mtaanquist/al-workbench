@@ -679,6 +679,30 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Who_is_signed_in_is_the_environments_own_tenant_and_only_for_those_who_can_see_it()
+    {
+        await ReportAsync(
+            Tier("BC250", "production",
+                Tenant("cronus-dk") with { SessionCount = 3, SessionUsers = ["CRONUS\\SVEN", "CRONUS\\ANNA"] },
+                Tenant("fabrikam") with { SessionCount = 1, SessionUsers = ["FABRIKAM\\JO"] }),
+            Tier("BC140", "production", Tenant("default") with { SessionCount = 4 }));
+        var open = await SolutionAsync("CRONUS Danmark");
+        var secret = await SolutionAsync("Fabrikam", visibility: ProjectVisibility.Private);
+        var cronus = await LinkAsync(open, "BC250", "Production", tenant: "cronus-dk");
+        var fabrikam = await LinkAsync(secret, "BC250", "Production", tenant: "fabrikam");
+        var unshared = await LinkAsync(open, "BC140", "Old production");
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var view = (await Fleet(ctx).GetOnPremisesSessionsAsync(cronus))!;
+        view.Count.Should().Be(3);
+        view.Users.Should().Equal(["CRONUS\\ANNA", "CRONUS\\SVEN"], "only this tenant's names, sorted; another customer's tenant on the same tier is not shown");
+        var counted = (await Fleet(ctx).GetOnPremisesSessionsAsync(unshared))!;
+        (counted.Count, counted.Users).Should().Be(((int?)4, (IReadOnlyList<string>?)null));
+        (await Fleet(ctx).GetOnPremisesSessionsAsync(fabrikam)).Should().BeNull("a Private solution the caller is not on is not there at all");
+    }
+
+    [Fact]
     public async Task On_premises_tiers_are_absent_from_upgrades()
     {
         await ReportAsync(Tier("BC250", "production", Tenant("default")));

@@ -201,6 +201,61 @@ else if (ShowSettings)
         }
     </div>
 }
+else if (ShowSessions)
+{
+    <div class="card">
+        <div class="card__head">
+            <div>
+                <h2 class="card__title onprem__counted">
+                    Signed in
+                    @if (Sessions?.Users is { Count: > 0 } named)
+                    {
+                        <span class="badge">@named.Count</span>
+                    }
+                </h2>
+                @if (Sessions?.Count is { } open)
+                {
+                    <p class="card__sub">@open @(open == 1 ? "open session" : "open sessions") at the last reading.</p>
+                }
+            </div>
+        </div>
+        @if (Sessions is null)
+        {
+            <div class="card__body"><LoadingBlock Text="Loading who is signed in..." /></div>
+        }
+        else if (Sessions.Users is null && Sessions.Count is null)
+        {
+            <EmptyState Icon="users" Title="Sessions weren't read">
+                <Text>The gateway couldn't read the sessions at its last reading.</Text>
+            </EmptyState>
+        }
+        else if (Sessions.Users is null)
+        {
+            @* Why the names are missing, and whose call it is. *@
+            <EmptyState Icon="users" Title="Who is signed in isn't shared">
+                <Text>The customer's IT can share it by adding session_users to this service tier in the gateway's settings file.</Text>
+            </EmptyState>
+        }
+        else if (Sessions.Users.Count == 0)
+        {
+            <EmptyState Icon="user-x" Title="Nobody is signed in" Quiet="true" />
+        }
+        else
+        {
+            <table class="data-table">
+                <thead>
+                    <tr><th scope="col">User</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var user in Sessions.Users)
+                    {
+                        <tr><td>@user</td></tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+}
 else if (!ShowApps)
 {
     <div class="card">
@@ -489,6 +544,11 @@ else
 
     /// <summary>True on the Server settings tab.</summary>
     [Parameter] public bool ShowSettings { get; set; }
+
+    [Parameter] public bool ShowSessions { get; set; }
+
+    /// <summary>Who is signed in on the tenant; null while it is read.</summary>
+    [Parameter] public OnPremisesSessionsView? Sessions { get; set; }
 
     /// <summary>The tier's server settings; null while they are read.</summary>
     [Parameter] public ServerSettingsView? Settings { get; set; }

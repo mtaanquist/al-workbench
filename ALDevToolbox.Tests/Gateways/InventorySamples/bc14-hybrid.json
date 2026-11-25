@@ -28,6 +28,11 @@
         "state": "Operational",
         "databaseName": "Demo Database BC (14-0)",
         "sessionCount": 3,
+        "sessionUsers": [
+          "CRONUS\\ANNA",
+          "CRONUS\\BO",
+          "CRONUS\\SVEN"
+        ],
         "apps": [
           {
             "appId": "437dbf0e-84ff-417a-965d-ed2bb9650972",
@@ -84,13 +89,13 @@
     "perTenant": [
       {
         "tenant": "default",
-        "count": 3
+        "count": 3,
+        "users": [
+          "CRONUS\\ANNA",
+          "CRONUS\\BO",
+          "CRONUS\\SVEN"
+        ]
       }
-    ],
-    "users": [
-      "CRONUS\\ANNA",
-      "CRONUS\\BO",
-      "CRONUS\\SVEN"
     ]
   },
   "licence": {

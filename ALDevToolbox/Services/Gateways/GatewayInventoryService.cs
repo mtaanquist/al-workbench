@@ -210,6 +210,7 @@ public sealed class GatewayInventoryService
             row.ReadError = Text(reported.Error);
             row.UnavailableJson = "{}";
             KeepOrClearServerSettings(row, reported);
+            foreach (var tenant in row.Tenants) tenant.SessionUsersJson = null;
             return;
         }
 
@@ -234,9 +235,6 @@ public sealed class GatewayInventoryService
         row.ServiceStartMode = Text(reported.Service?.StartMode);
         row.ServiceAccount = Text(reported.Service?.Account);
         row.SessionCount = reported.SessionCount;
-        row.SessionUsersJson = reported.SessionUsers is null
-            ? null
-            : JsonSerializer.Serialize(reported.SessionUsers.Where(u => !Blank(u)).Select(Text), Json);
 
         if (reported.Settings is { } settings)
         {
@@ -272,6 +270,12 @@ public sealed class GatewayInventoryService
         {
             row.TenantsTruncated = reported.TenantsTruncated;
             await ApplyTenantsAsync(orgId, row, tenants, reported.TenantsTruncated, now, ct);
+        }
+        else
+        {
+            // Who is signed in is personal data, and only as true as the report it came in:
+            // a report that could not list the tenants drops the last names too.
+            foreach (var tenant in row.Tenants) tenant.SessionUsersJson = null;
         }
         if (reported.Licence is { } licence)
         {
@@ -313,6 +317,9 @@ public sealed class GatewayInventoryService
             tenant.State = Text(reported.State);
             tenant.DatabaseName = Text(reported.DatabaseName);
             tenant.SessionCount = reported.SessionCount;
+            tenant.SessionUsersJson = reported.SessionUsers is null
+                ? null
+                : JsonSerializer.Serialize(reported.SessionUsers.Where(u => !Blank(u)).Select(Text), Json);
             tenant.ReadAt = now;
             tenant.MissingSince = null;
             if (reported.Apps is { } apps)
@@ -510,9 +517,9 @@ public sealed class GatewayInventoryService
             {
                 errors["settings"] = $"{tier} reports more than {GatewayInventoryLimits.MaxServerSettings} server settings.";
             }
-            if (instance.SessionUsers is { Count: > GatewayInventoryLimits.MaxSessionUsers })
+            if (instance.Tenants?.Any(t => t.SessionUsers is { Count: > GatewayInventoryLimits.MaxSessionUsers }) == true)
             {
-                errors["sessionUsers"] = $"{tier} reports more than {GatewayInventoryLimits.MaxSessionUsers} signed-in users.";
+                errors["sessionUsers"] = $"{tier} reports more than {GatewayInventoryLimits.MaxSessionUsers} signed-in users on a tenant.";
             }
             if (instance.PowerShell is { Length: > MaxPowerShellLength })
             {

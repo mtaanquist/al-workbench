@@ -58,13 +58,6 @@ public class GatewayInstance
     public int? SessionCount { get; set; }
 
     /// <summary>
-    /// Who had a session open, as JSON (a list of names). Only ever set when the
-    /// customer's policy file allows <c>session_users</c> for this tier; personal
-    /// data, so cleared by the next report that does not carry it.
-    /// </summary>
-    public string? SessionUsersJson { get; set; }
-
-    /// <summary>
     /// Every server setting, as JSON (a list of <c>{key, value, withheld}</c>). Only set when
     /// the customer's policy file allows <c>server_settings</c> for this tier; the gateway
     /// leaves secrets' values out. Kept when a report could not read the settings, cleared
@@ -120,6 +113,14 @@ public class GatewayInstanceTenant
     public string? DatabaseName { get; set; }
 
     public int? SessionCount { get; set; }
+
+    /// <summary>
+    /// Who had a session open on the tenant, as JSON (a list of names). Only ever set when
+    /// the customer's policy file allows <c>session_users</c> for the tier; personal data, so
+    /// cleared by the next report that does not carry it. Null: not shared or not read; an
+    /// empty list: shared, and nobody was signed in.
+    /// </summary>
+    public string? SessionUsersJson { get; set; }
 
     /// <summary>The tenant had more apps than a report carries; apps beyond them are never marked missing.</summary>
     public bool AppsTruncated { get; set; }

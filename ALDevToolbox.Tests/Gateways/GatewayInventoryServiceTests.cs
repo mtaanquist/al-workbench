@@ -312,10 +312,26 @@ public sealed class GatewayInventoryServiceTests : IDisposable
 
         var instance = (await RowsAsync()).Single();
         instance.Version.Should().Be("14.0.47786.0");
-        instance.SessionUsersJson.Should().BeNull("BC140's policy allows inventory but not session users");
+        instance.Tenants.Single().SessionUsersJson.Should().BeNull("BC140's policy allows inventory but not session users");
         instance.Tenants.Single().Apps.Should().HaveCount(4);
         instance.UnavailableJson.Should().Contain("apps.tenantSpecificProperties");
         instance.Licence!.Ranges.Should().HaveCount(8);
+    }
+
+    [Fact]
+    public async Task Who_is_signed_in_is_kept_per_tenant_and_dropped_by_a_report_that_could_not_list_the_tenants()
+    {
+        var gateway = await GatewayAsync();
+        await ApplyAsync(gateway, Report(Tier("BC250",
+            Tenant("cronus-dk") with { SessionCount = 2, SessionUsers = ["CRONUS\\ANNA", "CRONUS\\BO"] },
+            Tenant("fabrikam") with { SessionCount = 0, SessionUsers = [] })));
+
+        var tenants = (await RowsAsync()).Single().Tenants.OrderBy(t => t.TenantId).ToList();
+        System.Text.Json.JsonSerializer.Deserialize<List<string>>(tenants[0].SessionUsersJson!).Should().Equal("CRONUS\\ANNA", "CRONUS\\BO");
+        System.Text.Json.JsonSerializer.Deserialize<List<string>>(tenants[1].SessionUsersJson!).Should().BeEmpty("shared, and nobody was signed in");
+
+        await ApplyAsync(gateway, Report(Tier("BC250") with { Tenants = null }));
+        (await RowsAsync()).Single().Tenants.Should().OnlyContain(t => t.SessionUsersJson == null);
     }
 
     // ---------------------------------------------------------------- limits
@@ -357,20 +373,19 @@ public sealed class GatewayInventoryServiceTests : IDisposable
         var gateway = await GatewayAsync();
         var huge = new string('x', GatewayInventoryLimits.MaxTextChars + 500);
 
-        await ApplyAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA, name: huge)) with { DatabaseName = huge }) with
+        await ApplyAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA, name: huge)) with { DatabaseName = huge, SessionUsers = [huge] }) with
         {
             State = huge,
             Service = new GatewayServiceInventory { Account = huge },
             Unavailable = new Dictionary<string, string> { [huge] = huge },
-            SessionUsers = [huge],
         }));
 
         var instance = (await RowsAsync()).Single();
         instance.State.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
         instance.ServiceAccount.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
         instance.UnavailableJson.Length.Should().BeLessThan(2 * GatewayInventoryLimits.MaxTextChars + 20);
-        instance.SessionUsersJson!.Length.Should().BeLessThan(GatewayInventoryLimits.MaxTextChars + 10);
         var tenant = instance.Tenants.Single();
+        tenant.SessionUsersJson!.Length.Should().BeLessThan(GatewayInventoryLimits.MaxTextChars + 10);
         tenant.DatabaseName.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
         tenant.Apps.Single().Name.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
     }

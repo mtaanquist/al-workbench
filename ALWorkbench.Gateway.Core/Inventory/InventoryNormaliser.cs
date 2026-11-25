@@ -96,14 +96,8 @@ public static class InventoryNormaliser
             unavailable["instance"] = instanceWhy + AdministratorsHint;
         }
 
-        var (tenants, tenantsCut) = Tenants(root["tenants"]);
+        var (tenants, tenantsCut) = Tenants(root["tenants"], tier.Allows(PolicyPermission.SessionUsers));
         var sessions = root["sessions"] as JsonObject;
-        IReadOnlyList<string>? users = null;
-        if (tier.Allows(PolicyPermission.SessionUsers) && Unwrap(sessions?["users"]) is JsonArray names)
-        {
-            users = names.Select(Text).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)
-                .Take(GatewayInventoryLimits.MaxSessionUsers).ToList();
-        }
 
         return new GatewayInstanceInventory
         {
@@ -126,7 +120,6 @@ public static class InventoryNormaliser
             // The script stops at the limit and says so; the normaliser cuts what is over it.
             TenantsTruncated = tenantsCut || (tenants is not null && Bool(Text(root["tenantsTruncated"])) == true),
             SessionCount = Int(sessions?["total"]),
-            SessionUsers = users,
             Settings = tier.Allows(PolicyPermission.ServerSettings) ? Settings(root["settings"]) : null,
             Licence = Licence(root["licence"] as JsonObject),
             Unavailable = unavailable,
@@ -221,7 +214,7 @@ public static class InventoryNormaliser
         };
     }
 
-    private static (IReadOnlyList<GatewayTenantInventory>? Tenants, bool Cut) Tenants(JsonNode? node)
+    private static (IReadOnlyList<GatewayTenantInventory>? Tenants, bool Cut) Tenants(JsonNode? node, bool includeUsers)
     {
         if (node is null) return (null, false);
         if (Unwrap(node) is not JsonArray array) return (null, false);
@@ -243,12 +236,23 @@ public static class InventoryNormaliser
                 State = Text(tenant["state"]),
                 DatabaseName = Text(tenant["databaseName"]),
                 SessionCount = Int(tenant["sessionCount"]),
+                // Personal data: kept only where the policy allows it, whatever the script sent.
+                SessionUsers = includeUsers ? Names(tenant["sessionUsers"]) : null,
                 Apps = apps,
                 AppsTruncated = appsCut,
             });
         }
         return (tenants, cut);
     }
+
+    /// <summary>User names; Windows PowerShell can send a one-name list as the bare name.</summary>
+    private static IReadOnlyList<string>? Names(JsonNode? node) => Unwrap(node) switch
+    {
+        JsonArray names => names.Select(Text).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(GatewayInventoryLimits.MaxSessionUsers).ToList(),
+        JsonValue one when Text(one) is { } name => [name],
+        _ => null,
+    };
 
     private static (IReadOnlyList<GatewayAppInventory>? Apps, bool Cut) Apps(JsonNode? node)
     {
