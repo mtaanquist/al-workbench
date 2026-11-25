@@ -88,15 +88,15 @@ public sealed class GatewayInventory
             ct.ThrowIfCancellationRequested();
             progress?.Invoke($"Reading {tier.Tier}...");
             var inventory = await _reader.ReadAsync(tier, null, ct).ConfigureAwait(false);
-            if (inventory.Error is null)
+            if (InventoryNormaliser.NotRead(inventory) is { } why)
             {
-                read++;
-                progress?.Invoke(Describe(inventory));
+                failed++;
+                progress?.Invoke($"Could not read {tier.Tier}: {why}");
             }
             else
             {
-                failed++;
-                progress?.Invoke($"Could not read {tier.Tier}: {inventory.Error}");
+                read++;
+                progress?.Invoke(Describe(inventory));
             }
             foreach (var part in InventoryChunker.Split(inventory, GatewayInventoryLimits.TargetPostBytes))
             {

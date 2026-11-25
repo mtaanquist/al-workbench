@@ -306,6 +306,27 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
     }
 
     [Fact]
+    public async Task A_licence_that_lists_modules_and_no_ranges_is_not_checked_and_says_why()
+    {
+        var seed = await SeedAsync(objects: [.. InsideObjects, ("table", 50120, "CRONUS Rating Entry")]);
+        await using (var ctx = _db.NewContext())
+        {
+            // How a .bclicense on Business Central 25 reads: modules and quantities, no ranges.
+            var text = "Licensed to : CRONUS A/S\nNavn                         Antal\n----------------------------- ----------\nSolution Developer               1\n";
+            var licenceId = await ctx.GatewayInstanceLicences.Where(l => l.InstanceId == seed.InstanceId).Select(l => l.Id).SingleAsync();
+            await ctx.GatewayInstanceLicenceRanges.Where(r => r.LicenceId == licenceId).ExecuteDeleteAsync();
+            await ctx.GatewayInstanceLicences.Where(l => l.Id == licenceId)
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.Text, text).SetProperty(l => l.ParseProblems, (string?)null));
+        }
+
+        await RecordAsync(seed);
+
+        var check = (await StoredAsync(seed)).Single();
+        check.IsNotChecked.Should().BeTrue();
+        check.Reason.Should().Be("The licence on CRONUS-BC01 / BC250 lists modules but no object ranges, as licences for newer Business Central versions do, so there are no ranges to check the build against.");
+    }
+
+    [Fact]
     public async Task A_licence_with_a_problem_that_lost_no_range_is_still_checked()
     {
         var seed = await SeedAsync(environmentType: "Sandbox", objects: [.. InsideObjects, ("table", 50120, "CRONUS Rating Entry")]);

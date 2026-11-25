@@ -22,6 +22,24 @@ namespace ALWorkbench.Gateway.Core.Inventory;
 /// </summary>
 public static class InventoryNormaliser
 {
+    /// <summary>Added to Business Central's own "you need to be a member of the local Administrators group" refusal.</summary>
+    public const string AdministratorsHint =
+        " The gateway's service account must be a member of the local Administrators group on that server; running the gateway's setup again adds it.";
+
+    /// <summary>
+    /// Why a tier counts as not read although the script answered: Business Central would
+    /// not report the instance itself (refused, timed out, unknown), so there is no state.
+    /// Null when the instance was read.
+    /// </summary>
+    public static string? NotRead(GatewayInstanceInventory inventory)
+    {
+        ArgumentNullException.ThrowIfNull(inventory);
+        if (inventory.Error is { } error) return error;
+        return inventory.State is null && inventory.Unavailable.TryGetValue("instance", out var why)
+            ? $"Business Central did not report on {inventory.Name}: {why}"
+            : null;
+    }
+
     /// <summary>A tier nothing could be read from, with the reason.</summary>
     public static GatewayInstanceInventory Failed(EffectiveInstance tier, string error, string? powerShell = null)
     {
@@ -59,6 +77,15 @@ public static class InventoryNormaliser
                 if (unavailable.Count >= GatewayInventoryLimits.MaxUnavailable) break;
                 if (Cut(key) is { } section && Text(value) is { } reason) unavailable[section] = reason;
             }
+        }
+
+        // Business Central's cmdlets refuse anyone outside the local Administrators group
+        // and say so; add what to do about it. The rest of the round (the Windows service,
+        // the configuration) is still kept: see NotRead.
+        if (unavailable.TryGetValue("instance", out var instanceWhy)
+            && instanceWhy.Contains("Administrators", StringComparison.OrdinalIgnoreCase))
+        {
+            unavailable["instance"] = instanceWhy + AdministratorsHint;
         }
 
         var (tenants, tenantsCut) = Tenants(root["tenants"]);

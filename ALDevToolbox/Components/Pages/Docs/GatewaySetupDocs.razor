@@ -232,8 +232,8 @@
     <h2 id="gs-account">The service account</h2>
     <p>
         By default the service runs as its own <strong>virtual account</strong>,
-        <code>NT SERVICE\ALWorkbenchGateway</code>: no password to manage, not an administrator,
-        and on the network it acts as the computer's own account (<code>DOMAIN\SERVERNAME$</code>).
+        <code>NT SERVICE\ALWorkbenchGateway</code>: no password to manage, and on the network it
+        acts as the computer's own account (<code>DOMAIN\SERVERNAME$</code>).
         You can name a <strong>group managed service account</strong> instead, for example when
         the gateway must stop and start tiers on other computers as a domain identity. The account
         must be installed on the server and hold "Log on as a service". An ordinary user account
@@ -242,36 +242,30 @@
     <p>Whichever account you use, it needs:</p>
     <ul>
         <li>
-            <strong>To run the Business Central administration cmdlets</strong> against each tier
-            it manages - the same cmdlets your team runs in the Business Central Administration
-            Shell. Exactly which rights that takes depends on your servers and version, and has not
-            yet been confirmed on every Business Central version. After the gateway is approved,
-            the gateway's page in AL Workbench shows whether each tier could be read, which is the
-            first proof that the account has what it needs.
+            <strong>Membership of the local Administrators group</strong> on this server.
+            Business Central's administration cmdlets refuse anyone else, and there is no
+            narrower right to grant instead. Setup and <code>ALWorkbench.Gateway install</code>
+            add the account for you, <code>ALWorkbench.Gateway check</code> says whether it is
+            there, and uninstalling takes it out again.
         </li>
         <li>
             <strong>The right to stop and start the Business Central service</strong>
             (<code>MicrosoftDynamicsNavServer$&lt;instance&gt;</code>) of every tier you allow it
-            to restart, on this computer and on each other computer listed in a database's
-            <code>restart</code>. On another
-            computer that is remote service control, or, with the
-            <code>powershell-remoting</code> method, permission to connect with PowerShell
-            remoting there.
-        </li>
-        <li>
-            <strong>Read access</strong> to the gateway's program folder, its settings file and
-            your scripts - and <strong>no write access</strong> to them (see
-            <a href="/docs/gateway-setup#gs-rights">who may change the files</a>).
+            to restart on each other computer listed in a database's <code>restart</code>. That
+            is remote service control, or, with the <code>powershell-remoting</code> method,
+            permission to connect with PowerShell remoting there. On this computer, being an
+            administrator covers it.
         </li>
     </ul>
     <div class="note note--info">
         <span class="note__icon"><Icon Name="info" Width="17" Height="17" /></span>
-        <span class="note__title">If you make the account an administrator</span>
+        <span class="note__title">What still limits the gateway</span>
         <span class="note__body">
-            Adding the account to the local Administrators group is the quickest way to give it
-            those rights. It also lets the gateway's own process change its settings
-            file, which the file rules are there to prevent. If you can, grant the narrower rights
-            instead.
+            Being an administrator lets the gateway's program do anything on this server, so
+            what it actually does is decided by <code>gateway.toml</code>: it refuses every
+            request the file does not allow, whatever AL Workbench asks. Keep the gateway's
+            folder and that file changeable by administrators only (see
+            <a href="/docs/gateway-setup#gs-rights">who may change the files</a>).
         </span>
     </div>
 

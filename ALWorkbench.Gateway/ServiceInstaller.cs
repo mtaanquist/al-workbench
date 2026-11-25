@@ -12,14 +12,15 @@ namespace ALWorkbench.Gateway;
 ///
 /// <para><b>The account.</b> By default the service runs as its own virtual account,
 /// <c>NT SERVICE\ALWorkbenchGateway</c>: Windows creates and manages it, it has no
-/// password, it is not an administrator, and on the network it acts as the computer
-/// account. <c>install --account DOMAIN\name$</c> uses a group managed service
+/// password, and on the network it acts as the computer account. <c>install</c> makes
+/// it a local administrator (<see cref="LocalAdministrators"/>), because Business
+/// Central's administration cmdlets accept nobody else. <c>install --account DOMAIN\name$</c> uses a group managed service
 /// account instead, for when the gateway must reach other machines as a domain
 /// identity (remote service control, #1373); that account must already be installed
 /// on this computer and hold "Log on as a service". The gateway never stores a
-/// password, so an ordinary user account is not offered. What the account may do in
-/// Business Central (the administration PowerShell module, the database) is granted
-/// by customer IT and described in the setup guide (#1376).</para>
+/// password, so an ordinary user account is not offered. What else the account needs
+/// (remote service control, the database) is granted by customer IT and described in
+/// the setup guide (#1376).</para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal static class ServiceInstaller
@@ -30,6 +31,17 @@ internal static class ServiceInstaller
 
     private const string Description =
         "Connects this network's Business Central service tiers to AL Workbench. It only calls out to AL Workbench over HTTPS; nothing connects in.";
+
+    /// <summary>
+    /// The account the installed service really logs on as (its <c>ObjectName</c>),
+    /// which can differ from what install recorded if someone changed it in Services.
+    /// Null when the service is not installed.
+    /// </summary>
+    public static string? LogonAccount()
+    {
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{ServiceName}");
+        return key?.GetValue("ObjectName") as string is { Length: > 0 } name ? name : null;
+    }
 
     public static bool IsInstalled() =>
         ServiceController.GetServices().Any(s => string.Equals(s.ServiceName, ServiceName, StringComparison.OrdinalIgnoreCase));

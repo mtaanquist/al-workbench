@@ -360,8 +360,9 @@ public static partial class LicenceRangeCheck
             {
                 l.ReadAt,
                 l.Truncated,
-                // The text only when something could not be read, to learn whether a range was lost.
-                Text = l.ParseProblems == null ? null : l.Text,
+                // The text only when something could not be read, to learn whether a range was
+                // lost, or when there are no ranges, to learn whether the licence lists none.
+                Text = l.ParseProblems == null && l.Ranges.Any() ? null : l.Text,
                 Ranges = l.Ranges.Select(r => new LicenceRange(r.ObjectType, r.FromId, r.ToId, r.Permissions)).ToList(),
             })
             .FirstOrDefaultAsync(ct);
@@ -381,7 +382,9 @@ public static partial class LicenceRangeCheck
         if (licence.Truncated)
             return NotChecked($"The licence on {tier} was too long for AL Workbench to read whole. Check the licence on the environment page.");
         if (licence.Ranges.Count == 0)
-            return NotChecked($"AL Workbench could not read the object ranges in the licence on {tier}. Check the licence on the environment page.");
+            return NotChecked(licence.Text is { } listed && GatewayLicenceParser.Parse(listed).ListsNoRanges
+                ? $"The licence on {tier} lists modules but no object ranges, as licences for newer Business Central versions do, so there are no ranges to check the build against."
+                : $"AL Workbench could not read the object ranges in the licence on {tier}. Check the licence on the environment page.");
         if (licence.Text is { } text && !GatewayLicenceParser.Parse(text).RangesComplete)
             return NotChecked($"AL Workbench could read only some of the object ranges in the licence on {tier}, so an object could look outside it when it is not. Check the licence on the environment page.");
         if (OnPremisesLicenceService.ParseVersion(env.Version) is not { } version)

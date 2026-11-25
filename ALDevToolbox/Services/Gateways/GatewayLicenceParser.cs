@@ -23,6 +23,14 @@ public sealed record ParsedLicence(
     /// reads the stored text again to learn this.
     /// </summary>
     public bool RangesComplete { get; init; } = true;
+
+    /// <summary>
+    /// True for a licence that lists modules and quantities and no object ranges at
+    /// all, as a <c>.bclicense</c> on Business Central 25 prints it (staging, 2026-11-25).
+    /// Such a licence has no ranges to check a build against, which is not a reading
+    /// problem.
+    /// </summary>
+    public bool ListsNoRanges { get; init; }
 }
 
 /// <summary>
@@ -60,9 +68,12 @@ public static partial class GatewayLicenceParser
     /// <summary>A last guard on each match, should a line under the limit still be slow.</summary>
     private const int MatchTimeoutMilliseconds = 200;
 
-    private static readonly string[] LicenseeLabels = ["Licensed to", "Licensee", "Customer name", "Customer", "Licensed To"];
-    private static readonly string[] SerialLabels = ["Serial No.", "Serial No", "Serial number", "Serial Number", "Serial"];
-    private static readonly string[] ExpiryLabels = ["Expiration Date", "Expiration date", "Expiry date", "Expiry Date", "Expires", "Expiration", "Valid until", "Valid to"];
+    // The labels follow the server's language. Danish ones are from a real BC 25 server
+    // (2026-11-25), whose cmdlet printed "ø" in "Udløber" as "›" (an OEM codepage read
+    // as Windows-1252), so that spelling is listed as well.
+    private static readonly string[] LicenseeLabels = ["Licensed to", "Licensee", "Customer name", "Customer", "Licensed To", "Licenseret til"];
+    private static readonly string[] SerialLabels = ["Serial No.", "Serial No", "Serial number", "Serial Number", "Serial", "VOICE Account Number", "VOICE Account No.", "VOICE Kontonummer"];
+    private static readonly string[] ExpiryLabels = ["Expiration Date", "Expiration date", "Expiry date", "Expiry Date", "Expires", "Expiration", "Valid until", "Valid to", "Udløber", "Udl\u203aber", "Udløbsdato"];
 
     /// <summary>The object types a range line may start with, in the spelling stored.</summary>
     private static readonly Dictionary<string, string> ObjectTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -84,8 +95,12 @@ public static partial class GatewayLicenceParser
         ["Permission Set"] = "PermissionSet",
     };
 
-    [GeneratedRegex(@"^\s*(?<label>[A-Za-z][A-Za-z .()/]*?)\s*:\s*(?<value>.*?)\s*$", RegexOptions.None, MatchTimeoutMilliseconds)]
+    [GeneratedRegex(@"^\s*(?<label>\p{L}[\p{L} .()/\u203a-]*?)\s*:\s*(?<value>.*?)\s*$", RegexOptions.None, MatchTimeoutMilliseconds)]
     private static partial Regex LabelledLine();
+
+    /// <summary>The rule under a module table's heading: two runs of dashes.</summary>
+    [GeneratedRegex(@"^\s*-{10,}\s+-{3,}\s*$", RegexOptions.None, MatchTimeoutMilliseconds)]
+    private static partial Regex ModuleTableRule();
 
     [GeneratedRegex(@"^\s*(?<type>Permission Set|[A-Za-z]+)\s+(?<from>\d{1,10})\s*(?:\.\.|-|\s)\s*(?<to>\d{1,10})(?<rest>.*)$", RegexOptions.None, MatchTimeoutMilliseconds)]
     private static partial Regex RangeLine();
@@ -103,9 +118,23 @@ public static partial class GatewayLicenceParser
         var lines = text.Replace("\r", string.Empty, StringComparison.Ordinal).Split('\n');
         var tooMany = false;
         var skipped = 0;
+        var moduleTable = false;
         foreach (var line in lines)
         {
             if (line.Length > MaxLineChars)
+            {
+                skipped++;
+                continue;
+            }
+            try
+            {
+                if (ModuleTableRule().IsMatch(line))
+                {
+                    moduleTable = true;
+                    continue;
+                }
+            }
+            catch (RegexMatchTimeoutException)
             {
                 skipped++;
                 continue;
@@ -154,10 +183,11 @@ public static partial class GatewayLicenceParser
             expires = ParseDate(expiryText, out var dateProblem);
             if (dateProblem is not null) problems.Add(dateProblem);
         }
-        if (ranges.Count == 0) problems.Add("No licensed object ranges were found in the licence information.");
+        var listsNoRanges = ranges.Count == 0 && moduleTable;
+        if (ranges.Count == 0 && !listsNoRanges) problems.Add("No licensed object ranges were found in the licence information.");
         if (skipped > 0) problems.Add($"{skipped} line(s) of the licence information were too long or too slow to read and were skipped.");
         if (tooMany) problems.Add($"The licence lists more than {MaxRanges} object ranges; only the first {MaxRanges} were kept.");
-        return new ParsedLicence(licensee, serial, expires, ranges, problems) { RangesComplete = skipped == 0 && !tooMany };
+        return new ParsedLicence(licensee, serial, expires, ranges, problems) { RangesComplete = skipped == 0 && !tooMany, ListsNoRanges = listsNoRanges };
     }
 
     /// <summary>

@@ -343,8 +343,10 @@ gateway".
 
 **File permissions are part of the policy.** At start, and before each command, the gateway checks
 that the program folder, the policy file and every script it names are writable only by
-Administrators. The service account may read them but not write them: a compromised gateway process
-must not be able to widen its own policy. The gateway refuses to start otherwise, because whoever
+Administrators. The service account is given no write rule on them of its own; since it is a local
+administrator (Business Central's cmdlets require it, see "The Windows service, as built"), a
+compromised gateway process could still change them, so this guards against other users, not the
+gateway itself. The gateway refuses to start otherwise, because whoever
 can write them gets code running as a Business Central administrator.
 
 **Shared multitenant tiers.** On a multitenant server several tenants, often several customers,
@@ -643,7 +645,7 @@ Central yet; the script has only run under `pwsh` on Linux against stand-in cmdl
 - the layout of `Export-NAVServerLicenseInformation` for an `.flf` (BC 14) and a `.bclicense`
   licence, especially the expiry line and the object ranges, then replace the samples;
 - how long `Get-NAVAppInfo` takes on a tenant with many apps, against the three-minute limit;
-- the service account the gateway runs as can run every cmdlet above.
+- the service account the gateway runs as can run every cmdlet above. (Answered on BC 25: only as a local administrator; see "The Windows service, as built". A tier whose `Get-NAVServerInstance` is refused is reported as not read, with Business Central's reason.)
 
 ## Data model
 
@@ -1612,7 +1614,10 @@ beside it. It is not checked when: the environment is no longer linked; the cust
 connected (offline, revoked, waiting for approval); AL Workbench no longer sees the tier or its tenant
 (tenant ids compared trimmed and in any case, as the inventory compares them); the licence was never
 read; it was last read more than an hour ago (`OnPremisesTierFacts.StaleAfter`, four missed rounds);
-its text was cut to size by the gateway; it has no ranges the parser could read; **only part of its
+its text was cut to size by the gateway; it has no ranges the parser could read, or **lists none**
+(a `.bclicense` on BC 25 prints modules and quantities and no object ranges at all, found on a real
+server 2026-11-25; the parser recognises the module table by its dashed rule, records no problem, and
+the reason says the licence lists no ranges); **only part of its
 ranges could be read** (a line too long or too slow to match was skipped, or ranges past
 `GatewayLicenceParser.MaxRanges` were dropped: the missing range may be the one that covers an object,
 so flagging it would be a false refusal); the tier's version is unknown (the BC 14 rule needs it); or
@@ -1943,7 +1948,17 @@ service hands the loop a `VerbExecutors` that routes each verb to its own (`publ
   when the service stops with a failure exit code (`sc failureflag ... 1`): an unexpected error ends
   the loop with exit code 1 instead of a clean stop.
   It runs as its own **virtual account** `NT SERVICE\ALWorkbenchGateway` by default: no password,
-  not an administrator, the computer account on the network. A **group managed service account**
+  the computer account on the network. `install` adds the account to the local Administrators
+  group (by its well-known SID, so a translated group name does not matter), because Business
+  Central's administration cmdlets refuse anyone else ("You need to be a member of the local
+  Administrators group on the server to run this cmdlet", found on BC 25 in staging testing,
+  2026-11-25) and there is no narrower right. Run on an installed gateway, `install` only adds that
+  membership, which setup does on every upgrade; `check` reports it, since `check` itself runs as an
+  administrator and its own reads would succeed either way; `uninstall` removes it. An administrator
+  account could change `gateway.toml`, so the file's rules now guard against other users, not against
+  the gateway's own process: the policy is enforced by the program, which never writes the file.
+  Splitting the gateway into an unprivileged network process and a privileged worker was considered
+  and not chosen for now (Mads, 2026-11-25). A **group managed service account**
   can be named instead, for when the gateway must act on other machines as a domain identity
   (#1373); it must be installed on the computer and hold "Log on as a service". An ordinary user
   account is refused, because the gateway never stores a password. Which Business Central rights

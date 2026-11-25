@@ -10,7 +10,8 @@
 ;   ISCC.exe /DAppVersion=<version> /DSourceDir=<publish folder> /DOutputDir=<folder> gateway.iss
 ;
 ; Upgrading: running a newer setup over an older one stops the service (waiting while
-; it finishes what it is doing), replaces the program and starts the service again.
+; it finishes what it is doing), replaces the program, makes sure the service account is
+; a local administrator (Business Central's cmdlets require it) and starts the service again.
 ; A service installed by hand from another folder is refused, not upgraded. The registration, the key and gateway.toml
 ; are left as they were. Setup never replaces or removes gateway.toml, which is
 ; customer IT's file; when there is none, "init" writes a starter one that lists this
@@ -242,11 +243,23 @@ begin
     { A first install creates the service. It starts once the gateway is registered. }
     WizardForm.StatusLabel.Caption := 'Installing the AL Workbench Gateway service...';
     if not Exec(ExpandConstant('{app}\{#Exe}'), 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-      MsgBox('The gateway was copied, but its Windows service could not be installed. Open a command prompt with ' +
-        '"Run as administrator", go to ' + ExpandConstant('{app}') + ' and run "ALWorkbench.Gateway install" to see why.',
+      MsgBox('The gateway was copied, but installing its Windows service did not finish. Open a command prompt with ' +
+        '"Run as administrator", go to ' + ExpandConstant('{app}') + ' and run "ALWorkbench.Gateway install" to see why; ' +
+        'running it again finishes what is left.',
         mbError, MB_OK);
   end
-  else if RunningBefore then
+  else
+  begin
+    { An upgrade: install on an installed gateway only makes sure its account is a
+      local administrator, which Business Central's cmdlets require and which gateways
+      installed before that was known may lack. }
+    WizardForm.StatusLabel.Caption := 'Checking the gateway service account...';
+    if not Exec(ExpandConstant('{app}\{#Exe}'), 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      MsgBox('The gateway was upgraded, but its service account could not be added to the local Administrators group, ' +
+        'which Business Central requires. Open a command prompt with "Run as administrator", go to ' + ExpandConstant('{app}') +
+        ' and run "ALWorkbench.Gateway install" to see why.', mbError, MB_OK);
+  end;
+  if ExistedBefore and RunningBefore then
   begin
     { An upgrade starts the service it stopped. }
     WizardForm.StatusLabel.Caption := 'Starting the AL Workbench Gateway service...';

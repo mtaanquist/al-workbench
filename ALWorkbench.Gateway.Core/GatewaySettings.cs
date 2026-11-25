@@ -40,6 +40,15 @@ public sealed record GatewaySettings
     /// </summary>
     [JsonPropertyName("serviceAccount")]
     public string? ServiceAccount { get; init; }
+
+    /// <summary>
+    /// Whether <c>install</c> put <see cref="ServiceAccount"/> into the local
+    /// Administrators group (Business Central's cmdlets require it), so <c>uninstall</c>
+    /// takes out only a membership the gateway added, never one customer IT gave a
+    /// shared group managed service account for something else.
+    /// </summary>
+    [JsonPropertyName("addedToAdministrators")]
+    public bool AddedToAdministrators { get; init; }
 }
 
 /// <summary>Reads and writes <see cref="GatewaySettings"/>.</summary>
