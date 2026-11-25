@@ -172,8 +172,11 @@ internal static class StepUpEndpoints
     /// Re-issues the session cookie for the signed-in user with the method
     /// that just succeeded, which stamps a fresh strong moment, keeps the
     /// session's original start so a reset that should end it still does,
-    /// records the success so the MFA throttle's run of failures is broken,
-    /// and clears the pending state. Refuses unless the cookie on this
+    /// records a successful attempt, and clears the pending state. The
+    /// success row only ends a run in the password lockout, which looks at
+    /// the latest attempts; the MFA throttle counts failures since the last
+    /// completed sign-in (<c>LastLoginAt</c>, #1259), which a step-up does
+    /// not move, so a step-up never lifts that cap. Refuses unless the cookie on this
     /// request belongs to the user the step-up was started for: a pending
     /// state replayed from another session must not upgrade it.
     /// </summary>

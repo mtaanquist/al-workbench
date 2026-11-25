@@ -4,16 +4,17 @@ using ALDevToolbox.Tests.Infrastructure;
 namespace ALDevToolbox.Tests.Assets;
 
 /// <summary>
-/// Guards the two width decisions in the content archetype (divergences 72 and
-/// 73), both raised by the maintainer looking at rendered pages.
+/// Guards the width decisions in the content archetype (divergences 72, 73
+/// and 75), all raised by the maintainer looking at rendered pages.
 ///
-/// <para>The pair is worth reading together, because they pull opposite ways and
+/// <para>They are worth reading together, because they pull opposite ways and
 /// the reason is the same one. A reading measure belongs to <b>prose</b>. On
 /// <c>/tools/mcp</c> the measure had been put on the step <i>list</i>, which also
 /// holds a two-up card row, a token field and JSON config - so the container was
 /// held to 82ch and the UI inside it was crushed. On <c>/docs/mcp</c> the column
 /// really is all prose, so the measure is right and it was the grid around it
-/// that was wrong.</para>
+/// that was wrong. Divergence 75 extends the first case to <c>.note</c>: a box
+/// in a page layout fills its container.</para>
 /// </summary>
 public sealed class DocsLayoutTests
 {
@@ -83,26 +84,32 @@ public sealed class DocsLayoutTests
     }
 
     /// <summary>
-    /// Divergence 72, the opposite direction: the step list opts out of the
-    /// measure and the measure moves to <c>.step__text</c>, the only part of a
-    /// step that is prose.
+    /// Divergences 72 and 75: the step list and the note are boxes in a page
+    /// layout and fill their container. The measure lives on <c>.step__text</c>,
+    /// the only part of a step that is prose.
     /// </summary>
     [Fact]
-    public void A_step_list_can_opt_out_of_the_measure_but_its_prose_cannot()
+    public void Boxes_fill_their_container_and_the_measure_stays_on_prose()
     {
         var sheet = Read(Sheet);
 
-        sheet.Should().Contain(".steps--wide { max-width: none; }",
+        Rule(sheet, ".steps").Should().NotContain("max-width",
             "a step list whose bodies are cards, inputs and code is not a column of prose");
-        sheet.Should().Contain(".step__text { font-size: var(--text-sm); color: var(--ink-3); text-wrap: pretty; max-width: 82ch; }",
-            "the measure has to land on the step's prose, or opting out of it loses "
-            + "readability along with the cap");
+        Rule(sheet, ".note").Should().NotContain("max-width",
+            "a note sits in list and tool pages too, and stopping halfway across "
+            + "leaves it out of line with the table or cards below it (#1723)");
+        Rule(sheet, ".step__text").Should().Contain("max-width: 82ch",
+            "the measure has to land on the step's prose, or dropping the list's "
+            + "cap loses readability along with it");
+    }
 
-        // The class itself is rendered by SetupSteps (pinned in ContentArchetypeTests);
-        // what the page owns is the decision to ask for it.
-        Read("ALDevToolbox/Components/Pages/Mcp.razor").Should().Contain("<SetupSteps Wide=\"true\">",
-            "the MCP page is the case that raised it - two-up cards crushed to 265px "
-            + "each and a server address wrapped mid-token");
+    /// <summary>The declaration block of the rule whose selector is exactly <paramref name="selector"/>.</summary>
+    private static string Rule(string sheet, string selector)
+    {
+        var start = sheet.IndexOf("\n" + selector + " {", StringComparison.Ordinal);
+        start.Should().BeGreaterThanOrEqualTo(0, "{0} should be a rule in {1}", selector, Sheet);
+        var end = sheet.IndexOf('}', start);
+        return sheet[start..end];
     }
 
     private static string Read(string relative) =>

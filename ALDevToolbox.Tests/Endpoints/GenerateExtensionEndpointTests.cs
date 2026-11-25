@@ -18,7 +18,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// repository" path does: rewrite the settings with the new extension listed,
 /// and refuse an ID range one of the saved extensions already uses.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GenerateExtensionEndpointTests : IDisposable
 {
     private const string AlexEmail = "alex@cronus.example";
@@ -46,6 +45,34 @@ public sealed class GenerateExtensionEndpointTests : IDisposable
         using var reader = new StreamReader(settings!.Open());
         var toml = await reader.ReadToEndAsync();
         toml.Should().Contain("Banking").And.Contain("92000");
+    }
+
+    /// <summary>
+    /// #1615: the workspace was generated under a folder style that gave its
+    /// file another name than today's would. The download rewrites the file
+    /// under the name the settings recorded, so extracting it replaces the
+    /// user's file rather than landing a second one beside it.
+    /// </summary>
+    [Fact]
+    public async Task Joining_a_workspace_rewrites_the_code_workspace_file_under_the_name_it_was_saved_with()
+    {
+        const string savedName = "cronus_denmark.code-workspace";
+        var savedConfig = await SeedAsync(codeWorkspaceFile: savedName);
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+
+        using var response = await PostAsync(client, savedConfig, idFrom: 92000, idTo: 92999);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var archive = new ZipArchive(
+            new MemoryStream(await response.Content.ReadAsByteArrayAsync()), ZipArchiveMode.Read);
+        archive.Entries
+            .Where(e => e.FullName.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase))
+            .Select(e => e.FullName)
+            .Should().Equal(savedName);
+        using var reader = new StreamReader(archive.GetEntry(WorkspaceConfigService.FileName)!.Open());
+        (await reader.ReadToEndAsync()).Should().Contain($"code_workspace = \"{savedName}\"",
+            "the rewritten settings keep the name for the extension after this one");
     }
 
     [Fact]
@@ -82,7 +109,7 @@ public sealed class GenerateExtensionEndpointTests : IDisposable
     }
 
     /// <summary>Seeds the template and the user, and returns the settings a generated workspace saved.</summary>
-    private async Task<string> SeedAsync()
+    private async Task<string> SeedAsync(string? codeWorkspaceFile = null)
     {
         await using var ctx = _db.NewContext();
         ctx.RuntimeTemplates.Add(TemplateBuilder.Default());
@@ -91,7 +118,7 @@ public sealed class GenerateExtensionEndpointTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = AlexEmail,
             DisplayName = "Alex Hansen",
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = TestPasswords.Hash(Password),
             Role = UserRole.User,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -105,7 +132,7 @@ public sealed class GenerateExtensionEndpointTests : IDisposable
         [
             new WorkspaceExtensionIdentity(
                 WorkspaceExtensionIdentity.CoreKind, null, Guid.NewGuid(), "CRO Core", "Core", "CRONUS", 90000, 90999),
-        ]);
+        ], codeWorkspaceFile);
     }
 
     private static async Task<HttpClient> SignInAsync(EndpointFactory factory)

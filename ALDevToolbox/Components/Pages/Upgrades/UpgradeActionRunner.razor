@@ -178,6 +178,13 @@
     [Parameter] public string? PrefillVersion { get; set; }
 
     /// <summary>
+    /// The release Start update starts: an upgrade's target, whatever each environment has
+    /// lined up next, since the service selects it as it starts it. Null on the fleet
+    /// table, where Start update starts each environment's own next update.
+    /// </summary>
+    private string? StartVersion => UpgradeId is null ? null : PrefillVersion;
+
+    /// <summary>
     /// A slot (UTC) the Start update dialog opens on, with "Later" chosen - an upgrade's
     /// planned slot. The picker shows it as a wall clock in the organisation's display
     /// zone, the way the planner typed it, and each customer is then booked at that wall
@@ -395,7 +402,14 @@
         // customer ends up updated twice.
         _preview = rows.Select(r =>
         {
-            if (!r.HasUpdate)
+            if (StartVersion is { } release)
+            {
+                if (UpgradeFleetService.WhyNoUpgradeStart(r, release) is { } why)
+                {
+                    return new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction, why, PreviewGroup.Skipped);
+                }
+            }
+            else if (!r.HasUpdate)
             {
                 return new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
                     "no update is waiting", PreviewGroup.Skipped);
@@ -407,7 +421,7 @@
                     PreviewGroup.AlreadyBooked);
             }
             return new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
-                $"starts updating to {ShortVersion(r.NextUpdateVersion)}", PreviewGroup.Acting);
+                $"starts updating to {StartVersion ?? ShortVersion(r.NextUpdateVersion)}", PreviewGroup.Acting);
         }).ToList();
 
         StateHasChanged();
@@ -512,6 +526,17 @@
                 && _versionPreview.FirstOrDefault(p => p.Row.EnvironmentId == row.EnvironmentId) is { WillChange: false } passed)
             {
                 _results[row.EnvironmentId] = new UpgradeRowResult("Skipped — " + passed.Detail, "muted");
+                skipped++;
+                _progressDone = i + 1;
+                continue;
+            }
+
+            // A start from an upgrade passes over a row its preview said can't take the
+            // upgrade's release, rather than booking something that would fail at the slot.
+            if (kind == UpgradeActionKind.RunNow && StartVersion is { } release
+                && UpgradeFleetService.WhyNoUpgradeStart(row, release) is { } why)
+            {
+                _results[row.EnvironmentId] = new UpgradeRowResult("Skipped — " + why, "muted");
                 skipped++;
                 _progressDone = i + 1;
                 continue;

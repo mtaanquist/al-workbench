@@ -6,6 +6,8 @@ using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Email;
 using ALDevToolbox.Services.Notifications;
+using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -16,7 +18,8 @@ namespace ALDevToolbox.Tests.Notifications;
 
 /// <summary>
 /// Build notifications (issue #1035): one email when a pipeline starts failing
-/// and one when it works again, to the people behind the build.
+/// and one when it works again, to whoever pressed Build and the solution's
+/// followers who develop it (#1463).
 /// </summary>
 public sealed class BuildNotifierTests : IDisposable
 {
@@ -25,7 +28,8 @@ public sealed class BuildNotifierTests : IDisposable
     private readonly TestDb _db = new();
     private readonly ServiceProvider _services = new ServiceCollection().BuildServiceProvider();
     private readonly CapturingEmailService _email = new();
-    private int _creator;
+    private int _owner;
+    private int _pipelineCreator;
     private int _starter;
     private int _nightlyOwner;
     private int _projectId;
@@ -47,7 +51,7 @@ public sealed class BuildNotifierTests : IDisposable
         _email.Sent.Should().BeEmpty();
 
         await FinishAsync(ProjectBuildStatus.Failed, failure: "error AL0118: The name 'Brew' does not exist.");
-        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["starter@cronus.example", "creator@cronus.example"]);
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["starter@cronus.example", "owner@cronus.example"]);
         _email.Sent.Should().AllSatisfy(s =>
         {
             s.Subject.Should().Be("Build failed: CRONUS Coffee - Main");
@@ -65,10 +69,10 @@ public sealed class BuildNotifierTests : IDisposable
         await FinishAsync(ProjectBuildStatus.Ready);
         await FinishAsync(ProjectBuildStatus.Failed, failure: "error AL0118: The name 'Brew' does not exist.");
 
-        _email.Sent.Select(s => s.To).Should().Equal(["creator@cronus.example"],
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"],
             "the person who started it is on no team of the now private solution; its owner still sees it");
         await using var ctx = _db.NewContext();
-        (await ctx.UserNotifications.Select(n => n.UserId).ToListAsync()).Should().Equal(_creator);
+        (await ctx.UserNotifications.Select(n => n.UserId).ToListAsync()).Should().Equal(_owner);
     }
 
     [Fact]
@@ -78,7 +82,7 @@ public sealed class BuildNotifierTests : IDisposable
 
         await FinishAsync(ProjectBuildStatus.Failed);
         await FinishAsync(ProjectBuildStatus.Failed);
-        _email.Sent.Should().HaveCount(2, "one failure email each for the starter and the creator");
+        _email.Sent.Should().HaveCount(2, "one failure email each for the starter and the owner");
 
         _email.Sent.Clear();
         await FinishAsync(ProjectBuildStatus.Ready);
@@ -125,7 +129,8 @@ public sealed class BuildNotifierTests : IDisposable
         // A nightly next-major failure is news even though the manual build is failing too.
         await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMajor, "27.0");
 
-        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["nightly@cronus.example", "creator@cronus.example"]);
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"],
+            "a nightly check runs as whoever turned it on, who did not start it; the owner follows the solution");
         _email.Sent[0].Subject.Should().Be("Nightly check failed: CRONUS Coffee - Main (Next major)");
         _email.Sent[0].Html.Should().Contain("next major Business Central version (27.0)");
     }
@@ -144,18 +149,123 @@ public sealed class BuildNotifierTests : IDisposable
     public async Task The_same_person_in_both_roles_gets_one_email()
     {
         await SeedAsync();
-        _starter = _creator;
+        _starter = _owner;
 
         await FinishAsync(ProjectBuildStatus.Failed);
 
-        _email.Sent.Should().ContainSingle().Which.To.Should().Be("creator@cronus.example");
+        _email.Sent.Should().ContainSingle().Which.To.Should().Be("owner@cronus.example");
+    }
+
+    [Fact]
+    public async Task Followers_hear_about_builds_by_their_role_on_the_people_list()
+    {
+        await SeedAsync();
+        var developer = await SeedUserAsync("developer@cronus.example");
+        var architect = await SeedUserAsync("architect@cronus.example");
+        var leader = await SeedUserAsync("leader@cronus.example");
+        var both = await SeedUserAsync("both@cronus.example");
+        await AddPersonAsync(developer, ProjectPersonRole.Developer);
+        await AddPersonAsync(architect, ProjectPersonRole.Architect);
+        await AddPersonAsync(leader, ProjectPersonRole.ProjectLeader);
+        await AddPersonAsync(both, ProjectPersonRole.Consultant, ProjectPersonRole.Developer);
+        await AddPersonAsync(_owner, ProjectPersonRole.Consultant);
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.Push);
+
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
+            ["developer@cronus.example", "architect@cronus.example", "both@cronus.example"],
+            "a build on push runs as whoever saved the pipeline, and the owner is listed only as a consultant");
+    }
+
+    [Fact]
+    public async Task With_no_follower_left_to_tell_the_owner_hears_about_it()
+    {
+        await SeedAsync();
+        await AddPersonAsync(_owner, ProjectPersonRole.Consultant);
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMajor, "27.0");
+
+        _email.Sent.Should().ContainSingle().Which.To.Should().Be("owner@cronus.example");
+    }
+
+    [Fact]
+    public async Task The_owner_still_hears_when_the_one_who_started_it_can_no_longer_see_the_solution()
+    {
+        await SeedAsync();
+        await MakePrivateAsync(_projectId);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeProjectFollowers.Add(new OeProjectFollower
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, UserId = _owner, Following = false, UpdatedAt = _clock,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await FinishAsync(ProjectBuildStatus.Failed);
+
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"],
+            "the starter is dropped for access, which would otherwise leave nobody to tell");
+    }
+
+    [Fact]
+    public async Task The_authors_of_the_commits_in_a_failing_build_hear_about_it_and_about_the_fix()
+    {
+        await SeedAsync();
+        var author = await SeedUserAsync("author@cronus.example");
+        var linked = await SeedUserAsync("linked@cronus.example");
+        await LinkGitHubAsync(linked, "4242");
+        string[] commits = ["Author@Cronus.example", "4242+octocat@users.noreply.github.com", "stranger@elsewhere.example"];
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.Push, authorEmails: commits);
+
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
+            ["owner@cronus.example", "author@cronus.example", "linked@cronus.example"],
+            "the owner follows the solution; an address that matches nobody is skipped");
+        _email.Sent.Should().AllSatisfy(s => s.Html.Should().Contain("have commits in it"));
+
+        _email.Sent.Clear();
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.Push, authorEmails: commits);
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(
+            ["owner@cronus.example", "author@cronus.example", "linked@cronus.example"]);
+    }
+
+    [Fact]
+    public async Task A_commit_author_in_another_organisation_or_no_longer_active_is_not_told()
+    {
+        await SeedAsync();
+        var elsewhere = await SeedUserAsync("elsewhere@cronus.example", TestDb.OtherOrgId);
+        await LinkGitHubAsync(elsewhere, "5151");
+        var gone = await SeedUserAsync("gone@cronus.example");
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == gone)
+                .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+        }
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.Push,
+            authorEmails: ["elsewhere@cronus.example", "5151+octocat@users.noreply.github.com", "gone@cronus.example"]);
+
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"]);
+    }
+
+    [Fact]
+    public async Task A_nightly_check_does_not_blame_the_commits_in_it()
+    {
+        await SeedAsync();
+        await SeedUserAsync("author@cronus.example");
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMajor, "27.0",
+            authorEmails: ["author@cronus.example"]);
+
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"]);
     }
 
     [Fact]
     public async Task A_digest_choice_keeps_the_first_line_of_the_failure()
     {
         await SeedAsync();
-        _db.OrgContext.CurrentUserId = _creator;
+        _db.OrgContext.CurrentUserId = _owner;
         await using (var ctx = _db.NewContext())
         {
             await new NotificationPreferenceService(ctx, _db.OrgContext, TimeProvider.System,
@@ -168,7 +278,7 @@ public sealed class BuildNotifierTests : IDisposable
 
         await using var read = _db.NewContext();
         var item = await read.NotificationDigestItems.SingleAsync();
-        item.UserId.Should().Be(_creator);
+        item.UserId.Should().Be(_owner);
         item.Title.Should().Be("Build failed: CRONUS Coffee - Main");
         item.Detail.Should().Be("Coffee Extension: 2 errors.");
         item.SolutionName.Should().Be("CRONUS Coffee");
@@ -217,7 +327,8 @@ public sealed class BuildNotifierTests : IDisposable
         await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor,
             failedApps: ["CRONUS Coffee Reports"]);
 
-        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["nightly@cronus.example", "creator@cronus.example"]);
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"],
+            "a nightly check runs as whoever turned it on, who did not start it; the owner follows the solution");
         _email.Sent[0].Subject.Should().Be("Nightly check failed: CRONUS Coffee - Main (Next minor)");
         _email.Sent[0].Html.Should().Contain("CRONUS Coffee Reports: error AL0118");
     }
@@ -291,13 +402,15 @@ public sealed class BuildNotifierTests : IDisposable
 
     private async Task SeedAsync()
     {
-        _creator = await SeedUserAsync("creator@cronus.example");
+        _owner = await SeedUserAsync("owner@cronus.example");
         _starter = await SeedUserAsync("starter@cronus.example");
         _nightlyOwner = await SeedUserAsync("nightly@cronus.example");
+        // Set up the pipelines but only looks after deployments, so hears about no build.
+        _pipelineCreator = await SeedUserAsync("pipeline-creator@cronus.example");
         await using var ctx = _db.NewContext();
         var project = new OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Coffee", CreatedByUserId = _creator,
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Coffee", CreatedByUserId = _owner,
             CreatedAt = _clock, UpdatedAt = _clock,
         };
         ctx.OeProjects.Add(project);
@@ -305,12 +418,13 @@ public sealed class BuildNotifierTests : IDisposable
         var pipeline = new OePipeline
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "Main", Branch = "main",
-            CreatedByUserId = _creator, PreviewCheckByUserId = _nightlyOwner, CreatedAt = _clock, UpdatedAt = _clock,
+            CreatedByUserId = _pipelineCreator, PreviewCheckByUserId = _nightlyOwner, CreatedAt = _clock, UpdatedAt = _clock,
         };
         ctx.OePipelines.Add(pipeline);
         await ctx.SaveChangesAsync();
         _projectId = project.Id;
         _pipelineId = pipeline.Id;
+        await AddPersonAsync(_pipelineCreator, ProjectPersonRole.Consultant);
     }
 
     /// <summary>Adds a finished build with its release, then runs the notifier as the worker does.</summary>
@@ -321,7 +435,8 @@ public sealed class BuildNotifierTests : IDisposable
         string? bcVersion = "26.4",
         string? failure = null,
         string[]? failedApps = null,
-        int finishedAfterMinutes = 3)
+        int finishedAfterMinutes = 3,
+        string[]? authorEmails = null)
     {
         _clock = _clock.AddHours(1);
         int releaseId;
@@ -335,7 +450,7 @@ public sealed class BuildNotifierTests : IDisposable
             };
             ctx.OeReleases.Add(release);
             await ctx.SaveChangesAsync();
-            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            var build = new OeProjectBuild
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, PipelineId = _pipelineId,
                 ReleaseId = release.Id,
@@ -343,7 +458,19 @@ public sealed class BuildNotifierTests : IDisposable
                 Trigger = trigger, BcTarget = target, BcVersion = bcVersion, Status = status,
                 FailureMessage = failure ?? (status == ProjectBuildStatus.Failed ? "Compile failed." : null),
                 StartedAt = _clock, FinishedAt = _clock.AddMinutes(finishedAfterMinutes),
-            });
+            };
+            ctx.OeProjectBuilds.Add(build);
+            await ctx.SaveChangesAsync();
+            var ordering = 0;
+            foreach (var email in authorEmails ?? [])
+            {
+                ctx.OeProjectBuildCommits.Add(new OeProjectBuildCommit
+                {
+                    OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, ShortHash = $"c{ordering}",
+                    Message = "Change the brew", Author = "Someone", AuthorEmail = email, CommittedAt = _clock,
+                    Ordering = ordering++,
+                });
+            }
             foreach (var app in failedApps ?? [])
             {
                 ctx.OeProjectBuildResults.Add(new OeProjectBuildResult
@@ -363,7 +490,30 @@ public sealed class BuildNotifierTests : IDisposable
         var notifications = new NotificationService(
             work, _db.NewContextFactory(), preferences, _email, new EmailRenderer(_services, NullLoggerFactory.Instance),
             new PublicOrigin(Origin), _db.OrgContext, TimeProvider.System, NullLogger<NotificationService>.Instance);
-        await new BuildNotifier(work, notifications, NullLogger<BuildNotifier>.Instance).BuildFinishedAsync(releaseId);
+        var follows = new ProjectFollowService(
+            work, _db.OrgContext, new ProjectAccess(work, _db.OrgContext), TimeProvider.System, NullLogger<ProjectFollowService>.Instance);
+        await new BuildNotifier(work, notifications, follows, NullLogger<BuildNotifier>.Instance).BuildFinishedAsync(releaseId);
+    }
+
+    private async Task LinkGitHubAsync(int userId, string gitHubId)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId, Provider = "github", Issuer = "github.com", Subject = gitHubId, DisplayIdentity = "octocat",
+            CreatedAt = _clock,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task AddPersonAsync(int userId, params ProjectPersonRole[] roles)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeProjectPeople.Add(new OeProjectPerson
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, UserId = userId, Roles = [.. roles], CreatedAt = _clock,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     private async Task<int> AddPipelineAsync(string name)
@@ -372,19 +522,19 @@ public sealed class BuildNotifierTests : IDisposable
         var pipeline = new OePipeline
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, Name = name, Branch = "release",
-            CreatedByUserId = _creator, CreatedAt = _clock, UpdatedAt = _clock,
+            CreatedByUserId = _pipelineCreator, CreatedAt = _clock, UpdatedAt = _clock,
         };
         ctx.OePipelines.Add(pipeline);
         await ctx.SaveChangesAsync();
         return pipeline.Id;
     }
 
-    private async Task<int> SeedUserAsync(string email)
+    private async Task<int> SeedUserAsync(string email, int organizationId = TestDb.DefaultOrgId)
     {
         await using var ctx = _db.NewContext();
         var user = new User
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = organizationId,
             Email = email,
             DisplayName = "Alex Hansen",
             PasswordHash = "x",

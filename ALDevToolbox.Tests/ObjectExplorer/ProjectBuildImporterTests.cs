@@ -535,6 +535,37 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await act.Should().NotThrowAsync();
     }
 
+    /// <summary>
+    /// A Retry drops the last attempt's pickup time, so the page does not age or time the
+    /// queued rerun from it, and keeps its finish time, which is how the worker tells a
+    /// rerun from a first run (#1551).
+    /// </summary>
+    [Fact]
+    public async Task Building_again_clears_the_last_attempts_pickup_time_and_keeps_its_finish()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        var finished = DateTime.UtcNow.AddMinutes(-30);
+        await ctx.OeProjectBuilds.Where(b => b.ReleaseId == first)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(b => b.BuildingStartedAt, finished.AddMinutes(-5))
+                .SetProperty(b => b.FinishedAt, finished));
+
+        await using (var tx = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            await tx.CommitAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.ReleaseId == first);
+        build.Status.Should().Be(ProjectBuildStatus.Queued);
+        build.BuildingStartedAt.Should().BeNull();
+        build.FinishedAt.Should().NotBeNull("a set finish time is what marks a rerun");
+    }
+
     [Fact]
     public async Task A_build_of_a_disabled_pipeline_is_not_built_again()
     {
@@ -550,6 +581,27 @@ public sealed class ProjectBuildImporterTests : IDisposable
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Retry"]
             .Should().Be(ProjectBuildImporter.DisabledRefusal);
+    }
+
+    /// <summary>
+    /// Deleting a pipeline is how its automatic builds stop for good, so Retry and
+    /// Recover symbols on one of its old builds must not run it again (#1335).
+    /// </summary>
+    [Fact]
+    public async Task A_build_of_a_deleted_pipeline_is_not_built_again()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await ctx.OePipelines.Where(p => p.Id == pipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+
+        var act = async () => { await using var _ = await NewImporter(_db.NewContext(), new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Symbols"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
+            .Should().Be(ProjectBuildImporter.DeletedPipelineRefusal);
     }
 
     [Fact]
@@ -593,6 +645,62 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+    }
+
+    // The rest of this class builds as a SiteAdmin, which passes the gate; these two
+    // press Build as ordinary users on a Read-only solution. Both have a token, so the
+    // only difference between them is the team.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pressing_build_on_a_read_only_solution_is_for_its_team(bool onTheTeam)
+    {
+        const int personId = 9640;
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        await using (var write = _db.NewContext())
+        {
+            write.Users.Add(new User
+            {
+                Id = personId, OrganizationId = TestDb.DefaultOrgId, Email = "pat@cronus.example", PasswordHash = "x",
+                DisplayName = "Pat", Role = UserRole.User, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Nordics", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+            write.Teams.Add(team);
+            await write.SaveChangesAsync();
+            write.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, TeamId = team.Id, CreatedAt = DateTime.UtcNow });
+            if (onTheTeam)
+            {
+                write.TeamMembers.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, TeamId = team.Id, UserId = personId, CreatedAt = DateTime.UtcNow });
+            }
+            (await write.OeProjects.SingleAsync(p => p.Id == projectId)).Visibility = ProjectVisibility.ReadOnly;
+            await write.SaveChangesAsync();
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = personId;
+        await using (var tokens = _db.NewContext())
+        {
+            await NewTokens(tokens).SaveTokenAsync(RepositoryProvider.GitHub, "ghp_pat", clear: false);
+        }
+        var queue = new ProjectBuildQueue();
+
+        await using var build = _db.NewContext();
+        var act = () => NewImporter(build, queue).StartBuildAsync(pipelineId);
+
+        await using var read = _db.NewContext();
+        if (onTheTeam)
+        {
+            var releaseId = await act();
+            (await read.OeProjectBuilds.SingleAsync(b => b.PipelineId == pipelineId)).ReleaseId.Should().Be(releaseId);
+            queue.Reader.TryRead(out _).Should().BeTrue();
+            return;
+        }
+        (await act.Should().ThrowAsync<ProjectAccessDeniedException>()).Which.Message
+            .Should().Be("You don't have permission to change this solution. Ask its owner, a member of its team or an administrator.");
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(0);
+        (await read.OeReleases.CountAsync()).Should().Be(0, "a refused build leaves no release behind either");
+        queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     [Fact]
@@ -988,11 +1096,11 @@ public sealed class ProjectBuildImporterTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
         var access = new ProjectAccess(ctx, _db.OrgContext);
         var credentials = new CloneCredentialResolver(
@@ -1000,7 +1108,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
             _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance);
         return new ProjectBuildImporter(
-            importer, new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance),
+            importer, new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance),
             queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance);
     }

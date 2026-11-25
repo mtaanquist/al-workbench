@@ -72,7 +72,7 @@ public sealed class EnvironmentPaletteSource : IPaletteSource
         PaletteQuery query, int limit, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(query);
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
         var rows = await _db.OeProjectEnvironments.AsNoTracking()
@@ -93,7 +93,7 @@ public sealed class EnvironmentPaletteSource : IPaletteSource
                 ProjectName = e.Project!.Name,
                 ProjectShortName = e.Project.ShortName,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var candidates = rows.Select(r => new PaletteCandidate(
             "environment",

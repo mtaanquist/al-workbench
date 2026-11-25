@@ -120,6 +120,12 @@
                                     <span class="nav-item__label">Piper</span>
                                 </NavLink>
                                 break;
+                            case (TextGroup, "sealed"):
+                                <NavLink class="nav-item" href="/sealed" Match="NavLinkMatch.All" ActiveClass="is-active">
+                                    <Icon Name="lock" Width="17" Height="17" Css="nav-item__icon" />
+                                    <span class="nav-item__label">Sealed</span>
+                                </NavLink>
+                                break;
 
                             case (DeliverGroup, "solutions"):
                                 <div class="nav-parent is-open">
@@ -135,6 +141,9 @@
                                     <div class="nav-sub">
                                         <NavLink class="nav-item" href="/environments" Match="NavLinkMatch.Prefix" ActiveClass="is-active">
                                             <span class="nav-item__label">Environments</span>
+                                        </NavLink>
+                                        <NavLink class="nav-item" href="/repositories" Match="NavLinkMatch.Prefix" ActiveClass="is-active">
+                                            <span class="nav-item__label">Repositories</span>
                                         </NavLink>
                                         @if (_canUseEnvironmentOps)
                                         {
@@ -335,6 +344,12 @@
                                     <span class="nav-item__label">Workers</span>
                                 </NavLink>
                                 break;
+                            case (SiteAdminGroup, "logs"):
+                                <NavLink class="nav-item" href="/site-admin/logs" Match="NavLinkMatch.Prefix" ActiveClass="is-active">
+                                    <Icon Name="scroll-text" Width="17" Height="17" Css="nav-item__icon" />
+                                    <span class="nav-item__label">Logs</span>
+                                </NavLink>
+                                break;
                             case (SiteAdminGroup, "settings"):
                                 <NavLink class="nav-item" href="/site-admin/settings" Match="NavLinkMatch.Prefix" ActiveClass="is-active">
                                     <Icon Name="server-cog" Width="17" Height="17" Css="nav-item__icon" />
@@ -477,12 +492,12 @@
     private static readonly (string Group, string[] Items)[] Shipped =
     [
         (BuildGroup, ["templates", "cookbook", "object-explorer"]),
-        (TextGroup, ["translator", "diff", "piper"]),
+        (TextGroup, ["translator", "diff", "piper", "sealed"]),
         (DeliverGroup, ["solutions", "upgrades", "teams", "pipelines"]),
         (AssistantGroup, ["mcp"]),
         (AdminGroup, ["dashboard", "templates", "modules", "customer-modules", "catalogue", "cookbook",
             "app-versions", "object-explorer", "translation-memory", "administration", "audit"]),
-        (SiteAdminGroup, ["users", "audit", "backup-storage", "connections", "email", "workers", "settings"]),
+        (SiteAdminGroup, ["users", "audit", "backup-storage", "connections", "email", "workers", "logs", "settings"]),
     ];
 
     /// <summary>The shipped order in the cookie's format, for "Reset to default".</summary>
@@ -590,6 +605,7 @@
         (TextGroup, "translator") => ToolVisible(ToolKey.Translator),
         (TextGroup, "diff") => ToolVisible(ToolKey.Compare),
         (TextGroup, "piper") => ToolVisible(ToolKey.Piper),
+        (TextGroup, "sealed") => _isAuthenticated && ToolVisible(ToolKey.Sealed),
 
         (DeliverGroup, "solutions") => ToolVisible(ToolKey.Projects),
         // Only on its own when Solutions, which it otherwise nests under, is off.

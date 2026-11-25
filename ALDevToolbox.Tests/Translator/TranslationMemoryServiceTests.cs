@@ -63,6 +63,75 @@ public sealed class TranslationMemoryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Search_counts_up_to_the_limit_and_then_reports_more()
+    {
+        // The page counted every match exactly, which over a production memory
+        // (about 1.7M pairs) was most of its load time.
+        await using (var ctx = _db.NewContext())
+        {
+            var insert = $"""
+                INSERT INTO translation_memory (organization_id, source_language, target_language,
+                    source_text, target_text, source_hash, target_hash, kind, hit_count, score,
+                    created_at, updated_at, last_seen_at)
+                SELECT {TestDb.DefaultOrgId}, 'en-US', 'da-DK', 'Source ' || g, 'Kilde ' || g,
+                    md5('s' || g), md5('t' || g), 'caption', 1, 0, now(), now(), now()
+                FROM generate_series(1, {MemorySearchQuery.CountLimit + 1}) g
+                """;
+            await ctx.Database.ExecuteSqlRawAsync(insert);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewMemory(ctx).SearchAsync(new MemorySearchQuery(Take: 50));
+            result.Total.Should().Be(MemorySearchQuery.CountLimit);
+            result.TotalIsCapped.Should().BeTrue();
+            result.HasMore.Should().BeTrue();
+            result.Items.Should().HaveCount(50);
+        }
+    }
+
+    [Fact]
+    public async Task Search_pages_through_tied_rows_without_repeating_or_skipping_any()
+    {
+        // Every pair below ties on score, hit count and last seen, so only the
+        // id tie-break keeps the pages apart.
+        var seen = DateTime.UtcNow;
+        await using (var ctx = _db.NewContext())
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                ctx.TranslationMemory.Add(new TranslationMemoryEntry
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    SourceLanguage = "en-US", TargetLanguage = "da-DK",
+                    SourceText = $"Source {i}", TargetText = $"Kilde {i}",
+                    SourceHash = $"s{i}", TargetHash = $"t{i}", Kind = "caption",
+                    HitCount = 1, CreatedAt = seen, UpdatedAt = seen, LastSeenAt = seen,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            var first = await memory.SearchAsync(new MemorySearchQuery(Skip: 0, Take: 2));
+            var second = await memory.SearchAsync(new MemorySearchQuery(Skip: 2, Take: 2));
+            var last = await memory.SearchAsync(new MemorySearchQuery(Skip: 4, Take: 2));
+
+            first.Total.Should().Be(5);
+            first.TotalIsCapped.Should().BeFalse();
+            first.HasMore.Should().BeTrue();
+            second.HasMore.Should().BeTrue();
+            last.HasMore.Should().BeFalse();
+            last.Items.Should().ContainSingle();
+
+            first.Items.Concat(second.Items).Concat(last.Items).Select(e => e.Id)
+                .Should().OnlyHaveUniqueItems().And.HaveCount(5).And.BeInDescendingOrder();
+        }
+    }
+
+    [Fact]
     public async Task An_upsert_that_names_no_source_does_not_erase_the_one_already_recorded()
     {
         // The repository sweep records which repository and file a pair came
@@ -718,6 +787,89 @@ public sealed class TranslationMemoryServiceTests : IDisposable
         await using var read = _db.NewContext();
         (await NewMemory(read).SuggestAsync("Rebate scheme", "en-US", "da-DK")).Should().ContainSingle(
             "a solution the reader can see already shows them that repository");
+    }
+
+    /// <summary>
+    /// #1324: a Translator save to a repository learns its units on the spot,
+    /// before any ingest reads that repository - and if the pull request is
+    /// never merged, no ingest ever will. The save has to carry the repository
+    /// itself, or the new pairs are nobody's and everybody sees them.
+    /// </summary>
+    [Fact]
+    public async Task A_save_to_a_private_solutions_repository_is_not_suggested_to_people_outside_it()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+
+        _db.OrgContext.CurrentUserId = OwnerId;
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewMemory(ctx).LearnFromXliffAsync(
+                Xliff("Customer bonus", "Kundebonus"), "App.da-DK.xlf",
+                sourceRepository: "cronus-dk/Secret-App", sourcePath: "App/Translations/App.da-DK.xlf"))
+                .Should().Be(1);
+        }
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            (await memory.SuggestAsync("Customer bonus", "en-US", "da-DK")).Should().BeEmpty();
+            (await memory.SearchAsync(new MemorySearchQuery(Text: "Customer bonus"))).Items.Should().BeEmpty();
+        }
+
+        _db.OrgContext.CurrentUserId = OwnerId;
+        await using (var ctx = _db.NewContext())
+        {
+            var hit = (await NewMemory(ctx).SuggestAsync("Customer bonus", "en-US", "da-DK")).Single();
+            hit.SourceRepository.Should().Be("cronus-dk/Secret-App");
+            hit.SourcePath.Should().Be("App/Translations/App.da-DK.xlf");
+        }
+    }
+
+    [Fact]
+    public async Task Voting_on_a_pair_from_a_hidden_solution_answers_not_found()
+    {
+        // #1547: the id leaks through the repository, so the vote must not change the
+        // ranking for the team or return the score that confirms the entry exists.
+        await SeedPrivateAndPublicSolutionsAsync();
+        var hiddenId = await EntryIdAsync("Rebate scheme", "Hemmelig");
+        var visibleId = await EntryIdAsync("Bin code", "Delt");
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            var act = () => memory.VoteAsync(hiddenId, 1);
+            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+            (await memory.VoteAsync(visibleId, 1)).Score.Should().Be(1);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.TranslationMemory.AsNoTracking().SingleAsync(e => e.Id == hiddenId)).Score.Should().Be(0);
+        (await read.TranslationMemoryVotes.AnyAsync(v => v.EntryId == hiddenId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Removing_a_pair_from_a_hidden_solution_answers_not_found()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+        var hiddenId = await EntryIdAsync("Rebate scheme", "Hemmelig");
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewMemory(ctx).DeleteAsync(hiddenId);
+            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+        }
+
+        // The owner still can, so the gate is visibility and not a blanket refusal.
+        _db.OrgContext.CurrentUserId = OwnerId;
+        await using (var ctx = _db.NewContext())
+        {
+            await NewMemory(ctx).DeleteAsync(hiddenId);
+        }
+        await using var read = _db.NewContext();
+        (await read.TranslationMemory.AsNoTracking().SingleAsync(e => e.Id == hiddenId)).DeletedAt.Should().NotBeNull();
     }
 
     private async Task SeedPrivateAndPublicSolutionsAsync()

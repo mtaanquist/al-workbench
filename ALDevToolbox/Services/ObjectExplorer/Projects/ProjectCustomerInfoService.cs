@@ -1,4 +1,5 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -393,7 +394,7 @@ public sealed class ProjectCustomerInfoService
         await _access.EnsureCanViewAsync(projectId, ct);
         var rows = await _db.OeProjectPeople.AsNoTracking()
             .Where(p => p.ProjectId == projectId)
-            .Select(p => new CustomerPerson(p.Id, p.UserId, p.User!.DisplayName, p.User.Email, p.Role, p.Areas))
+            .Select(p => new CustomerPerson(p.Id, p.UserId, p.User!.DisplayName, p.User.Email, p.Roles, p.Areas))
             .ToListAsync(ct);
         return rows.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -420,7 +421,7 @@ public sealed class ProjectCustomerInfoService
             .Where(p => p.User!.Email.ToLower() == lowered || p.User.DisplayName.ToLower().Contains(lowered))
             .Where(p => _db.OeProjects.Where(visible).Any(x => x.Id == p.ProjectId && x.DeletedAt == null))
             .Select(p => new KnownCustomer(
-                p.ProjectId, p.Project!.Name, p.UserId, p.User!.DisplayName, p.User.Email, p.Role, p.Areas))
+                p.ProjectId, p.Project!.Name, p.UserId, p.User!.DisplayName, p.User.Email, p.Roles, p.Areas))
             .ToListAsync(ct);
         return rows
             .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
@@ -438,20 +439,37 @@ public sealed class ProjectCustomerInfoService
         return rows.OrderBy(u => u.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    /// <summary>Adds one of our people, or changes their role and areas. One row per person.</summary>
+    /// <summary>Adds one of our people, or changes their roles and areas. One row per person.</summary>
     public async Task SavePersonAsync(int projectId, int? personId, CustomerPersonInput input, CancellationToken ct = default)
     {
         var errors = new Dictionary<string, string>();
         var areas = Clean(input.Areas);
         if (areas?.Length > 250) errors["Areas"] = "Keep the areas under 250 characters.";
+        var roles = (input.Roles ?? []).Where(Enum.IsDefined).Distinct().Order().ToList();
+        if (roles.Count == 0) errors["Roles"] = "Pick at least one role.";
 
         var project = await LoadManagedProjectAsync(projectId, ct);
+
+        // Who the row names today, when editing: the picker is locked then, so someone
+        // disabled since can still have their roles and areas changed.
+        var currentUserId = personId is { } editedId
+            ? await _db.OeProjectPeople.AsNoTracking()
+                .Where(p => p.Id == editedId && p.ProjectId == projectId)
+                .Select(p => (int?)p.UserId)
+                .FirstOrDefaultAsync(ct)
+            : null;
 
         // The query filter keeps this to the caller's own organisation.
         if (input.UserId is not { } userId || !await _db.Users.AnyAsync(u => u.Id == userId, ct))
             errors["UserId"] = "Choose one of your colleagues.";
+        // The picker offers active accounts only; held here too, as the team service does,
+        // so nobody who can't sign in (#1603) - disabled, or not yet approved - is newly
+        // put on the list. An existing entry for them can still be edited.
+        else if (userId != currentUserId
+                 && !await _db.Users.AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct))
+            errors["UserId"] = "That account can't sign in right now. Choose someone with an active account.";
         else if (await _db.OeProjectPeople.AnyAsync(p => p.ProjectId == projectId && p.UserId == userId && p.Id != personId, ct))
-            errors["UserId"] = "They are already on the list. Change their role or areas there.";
+            errors["UserId"] = "They are already on the list. Change their roles or areas there.";
 
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
@@ -468,7 +486,7 @@ public sealed class ProjectCustomerInfoService
         }
 
         row.UserId = input.UserId!.Value;
-        row.Role = input.Role;
+        row.Roles = roles;
         row.Areas = areas;
         await _db.SaveChangesAsync(ct);
     }
@@ -611,13 +629,13 @@ public sealed record CustomerNotes(string? AccessDescription, string? HostingNot
 public sealed record CustomerContact(int Id, ProjectContactType Type, string Name, string? Company, string? Email, string? Phone);
 public sealed record CustomerContactInput(ProjectContactType Type, string? Name, string? Company, string? Email, string? Phone);
 
-public sealed record CustomerPerson(int Id, int UserId, string Name, string Email, ProjectPersonRole Role, string? Areas);
+public sealed record CustomerPerson(int Id, int UserId, string Name, string Email, IReadOnlyList<ProjectPersonRole> Roles, string? Areas);
 public sealed record CustomerPersonOption(int UserId, string Name, string Email);
 
 /// <summary>One solution a colleague knows, from <see cref="ProjectCustomerInfoService.ListCustomersKnownByAsync"/>.</summary>
 public sealed record KnownCustomer(
-    int ProjectId, string ProjectName, int UserId, string Name, string Email, ProjectPersonRole Role, string? Areas);
-public sealed record CustomerPersonInput(int? UserId, ProjectPersonRole Role, string? Areas);
+    int ProjectId, string ProjectName, int UserId, string Name, string Email, IReadOnlyList<ProjectPersonRole> Roles, string? Areas);
+public sealed record CustomerPersonInput(int? UserId, IReadOnlyList<ProjectPersonRole> Roles, string? Areas);
 
 public sealed record CustomerIntegration(int Id, string Name, ProjectIntegrationDirection Direction);
 public sealed record CustomerIntegrationInput(string? Name, ProjectIntegrationDirection Direction);

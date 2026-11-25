@@ -45,7 +45,7 @@ public sealed class GatewayNotifier
     {
         try
         {
-            return await SendAsync(ct).ConfigureAwait(false);
+            return await SendAsync(ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -60,7 +60,7 @@ public sealed class GatewayNotifier
         var gateways = await _db.Gateways.AsNoTracking()
             .Where(g => g.RevokedAt == null && g.State == GatewayState.Approved)
             .Select(g => new { g.Id, g.Name, g.MachineName, g.State, g.LastSeenAt, g.RevokedAt, g.NotifiedOnline })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         List<int>? admins = null;
         var announced = 0;
@@ -80,7 +80,7 @@ public sealed class GatewayNotifier
             var previous = gateway.NotifiedOnline;
             var claimed = await _db.Gateways
                 .Where(g => g.Id == gateway.Id && g.NotifiedOnline == previous)
-                .ExecuteUpdateAsync(s => s.SetProperty(g => g.NotifiedOnline, nowOnline), ct).ConfigureAwait(false);
+                .ExecuteUpdateAsync(s => s.SetProperty(g => g.NotifiedOnline, nowOnline), ct);
             if (claimed == 0) continue;
             // First connection: recorded, not announced.
             if (previous is null) continue;
@@ -88,7 +88,7 @@ public sealed class GatewayNotifier
             admins ??= await _db.Users.AsNoTracking()
                 .Where(u => u.Role == UserRole.Admin && u.Status == UserStatus.Active)
                 .Select(u => u.Id)
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             var offline = !nowOnline;
             var lastSeen = gateway.LastSeenAt is { } seen
                 ? seen.ToString("d MMM yyyy, HH:mm 'UTC'", CultureInfo.InvariantCulture)
@@ -104,7 +104,7 @@ public sealed class GatewayNotifier
                 (email, token) => GatewayStatusEmail.RenderAsync(
                     email.Renderer, email.Recipient.DisplayName, email.OrganizationName, gateway.Name, gateway.MachineName,
                     offline, lastSeen, email.ItemUrl, email.SettingsUrl, token)),
-                ct).ConfigureAwait(false);
+                ct);
             announced++;
             _logger.LogInformation("Gateway {GatewayId} is {State}; told {Count} admin(s).",
                 gateway.Id, offline ? "offline" : "back online", admins.Count);

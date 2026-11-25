@@ -235,7 +235,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             row.BcClientSecretEncrypted = _secretProtector.Protect(newSecret!);
             row.BcClientSecretExpiresAt = DateTime.SpecifyKind(input.SecretExpiresAt!.Value, DateTimeKind.Utc);
         }
-        row.UpdatedAt = DateTime.UtcNow;
+        row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
         var affected = await ResetSolutionsOnOrganizationRegistrationAsync(ct);
         await _db.SaveChangesAsync(ct);
@@ -262,7 +262,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         row.BcClientId = null;
         row.BcClientSecretEncrypted = null;
         row.BcClientSecretExpiresAt = null;
-        row.UpdatedAt = DateTime.UtcNow;
+        row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
         var affected = await ResetSolutionsOnOrganizationRegistrationAsync(ct);
         await _db.SaveChangesAsync(ct);
@@ -310,9 +310,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     public async Task SaveConnectionAsync(int projectId, BcConnectionInput input, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        var project = await LoadProjectForWriteAsync(projectId, ct);
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         var errors = new Dictionary<string, string>();
@@ -336,9 +334,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
         else
         {
-            if (clientId.Length == 0)
+            if (!Guid.TryParse(clientId, out _))
             {
-                errors["BcClientId"] = "Enter the app registration's client ID.";
+                errors["BcClientId"] = "Enter the app registration's Application (client) ID - a GUID like 00000000-0000-0000-0000-000000000000.";
             }
             var hasExistingSecret = project.BcClientSecretEncrypted is not null;
             if (!settingSecret && !hasExistingSecret)
@@ -376,15 +374,16 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
         else
         {
-            project.BcClientId = clientId;
+            // One spelling, whatever was pasted (braces, no dashes, upper case).
+            project.BcClientId = Guid.Parse(clientId).ToString();
         }
         if (settingSecret)
         {
             project.BcClientSecretEncrypted = _secretProtector.Protect(newSecret!);
             project.BcClientSecretExpiresAt = DateTime.SpecifyKind(input.SecretExpiresAt!.Value, DateTimeKind.Utc);
         }
-        project.BcCredentialsUpdatedAt = DateTime.UtcNow;
-        project.UpdatedAt = DateTime.UtcNow;
+        project.BcCredentialsUpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        project.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         // Re-verification is required after a credential change; the previous verify no
         // longer reflects the live creds.
         project.BcConnectionVerifiedAt = null;
@@ -412,9 +411,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     private async Task<BcConnectionTestResult> FetchAndUpsertEnvironmentsAsync(int projectId, bool markVerified, CancellationToken ct)
     {
         RequireOrganizationId();
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        var project = await LoadProjectForWriteAsync(projectId, ct);
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified, ct);
@@ -435,9 +432,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// </summary>
     public async Task<BcConnectionTestResult> RefreshEnvironmentsUnattendedAsync(int projectId, CancellationToken ct = default)
     {
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        var project = await LoadProjectForWriteAsync(projectId, ct);
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified: false, ct);
     }
@@ -462,6 +457,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh: true, ct);
         }
+        catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+        {
+            _logger.LogWarning("BC test connection: token step throttled for project {ProjectId}; asked to wait {Wait}.", projectId, wait);
+            return Throttled(wait);
+        }
         catch (BcApiException ex)
         {
             _logger.LogWarning("BC test connection: token step failed for project {ProjectId}: {Message}.", projectId, ex.Message);
@@ -473,6 +473,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         try
         {
             environments = await _adminClient.ListEnvironmentsAsync(token, ct);
+        }
+        catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+        {
+            _logger.LogWarning("BC test connection: environments call throttled for project {ProjectId}; asked to wait {Wait}.", projectId, wait);
+            return Throttled(wait);
         }
         // 401 and 403 mean different things here and are fixed in different places, so
         // they get different messages. Entra having issued a token (we got past the step
@@ -501,23 +506,33 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         await UpsertEnvironmentsAsync(project, environments, ct);
-        if (markVerified) project.BcConnectionVerifiedAt = DateTime.UtcNow;
-        project.BcEnvironmentsFetchedAt = DateTime.UtcNow; // the refresh freshness gate reads this
-        project.UpdatedAt = DateTime.UtcNow;
+        if (markVerified) project.BcConnectionVerifiedAt = _clock.GetUtcNow().UtcDateTime;
+        project.BcEnvironmentsFetchedAt = _clock.GetUtcNow().UtcDateTime; // the refresh freshness gate reads this
+        project.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct);
 
         // After the save, so newly-discovered environments already have rows to mirror
         // onto, and so a failure here can never cost us the environment list itself.
         // A refresh in this scope that failed after reading leaves nothing for this one to announce.
         _scheduleChanges.Clear();
-        await MirrorBcEnvironmentDetailsAsync(project, token, ct);
+        var throttledFor = await MirrorBcEnvironmentDetailsAsync(project, token, ct);
         await _db.SaveChangesAsync(ct);
         await AnnounceScheduleChangesAsync();
 
         _logger.LogInformation("BC test connection succeeded for project {ProjectId}: {Count} environment(s).", projectId, environments.Count);
         return new BcConnectionTestResult(BcConnectionResult.Success, environments.Count,
-            environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.");
+            (environments.Count == 1 ? "Connected. Found 1 environment." : $"Connected. Found {environments.Count} environments.")
+            + (throttledFor is null ? "" : " Business Central asked us to slow down before every detail was read, so some show their previous answer."),
+            throttledFor);
     }
+
+    /// <summary>The result for a run Business Central asked to slow down, in words a consultant can act on.</summary>
+    private static BcConnectionTestResult Throttled(TimeSpan wait) =>
+        new(BcConnectionResult.Throttled, 0,
+            wait < TimeSpan.FromMinutes(2)
+                ? "Business Central asked us to slow down. Try again in a minute or two."
+                : $"Business Central asked us to slow down. Try again in about {Math.Ceiling(wait.TotalMinutes):N0} minutes.",
+            wait);
 
     /// <summary>
     /// The project's fetched environments (the delivery targets). Production first, then
@@ -536,7 +551,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .ThenBy(e => e.Name)
             .Select(e => new ProjectEnvironmentRow(
                 e.Id, e.Name, e.Type, e.FetchedAt, e.MissingSince,
-                e.UpdateWindowStart, e.UpdateWindowEnd,
+                e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays,
                 e.Status,
                 e.AppSourceAppsUpdateCadence,
                 e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana, e.BcUpdateWindowFetchedAt,
@@ -554,7 +569,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <para>
     /// <b>Cached for <see cref="BcPanelCache.Ttl"/>.</b> These are four reads against
     /// Business Central, and re-issuing them every time a consultant expands a row is
-    /// traffic Microsoft's API does not need — especially as we honour no throttle. A
+    /// traffic Microsoft's API does not need. A
     /// window this short keeps the panel's promise of "what is true right now" while
     /// collapsing a working session's repeated opens into one fetch. Anything we write
     /// ourselves invalidates the entry (see <see cref="BcPanelCache.Invalidate"/>), so a
@@ -751,7 +766,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         try
         {
-            return (await read().ConfigureAwait(false), null);
+            return (await read(), null);
         }
         catch (BcApiException ex)
         {
@@ -828,6 +843,23 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     }
 
     /// <summary>
+    /// A fresh token for <paramref name="projectId"/>, for a poll that Business Central
+    /// answers with 401. A cached token is handed out while it has a few minutes left and
+    /// a booked install can be polled for longer, so it can run out mid-wait; the delivery
+    /// path refreshes the same way (#1113). The credentials are read again, so a change
+    /// since the send is honoured.
+    /// </summary>
+    private Func<CancellationToken, Task<string>> ForcedTokenRefresh(int projectId) => async ct =>
+    {
+        var project = await _db.OeProjects.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw new BcApiException(null, "This solution no longer exists.");
+        var creds = await ResolveCredentialsAsync(project, ct)
+            ?? throw new BcApiException(null, "The Business Central connection isn't set up any more.");
+        return await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh: true, ct);
+    };
+
+    /// <summary>
     /// Runs one of the four access checks. The "either" case tries the project-manage
     /// axis first and falls back to the update-ops flag, so a refusal names both ways in.
     /// </summary>
@@ -848,7 +880,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 if (await _access.CanManageAsync(projectId, createdByUserId, ct)) break;
                 if (await _access.CanManageEnvironmentUpdatesAsync(projectId, ct)) break;
                 throw new ProjectAccessDeniedException(
-                    "You need to manage this solution, or hold permission to manage environment updates for one of its teams.");
+                    "You need to manage this solution, or be allowed to schedule its upgrades.");
         }
     }
 
@@ -857,14 +889,23 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// cached column so the page agrees with the tenant. The row write is what puts this
     /// in the audit log — see <c>AuditInterceptor.EnvironmentSettingColumns</c>.
     /// </summary>
-    public async Task SetAppUpdateCadenceAsync(int projectId, int environmentId, string cadence, CancellationToken ct = default)
+    public Task SetAppUpdateCadenceAsync(int projectId, int environmentId, string cadence, CancellationToken ct = default) =>
+        SetAppUpdateCadenceCoreAsync(projectId, environmentId, cadence, EnvironmentGate.Manage, ct);
+
+    /// <summary>
+    /// The cadence write behind both the environment page (gated on managing the
+    /// solution) and the Upgrades page's bulk action (gated on the environment-updates
+    /// grant, like the page's other bulk moves).
+    /// </summary>
+    private async Task SetAppUpdateCadenceCoreAsync(
+        int projectId, int environmentId, string cadence, EnvironmentGate gate, CancellationToken ct)
     {
         if (BcAppUpdateCadence.Normalize(cadence) is not { } value)
         {
             throw Validation("Cadence", "Choose how often Marketplace apps should update.");
         }
 
-        var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
+        var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, gate);
         try
         {
             await _adminClient.SetAppUpdateCadenceAsync(env.Token, env.Family, env.Name, value, ct);
@@ -903,6 +944,131 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             throw Validation("Operations", ex.Message);
         }
     }
+
+    /// <summary>What the Operations list says in place of our own app registration's client id.</summary>
+    public const string WorkbenchStarter = "AL Workbench";
+
+    /// <summary>
+    /// How far apart our record of a send and Business Central's record of the operation
+    /// it created may be and still be taken as the same thing, for the actions that do
+    /// not keep the operation id (a date move, a start, a recovery).
+    /// </summary>
+    internal static readonly TimeSpan StarterMatchWindow = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// The "Started by" text for the operations this workbench started, keyed by
+    /// operation id. Business Central names the starter by the app registration's client
+    /// id, which reads as noise; an operation started by the organisation's registration,
+    /// or the solution's own, reads "AL Workbench" instead, and "AL Workbench (name)" when
+    /// our own records say who asked for it.
+    /// <para>
+    /// Who asked comes from the operation id where we kept it (a pipeline deployment's
+    /// installs, a booked install or app update), and otherwise from the nearest action
+    /// sent within <see cref="StarterMatchWindow"/> of the operation that is the same
+    /// kind of change. Operations started by anyone else are left out, so the caller
+    /// shows what Business Central said. Database only; no call to Business Central.
+    /// </para>
+    /// </summary>
+    public async Task<Dictionary<string, string>> DescribeOperationStartersAsync(
+        int projectId, int environmentId, IReadOnlyList<BcEnvironmentOperation> operations, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        await _access.EnsureCanViewAsync(projectId, ct);
+
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var project = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => new { p.BcClientId })
+            .FirstOrDefaultAsync(ct);
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.ProjectId == projectId)
+            .Select(e => new { e.Name })
+            .FirstOrDefaultAsync(ct);
+        if (project is null || env is null) return labels;
+
+        var orgClientId = await _db.OrganizationSettings.AsNoTracking()
+            .Where(o => o.OrganizationId == orgId)
+            .Select(o => o.BcClientId)
+            .FirstOrDefaultAsync(ct);
+        var ours = new HashSet<Guid>();
+        if (Guid.TryParse(orgClientId, out var orgClient)) ours.Add(orgClient);
+        if (Guid.TryParse(project.BcClientId, out var projectClient)) ours.Add(projectClient);
+
+        var mine = operations
+            .Where(o => !string.IsNullOrWhiteSpace(o.Id)
+                        && Guid.TryParse(o.CreatedBy?.Trim(), out var by) && ours.Contains(by))
+            .ToList();
+        if (mine.Count == 0) return labels;
+
+        var ids = mine.Select(o => Guid.TryParse(o.Id, out var id) ? id : Guid.Empty)
+            .Where(id => id != Guid.Empty).Distinct().ToList();
+
+        // Exact matches first: the operation ids we kept when Business Central accepted
+        // a package or an app update.
+        var byId = new Dictionary<Guid, string>();
+        var deliveries = await _db.OeProjectDeliveryResults.AsNoTracking()
+            .Where(r => r.OperationId != null && ids.Contains(r.OperationId.Value)
+                        && r.ProjectDelivery!.ProjectId == projectId
+                        && r.ProjectDelivery.EnvironmentName.ToLower() == env.Name.ToLower())
+            .Select(r => new { Id = r.OperationId!.Value, Who = r.ProjectDelivery!.TriggeredByUser!.DisplayName })
+            .ToListAsync(ct);
+        foreach (var d in deliveries) byId.TryAdd(d.Id, d.Who ?? string.Empty);
+
+        var actions = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                        && a.BcOperationId != null && ids.Contains(a.BcOperationId.Value))
+            .Select(a => new { Id = a.BcOperationId!.Value, a.RequestedBy })
+            .ToListAsync(ct);
+        foreach (var a in actions) byId.TryAdd(a.Id, UpgradeActionRow.NameOf(a.RequestedBy));
+
+        // The rest by time: the actions that change the environment through a call whose
+        // operation id we never see.
+        var earliest = mine.Min(o => o.CreatedOn ?? o.StartedOn)?.UtcDateTime - StarterMatchWindow;
+        var latest = mine.Max(o => o.CreatedOn ?? o.StartedOn)?.UtcDateTime + StarterMatchWindow;
+        var sent = earliest is { } from && latest is { } to
+            ? await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                            && a.BcOperationId == null && a.SentAt != null && a.SentAt >= from && a.SentAt <= to
+                            && (a.Kind == UpgradeActionKind.PushDateToLatest || a.Kind == UpgradeActionKind.RunNow
+                                || a.Kind == UpgradeActionKind.SelectVersion || a.Kind == UpgradeActionKind.RecoverEnvironment))
+                .Select(a => new { a.Id, a.Kind, SentAt = a.SentAt!.Value, a.RequestedBy })
+                .ToListAsync(ct)
+            : [];
+        var claimed = new HashSet<int>();
+
+        foreach (var op in mine)
+        {
+            string? who = null;
+            if (Guid.TryParse(op.Id, out var opId) && byId.TryGetValue(opId, out var exact))
+            {
+                who = exact;
+            }
+            else if ((op.CreatedOn ?? op.StartedOn) is { } at && OperationTypeFor(op.Type) is { } kinds)
+            {
+                var when = at.UtcDateTime;
+                var nearest = sent
+                    .Where(a => kinds.Contains(a.Kind) && !claimed.Contains(a.Id)
+                                && (a.SentAt - when).Duration() <= StarterMatchWindow)
+                    .OrderBy(a => (a.SentAt - when).Duration())
+                    .FirstOrDefault();
+                if (nearest is not null)
+                {
+                    claimed.Add(nearest.Id);
+                    who = UpgradeActionRow.NameOf(nearest.RequestedBy);
+                }
+            }
+            labels[op.Id] = string.IsNullOrWhiteSpace(who) ? WorkbenchStarter : $"{WorkbenchStarter} ({who.Trim()})";
+        }
+        return labels;
+    }
+
+    /// <summary>The kinds of action that produce an operation of this Business Central type.</summary>
+    private static UpgradeActionKind[]? OperationTypeFor(string type) => type.ToLowerInvariant() switch
+    {
+        "modify" => [UpgradeActionKind.PushDateToLatest, UpgradeActionKind.RunNow, UpgradeActionKind.SelectVersion],
+        "recover" => [UpgradeActionKind.RecoverEnvironment],
+        _ => null,
+    };
 
     /// <summary>
     /// Who is signed in to the environment right now, longest-running operation first -
@@ -1400,11 +1566,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, EnvironmentGate.UpdateOps);
         var next = await ReadNextUpdateAsync(env, ct)
-            ?? throw Validation("Update", "No update is available to reschedule.");
+            ?? throw new NothingToMoveException("No update is available to reschedule.");
 
         if (BcUpdateSchedule.EffectiveLatest(next.LatestSelectableDateTime) is not { } latest)
         {
-            throw Validation("Update", "Business Central hasn't given this update a last possible date, so it can't be moved.");
+            throw new NothingToMoveException("Business Central hasn't given this update a last possible date, so it can't be moved.");
         }
         // On or after, by calendar day in UTC rather than by tick: Business Central stores
         // the date at the start of the environment's own update window, so an update that
@@ -1414,7 +1580,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // move it to, and re-sending would only fail against the bound.
         if (next.SelectedDateTime?.UtcDateTime.Date >= latest.UtcDateTime.Date)
         {
-            throw Validation("Update", "This update's date is already the latest Microsoft allows.");
+            throw new NothingToMoveException("This update's date is already the latest Microsoft allows.");
         }
 
         await WriteUpdateScheduleAsync(env, next, latest, ignoreUpdateWindow: null, ct, verifyDateMoved: true);
@@ -1437,22 +1603,38 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <paramref name="expectedVersion"/>, and is refused when the next update has become
     /// another one since: the person agreed to start that version, not whatever is next
     /// when the slot arrives (#1234).</para>
+    /// <para>A start from a planned upgrade passes the upgrade's target release as
+    /// <paramref name="upgradeVersion"/> instead, and starts the update to that release
+    /// even when Business Central has another one lined up next: the one write selects it
+    /// and starts it. An upgrade "to 28.5" that started the 28.3 the environment happened
+    /// to have selected is what this guards against. Refused when that release isn't on
+    /// offer to the environment, and verified on the re-read like a version change.</para>
     /// </summary>
     public async Task RunUpdateNowAsync(
-        int projectId, int environmentId, CancellationToken ct = default, string? expectedVersion = null)
+        int projectId, int environmentId, CancellationToken ct = default, string? expectedVersion = null,
+        string? upgradeVersion = null)
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, EnvironmentGate.UpdateOps);
-        var next = await ReadNextUpdateAsync(env, ct)
-            ?? throw Validation("Update", "No update is available to run.");
-        if (expectedVersion is not null
-            && !string.Equals(next.TargetVersion, expectedVersion, StringComparison.OrdinalIgnoreCase))
+        BcEnvironmentUpdate next;
+        if (upgradeVersion is not null)
         {
-            throw Validation("Update",
-                $"The next update had become {next.TargetVersion}, not the {expectedVersion} that was booked.");
+            next = await ReadUpgradeTargetAsync(env, upgradeVersion, ct);
+        }
+        else
+        {
+            next = await ReadNextUpdateAsync(env, ct)
+                ?? throw Validation("Update", "No update is available to run.");
+            if (expectedVersion is not null
+                && !string.Equals(next.TargetVersion, expectedVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                throw Validation("Update",
+                    $"The next update had become {next.TargetVersion}, not the {expectedVersion} that was booked.");
+            }
         }
 
-        var now = DateTimeOffset.UtcNow;
-        await WriteUpdateScheduleAsync(env, next, now, ignoreUpdateWindow: true, ct);
+        var now = _clock.GetUtcNow();
+        await WriteUpdateScheduleAsync(env, next, now, ignoreUpdateWindow: true, ct,
+            verifyVersion: upgradeVersion is null ? null : next.TargetVersion);
         await RecordUpdateActionAsync(
             projectId, env, next, "Started the update now, ignoring the environment's update window", ct);
         _panelCache.Invalidate(projectId, environmentId);
@@ -1564,6 +1746,48 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     }
 
     /// <summary>
+    /// The update to a planned upgrade's target release (Major.Minor, so "28.5" matches an
+    /// offer of "28.5" or "28.5.12345.0"), read live: the one already lined up when it is
+    /// that release, else the newest offer of it. Refused when an update is already
+    /// running, and when Business Central doesn't offer the release to this environment.
+    /// </summary>
+    private async Task<BcEnvironmentUpdate> ReadUpgradeTargetAsync(
+        (string Token, string Family, string Name, int Id) env, string upgradeVersion, CancellationToken ct)
+    {
+        IReadOnlyList<BcEnvironmentUpdate> updates;
+        try
+        {
+            updates = await _adminClient.ListEnvironmentUpdatesAsync(env.Token, env.Family, env.Name, ct);
+        }
+        catch (BcApiException ex)
+        {
+            throw Validation("Update", "Couldn't read the updates for this environment. " + ex.Message);
+        }
+
+        if (updates.Any(u => IsUpdateUnderWay(u.UpdateStatus)))
+        {
+            throw Validation("Update", $"An update is already running on {env.Name}.");
+        }
+
+        var target = UpgradeFleetService.MajorMinor(upgradeVersion);
+        bool IsTarget(BcEnvironmentUpdate u) =>
+            CompareVersions(UpgradeFleetService.MajorMinor(u.TargetVersion), target) == 0;
+
+        if (PickNextUpdate(updates) is { } next && IsTarget(next)) return next;
+
+        BcEnvironmentUpdate? offered = null;
+        foreach (var candidate in updates.Where(u => u.Available && IsTarget(u)))
+        {
+            if (offered is null || CompareVersions(candidate.TargetVersion, offered.TargetVersion) > 0)
+            {
+                offered = candidate;
+            }
+        }
+        return offered ?? throw Validation("Update",
+            $"Business Central doesn't offer {target} to {env.Name}, so the update wasn't started.");
+    }
+
+    /// <summary>
     /// Sends the date write and re-mirrors the row from a fresh read, so the fleet page
     /// shows the new date without waiting for the nightly sweep. The PATCH also selects
     /// the update, which matters when the picked one was merely available: setting a date
@@ -1585,7 +1809,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         DateTimeOffset selectedDateTime,
         bool? ignoreUpdateWindow,
         CancellationToken ct,
-        bool verifyDateMoved = false)
+        bool verifyDateMoved = false,
+        string? verifyVersion = null)
     {
         try
         {
@@ -1619,6 +1844,18 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 "The update date on {Environment} was changed, but re-reading it failed: {Message}. The cached row stays stale until the next refresh.",
                 env.Name, ex.Message);
             return;
+        }
+
+        // A write that also switched the version is proved the way a version change is:
+        // a re-read that still shows another version next fails the action (#804).
+        if (verifyVersion is not null && (stored is null || CompareVersions(stored.TargetVersion, verifyVersion) != 0))
+        {
+            _logger.LogWarning(
+                "Business Central kept {Environment} on {StoredVersion} after being asked to start {TargetVersion}, so the start was not recorded as done.",
+                env.Name, stored?.TargetVersion, verifyVersion);
+            throw Validation("Update", stored is not null
+                ? $"Business Central did not switch to {verifyVersion}. Its next update is still {stored.TargetVersion}."
+                : $"Business Central did not switch to {verifyVersion}. It has no next update chosen.");
         }
 
         if (!verifyDateMoved) return;
@@ -1684,7 +1921,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         _db.AuditLog.Add(new AuditLogEntry
         {
-            Timestamp = DateTime.UtcNow,
+            Timestamp = _clock.GetUtcNow().UtcDateTime,
             ChangedBy = changedBy,
             ChangedByUserId = _orgContext.CurrentUserId,
             OrganizationId = _orgContext.CurrentOrganizationId,
@@ -1792,35 +2029,75 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <param name="at">The slot for <see cref="UploadAppTiming.AtTime"/>; ignored for the other timings.</param>
     /// <param name="confirmedPrerequisiteAppIds">The apps the caller agreed may be installed or updated alongside; null or empty for none.</param>
     /// <returns>The timing that applied and the slot the update waits for.</returns>
-    public async Task<UploadAppOutcome> BookAppUpdateAsync(
+    public Task<UploadAppOutcome> BookAppUpdateAsync(
         int projectId, int environmentId, Guid appId, string targetVersion, UploadAppTiming timing,
-        DateTimeOffset? at = null, IReadOnlyCollection<Guid>? confirmedPrerequisiteAppIds = null, CancellationToken ct = default)
+        DateTimeOffset? at = null, IReadOnlyCollection<Guid>? confirmedPrerequisiteAppIds = null, CancellationToken ct = default) =>
+        BookAppUpdatesAsync(projectId, environmentId,
+            new[] { new AppUpdatePick(appId, targetVersion, confirmedPrerequisiteAppIds ?? Array.Empty<Guid>()) },
+            timing, at, ct);
+
+    /// <summary>
+    /// Books several AppSource apps to be updated in one go, for one slot - the
+    /// operations team's "these eight tonight at 20:00". Each app gets its own
+    /// <c>Pending</c> row, held to the same rules as <see cref="BookAppUpdateAsync"/>
+    /// (which is this with one pick), and more than one share a batch in dependency
+    /// order: an app another picked app waits for goes first, so by the time the
+    /// dependent is sent Business Central no longer lists it as waiting.
+    /// <see cref="UpgradeActionWorker"/> sends them one after another and waits for each;
+    /// a failed one stops only the picked apps that wait for it. All or nothing: one app
+    /// refused books none of them, so the person never has to work out which half went.
+    /// See <c>.design/saas-delivery.md</c>, "Updating an AppSource app".
+    /// </summary>
+    /// <param name="picks">The apps, each with the version shown and the prerequisites the person agreed to. A repeated app is booked once.</param>
+    /// <param name="at">The slot for <see cref="UploadAppTiming.AtTime"/>; ignored for the other timings.</param>
+    /// <returns>The timing that applied, the slot the batch waits for, and how many apps were booked.</returns>
+    public async Task<UploadAppOutcome> BookAppUpdatesAsync(
+        int projectId, int environmentId, IReadOnlyList<AppUpdatePick> picks, UploadAppTiming timing,
+        DateTimeOffset? at = null, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(targetVersion))
+        ArgumentNullException.ThrowIfNull(picks);
+        if (picks.GroupBy(p => p.AppId).Any(g => g.Select(p => p.TargetVersion?.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+        {
+            throw Validation("App", "The same app was picked twice with different versions. Refresh and pick again.");
+        }
+        var distinct = picks.DistinctBy(p => p.AppId).ToList();
+        if (distinct.Count == 0)
+        {
+            throw Validation("App", "Choose at least one app to update.");
+        }
+        if (distinct.Count > MaxUpdateBatch)
+        {
+            throw Validation("App", $"Choose at most {MaxUpdateBatch} apps at a time.");
+        }
+        if (distinct.Any(p => string.IsNullOrWhiteSpace(p.TargetVersion)))
         {
             throw Validation("App", "Choose the version to update to.");
         }
 
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
-        var confirmed = confirmedPrerequisiteAppIds ?? Array.Empty<Guid>();
         // The slot first: a time that has gone is refused without asking Business Central anything.
         var now = _clock.GetUtcNow().UtcDateTime;
         var (applied, runsAt) = await ResolveBookingSlotAsync(environmentId, timing, at, now, ct);
 
-        BcAvailableAppUpdate offered;
+        IReadOnlyList<BcAvailableAppUpdate> waiting;
         try
         {
-            offered = await ReadOfferedUpdateAsync(env, appId, targetVersion, confirmed, ct);
+            waiting = await _apps.ListAvailableUpdatesAsync(env.Token, env.Family, env.Name, ct);
         }
         catch (BcApiException ex)
         {
             throw Validation("App", "Business Central didn't list the waiting updates. " + ex.Message);
         }
+        var offered = distinct
+            .Select(p => CheckOfferedUpdate(waiting, p.AppId, p.TargetVersion, p.ConfirmedPrerequisiteAppIds, several: distinct.Count > 1))
+            .ToList();
 
         // One booking per app, counting the apps a booking brings along: a second would
         // only ask Business Central for the same update twice, and whichever ran first
-        // would leave the other failing on an update that is no longer waiting.
-        var covered = offered.Requirements.Select(r => r.AppId!.Value).Append(appId).ToList();
+        // would leave the other failing on an update that is no longer waiting. Within
+        // one batch an overlap is fine - the batch goes in order, and an app updated by
+        // an earlier row is no longer waiting when a later one is sent.
+        var covered = offered.SelectMany(o => o.Requirements.Select(r => r.AppId!.Value).Append(o.AppId)).Distinct().ToList();
         var clash = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.EnvironmentId == env.Id && a.Kind == UpgradeActionKind.UpdateApp
                         && a.Status == UpgradeActionStatus.Pending
@@ -1830,35 +2107,55 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .FirstOrDefaultAsync(ct);
         if (clash is not null)
         {
-            throw Validation("App", clash.BcAppId == appId
-                ? $"An update of {offered.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time."
-                : $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves {offered.Name} or an app it waits for. Cancel that booking under Scheduled installs first.");
+            var same = offered.FirstOrDefault(o => o.AppId == clash.BcAppId);
+            throw Validation("App", same is not null
+                ? $"An update of {same.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time."
+                : offered.Count == 1
+                ? $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves {offered[0].Name} or an app it waits for. Cancel that booking under Scheduled installs first."
+                : $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves one of these apps or an app they wait for. Cancel that booking under Scheduled installs first.");
         }
 
-        _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        // Dependencies first, with DependencyOrder as the uploads use it: an app a picked
+        // app waits for goes before it. Unrelated apps keep the order they were picked in.
+        var ordered = DependencyOrder.Sort(offered,
+            o => o.AppId.ToString(),
+            o => o.Requirements.Select(r => r.AppId!.Value.ToString()));
+
+        var orgId = RequireOrganizationId();
+        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
+        var batchId = ordered.Count > 1 ? Guid.NewGuid() : (Guid?)null;
+        for (var i = 0; i < ordered.Count; i++)
         {
-            OrganizationId = RequireOrganizationId(),
-            ProjectId = projectId,
-            EnvironmentId = env.Id,
-            Kind = UpgradeActionKind.UpdateApp,
-            Status = UpgradeActionStatus.Pending,
-            RequestedByUserId = _orgContext.CurrentUserId,
-            RequestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct),
-            RequestedAt = now,
-            ExecuteAfter = runsAt,
-            BcAppId = appId,
-            AppName = Truncate(offered.Name, 250),
-            TargetVersion = offered.Version,
-            // What the person was shown, and so what the send may bring along. The check
-            // above has made sure each one has an id and was agreed to.
-            PrerequisiteAppIds = offered.Requirements.Select(r => r.AppId!.Value).ToList(),
-        });
+            var update = ordered[i];
+            _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = orgId,
+                ProjectId = projectId,
+                EnvironmentId = env.Id,
+                Kind = UpgradeActionKind.UpdateApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedByUserId = _orgContext.CurrentUserId,
+                RequestedBy = requestedBy,
+                RequestedAt = now,
+                ExecuteAfter = runsAt,
+                ScheduledByWindow = WindowThatChose(applied),
+                BcAppId = update.AppId,
+                AppName = Truncate(update.Name, 250),
+                TargetVersion = update.Version,
+                // What the person was shown, and so what the send may bring along. The check
+                // above has made sure each one has an id and was agreed to.
+                PrerequisiteAppIds = update.Requirements.Select(r => r.AppId!.Value).ToList(),
+                BatchId = batchId,
+                BatchOrder = batchId is null ? null : i,
+            });
+        }
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "User {UserId} booked app {AppId} ({AppName}) to be updated to {Version} on {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}), along with {PrerequisiteCount} prerequisites.",
-            _orgContext.CurrentUserId, appId, offered.Name, offered.Version, env.Name, projectId, runsAt, applied, offered.Requirements.Count);
-        return new UploadAppOutcome(applied, runsAt, 1);
+            "User {UserId} booked {Count} AppSource update(s) ({Apps}) on {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}), along with {PrerequisiteCount} prerequisites.",
+            _orgContext.CurrentUserId, ordered.Count, string.Join(", ", ordered.Select(o => $"{o.Name} {o.Version}")),
+            env.Name, projectId, runsAt, applied, ordered.Sum(o => o.Requirements.Count));
+        return new UploadAppOutcome(applied, runsAt, ordered.Count);
     }
 
     /// <summary>
@@ -1902,7 +2199,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // Business Central may answer without the app id; it is the one we asked about.
         var polled = operation.AppId is null ? operation with { AppId = appId } : operation;
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, polled, UploadPollDelay, UploadPollTimeout, ct, progress);
+            _apps, env.Token, ForcedTokenRefresh(projectId), env.Family, env.Name, polled, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         if (result.Raw is { } raw)
         {
@@ -1922,8 +2219,22 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         (string Token, string Family, string Name, int Id) env, Guid appId, string targetVersion, IReadOnlyCollection<Guid> confirmed, CancellationToken ct)
     {
         var waiting = await _apps.ListAvailableUpdatesAsync(env.Token, env.Family, env.Name, ct);
+        return CheckOfferedUpdate(waiting, appId, targetVersion, confirmed, several: false);
+    }
+
+    /// <summary>
+    /// The half of <see cref="ReadOfferedUpdateAsync"/> that needs no call: finds
+    /// <paramref name="appId"/> in a list already read, so a booking of several apps reads
+    /// the list once. <paramref name="several"/> only changes how an app no longer on the
+    /// list is named, since "that app" points at nothing when there were eight.
+    /// </summary>
+    private static BcAvailableAppUpdate CheckOfferedUpdate(
+        IReadOnlyList<BcAvailableAppUpdate> waiting, Guid appId, string targetVersion, IReadOnlyCollection<Guid> confirmed, bool several)
+    {
         var offered = waiting.FirstOrDefault(u => u.AppId == appId)
-            ?? throw Validation("App", "Business Central no longer has an update waiting for that app. Refresh and look again.");
+            ?? throw Validation("App", several
+                ? "Business Central no longer has an update waiting for one of the apps you picked. Refresh and look again."
+                : "Business Central no longer has an update waiting for that app. Refresh and look again.");
         if (!string.Equals(offered.Version, targetVersion.Trim(), StringComparison.OrdinalIgnoreCase))
         {
             throw Validation("App", $"Business Central now offers {offered.Name} {offered.Version}, not {targetVersion}. Refresh and try again.");
@@ -2022,6 +2333,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 RequestedBy = requestedBy,
                 RequestedAt = now,
                 ExecuteAfter = runsAt,
+                ScheduledByWindow = WindowThatChose(applied),
                 PackageFileName = cleaned[i].Name,
                 PackageContent = cleaned[i].Bytes,
                 BatchId = batchId,
@@ -2065,7 +2377,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .Where(e => e.Id == environmentId)
             .Select(e => new
             {
-                e.UpdateWindowStart, e.UpdateWindowEnd, e.Project!.BcTimeZone,
+                e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays, e.Project!.BcTimeZone,
                 e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana,
             })
             .FirstAsync(ct);
@@ -2089,7 +2401,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             }
             case UploadAppTiming.DeliveryWindow when UpdateWindow.IsConfigured(windows.UpdateWindowStart, windows.UpdateWindowEnd):
                 runsAt = UpdateWindow.NextOpeningUtc(
-                    windows.UpdateWindowStart, windows.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(windows.BcTimeZone), now);
+                    windows.UpdateWindowStart, windows.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(windows.BcTimeZone), now,
+                    windows.UpdateWindowDays);
                 break;
             case UploadAppTiming.DeliveryWindow:
             case UploadAppTiming.BcUpdateWindow:
@@ -2115,8 +2428,22 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         return (applied, runsAt);
     }
 
+    /// <summary>
+    /// The window a booking's time came from, stored on the row so the worker holds the
+    /// install to it when its turn comes (#1539); null for a picked time or "now".
+    /// </summary>
+    private static UploadAppTiming? WindowThatChose(UploadAppTiming applied) =>
+        applied is UploadAppTiming.DeliveryWindow or UploadAppTiming.BcUpdateWindow ? applied : null;
+
     /// <summary>The most apps one upload may book together. A vendor's suite, not a whole environment.</summary>
     public const int MaxUploadBatch = 10;
+
+    /// <summary>
+    /// The most AppSource updates one booking takes. Nothing is stored per app but a row,
+    /// so this is only a bound on one request; it sits above the waiting list of any
+    /// environment seen so far.
+    /// </summary>
+    public const int MaxUpdateBatch = 100;
 
     /// <summary>
     /// Sends one booked upload when its slot arrives and waits for Business Central to
@@ -2165,7 +2492,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct, progress);
+            _apps, env.Token, ForcedTokenRefresh(projectId), env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         if (result.Raw is { } raw)
         {
@@ -2193,7 +2520,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var started = new BcAppOperation(operationId, appId, string.Empty, BcAppOperationStatus.Unknown, string.Empty,
             string.Empty, string.Empty, null, string.Empty, string.Empty, string.Empty, false, string.Empty, null, null, null);
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, started, UploadPollDelay, UploadPollTimeout, ct, progress);
+            _apps, env.Token, ForcedTokenRefresh(projectId), env.Family, env.Name, started, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         _logger.LogInformation(
             "Checked operation {OperationId} of app {AppId} on {Environment} (project {ProjectId}) again: completed {Completed}, unconfirmed {Unconfirmed}.",
@@ -2267,11 +2594,14 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <summary>
     /// Sets or clears an environment's recurring update window. Pass both
     /// <paramref name="start"/> and <paramref name="end"/> to set it, or both null to
-    /// clear it ("any time"); passing only one is a validation error. Interpreted in the
+    /// clear it ("any time"); passing only one is a validation error. <paramref name="days"/>
+    /// are the days it opens on; a window needs at least one, and clearing the window
+    /// resets them to every day. Interpreted in the
     /// project's timezone. Access-gated; survives a Refresh (the discovery upsert only
     /// touches fetched fields). See <c>.design/saas-delivery.md</c> ("Update window").
     /// </summary>
-    public async Task SetUpdateWindowAsync(int projectId, int environmentId, TimeOnly? start, TimeOnly? end, CancellationToken ct = default)
+    public async Task SetUpdateWindowAsync(
+        int projectId, int environmentId, TimeOnly? start, TimeOnly? end, DeliveryDays days, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var ownerId = await _db.OeProjects.AsNoTracking()
@@ -2284,6 +2614,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             throw Validation("UpdateWindow", "Set both a start and an end time for the window, or clear both for 'any time'.");
         }
+        days = CheckWindowDays(start, days);
 
         var env = await _db.OeProjectEnvironments
             .FirstOrDefaultAsync(e => e.Id == environmentId && e.ProjectId == projectId, ct)
@@ -2291,9 +2622,25 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         env.UpdateWindowStart = start;
         env.UpdateWindowEnd = end;
+        env.UpdateWindowDays = days;
         await _db.SaveChangesAsync(ct);
-        _logger.LogInformation("Set update window {Start}-{End} for environment {EnvId} (project {ProjectId}).",
-            start, end, environmentId, projectId);
+        _logger.LogInformation("Set update window {Start}-{End} on {Days} for environment {EnvId} (project {ProjectId}).",
+            start, end, days, environmentId, projectId);
+    }
+
+    /// <summary>
+    /// The days to store with a window: at least one when a window is set (one that never
+    /// opens would park every deployment that follows it), every day when it is cleared.
+    /// </summary>
+    private static DeliveryDays CheckWindowDays(TimeOnly? start, DeliveryDays days)
+    {
+        if (start is null) return DeliveryDays.Every;
+        days = days.Normalize();
+        if (days == DeliveryDays.None)
+        {
+            throw Validation("UpdateWindowDays", "Tick at least one day for the window, or clear it for 'any time'.");
+        }
+        return days;
     }
 
     /// <summary>
@@ -2308,7 +2655,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// does not exist, as <see cref="UpgradeFleetService.GetEnvironmentAsync"/> does.</para>
     /// </summary>
     public async Task<List<DeliveryWindowChangePreviewRow>> PreviewUpdateWindowForManyAsync(
-        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, CancellationToken ct = default)
+        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, DeliveryDays days, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(environmentIds);
         RequireOrganizationId();
@@ -2316,31 +2663,12 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             throw Validation("UpdateWindow", "Set both a start and an end time for the window, or clear both for 'any time'.");
         }
+        days = CheckWindowDays(start, days);
 
         var ids = environmentIds.Distinct().ToList();
         if (ids.Count == 0) return [];
 
-        var snapshot = await _access.GetSnapshotAsync(ct);
-        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
-        var found = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(e => ids.Contains(e.Id))
-            .Where(e => _db.OeProjects.Where(visible).Any(p => p.Id == e.ProjectId))
-            .Select(e => new
-            {
-                e.Id,
-                e.ProjectId,
-                ProjectName = e.Project!.Name,
-                ProjectDeleted = e.Project!.DeletedAt != null,
-                OwnerId = e.Project!.CreatedByUserId,
-                e.Name,
-                e.Type,
-                e.Status,
-                e.SoftDeletedOn,
-                e.MissingSince,
-                e.UpdateWindowStart,
-                e.UpdateWindowEnd,
-            })
-            .ToDictionaryAsync(e => e.Id, ct);
+        var (found, canManage) = await LoadBulkTargetsAsync(ids, EnvironmentGate.Manage, ct);
 
         // A deployment already booked for the environment's current window keeps its time
         // while that time falls in the new window, and otherwise moves to the new window's
@@ -2352,30 +2680,22 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .Distinct()
             .ToListAsync(ct)).ToHashSet();
 
-        var canManage = new Dictionary<int, bool>();
-        foreach (var project in found.Values.Where(e => !e.ProjectDeleted).GroupBy(e => e.ProjectId))
-        {
-            canManage[project.Key] = await _access.CanManageAsync(project.Key, project.First().OwnerId, ct);
-        }
-
         var rows = new List<DeliveryWindowChangePreviewRow>(ids.Count);
         foreach (var id in ids)
         {
             if (!found.TryGetValue(id, out var e))
             {
                 rows.Add(new DeliveryWindowChangePreviewRow(
-                    id, null, null, null, null, null, null, DeliveryWindowChangeGroup.Missing, false));
+                    id, null, null, null, null, null, null, DeliveryDays.Every, DeliveryWindowChangeGroup.Missing, false));
                 continue;
             }
 
-            var gone = e.ProjectDeleted || e.MissingSince is not null
-                || e.SoftDeletedOn is not null || BcEnvironmentStatus.IsSoftDeleted(e.Status);
-            var group = gone ? DeliveryWindowChangeGroup.Missing
+            var group = e.IsGone ? DeliveryWindowChangeGroup.Missing
                 : !canManage[e.ProjectId] ? DeliveryWindowChangeGroup.NoAccess
-                : e.UpdateWindowStart == start && e.UpdateWindowEnd == end ? DeliveryWindowChangeGroup.AlreadySet
+                : e.UpdateWindowStart == start && e.UpdateWindowEnd == end && e.UpdateWindowDays == days ? DeliveryWindowChangeGroup.AlreadySet
                 : DeliveryWindowChangeGroup.WillChange;
             rows.Add(new DeliveryWindowChangePreviewRow(
-                id, e.ProjectId, e.ProjectName, e.Name, e.Type, e.UpdateWindowStart, e.UpdateWindowEnd,
+                id, e.ProjectId, e.ProjectName, e.Name, e.Type, e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays,
                 group, group == DeliveryWindowChangeGroup.WillChange && waiting.Contains(id)));
         }
         return rows;
@@ -2391,9 +2711,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// per id, which is what the dialog shows afterwards.
     /// </summary>
     public async Task<List<DeliveryWindowChangeResult>> SetUpdateWindowForManyAsync(
-        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, CancellationToken ct = default)
+        IReadOnlyCollection<int> environmentIds, TimeOnly? start, TimeOnly? end, DeliveryDays days, CancellationToken ct = default)
     {
-        var preview = await PreviewUpdateWindowForManyAsync(environmentIds, start, end, ct);
+        var preview = await PreviewUpdateWindowForManyAsync(environmentIds, start, end, days, ct);
         var results = new List<DeliveryWindowChangeResult>(preview.Count);
         foreach (var row in preview)
         {
@@ -2404,7 +2724,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             }
             try
             {
-                await SetUpdateWindowAsync(row.ProjectId!.Value, row.EnvironmentId, start, end, ct);
+                await SetUpdateWindowAsync(row.ProjectId!.Value, row.EnvironmentId, start, end, days, ct);
                 results.Add(new DeliveryWindowChangeResult(row, DeliveryWindowChangeOutcome.Changed, null));
             }
             catch (PlanValidationException ex)
@@ -2419,11 +2739,206 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         _logger.LogInformation(
-            "User {UserId} set the delivery window {Start}-{End} on {Changed} of {Selected} environment(s) ({Failed} failed).",
-            _orgContext.CurrentUserId, start, end,
+            "User {UserId} set the delivery window {Start}-{End} on {Days} on {Changed} of {Selected} environment(s) ({Failed} failed).",
+            _orgContext.CurrentUserId, start, end, days,
             results.Count(r => r.Outcome == DeliveryWindowChangeOutcome.Changed), results.Count,
             results.Count(r => r.Outcome == DeliveryWindowChangeOutcome.Failed));
         return results;
+    }
+
+    /// <summary>
+    /// What setting the AppSource apps update cadence to <paramref name="cadence"/> on each
+    /// of <paramref name="environmentIds"/> would do, one row per id in the order given:
+    /// <see cref="AppCadenceChangeGroup.WillChange"/>, <see cref="AppCadenceChangeGroup.AlreadySet"/>,
+    /// <see cref="AppCadenceChangeGroup.NoAccess"/> or <see cref="AppCadenceChangeGroup.Missing"/>.
+    /// Reads only our own mirror, so "already set" is what the last refresh saw; a row
+    /// whose cadence was never read counts as a change. The grouping is the bulk delivery
+    /// window's (#961); the access rule is the Upgrades page's: <see cref="AppCadenceChangeGroup.NoAccess"/>
+    /// means the caller lacks the environment-updates grant on the solution, which is what
+    /// the page's other bulk moves ask for.
+    /// </summary>
+    public async Task<List<AppCadenceChangePreviewRow>> PreviewAppUpdateCadenceForManyAsync(
+        IReadOnlyCollection<int> environmentIds, string cadence, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(environmentIds);
+        RequireOrganizationId();
+        if (BcAppUpdateCadence.Normalize(cadence) is not { } value)
+        {
+            throw Validation("Cadence", "Choose how often Marketplace apps should update.");
+        }
+
+        var ids = environmentIds.Distinct().ToList();
+        if (ids.Count == 0) return [];
+
+        var (found, canManage) = await LoadBulkTargetsAsync(ids, EnvironmentGate.UpdateOps, ct);
+        var rows = new List<AppCadenceChangePreviewRow>(ids.Count);
+        foreach (var id in ids)
+        {
+            if (!found.TryGetValue(id, out var e))
+            {
+                rows.Add(new AppCadenceChangePreviewRow(id, null, null, null, null, null, AppCadenceChangeGroup.Missing));
+                continue;
+            }
+
+            var current = BcAppUpdateCadence.Normalize(e.AppSourceAppsUpdateCadence);
+            var group = e.IsGone ? AppCadenceChangeGroup.Missing
+                : !canManage[e.ProjectId] ? AppCadenceChangeGroup.NoAccess
+                : current == value ? AppCadenceChangeGroup.AlreadySet
+                : AppCadenceChangeGroup.WillChange;
+            rows.Add(new AppCadenceChangePreviewRow(
+                id, e.ProjectId, e.ProjectName, e.Name, e.Type, current, group));
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Sets the AppSource apps update cadence on many environments at once. Groups first
+    /// with <see cref="PreviewAppUpdateCadenceForManyAsync"/>, then writes each
+    /// <see cref="AppCadenceChangeGroup.WillChange"/> row through
+    /// the same write as <see cref="SetAppUpdateCadenceAsync"/>, re-checking the
+    /// environment-updates grant per row, so the write to the customer's tenant and the
+    /// audited row update are the single-environment ones. Every
+    /// other row is skipped. A row that fails is reported and does not stop the rest.
+    /// </summary>
+    public async Task<List<AppCadenceChangeResult>> SetAppUpdateCadenceForManyAsync(
+        IReadOnlyCollection<int> environmentIds, string cadence, CancellationToken ct = default)
+    {
+        var preview = await PreviewAppUpdateCadenceForManyAsync(environmentIds, cadence, ct);
+        var value = BcAppUpdateCadence.Normalize(cadence)!;
+        var results = new List<AppCadenceChangeResult>(preview.Count);
+        foreach (var row in preview)
+        {
+            if (row.Group != AppCadenceChangeGroup.WillChange)
+            {
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Skipped, null));
+                continue;
+            }
+            try
+            {
+                await SetAppUpdateCadenceCoreAsync(row.ProjectId!.Value, row.EnvironmentId, value, EnvironmentGate.UpdateOps, ct);
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Changed, null));
+            }
+            catch (PlanValidationException ex)
+            {
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed,
+                    ex.Errors.Values.FirstOrDefault() ?? "Business Central didn't accept the change."));
+            }
+            catch (ProjectAccessDeniedException ex)
+            {
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed, ex.Message));
+            }
+            catch (DbUpdateException ex)
+            {
+                // Business Central took the change; only our copy of it failed to save.
+                // The row must not stay modified on the context, or the next row's save
+                // (or a later save on the page) would write it again.
+                ForgetPendingEnvironmentChange(row.EnvironmentId);
+                _logger.LogError(ex,
+                    "Saving the AppSource update cadence for environment {EnvironmentId} of solution {ProjectId} failed after Business Central accepted it.",
+                    row.EnvironmentId, row.ProjectId);
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed,
+                    "Business Central took the change, but it couldn't be saved here. Refresh the solution to see the current setting."));
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // Each row is a call to a different customer's tenant, so one network
+                // failure must not cost the rest of the batch. The detail goes to the log;
+                // the row gets words a consultant can act on.
+                ForgetPendingEnvironmentChange(row.EnvironmentId);
+                _logger.LogError(ex,
+                    "Setting the AppSource update cadence on environment {EnvironmentId} of solution {ProjectId} failed.",
+                    row.EnvironmentId, row.ProjectId);
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed,
+                    "Business Central didn't answer. Try again, or check the solution's connection."));
+            }
+        }
+
+        _logger.LogInformation(
+            "User {UserId} set the AppSource update cadence {Cadence} on {Changed} of {Selected} environment(s) ({Skipped} skipped, {Failed} failed).",
+            _orgContext.CurrentUserId, value,
+            results.Count(r => r.Outcome == AppCadenceChangeOutcome.Changed), results.Count,
+            results.Count(r => r.Outcome == AppCadenceChangeOutcome.Skipped),
+            results.Count(r => r.Outcome == AppCadenceChangeOutcome.Failed));
+        return results;
+    }
+
+    /// <summary>
+    /// Drops an environment row a failed write left modified on the context, so a later
+    /// save in the same batch - or on the page that shares the context - does not write it.
+    /// </summary>
+    private void ForgetPendingEnvironmentChange(int environmentId)
+    {
+        foreach (var entry in _db.ChangeTracker.Entries<OeProjectEnvironment>()
+                     .Where(e => e.Entity.Id == environmentId && e.State != EntityState.Unchanged)
+                     .ToList())
+        {
+            entry.State = EntityState.Detached;
+        }
+    }
+
+    /// <summary>
+    /// The environments a bulk settings change was asked for, as far as the caller can see
+    /// them, and whether the caller may make the change on each one's solution under
+    /// <paramref name="gate"/> (<see cref="EnvironmentGate.Manage"/> or
+    /// <see cref="EnvironmentGate.UpdateOps"/>) - asked once per solution, not once per row. An environment of a solution the caller cannot see is left out,
+    /// so it answers as one that does not exist, as
+    /// <see cref="UpgradeFleetService.GetEnvironmentAsync"/> does.
+    /// </summary>
+    private async Task<(Dictionary<int, BulkTarget> Found, Dictionary<int, bool> CanManage)> LoadBulkTargetsAsync(
+        List<int> ids, EnvironmentGate gate, CancellationToken ct)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+        var found = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => ids.Contains(e.Id))
+            .Where(e => _db.OeProjects.Where(visible).Any(p => p.Id == e.ProjectId))
+            .Select(e => new BulkTarget(
+                e.Id,
+                e.ProjectId,
+                e.Project!.Name,
+                e.Project!.DeletedAt != null,
+                e.Project!.CreatedByUserId,
+                e.Name,
+                e.Type,
+                e.Status,
+                e.SoftDeletedOn,
+                e.MissingSince,
+                e.UpdateWindowStart,
+                e.UpdateWindowEnd,
+                e.UpdateWindowDays,
+                e.AppSourceAppsUpdateCadence))
+            .ToDictionaryAsync(e => e.Id, ct);
+
+        var canManage = new Dictionary<int, bool>();
+        foreach (var project in found.Values.Where(e => !e.ProjectDeleted).GroupBy(e => e.ProjectId))
+        {
+            canManage[project.Key] = gate == EnvironmentGate.UpdateOps
+                ? await _access.CanManageEnvironmentUpdatesAsync(project.Key, ct)
+                : await _access.CanManageAsync(project.Key, project.First().OwnerId, ct);
+        }
+        return (found, canManage);
+    }
+
+    /// <summary>One environment as a bulk settings change reads it from the mirror.</summary>
+    private sealed record BulkTarget(
+        int Id,
+        int ProjectId,
+        string ProjectName,
+        bool ProjectDeleted,
+        int? OwnerId,
+        string Name,
+        string Type,
+        string? Status,
+        DateTime? SoftDeletedOn,
+        DateTime? MissingSince,
+        TimeOnly? UpdateWindowStart,
+        TimeOnly? UpdateWindowEnd,
+        DeliveryDays UpdateWindowDays,
+        string? AppSourceAppsUpdateCadence)
+    {
+        /// <summary>Its solution is deleted, or Business Central no longer has it or is deleting it.</summary>
+        public bool IsGone => ProjectDeleted || MissingSince is not null
+            || SoftDeletedOn is not null || BcEnvironmentStatus.IsSoftDeleted(Status);
     }
 
     /// <summary>
@@ -2451,7 +2966,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             ?? throw new BcApiException(null,
                 "The Business Central connection isn't set up (or its secret can't be decrypted). Re-enter it on the solution's Business Central page.");
 
-        if (creds.ExpiresAt is { } expiry && expiry <= DateTime.UtcNow)
+        if (creds.ExpiresAt is { } expiry && expiry <= _clock.GetUtcNow().UtcDateTime)
         {
             // Never a quiet switch to the other registration: which one a customer has
             // authorised is theirs to know, and a fallback would hide it.
@@ -2460,8 +2975,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 : "This solution's own Business Central client secret has expired. Rotate it in Entra and re-enter it on the solution's Business Central tab, or switch the solution to your organisation's app registration there.");
         }
 
-        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh, ct)
-            .ConfigureAwait(false);
+        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh, ct);
         return new BcDeliveryContext(token, creds.TenantId);
     }
 
@@ -2509,7 +3023,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             return false;
         }).ToList();
         var byName = existing.ToDictionary(e => e.Name, StringComparer.OrdinalIgnoreCase);
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var fetchedNames = fetched.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         DefaultDeliveryWindows? defaults = null; // read at most once, and only if a row is born
@@ -2623,6 +3137,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             survivor.UpdateWindowStart = stale.UpdateWindowStart;
             survivor.UpdateWindowEnd = stale.UpdateWindowEnd;
+            survivor.UpdateWindowDays = stale.UpdateWindowDays;
         }
 
         _db.OeProjectEnvironments.Remove(stale);
@@ -2694,8 +3209,13 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// stale rather than to empty. The two mirrors fail independently — a denied updates
     /// read still leaves a freshly-read window.
     /// </para>
+    /// <para>
+    /// Being told to slow down is the exception: the first throttled read ends the
+    /// mirror, because the remaining reads go to the same tenant and would only be
+    /// refused too. Returns how long Business Central asked us to wait, or null.
+    /// </para>
     /// </summary>
-    private async Task MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
+    private async Task<TimeSpan?> MirrorBcEnvironmentDetailsAsync(OeProject project, string token, CancellationToken ct)
     {
         var rows = await _db.OeProjectEnvironments
             .Where(e => e.ProjectId == project.Id && e.MissingSince == null && e.Kind == OeEnvironmentKind.Online)
@@ -2717,6 +3237,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         {
             _logger.LogWarning(
                 "Couldn't read the storage figures for project {ProjectId}: {Message}.", project.Id, ex.Message);
+            if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
         }
 
         foreach (var row in rows)
@@ -2729,13 +3250,14 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 row.BcUpdateWindowEnd = settings?.EndTime;
                 row.BcUpdateWindowTimeZoneId = settings?.WindowsTimeZoneId;
                 row.BcUpdateWindowTimeZoneIana = BcUpdateWindow.ToIana(settings?.WindowsTimeZoneId);
-                row.BcUpdateWindowFetchedAt = DateTime.UtcNow;
+                row.BcUpdateWindowFetchedAt = _clock.GetUtcNow().UtcDateTime;
             }
             catch (BcApiException ex)
             {
                 _logger.LogWarning(
                     "Couldn't read the Business Central update window for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -2749,6 +3271,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the Business Central platform updates for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -2763,8 +3286,18 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 _logger.LogWarning(
                     "Couldn't read the installed apps for {Environment} (project {ProjectId}): {Message}.",
                     row.Name, project.Id, ex.Message);
+                if (ex.RetryAfter is { } wait) return StoppedMirror(project.Id, wait);
             }
         }
+        return null;
+    }
+
+    private TimeSpan StoppedMirror(int projectId, TimeSpan wait)
+    {
+        _logger.LogWarning(
+            "Business Central asked us to wait {Wait} for project {ProjectId}; the rest of its environment details keep their previous answers.",
+            wait, projectId);
+        return wait;
     }
 
     /// <summary>
@@ -2816,7 +3349,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <c>BcNextUpdateFetchedAt</c> is stamped: an empty list is a successful read that
     /// says "nothing is scheduled", which is a different fact from "we never asked".
     /// </summary>
-    private static void ApplyNextUpdate(OeProjectEnvironment row, IReadOnlyList<BcEnvironmentUpdate> updates)
+    private void ApplyNextUpdate(OeProjectEnvironment row, IReadOnlyList<BcEnvironmentUpdate> updates)
     {
         var update = PickNextUpdate(updates);
         row.BcNextUpdateVersion = update?.TargetVersion;
@@ -2826,7 +3359,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         row.BcNextUpdateLatestDate = update?.LatestSelectableDateTime?.UtcDateTime;
         row.BcNextUpdateIgnoresWindow = update is null ? null : update.IgnoreUpdateWindow;
         row.BcOfferedVersions = OfferedVersions(updates);
-        row.BcNextUpdateFetchedAt = DateTime.UtcNow;
+        row.BcNextUpdateFetchedAt = _clock.GetUtcNow().UtcDateTime;
     }
 
     /// <summary>
@@ -2897,6 +3430,24 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             return (defaults.SandboxStart, defaults.SandboxEnd);
         }
         return (null, null);
+    }
+
+    /// <summary>
+    /// The solution, tracked, as it is in the database now. A Blazor circuit keeps one
+    /// context for hours and a tracking query hands back the instance it already holds,
+    /// values and all, so without the reload a page open since before a colleague rotated
+    /// the secret or corrected the tenant would test and refresh with the old ones - and
+    /// stamp "verified" over the re-test their save asked for (same shape as #1236).
+    /// The query's own filter has already read <c>DeletedAt</c> from the database.
+    /// </summary>
+    private async Task<OeProject> LoadProjectForWriteAsync(int projectId, CancellationToken ct)
+    {
+        var alreadyTracked = _db.OeProjects.Local.FindEntry(projectId) is not null;
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        if (alreadyTracked) await _db.Entry(project).ReloadAsync(ct);
+        return project;
     }
 
     /// <summary>Decrypts the stored credentials, or null when not fully configured / the key ring can't decrypt the secret.</summary>
@@ -3033,6 +3584,13 @@ public sealed record UploadPackage(byte[] Bytes, string FileName);
 /// </summary>
 public sealed record UploadAppOutcome(UploadAppTiming Timing, DateTime RunsAtUtc, int Count);
 
+/// <summary>
+/// One app handed to <see cref="ProjectConnectionService.BookAppUpdatesAsync"/>: the
+/// waiting update as the page showed it, and the prerequisites the person was shown
+/// and agreed may move with it.
+/// </summary>
+public sealed record AppUpdatePick(Guid AppId, string TargetVersion, IReadOnlyCollection<Guid> ConfirmedPrerequisiteAppIds);
+
 /// <summary>Where one environment lands in the preview of "set the delivery window" (issue #961).</summary>
 public enum DeliveryWindowChangeGroup
 {
@@ -3067,6 +3625,7 @@ public sealed record DeliveryWindowChangePreviewRow(
     string? EnvironmentType,
     TimeOnly? CurrentStart,
     TimeOnly? CurrentEnd,
+    DeliveryDays CurrentDays,
     DeliveryWindowChangeGroup Group,
     bool HasDeploymentWaitingForWindow)
 {
@@ -3083,6 +3642,49 @@ public sealed record DeliveryWindowChangeResult(
     DeliveryWindowChangeOutcome Outcome,
     string? Error);
 
+/// <summary>Where one environment lands in the preview of a bulk AppSource cadence change.</summary>
+public enum AppCadenceChangeGroup
+{
+    /// <summary>The cadence differs from the one asked for (or was never read), and the caller may change the solution's updates.</summary>
+    WillChange,
+
+    /// <summary>The environment already has this cadence; skipped.</summary>
+    AlreadySet,
+
+    /// <summary>The caller lacks the environment-updates grant on the environment's solution; skipped.</summary>
+    NoAccess,
+
+    /// <summary>The environment, or its solution, no longer exists, or the customer deleted it; skipped.</summary>
+    Missing,
+}
+
+/// <summary>
+/// One environment in the preview of a bulk AppSource cadence change. The names are null
+/// for a <see cref="AppCadenceChangeGroup.Missing"/> row this caller could not read at all;
+/// <paramref name="CurrentCadence"/> is null when the cadence was never read.
+/// </summary>
+public sealed record AppCadenceChangePreviewRow(
+    int EnvironmentId,
+    int? ProjectId,
+    string? ProjectName,
+    string? EnvironmentName,
+    string? EnvironmentType,
+    string? CurrentCadence,
+    AppCadenceChangeGroup Group)
+{
+    /// <summary>True for a Production environment.</summary>
+    public bool IsProduction => string.Equals(EnvironmentType, "Production", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>What happened to one environment in a bulk AppSource cadence change.</summary>
+public enum AppCadenceChangeOutcome { Changed, Skipped, Failed }
+
+/// <summary>One environment's result of a bulk AppSource cadence change; <paramref name="Error"/> is set on a failed row.</summary>
+public sealed record AppCadenceChangeResult(
+    AppCadenceChangePreviewRow Row,
+    AppCadenceChangeOutcome Outcome,
+    string? Error);
+
 /// <summary>One fetched BC environment — the project detail page's environment row.</summary>
 public sealed record ProjectEnvironmentRow(
     int Id,
@@ -3092,6 +3694,8 @@ public sealed record ProjectEnvironmentRow(
     DateTime? MissingSince,
     TimeOnly? UpdateWindowStart,
     TimeOnly? UpdateWindowEnd,
+    /// <summary>The days the delivery window opens on; every day when there is no window.</summary>
+    DeliveryDays UpdateWindowDays,
     /// <summary>Lifecycle status from the last fetch, verbatim. Null on rows fetched before it was captured.</summary>
     string? Status,
     /// <summary>How often Marketplace apps update on the environment (a <see cref="BcAppUpdateCadence"/> value).</summary>

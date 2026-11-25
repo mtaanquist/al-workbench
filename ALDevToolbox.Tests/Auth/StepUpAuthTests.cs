@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Security.Claims;
+using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Account;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Authentication;
@@ -75,6 +77,41 @@ public sealed class StepUpAuthTests
         identity.FindAll(StepUpAuth.MethodClaim).Should().ContainSingle().Which.Value.Should().Be("Entra");
         StepUpAuth.Method(new ClaimsPrincipal(identity)).Should().Be(SignInMethod.Entra);
         StepUpAuth.StrongAuthAt(new ClaimsPrincipal(identity)).Should().Be(Now);
+    }
+
+    [Fact]
+    public void The_sign_in_moment_mirrors_onto_a_claim_and_a_missing_one_reads_as_oldest()
+    {
+        var identity = new ClaimsIdentity(new[] { new Claim(EndpointHelpers.SignedInAtClaim, "garbage") }, "test");
+        var props = new AuthenticationProperties();
+        props.Items[EndpointHelpers.SignedInAtKey] = Now.ToString("o", CultureInfo.InvariantCulture);
+
+        StepUpAuth.ApplyClaims(identity, props);
+
+        identity.FindAll(EndpointHelpers.SignedInAtClaim).Should().ContainSingle();
+        EndpointHelpers.SignedInAt(new ClaimsPrincipal(identity)).Should().Be(Now);
+        EndpointHelpers.SignedInAt(new ClaimsPrincipal(new ClaimsIdentity("test"))).Should().Be(DateTime.MinValue);
+    }
+
+    [Fact]
+    public void A_reissued_principal_carries_the_new_sign_in_time_and_keeps_its_other_claims()
+    {
+        var old = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim(ClaimTypes.Role, "Admin"),
+            new Claim(EndpointHelpers.SignedInAtClaim, Now.AddDays(-3).ToString("o", CultureInfo.InvariantCulture)),
+        }, "test"));
+        var props = new AuthenticationProperties();
+        props.Items[EndpointHelpers.SignedInAtKey] = Now.ToString("o", CultureInfo.InvariantCulture);
+        StepUpAuth.Stamp(props, SignInMethod.Totp, Now.AddMinutes(-10));
+
+        var reissued = EndpointHelpers.WithStampsFrom(old, props);
+
+        EndpointHelpers.SignedInAt(reissued).Should().Be(Now);
+        reissued.FindAll(EndpointHelpers.SignedInAtClaim).Should().ContainSingle();
+        reissued.IsInRole("Admin").Should().BeTrue();
+        StepUpAuth.Method(reissued).Should().Be(SignInMethod.Totp);
+        EndpointHelpers.SignedInAt(old).Should().Be(Now.AddDays(-3), "the principal it was copied from is left alone");
     }
 
     private static readonly TimeSpan Window = StepUpAuth.DefaultWindow;

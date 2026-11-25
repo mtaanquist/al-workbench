@@ -1,5 +1,6 @@
 using ALDevToolbox.Components.Pages.Admin;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Infrastructure;
 using Bunit;
@@ -105,7 +106,8 @@ public sealed class AdminApplicationVersionsTests : IDisposable
 
             var keyInput = cut.Find("tbody tr td input[type=text]");
             keyInput.HasAttribute("pattern").Should().BeTrue();
-            keyInput.GetAttribute("pattern").Should().Be("[a-z0-9-]+",
+            // HTML anchors pattern= itself, so the server's regex without its anchors.
+            keyInput.GetAttribute("pattern").Should().Be(ValidationPatterns.Key.ToString().TrimStart('^').TrimEnd('$'),
                 "the HTML pattern= mirrors the server's kebab-case rule on the Key column");
         });
     }

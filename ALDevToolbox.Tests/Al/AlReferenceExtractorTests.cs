@@ -2596,6 +2596,54 @@ public sealed class AlReferenceExtractorTests
     }
 
     [Fact]
+    public void A_static_dispatch_is_not_recorded_on_an_object_of_another_kind()
+    {
+        // The type lookup falls back to any kind, so a Page:: literal whose
+        // page is not visible can find the table of the same name instead.
+        var resolver = MakeResolver();
+        resolver.AddType("Company Information", new AlTypeRef(BaseAppId, "table", 79, "Company Information"));
+        const string src = """
+            procedure Foo()
+            begin
+                Page.RunModal(Page::"Company Information");
+            end;
+            """;
+        var result = AlReferenceExtractor.Extract(src, OwnerCodeunit(resolver));
+
+        result.SystemReferences.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_static_dispatch_is_a_built_in_call_on_the_object_it_names()
+    {
+        // Page.RunModal(Page::"Customer Card") opens the page as surely as
+        // CustomerCard.RunModal() does, so "Find built-in calls" on the page
+        // has to find both. The literal is still a reference of its own.
+        var resolver = MakeResolver();
+        resolver.AddType("Customer Card", new AlTypeRef(BaseAppId, "page", 21, "Customer Card"));
+        const string src = """
+            procedure Foo()
+            var
+                Cust: Record Customer;
+            begin
+                Page.RunModal(Page::"Customer Card", Cust);
+                Codeunit.Run(Codeunit::"Sales-Post");
+                Page.Run(0, Cust);
+            end;
+            """;
+        var result = AlReferenceExtractor.Extract(src, OwnerCodeunit(resolver));
+
+        result.SystemReferences.Should().HaveCount(2);
+        result.SystemReferences.Should().ContainSingle(r =>
+            r.TargetObjectKind == "page" && r.TargetObjectId == 21 && r.SystemMethodName == "RunModal"
+            && r.Line == 5 && r.Column == 10);
+        result.SystemReferences.Should().ContainSingle(r =>
+            r.TargetObjectKind == "codeunit" && r.TargetObjectId == 80 && r.SystemMethodName == "Run");
+        result.References.Should().Contain(r =>
+            r.ReferenceKind == "property_object" && r.TargetObjectName == "Customer Card");
+    }
+
+    [Fact]
     public void Record_DeleteAll_is_a_builtin_not_unresolved()
     {
         // `Customer.DeleteAll();` — DeleteAll is a Record built-in.
@@ -2610,8 +2658,13 @@ public sealed class AlReferenceExtractorTests
             """;
         var result = AlReferenceExtractor.Extract(src, OwnerCodeunit(MakeResolver()));
 
+        // Neither call is a reference in its own right. ModifyAll's first
+        // argument names the field it sets, so that field is one: "where is
+        // this field set?" has to find it.
         result.References.Where(r => r.ReferenceKind != "property_object")
-            .Should().BeEmpty(because: "DeleteAll and ModifyAll are Record built-ins");
+            .Should().ContainSingle(because: "DeleteAll and ModifyAll are Record built-ins")
+            .Which.Should().Match<ExtractedReference>(r =>
+                r.ReferenceKind == "field_access" && r.TargetMemberName == "Name" && r.Line == 6);
         result.Stats.UnresolvedReceivers.Should().Be(0);
     }
 

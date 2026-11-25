@@ -23,7 +23,8 @@ using Microsoft.Extensions.Logging.EventLog;
 //   uninstall                                  remove the service, the key and the stored settings
 //   check [--inventory <folder>]               read gateway.toml and try each local tier, changing nothing;
 //                                              with --inventory, also save what the inventory reads from each
-//   run                                        the service itself; Windows starts it with this
+//   run                                        the service itself; Windows starts it with this, and from an
+//                                              administrator's command prompt it runs in that window (trial package)
 // See .design/on-prem-gateway.md.
 
 if (!OperatingSystem.IsWindows())
@@ -100,6 +101,10 @@ internal static class GatewayProgram
                   way the gateway reports it to AL Workbench (versions, tenants, apps,
                   sessions, licence) and saves it as one file per tier in <folder>.
 
+              ALWorkbench.Gateway run
+                  Runs the gateway in this window instead of as a service, for trying it
+                  out. Register first. Ctrl+C stops it.
+
               ALWorkbench.Gateway uninstall
                   Removes the service, the gateway's key and its settings. The log files stay.
 
@@ -170,6 +175,7 @@ internal static class GatewayProgram
         else
         {
             Console.WriteLine("Next, run: ALWorkbench.Gateway install");
+            Console.WriteLine("To try it in this window first, run: ALWorkbench.Gateway run");
         }
         return 0;
     }

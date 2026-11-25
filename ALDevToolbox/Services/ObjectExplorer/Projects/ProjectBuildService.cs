@@ -39,6 +39,13 @@ public sealed class ProjectBuildService
     public const string TempPrefix = "oe-build-";
 
     /// <summary>
+    /// What a build that finds no compiler says. Shown on the build row to whoever pressed
+    /// Build, so it names no feed or setting; the log line beside it carries those (#1580).
+    /// </summary>
+    internal const string CompilerMissingMessage =
+        "The tool that compiles AL isn't installed on this server yet. Ask whoever runs AL Workbench to check it can reach the internet, then try again.";
+
+    /// <summary>
     /// Hard ceiling for a discovery clone — a stalled remote becomes a logged
     /// failure, not a hang. Discovery fetches only trees + app.json blobs (no
     /// working-tree checkout), so this is ample even for repos whose history is
@@ -70,6 +77,16 @@ public sealed class ProjectBuildService
     /// holding a build worker (#1132).
     /// </summary>
     private static readonly TimeSpan LocalGitTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// For a git call that only reads the clone: it carries no credential, so it must not
+    /// prompt or fetch a missing object, and fails with git's own reason instead.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> LocalGitEnv = new Dictionary<string, string>
+    {
+        ["GIT_TERMINAL_PROMPT"] = "0",
+        ["GIT_NO_LAZY_FETCH"] = "1",
+    };
 
     /// <summary><paramref name="raw"/> as a positive number of minutes, else <paramref name="defaultMinutes"/>.</summary>
     internal static TimeSpan MinutesOrDefault(string? raw, int defaultMinutes) =>
@@ -144,7 +161,7 @@ public sealed class ProjectBuildService
         var project = await _db.OeProjects.AsNoTracking()
             .Where(c => c.Id == projectId && c.DeletedAt == null)
             .Include(c => c.Repositories)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw new InvalidOperationException($"Project {projectId} not found for build.");
 
         // The first-class build row the importer created and linked to this
@@ -152,12 +169,19 @@ public sealed class ProjectBuildService
         // only for a release without a ProjectBuild (legacy / synthetic) — the new
         // persistence then no-ops, leaving the old per-app report as the record.
         var build = await _db.OeProjectBuilds
-            .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
-        // Only on the first run: a Retry or Recover symbols is a person's own choice, made
-        // and run as them, so it is not the pipeline's automation to check.
+            .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct);
+        // The automation settings are checked on the first run only: a Retry or Recover
+        // symbols is a person's own choice, made and run as them. Whether the pipeline was
+        // deleted or disabled is checked on every pickup - a first run, a build resumed
+        // after a restart, a Retry or a Recover symbols - because each can wait in the
+        // queue, and the page promises a disabled pipeline won't build (#1335).
         if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck, FinishedAt: null })
         {
-            await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
+            await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct);
+        }
+        else if (build is { PipelineId: not null })
+        {
+            await EnsurePipelineStillBuildsAsync(build, project.CreatedByUserId, ct);
         }
         if (build is not null)
         {
@@ -165,14 +189,14 @@ public sealed class ProjectBuildService
             build.BuildingStartedAt = _clock.GetUtcNow().UtcDateTime;
             // A rerun starts clean: the earlier attempt's reason is no longer the build's.
             build.FailureMessage = null;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             // A push may have moved this build onto its own commit between the read
             // above and the save (ProjectBuildImporter.StartPushBuildAsync). That move
             // only lands on a queued row, so once this one says building, the commit
             // read now is the one it builds.
             if (build.Trigger == ProjectBuildTrigger.Push)
             {
-                await _db.Entry(build).ReloadAsync(ct).ConfigureAwait(false);
+                await _db.Entry(build).ReloadAsync(ct);
             }
         }
 
@@ -193,7 +217,7 @@ public sealed class ProjectBuildService
                 BcBuildTarget.NextMajor => ProjectBuildTarget.NextMajor,
                 _ => ProjectBuildTarget.Current,
             };
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
 
         // A build started by a push checks the pushed repository out at the push's own
@@ -216,7 +240,7 @@ public sealed class ProjectBuildService
                 .Where(c => c.ProjectBuildId == build.Id && c.ProjectRepositoryId != null && c.CommitHash != "")
                 .OrderBy(c => c.Id)
                 .Select(c => new { RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             if (earlier.Count > 0)
             {
                 // A run that recorded its commits more than once keeps the latest.
@@ -234,9 +258,13 @@ public sealed class ProjectBuildService
         // the stable compiler every build has used.
         // The lease keeps the compiler on the volume while this build uses it: another
         // build may bring in a newer beta meanwhile (#1137).
-        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException(
-                "The AL compiler isn't available yet. It's downloaded from NuGet on first use — check the server has outbound access, then retry.");
+        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct);
+        if (compilerLease is null)
+        {
+            // The person who pressed Build can't act on the feed or the network; the log is for whoever can (#1580).
+            _logger.LogWarning("The AL compiler is not installed and could not be downloaded from NuGet; check the server's outbound access.");
+            throw new InvalidOperationException(CompilerMissingMessage);
+        }
         var compiler = compilerLease.Value;
 
         var buildRoot = Path.Combine(Path.GetTempPath(), TempPrefix + Guid.NewGuid().ToString("N"));
@@ -254,7 +282,7 @@ public sealed class ProjectBuildService
             // branch its pipeline watches; a pull-request build keeps its own head and
             // ignores it (#963).
             var branch = build is not null && build.Trigger != ProjectBuildTrigger.PullRequest ? build.Branch : null;
-            var clones = await CloneRepositoriesAsync(project, buildRoot, results, logs, options, branch, ct).ConfigureAwait(false);
+            var clones = await CloneRepositoriesAsync(project, buildRoot, results, logs, options, branch, ct);
 
             // A build of the default branch records which branch that was, so the
             // pipeline can name it. A pull-request build is labelled by its head ref.
@@ -273,7 +301,7 @@ public sealed class ProjectBuildService
             // provenance failure never sinks the build.
             if (build is not null)
             {
-                await PersistRepoProvenanceAsync(build, project, clones, logs, ct).ConfigureAwait(false);
+                await PersistRepoProvenanceAsync(build, project, clones, logs, ct);
             }
 
             // 2. Discover extensions across the successful clones.
@@ -334,12 +362,12 @@ public sealed class ProjectBuildService
             //     version (written into the clone so the app.json agrees), and the build
             //     carries the earlier .app without compiling it again (#1094, #1140).
             var settings = build is not null && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
-                ? await ReadPipelineBuildSettingsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false)
+                ? await ReadPipelineBuildSettingsAsync(_db, build.PipelineId!.Value, ct)
                 : null;
             var carried = new Dictionary<string, CarriedApp>(StringComparer.Ordinal);
             if (settings is { ChangedAppsOnly: true })
             {
-                carried = await FindUnchangedAppsAsync(build!, discovered, settings.PublishesToGitHub, logs, ct).ConfigureAwait(false);
+                carried = await FindUnchangedAppsAsync(build!, discovered, settings.PublishesToGitHub, logs, ct);
                 discovered = discovered
                     .Select(d => carried.TryGetValue(NormalizeAppId(d.Manifest.Id), out var c)
                         ? d with { Manifest = d.Manifest with { Version = c.Version } }
@@ -370,7 +398,7 @@ public sealed class ProjectBuildService
             ResolvedArtifact resolved;
             if (options.Target == BcBuildTarget.Current)
             {
-                resolved = await _artifacts.ResolveOnPremAsync(country, majorMinor, ct).ConfigureAwait(false)
+                resolved = await _artifacts.ResolveOnPremAsync(country, majorMinor, ct)
                     ?? throw new InvalidOperationException(
                         $"No Business Central artifact matched application {majorMinor} for country '{country}'. Check the version and country.");
             }
@@ -379,7 +407,7 @@ public sealed class ProjectBuildService
                 // The manifests are left as they are: the build compiles the code
                 // as it stands against the next version's symbols, which is the point.
                 var nextName = options.Target == BcBuildTarget.NextMajor ? "next major" : "next minor";
-                resolved = await _artifacts.ResolveTargetAsync(country, options.Target, ct).ConfigureAwait(false)
+                resolved = await _artifacts.ResolveTargetAsync(country, options.Target, ct)
                     ?? throw new InvalidOperationException(
                         $"Microsoft has not published a preview of the {nextName} Business Central version for country '{country}' yet.");
                 logs.Add(new PendingLog(null, "Build",
@@ -394,7 +422,7 @@ public sealed class ProjectBuildService
             if (build is not null)
             {
                 build.BcArtifactVersion = resolved.Version;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
             }
 
             var symbolsDir = Path.Combine(buildRoot, "symbols");
@@ -403,7 +431,7 @@ public sealed class ProjectBuildService
             using var artifactLease = await _artifactCache.GetAsync(
                 resolved.ApplicationUrl,
                 token => _artifacts.DownloadArtifactSetAsync(resolved.ApplicationUrl, token),
-                ct).ConfigureAwait(false);
+                ct);
             var download = artifactLease.Value;
             int? parentReleaseId;
             IReadOnlyList<ResolvedSymbolPackage> fromFeeds = [];
@@ -425,13 +453,12 @@ public sealed class ProjectBuildService
                 // feeds, then from the organisation's own earlier builds (#901).
                 // Stored uploads are read first so neither fetches an app the
                 // operator has deliberately supplied.
-                var supplemental = await LoadSupplementalSymbolsAsync(projectId, ct).ConfigureAwait(false);
-                fromFeeds = await ResolveDependencySymbolsAsync(projectId, discovered, supplemental, symbolsDir, resolved.MajorMinor, country, logs, ct)
-                    .ConfigureAwait(false);
+                var supplemental = await LoadSupplementalSymbolsAsync(projectId, ct);
+                fromFeeds = await ResolveDependencySymbolsAsync(projectId, discovered, supplemental, symbolsDir, resolved.MajorMinor, country, logs, ct);
                 // Operator-supplied symbols (the manual-symbols recovery path) are
                 // written last so they win over a stale committed/artifact/feed/build
                 // copy of the same package — the upload is the deliberate fix.
-                await WriteSupplementalSymbolsAsync(projectId, supplemental, symbolsDir, ct).ConfigureAwait(false);
+                await WriteSupplementalSymbolsAsync(projectId, supplemental, symbolsDir, ct);
                 // 4. Auto-import the parent BC release inline (best-effort) so
                 //    cross-release references into Base App resolve. Reuses the
                 //    artifact we already downloaded. A preview check indexes no
@@ -439,8 +466,8 @@ public sealed class ProjectBuildService
                 //    it links the catalogue's preview when there is one and imports
                 //    nothing.
                 parentReleaseId = options.Target == BcBuildTarget.Current
-                    ? await EnsureParentReleaseAsync(resolved, download, releaseId, ct).ConfigureAwait(false)
-                    : await ExistingParentReleaseAsync(resolved, ct).ConfigureAwait(false);
+                    ? await EnsureParentReleaseAsync(resolved, download, releaseId, ct)
+                    : await ExistingParentReleaseAsync(resolved, ct);
             }
             finally
             {
@@ -452,7 +479,7 @@ public sealed class ProjectBuildService
             //     into it resolve (#901, Part 4). Best-effort, like the parent. Not
             //     for a preview check, which has no references to resolve (#1140).
             IReadOnlyList<int> dependencyReleaseIds = options.Target == BcBuildTarget.Current
-                ? await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, releaseId, logs, ct).ConfigureAwait(false)
+                ? await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, releaseId, logs, ct)
                 : [];
 
             // 5. Compile each extension in dependency order; a compiled sibling
@@ -461,50 +488,65 @@ public sealed class ProjectBuildService
             var artifacts = new List<PendingArtifact>();
             List<StoredSymbolPackage>? storedSymbols = null;
             List<InstalledAppFact>? installedApps = null;
+
+            // Puts an unchanged app's earlier .app into this build in place of a new
+            // one: into the symbols folder for the apps that depend on it, the upload
+            // and the build's artifacts. The log line is given the earlier file's name.
+            async Task<bool> CarryEarlierAppAsync(DiscoveredApp app, CarriedApp earlier, Func<string, string> logLine)
+            {
+                var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
+                    .Where(a => a.Id == earlier.ArtifactId)
+                    .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
+                    .FirstOrDefaultAsync(ct);
+                if (kept is null)
+                {
+                    // The earlier build was removed while this one ran. Building again
+                    // finds no earlier build and gives the app a new version.
+                    results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                        ProjectBuildResultStatus.Failed,
+                        $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
+                        RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    return false;
+                }
+                await File.WriteAllBytesAsync(Path.Combine(symbolsDir, SafeAppFileName(app.Manifest)), kept.Content, ct);
+                uploads.Add(new AppFileUpload(
+                    FileName: kept.FileName,
+                    AppStream: new MemoryStream(kept.Content, writable: false),
+                    SourceZipStream: null));
+                // Deliver exactly the .app the earlier build produced, so an
+                // environment already on it sees the same version and skips it.
+                artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
+                    kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
+                logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}", logLine(kept.FileName)));
+                results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                    ProjectBuildResultStatus.Compiled, null,
+                    RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                return true;
+            }
+
             foreach (var app in TopologicalOrder(discovered))
             {
                 ct.ThrowIfCancellationRequested();
-                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
+                carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier);
+                if (earlier is { CompileFirst: false })
                 {
-                    // Unchanged, and so is every sibling it depends on (FindUnchangedAppsAsync
-                    // carries nothing whose dependency changed): compiling it again would only
-                    // produce what the earlier build already did, so its .app is used as it is
-                    // (#1140). It goes into the symbols folder for the apps that depend on it.
-                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
-                        .Where(a => a.Id == earlier.ArtifactId)
-                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
-                        .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-                    if (kept is null)
-                    {
-                        // The earlier build was removed while this one ran. Building again
-                        // finds no earlier build and gives the app a new version.
-                        results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
-                            ProjectBuildResultStatus.Failed,
-                            $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
-                            RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
-                        continue;
-                    }
-                    await File.WriteAllBytesAsync(Path.Combine(symbolsDir, SafeAppFileName(app.Manifest)), kept.Content, ct).ConfigureAwait(false);
-                    uploads.Add(new AppFileUpload(
-                        FileName: kept.FileName,
-                        AppStream: new MemoryStream(kept.Content, writable: false),
-                        SourceZipStream: null));
-                    // Deliver exactly the .app the earlier build produced, so an
-                    // environment already on it sees the same version and skips it.
-                    artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
-                        kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
-                    logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}",
-                        $"Not compiled: nothing in it or in the extensions it depends on changed since build #{earlier.OriginBuildId}, so this build uses that build's {kept.FileName}."));
-                    results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
-                        ProjectBuildResultStatus.Compiled, null,
-                        RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    // Unchanged, and so is every sibling it depends on: compiling it again
+                    // would only produce what the earlier build already did, so its .app is
+                    // used as it is (#1140).
+                    await CarryEarlierAppAsync(app, earlier, file =>
+                        $"Not compiled: nothing in it or in the extensions it depends on changed since build #{earlier.OriginBuildId}, so this build uses that build's {file}.");
                     continue;
                 }
 
-                var (compiled, compileLog) = await CompileAsync(app, symbolsDir, compiler, ct).ConfigureAwait(false);
-                if (!string.IsNullOrWhiteSpace(compileLog))
+                var (compiled, compileLog) = await CompileAsync(app, symbolsDir, compiler, ct);
+                // A check's compiler output shares its section with the note on what was
+                // carried (below), so the log has one section per extension.
+                if (!string.IsNullOrWhiteSpace(compileLog) && (earlier is null || compiled is null))
                 {
                     logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}", compileLog));
+                }
+                if (!string.IsNullOrWhiteSpace(compileLog))
+                {
                     foreach (var diagnostic in AlcOutputParser.Parse(compileLog))
                     {
                         // The compiler names the file by its absolute path inside
@@ -524,8 +566,8 @@ public sealed class ProjectBuildService
                     var missing = AlcOutputParser.ParseMissingPackages(compileLog);
                     if (missing.Count > 0)
                     {
-                        storedSymbols ??= await ReadStoredSymbolPackagesAsync(projectId, ct).ConfigureAwait(false);
-                        installedApps ??= await ReadInstalledAppsAsync(projectId, ct).ConfigureAwait(false);
+                        storedSymbols ??= await ReadStoredSymbolPackagesAsync(projectId, ct);
+                        installedApps ??= await ReadInstalledAppsAsync(projectId, ct);
                         var failedSiblings = results
                             .Where(r => r.Status == ProjectBuildResultStatus.Failed && !string.IsNullOrEmpty(r.AppId))
                             .Select(r => r.AppId)
@@ -544,9 +586,27 @@ public sealed class ProjectBuildService
                         RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
                     continue;
                 }
+                if (earlier is not null)
+                {
+                    // Unchanged itself, but compiled because something it depends on
+                    // changed, to prove it still builds against that. It did, so the new
+                    // output is set aside and the earlier .app is delivered as it was:
+                    // Business Central recompiles an installed app when what it depends on
+                    // is upgraded, and this compile was that same check, run first.
+                    var checkedLog = compileLog;
+                    if (!await CarryEarlierAppAsync(app, earlier, file =>
+                            $"Compiled against the changed extensions it depends on to check it still builds, and it does. Nothing in it changed since build #{earlier.OriginBuildId}, so this build uses that build's {file} instead of a new version."
+                            + (string.IsNullOrWhiteSpace(checkedLog) ? string.Empty : "\n\n" + checkedLog)))
+                    {
+                        // Nothing is delivered for it, so its dependents must not compile
+                        // against the check's output either.
+                        File.Delete(compiled);
+                    }
+                    continue;
+                }
                 // Read the .app into memory so the upload survives the temp-root
                 // cleanup, and copy it into the symbol dir for dependents.
-                var bytes = await File.ReadAllBytesAsync(compiled, ct).ConfigureAwait(false);
+                var bytes = await File.ReadAllBytesAsync(compiled, ct);
                 var fileName = Path.GetFileName(compiled);
                 uploads.Add(new AppFileUpload(
                     FileName: fileName,
@@ -568,13 +628,13 @@ public sealed class ProjectBuildService
             // captured logs are persisted in the finally so they survive a throw too).
             if (build is not null)
             {
-                await PersistArtifactsAsync(build, artifacts, ct).ConfigureAwait(false);
+                await PersistArtifactsAsync(build, artifacts, ct);
             }
 
             // Project labels aren't unique (the release id is their identity), so
             // a rebuild of the same project+version reuses the same clean label.
             var finalLabel = $"{project.Name} on BC {resolved.MajorMinor}";
-            await FinalizeReleaseAsync(releaseId, finalLabel, parentReleaseId, dependencyReleaseIds, ct).ConfigureAwait(false);
+            await FinalizeReleaseAsync(releaseId, finalLabel, parentReleaseId, dependencyReleaseIds, ct);
 
             _logger.LogInformation(
                 "Project build for {Project} (release {ReleaseId}): {Compiled} compiled, {Failed} failed, parent release {ParentReleaseId}.",
@@ -589,12 +649,12 @@ public sealed class ProjectBuildService
             // unresolved symbols throws before compile), so the user can diagnose.
             if (build is not null && logs.Count > 0)
             {
-                try { await PersistLogsAsync(build, logs, ct).ConfigureAwait(false); }
+                try { await PersistLogsAsync(build, logs, ct); }
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist build logs for release {ReleaseId}.", releaseId); }
             }
             if (build is not null)
             {
-                try { await PersistDiagnosticsAsync(build, diagnostics, ct).ConfigureAwait(false); }
+                try { await PersistDiagnosticsAsync(build, diagnostics, ct); }
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist build diagnostics for release {ReleaseId}.", releaseId); }
             }
             TryDeleteDirectory(buildRoot);
@@ -608,7 +668,7 @@ public sealed class ProjectBuildService
     /// before the setting changed follows it. See <see cref="BuildVersionStamp"/>.
     /// </summary>
     internal static async Task<bool> PipelineNumbersAppsAsync(AppDbContext db, int pipelineId, CancellationToken ct) =>
-        (await ReadPipelineBuildSettingsAsync(db, pipelineId, ct).ConfigureAwait(false))?.AutoVersion ?? false;
+        (await ReadPipelineBuildSettingsAsync(db, pipelineId, ct))?.AutoVersion ?? false;
 
     /// <summary>
     /// The pipeline settings that shape what a build produces, read at build time so a
@@ -630,10 +690,12 @@ public sealed class ProjectBuildService
     /// to carry. An app counts as changed when the pipeline has no earlier build of it,
     /// when that build targeted another Business Central version, when the pipeline
     /// publishes to GitHub and the app never made it into a release, when git can't say
-    /// (the earlier commit is not in this clone's history, say), when any file under its
-    /// folder differs, or when an app in this build it depends on changed or was built
-    /// after it, so it is never left compiled against an older sibling than the one
-    /// deployed beside it. Writes one <b>Changes</b> log section saying which is which.
+    /// (the earlier commit is not in this clone's history, say), or when any file under its
+    /// folder differs. An unchanged app whose earlier build was not checked against the
+    /// very siblings it depends on in this build (one changed, was compiled again, or is
+    /// itself being checked) is carried with <see cref="CarriedApp.CompileFirst"/>: it is
+    /// compiled against them first, so it is never delivered beside a sibling it no
+    /// longer builds against. Writes one <b>Changes</b> log section saying which is which.
     /// </summary>
     private async Task<Dictionary<string, CarriedApp>> FindUnchangedAppsAsync(
         OeProjectBuild build, IReadOnlyList<DiscoveredApp> apps, bool publishesToGitHub, List<PendingLog> logs, CancellationToken ct)
@@ -653,7 +715,7 @@ public sealed class ProjectBuildService
                     a.Id, AppId = a.AppId!, a.ProjectBuildId, a.AppVersion, a.CarriedFromBuildId,
                     a.ProjectBuild!.StartedAt, a.ProjectBuild.BcVersion,
                 })
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .GroupBy(a => a.AppId, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(a => a.StartedAt).ThenByDescending(a => a.Id).First(), StringComparer.Ordinal);
 
@@ -663,7 +725,7 @@ public sealed class ProjectBuildService
         var commits = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
                 .Where(c => buildIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
                 .Select(c => new { c.Id, c.ProjectBuildId, RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .GroupBy(c => (c.ProjectBuildId, c.RepoId))
             .ToDictionary(g => g.Key, g => g.MaxBy(c => c.Id)!.CommitHash);
 
@@ -671,6 +733,17 @@ public sealed class ProjectBuildService
         // GitHub, an app whose build never made a release (the publish failed, or
         // publishing was set up later) is built again so it reaches one.
         int Origin(int artifactBuildId, int? carriedFrom) => carriedFrom ?? artifactBuildId;
+
+        // What each of those builds delivered for each app, by the build that compiled
+        // the bytes. Every app in a finished build was compiled or checked against the
+        // siblings delivered beside it, so a sibling delivered there with the same
+        // origin as now is one the app is already known to build against.
+        var deliveredWith = (await _db.OeProjectBuildArtifacts.AsNoTracking()
+                .Where(a => a.AppId != null && ids.Contains(a.AppId) && buildIds.Contains(a.ProjectBuildId))
+                .Select(a => new { a.ProjectBuildId, AppId = a.AppId!, a.CarriedFromBuildId })
+                .ToListAsync(ct))
+            .GroupBy(a => (a.ProjectBuildId, a.AppId))
+            .ToDictionary(g => g.Key, g => g.Select(a => Origin(a.ProjectBuildId, a.CarriedFromBuildId)).ToHashSet());
         var released = new HashSet<int>();
         if (publishesToGitHub)
         {
@@ -678,7 +751,7 @@ public sealed class ProjectBuildService
             released = (await _db.OeProjectBuilds.AsNoTracking()
                     .Where(b => origins.Contains(b.Id) && b.GithubReleaseTag != null)
                     .Select(b => b.Id)
-                    .ToListAsync(ct).ConfigureAwait(false))
+                    .ToListAsync(ct))
                 .ToHashSet();
         }
 
@@ -707,6 +780,11 @@ public sealed class ProjectBuildService
                 lines.Add($"{name}: rebuilt, because build #{origin} did not publish it to a GitHub release.");
                 continue;
             }
+            if (app.Repo.CommitSha is null)
+            {
+                lines.Add($"{name}: changed (this build could not tell which commit it built).");
+                continue;
+            }
             if (app.Repo.RepositoryId is not { } repoId || app.Repo.CommitSha is not { } headSha
                 || !commits.TryGetValue((prior.ProjectBuildId, repoId), out var priorSha)
                 || !CommitShaRegex.IsMatch(priorSha) || !CommitShaRegex.IsMatch(headSha))
@@ -714,21 +792,20 @@ public sealed class ProjectBuildService
                 lines.Add($"{name}: changed (build #{prior.ProjectBuildId} did not record its commit).");
                 continue;
             }
-            // A sibling it depends on that changed, or that was compiled after it: either
-            // way its own .app was compiled against something other than what is deployed.
-            var dependencyIds = app.Manifest.Dependencies.Select(d => NormalizeAppId(d.Id)).ToHashSet(StringComparer.Ordinal);
-            var newerSibling = apps.FirstOrDefault(a =>
+            // A sibling it depends on, directly or through another sibling, that changed,
+            // that is being checked itself, or whose bytes the earlier build did not
+            // deliver beside it: its .app was compiled against something other than what
+            // this build delivers, so it is checked. Transitively, because a checked
+            // sibling keeps its old origin and so hides a change further down.
+            var dependencyIds = DependencyClosure(app, apps);
+            var changedSibling = apps.FirstOrDefault(a =>
             {
                 var siblingId = NormalizeAppId(a.Manifest.Id);
                 if (!dependencyIds.Contains(siblingId)) return false;
-                if (!unchanged.TryGetValue(siblingId, out var sibling)) return true;
-                return sibling.OriginBuildId > origin;
+                if (!unchanged.TryGetValue(siblingId, out var sibling) || sibling.CompileFirst) return true;
+                return !(deliveredWith.TryGetValue((prior.ProjectBuildId, siblingId), out var beside)
+                         && beside.Contains(sibling.OriginBuildId));
             });
-            if (newerSibling is not null)
-            {
-                lines.Add($"{name}: rebuilt, because {newerSibling.Manifest.Name} changed.");
-                continue;
-            }
 
             var folder = Path.GetRelativePath(app.Repo.Dir, app.ProjectDir).Replace('\\', '/');
             var diff = await _processRunner.RunAsync(new ProcessRunRequest(
@@ -738,7 +815,7 @@ public sealed class ProjectBuildService
                 app.Repo.Dir,
                 // Never prompt or fetch: the answer is in the clone's history or not at all.
                 new Dictionary<string, string> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_NO_LAZY_FETCH"] = "1" },
-                LocalGitTimeout), ct).ConfigureAwait(false);
+                LocalGitTimeout), ct);
             if (!diff.Succeeded)
             {
                 lines.Add($"{name}: changed (the commit build #{prior.ProjectBuildId} used, {Short(priorSha)}, could not be compared).");
@@ -754,6 +831,15 @@ public sealed class ProjectBuildService
                 lines.Add($"{name}: changed (its app.json could not be set back to {prior.AppVersion}).");
                 continue;
             }
+            if (changedSibling is not null)
+            {
+                unchanged[id] = new CarriedApp(prior.Id, origin, prior.AppVersion, CompileFirst: true);
+                var siblingState = unchanged.TryGetValue(NormalizeAppId(changedSibling.Manifest.Id), out var s)
+                    ? s.CompileFirst ? "depends on a changed extension" : $"was built again after build #{prior.ProjectBuildId}"
+                    : "changed";
+                lines.Add($"{name}: unchanged since build #{origin}, but {changedSibling.Manifest.Name} {siblingState}. It is compiled to check it still builds; if it does, it keeps {prior.AppVersion} and is not published again.");
+                continue;
+            }
             unchanged[id] = new CarriedApp(prior.Id, origin, prior.AppVersion);
             lines.Add($"{name}: unchanged since build #{origin}, so it keeps {prior.AppVersion} and is not published again.");
         }
@@ -764,10 +850,33 @@ public sealed class ProjectBuildService
     }
 
     /// <summary>
-    /// An unchanged app's earlier artifact, carried into this build in place of the one
-    /// it compiles, and the build that compiled those bytes.
+    /// The ids of the apps in <paramref name="apps"/> that <paramref name="app"/> depends
+    /// on, directly or through each other.
     /// </summary>
-    private sealed record CarriedApp(int ArtifactId, int OriginBuildId, string Version);
+    private static HashSet<string> DependencyClosure(DiscoveredApp app, IReadOnlyList<DiscoveredApp> apps)
+    {
+        var byId = new Dictionary<string, DiscoveredApp>(StringComparer.Ordinal);
+        foreach (var a in apps) byId.TryAdd(NormalizeAppId(a.Manifest.Id), a);
+        var closure = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<DiscoveredApp>([app]);
+        while (pending.TryPop(out var next))
+        {
+            foreach (var dependency in next.Manifest.Dependencies)
+            {
+                var id = NormalizeAppId(dependency.Id);
+                if (byId.TryGetValue(id, out var sibling) && closure.Add(id)) pending.Push(sibling);
+            }
+        }
+        return closure;
+    }
+
+    /// <summary>
+    /// An unchanged app's earlier artifact, carried into this build in place of the one
+    /// it compiles, and the build that compiled those bytes. <paramref name="CompileFirst"/>
+    /// when a sibling it depends on changed: it is compiled against that sibling as a
+    /// check, and carried only if that succeeds (a failure fails it as any compile does).
+    /// </summary>
+    private sealed record CarriedApp(int ArtifactId, int OriginBuildId, string Version, bool CompileFirst = false);
 
     /// <summary>
     /// The kinds of build that can number their apps: a pipeline's own build against the
@@ -866,14 +975,14 @@ public sealed class ProjectBuildService
         var project = await _db.OeProjects
             .Where(c => c.Id == projectId && c.DeletedAt == null)
             .Include(c => c.Repositories)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (project is null)
         {
             _logger.LogWarning("Discovery: project {ProjectId} no longer exists; skipping cache warm.", projectId);
             return;
         }
 
-        var (extensions, error) = await DiscoverCoreAsync(project, ct).ConfigureAwait(false);
+        var (extensions, error) = await DiscoverCoreAsync(project, ct);
         var now = _clock.GetUtcNow().UtcDateTime;
         if (error is not null)
         {
@@ -886,7 +995,7 @@ public sealed class ProjectBuildService
             project.DiscoveredAt = now;
             project.DiscoveryError = null;
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -925,7 +1034,7 @@ public sealed class ProjectBuildService
                     failures.Add($"Left out \"{RepositoryLabel(repo)}\": nobody has confirmed they can open it. Someone who can should press Confirm access on the solution's Repositories tab.");
                     continue;
                 }
-                var credentials = await _credentials.ResolveAsync(repo.Provider, ct).ConfigureAwait(false);
+                var credentials = await _credentials.ResolveAsync(repo.Provider, ct);
                 if (credentials.Count == 0)
                 {
                     failures.Add($"Couldn't reach \"{repo.DisplayName}\": {CloneCredentialResolver.NothingToCloneWith(repo.Provider)}");
@@ -941,7 +1050,7 @@ public sealed class ProjectBuildService
                 // token travels in git config (http.extraHeader), never the URL or argv.
                 var (clone, used, cloneFailure) = await CloneWithAsync(gitPath,
                     new[] { "clone", "--filter=blob:none", "--no-checkout", "--depth", "1", "--single-branch", "--no-tags", "--quiet", repo.Url, dest },
-                    root, dest, DiscoveryCloneTimeout, credentials, repo, ct).ConfigureAwait(false);
+                    root, dest, DiscoveryCloneTimeout, credentials, repo, ct);
                 var pat = used.Secret;
                 var env = GitAuthEnv(repo.Provider, pat);
                 if (!clone.Succeeded || !Directory.Exists(dest))
@@ -955,9 +1064,9 @@ public sealed class ProjectBuildService
                 // Limit the working tree to app.json (gitignore-style match at any
                 // depth) and materialise it — fetches only those blobs.
                 await _processRunner.RunAsync(new ProcessRunRequest(gitPath,
-                    new[] { "-C", dest, "sparse-checkout", "set", "--no-cone", "app.json" }, dest, env, DiscoveryCloneTimeout), ct).ConfigureAwait(false);
+                    new[] { "-C", dest, "sparse-checkout", "set", "--no-cone", "app.json" }, dest, env, DiscoveryCloneTimeout), ct);
                 var checkout = await _processRunner.RunAsync(new ProcessRunRequest(gitPath,
-                    new[] { "-C", dest, "checkout" }, dest, env, DiscoveryCloneTimeout), ct).ConfigureAwait(false);
+                    new[] { "-C", dest, "checkout" }, dest, env, DiscoveryCloneTimeout), ct);
                 if (!checkout.Succeeded)
                 {
                     failures.Add($"Couldn't read \"{repo.DisplayName}\": {Sanitize(checkout.StdErr, pat)}".Trim());
@@ -1015,7 +1124,7 @@ public sealed class ProjectBuildService
 
         var stale = await _db.OeProjectBuildResults
             .Where(r => r.ReleaseId == releaseId)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (stale.Count > 0) _db.OeProjectBuildResults.RemoveRange(stale);
 
         foreach (var r in results)
@@ -1034,7 +1143,7 @@ public sealed class ProjectBuildService
                 CreatedAt = now,
             });
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -1046,9 +1155,9 @@ public sealed class ProjectBuildService
     {
         var rows = await _db.OeProjectBuildResults
             .Where(r => r.ReleaseId == releaseId && r.Status == ProjectBuildResultStatus.Compiled)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         foreach (var row in rows) row.Status = ProjectBuildResultStatus.Ingested;
-        if (rows.Count > 0) await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        if (rows.Count > 0) await _db.SaveChangesAsync(ct);
     }
 
     // ── ProjectBuild lifecycle (worker calls these around the build) ────────
@@ -1060,12 +1169,12 @@ public sealed class ProjectBuildService
     /// </summary>
     public async Task MarkBuildReadyAsync(int releaseId, string? bcVersion, CancellationToken ct = default)
     {
-        var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+        var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct);
         if (build is null) return;
         build.Status = ProjectBuildStatus.Ready;
         build.BcVersion = bcVersion ?? build.BcVersion;
         build.FinishedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -1082,11 +1191,11 @@ public sealed class ProjectBuildService
     {
         try
         {
-            var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+            var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct);
             if (build is null || build.Status != ProjectBuildStatus.Ready) return;
-            var checks = await LicenceRangeCheck.ForBuildAsync(_db, build.Id, _clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
+            var checks = await LicenceRangeCheck.ForBuildAsync(_db, build.Id, _clock.GetUtcNow().UtcDateTime, ct);
             build.LicenceCheckJson = LicenceRangeCheck.Serialize(checks);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             foreach (var check in checks)
             {
                 if (check.IsOutside)
@@ -1117,14 +1226,45 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// The reasons <see cref="EnsureAutomationStillOnAsync"/> fails a build with. Such a
-    /// build did not fail on its own merits, so it sends no build email and does not
-    /// count as the build before the next one (<c>BuildNotifier</c>).
+    /// build did not fail on its own merits, so it sends no build email, does not count
+    /// as the build before the next one (<c>BuildNotifier</c>), and does not count as
+    /// having built its commit when that commit is pushed again (<c>PushBuildService</c>).
     /// </summary>
     public static readonly IReadOnlyList<string> AutomationRefusals =
     [
         PipelineDeletedRefusal, PipelineDisabledRefusal, PushTurnedOffRefusal, PreviewCheckTurnedOffRefusal,
         TakenOverRefusal, InactiveRefusal, NoAccessRefusal,
     ];
+
+    /// <summary>
+    /// Refuses a pipeline build whose pipeline was deleted or disabled while it waited
+    /// in the queue: the part of <see cref="EnsureAutomationStillOnAsync"/> that holds
+    /// for every build, by hand or rerun as well (#1335). The worker fails the build
+    /// with the reason. The person the build runs as is held to what an automatic build's
+    /// is (#1551): a build by hand can wait in the queue too, and it clones with their
+    /// credentials, so one whose account was disabled or who can no longer manage the
+    /// solution by the time it starts is refused rather than run as them.
+    /// </summary>
+    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, int? projectOwnerId, CancellationToken ct)
+    {
+        var pipeline = await _db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == build.PipelineId && p.DeletedAt == null)
+            .Select(p => new { Disabled = p.DisabledAt != null })
+            .FirstOrDefaultAsync(ct);
+        var runsAs = _orgContext.CurrentUserId;
+        var reason = pipeline is null ? PipelineDeletedRefusal
+            : pipeline.Disabled ? PipelineDisabledRefusal
+            : runsAs is not { } userId ? null
+            : !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct)
+                ? InactiveRefusal
+            : !await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct)
+                ? NoAccessRefusal
+            : null;
+        if (reason is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Build"] = reason });
+        }
+    }
 
     /// <summary>
     /// Refuses a build the pipeline started on its own once that is no longer what the
@@ -1146,7 +1286,7 @@ public sealed class ProjectBuildService
                 RunsAs = push ? p.BuildOnPushByUserId : p.PreviewCheckByUserId,
                 Disabled = p.DisabledAt != null,
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
 
         string? reason;
         if (pipeline is null)
@@ -1158,9 +1298,9 @@ public sealed class ProjectBuildService
         else if (pipeline.RunsAs != build.StartedByUserId)
             reason = TakenOverRefusal;
         else if (build.StartedByUserId is not { } userId
-                 || !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct).ConfigureAwait(false))
+                 || !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct))
             reason = InactiveRefusal;
-        else if (!await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct).ConfigureAwait(false))
+        else if (!await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct))
             reason = NoAccessRefusal;
         else
             return;
@@ -1175,12 +1315,12 @@ public sealed class ProjectBuildService
     /// </summary>
     public async Task MarkBuildFailedAsync(int releaseId, string message, CancellationToken ct = default)
     {
-        var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+        var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct);
         if (build is null) return;
         build.Status = ProjectBuildStatus.Failed;
         build.FailureMessage = Truncate(message, 2000);
         build.FinishedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     // ── ProjectBuild provenance (repo commit set + changelog) ───────────────
@@ -1203,9 +1343,9 @@ public sealed class ProjectBuildService
             // A retried or resumed build records its provenance again; clear the earlier
             // rows so its changelog isn't listed twice (same as PersistArtifactsAsync).
             _db.OeProjectBuildRepoCommits.RemoveRange(await _db.OeProjectBuildRepoCommits
-                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false));
+                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct));
             _db.OeProjectBuildCommits.RemoveRange(await _db.OeProjectBuildCommits
-                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false));
+                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct));
             // The commit set for this build.
             foreach (var clone in clones)
             {
@@ -1220,9 +1360,9 @@ public sealed class ProjectBuildService
                     CommittedAt = clone.CommitDate,
                 });
             }
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
 
-            await ComputeAndPersistChangelogAsync(build, clones, ct).ConfigureAwait(false);
+            await ComputeAndPersistChangelogAsync(build, clones, ct);
         }
         catch (Exception ex)
         {
@@ -1253,11 +1393,11 @@ public sealed class ProjectBuildService
                 _db.OeProjectBuildCommits.Add(SummaryNote(orgId, build.Id, clone.RepositoryId,
                     "Pull request build: its commits are listed on the pull request."));
             }
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             return;
         }
 
-        var prevByRepo = await FindChangelogBaselineAsync(_db, build, ct).ConfigureAwait(false);
+        var prevByRepo = await FindChangelogBaselineAsync(_db, build, ct);
 
         foreach (var clone in clones)
         {
@@ -1278,7 +1418,7 @@ public sealed class ProjectBuildService
             {
                 var ancestry = await _processRunner.RunAsync(new ProcessRunRequest(
                     gitPath, new[] { "-C", clone.Dir, "merge-base", "--is-ancestor", prevSha, "HEAD" }, clone.Dir,
-                    Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
+                    Timeout: LocalGitTimeout), ct);
                 if (!ancestry.Succeeded)
                 {
                     rows.Add(SummaryNote(orgId, build.Id, clone.RepositoryId.Value,
@@ -1289,8 +1429,8 @@ public sealed class ProjectBuildService
                     var log = await _processRunner.RunAsync(new ProcessRunRequest(
                         gitPath,
                         new[] { "-C", clone.Dir, "log", "--no-merges", "-n", (ChangelogCommitCap + 1).ToString(),
-                                "--pretty=format:%h%an%cI%s", $"{prevSha}..HEAD" },
-                        clone.Dir, Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
+                                "--pretty=format:%h\u001F%an\u001F%cI\u001F%s\u001F%ae", $"{prevSha}..HEAD" },
+                        clone.Dir, Timeout: LocalGitTimeout), ct);
                     var (parsed, truncated) = ParseChangelog(log.StdOut, ChangelogCommitCap);
                     var ordering = 0;
                     foreach (var entry in parsed)
@@ -1303,6 +1443,7 @@ public sealed class ProjectBuildService
                             ShortHash = Truncate(entry.ShortHash, 64),
                             Message = entry.Subject,
                             Author = Truncate(entry.Author, 250),
+                            AuthorEmail = entry.AuthorEmail is { } email ? Truncate(email, 320) : null,
                             CommittedAt = entry.CommittedAt,
                             Ordering = ordering++,
                         });
@@ -1323,7 +1464,7 @@ public sealed class ProjectBuildService
 
             _db.OeProjectBuildCommits.AddRange(rows);
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -1336,29 +1477,44 @@ public sealed class ProjectBuildService
     /// something that shipped (#994), and a pull-request build is of a commit that
     /// isn't on the branch yet, so neither becomes the baseline - the same builds
     /// <c>FindUnchangedAppsAsync</c> leaves out.
+    /// <para>Per repository it is the newest such build that recorded a commit for it: a
+    /// build that could not say which commit it built would otherwise make the next one
+    /// read as the repository's first build (#1453). How far back it looks is capped at
+    /// <see cref="ChangelogBaselineLookback"/> builds.</para>
     /// </summary>
     internal static async Task<Dictionary<int, string>> FindChangelogBaselineAsync(AppDbContext db, OeProjectBuild build, CancellationToken ct)
     {
-        var prevBuildId = await db.OeProjectBuilds.AsNoTracking()
+        var candidates = await db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ProjectId == build.ProjectId && b.PipelineId == build.PipelineId && b.Branch == build.Branch
                         && b.Id != build.Id
                         && b.Status == ProjectBuildStatus.Ready
                         && b.BcTarget == ProjectBuildTarget.Current
                         && b.Trigger != ProjectBuildTrigger.PullRequest)
             .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
-            .Select(b => (int?)b.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .Select(b => b.Id)
+            .Take(ChangelogBaselineLookback)
+            .ToListAsync(ct);
 
         var prevByRepo = new Dictionary<int, string>();
-        if (prevBuildId is null) return prevByRepo;
+        if (candidates.Count == 0) return prevByRepo;
 
-        var prevCommits = await db.OeProjectBuildRepoCommits.AsNoTracking()
-            .Where(c => c.ProjectBuildId == prevBuildId && c.ProjectRepositoryId != null && c.CommitHash != "")
-            .Select(c => new { RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
-            .ToListAsync(ct).ConfigureAwait(false);
-        foreach (var c in prevCommits) prevByRepo[c.RepoId] = c.CommitHash;
+        var rows = await db.OeProjectBuildRepoCommits.AsNoTracking()
+            .Where(c => candidates.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
+            .Select(c => new { c.Id, c.ProjectBuildId, RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
+            .ToListAsync(ct);
+        var newestFirst = candidates.Select((id, rank) => (id, rank)).ToDictionary(x => x.id, x => x.rank);
+        // A build that recorded its commits more than once (a rerun) keeps its latest row.
+        foreach (var group in rows.GroupBy(c => c.RepoId))
+        {
+            prevByRepo[group.Key] = group
+                .OrderBy(c => newestFirst[c.ProjectBuildId]).ThenByDescending(c => c.Id)
+                .First().CommitHash;
+        }
         return prevByRepo;
     }
+
+    /// <summary>How many earlier builds the changelog looks back through for one that recorded its commit.</summary>
+    internal const int ChangelogBaselineLookback = 50;
 
     private static OeProjectBuildCommit SummaryNote(int orgId, int buildId, int? repoId, string text) => new()
     {
@@ -1374,7 +1530,7 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// Parses <c>git log</c> output formatted as short-hash / author / committer-date
-    /// / subject, separated by the ASCII unit-separator (0x1F) with one commit per
+    /// / subject / author email (missing from output recorded before #1464), separated by the ASCII unit-separator (0x1F) with one commit per
     /// line, into changelog entries. Returns whether the range exceeded
     /// <paramref name="cap"/> (the caller passed <c>cap + 1</c> to <c>-n</c>).
     /// </summary>
@@ -1386,10 +1542,11 @@ public sealed class ProjectBuildService
         foreach (var line in stdout.Split('\n'))
         {
             if (line.Length == 0) continue;
-            var parts = line.Split('');
+            var parts = line.Split('\u001F');
             if (parts.Length < 4) continue;
             DateTime? date = DateTimeOffset.TryParse(parts[2].Trim(), out var dto) ? dto.UtcDateTime : null;
-            entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim()));
+            entries.Add(new ChangelogEntry(parts[0].Trim(), parts[1].Trim(), date, parts[3].Trim(),
+                parts.Length > 4 && parts[4].Trim() is { Length: > 0 } email ? email : null));
         }
 
         var truncated = entries.Count > cap;
@@ -1404,7 +1561,7 @@ public sealed class ProjectBuildService
     /// <summary>Replaces the build's retained deliverables with <paramref name="artifacts"/> (clears stale rows so a retry doesn't duplicate).</summary>
     private async Task PersistArtifactsAsync(OeProjectBuild build, List<PendingArtifact> artifacts, CancellationToken ct)
     {
-        var stale = await _db.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false);
+        var stale = await _db.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == build.Id).ToListAsync(ct);
         if (stale.Count > 0) _db.OeProjectBuildArtifacts.RemoveRange(stale);
 
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -1425,13 +1582,13 @@ public sealed class ProjectBuildService
                 CreatedAt = now,
             });
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>Replaces the build's logs with <paramref name="logs"/> (idempotent across the success-path and the failure finally).</summary>
     private async Task PersistLogsAsync(OeProjectBuild build, List<PendingLog> logs, CancellationToken ct)
     {
-        var stale = await _db.OeProjectBuildLogs.Where(l => l.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false);
+        var stale = await _db.OeProjectBuildLogs.Where(l => l.ProjectBuildId == build.Id).ToListAsync(ct);
         if (stale.Count > 0) _db.OeProjectBuildLogs.RemoveRange(stale);
 
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -1449,7 +1606,7 @@ public sealed class ProjectBuildService
                 CreatedAt = now,
             });
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -1460,7 +1617,7 @@ public sealed class ProjectBuildService
     private async Task PersistDiagnosticsAsync(OeProjectBuild build, List<PendingDiagnostic> diagnostics, CancellationToken ct)
     {
         var stale = await _db.OeProjectBuildDiagnostics
-            .Where(d => d.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false);
+            .Where(d => d.ProjectBuildId == build.Id).ToListAsync(ct);
         if (stale.Count == 0 && diagnostics.Count == 0) return;
         if (stale.Count > 0) _db.OeProjectBuildDiagnostics.RemoveRange(stale);
 
@@ -1481,7 +1638,7 @@ public sealed class ProjectBuildService
                 Ordering = ordering++,
             });
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     // ── Clone ───────────────────────────────────────────────────────────
@@ -1536,7 +1693,7 @@ public sealed class ProjectBuildService
             }
             else
             {
-                credentials = await _credentials.ResolveAsync(repo.Provider, ct).ConfigureAwait(false);
+                credentials = await _credentials.ResolveAsync(repo.Provider, ct);
             }
             if (credentials.Count == 0)
             {
@@ -1565,8 +1722,7 @@ public sealed class ProjectBuildService
             // names the branch - the same as any other clone failure.
             if (branch is not null) args.AddRange(["--branch", branch]);
             args.AddRange([repo.Url, dest]);
-            var (result, used, cloneFailure) = await CloneWithAsync(gitPath, args, buildRoot, dest, BuildCloneTimeout(), credentials, repo, ct)
-                .ConfigureAwait(false);
+            var (result, used, cloneFailure) = await CloneWithAsync(gitPath, args, buildRoot, dest, BuildCloneTimeout(), credentials, repo, ct);
             var pat = used.Secret;
             var env = GitAuthEnv(repo.Provider, pat);
             var cloneLog = Sanitize(string.Join("\n", new[] { result.StdOut, result.StdErr }.Where(s => !string.IsNullOrWhiteSpace(s))).Trim(), credentials);
@@ -1580,19 +1736,21 @@ public sealed class ProjectBuildService
                 // one, which is the point.
                 // The branch is read before that checkout, which detaches HEAD: a build
                 // on push of the default branch still records which branch it was.
-                var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
+                var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct) : branch;
                 var commit = options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id
                     ? headSha
                     : options.PinnedCommits?.GetValueOrDefault(repo.Id);
                 if (commit is not null)
                 {
                     var checkedOut = await CheckoutCommitAsync(gitPath, dest, commit, env, pat, repo, logs, results,
-                        shallow: options.InstallationToken is not null, ct)
-                        .ConfigureAwait(false);
+                        shallow: options.InstallationToken is not null, ct);
                     if (!checkedOut) continue;
                 }
 
-                var (sha, date) = await CaptureCommitAsync(gitPath, dest, ct).ConfigureAwait(false);
+                var (sha, date) = await CaptureCommitAsync(gitPath, dest, ct);
+                // git checked out exactly this commit a moment ago, so when it can't name
+                // HEAD now, the commit it was asked for is the answer (#1453).
+                if (sha is null && commit is { Length: 40 }) sha = commit;
                 clones.Add(new ClonedRepo(dest, repo.Url, sha, date, repo.Id, repo.DisplayName, clonedBranch));
                 logs.Add(new PendingLog(repo.Id, repo.DisplayName,
                     $"Cloned {repo.Url} at {(sha is null ? "(unknown commit)" : sha)} using {used.Source}.{(cloneLog.Length > 0 ? "\n" + cloneLog : "")}"));
@@ -1634,7 +1792,7 @@ public sealed class ProjectBuildService
         {
             used = credentials[i];
             result = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, args, workDir, GitAuthEnv(repo.Provider, used.Secret), timeout), ct).ConfigureAwait(false);
+                gitPath, args, workDir, GitAuthEnv(repo.Provider, used.Secret), timeout), ct);
             if (result.Succeeded && Directory.Exists(dest)) return (result, used, string.Empty);
             attempts.Add((used, result.StdErr));
             if (i + 1 < credentials.Count)
@@ -1760,16 +1918,14 @@ public sealed class ProjectBuildService
             ? ["-C", cloneDir, "fetch", "--depth", "1", "origin", "--", commitSha]
             : ["-C", cloneDir, "fetch", "origin", "--", commitSha];
         var outcome = await _processRunner.RunAsync(new ProcessRunRequest(
-            gitPath, fetch, cloneDir, env, BuildCloneTimeout()), ct)
-            .ConfigureAwait(false);
+            gitPath, fetch, cloneDir, env, BuildCloneTimeout()), ct);
         if (outcome.Succeeded)
         {
             outcome = await _processRunner.RunAsync(new ProcessRunRequest(
                 gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env,
                 // The clone is blobless, so the checkout downloads the commit's files:
                 // it gets the clone's limit, not the local one.
-                BuildCloneTimeout()), ct)
-                .ConfigureAwait(false);
+                BuildCloneTimeout()), ct);
             if (outcome.Succeeded)
             {
                 logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Checked out {commitSha}."));
@@ -1809,13 +1965,32 @@ public sealed class ProjectBuildService
             // %H = full SHA, %cI = committer date (strict ISO-8601), tab-separated.
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
                 gitPath, new[] { "-C", cloneDir, "show", "-s", "--format=%H%x09%cI", "HEAD" }, cloneDir,
-                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
-            if (!r.Succeeded) return (null, null);
-            var parts = r.StdOut.Trim().Split('\t');
-            var sha = parts.Length > 0 && parts[0].Trim().Length > 0 ? parts[0].Trim() : null;
-            DateTime? date = parts.Length > 1 && DateTimeOffset.TryParse(parts[1].Trim(), out var dto)
-                ? dto.UtcDateTime : null;
-            return (sha, date);
+                LocalGitEnv, LocalGitTimeout), ct);
+            var parts = r.Succeeded ? r.StdOut.Trim().Split('\t') : [];
+            var sha = parts.Length > 0 && CommitShaRegex.IsMatch(parts[0].Trim()) ? parts[0].Trim() : null;
+            if (sha is not null)
+            {
+                DateTime? date = parts.Length > 1 && DateTimeOffset.TryParse(parts[1].Trim(), out var dto)
+                    ? dto.UtcDateTime : null;
+                return (sha, date);
+            }
+
+            // A build that can't say which commit it built has nothing to compare the next
+            // one with, so every extension reads as changed and is published again (#1453).
+            // git's own words are the only clue to why, so they are logged, and the commit is
+            // asked for a second way that reads only the ref, not the commit object.
+            _logger.LogWarning(
+                "Could not read the commit for {CloneDir}: git show exited {ExitCode}: {StdErr}",
+                cloneDir, r.ExitCode, r.StdErr.Trim());
+            var parsed = await _processRunner.RunAsync(new ProcessRunRequest(
+                gitPath, new[] { "-C", cloneDir, "rev-parse", "--verify", "HEAD" }, cloneDir,
+                LocalGitEnv, LocalGitTimeout), ct);
+            var fallback = parsed.StdOut.Trim();
+            if (parsed.Succeeded && CommitShaRegex.IsMatch(fallback)) return (fallback, null);
+            _logger.LogWarning(
+                "Could not read the commit for {CloneDir}: git rev-parse exited {ExitCode}: {StdErr}",
+                cloneDir, parsed.ExitCode, parsed.StdErr.Trim());
+            return (null, null);
         }
         catch (Exception ex)
         {
@@ -1835,7 +2010,7 @@ public sealed class ProjectBuildService
         {
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
                 gitPath, new[] { "-C", cloneDir, "symbolic-ref", "--short", "-q", "HEAD" }, cloneDir,
-                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
+                Timeout: LocalGitTimeout), ct);
             var name = r.Succeeded ? r.StdOut.Trim() : string.Empty;
             return name.Length > 0 && GitBranchName.IsValid(name) ? name : null;
         }
@@ -1887,7 +2062,7 @@ public sealed class ProjectBuildService
         await _db.OeProjectSymbols.AsNoTracking()
             .Where(s => s.ProjectId == projectId)
             .Select(s => new SupplementalSymbol(s.FileName, s.Content))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
     /// <summary>
     /// Writes the stored uploads into the symbol dir, overwriting a same-named
@@ -1899,7 +2074,7 @@ public sealed class ProjectBuildService
         foreach (var symbol in symbols)
         {
             var dest = Path.Combine(symbolsDir, Path.GetFileName(symbol.FileName));
-            await File.WriteAllBytesAsync(dest, symbol.Content, ct).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(dest, symbol.Content, ct);
         }
         if (symbols.Count > 0)
         {
@@ -1942,8 +2117,7 @@ public sealed class ProjectBuildService
         var lines = new List<string>();
         var fromFeeds = new List<ResolvedSymbolPackage>();
         var unresolved = new List<UnresolvedSymbol>(
-            await ResolveFromSymbolFeedsAsync(dependencies, symbolsDir, provided, applicationVersion, country, lines, fromFeeds, ct)
-                .ConfigureAwait(false));
+            await ResolveFromSymbolFeedsAsync(dependencies, symbolsDir, provided, applicationVersion, country, lines, fromFeeds, ct));
 
         // The feeds only know published apps; a PTE another solution in the
         // organisation builds is in that solution's retained build output.
@@ -1951,7 +2125,7 @@ public sealed class ProjectBuildService
         try
         {
             var outcome = await new BuildArtifactSymbolResolver(_db, _logger).ResolveAsync(
-                new BuildArtifactSymbolRequest(projectId, dependencies, symbolsDir, provided, applicationVersion), ct).ConfigureAwait(false);
+                new BuildArtifactSymbolRequest(projectId, dependencies, symbolsDir, provided, applicationVersion), ct);
             foreach (var hit in outcome.Resolved)
             {
                 fromBuilds.Add(hit.AppId);
@@ -1965,7 +2139,7 @@ public sealed class ProjectBuildService
             if (outcome.TransitiveMisses.Count > 0)
             {
                 unresolved.AddRange(await ResolveFromSymbolFeedsAsync(
-                    outcome.TransitiveMisses, symbolsDir, provided, applicationVersion, country, lines, fromFeeds, ct).ConfigureAwait(false));
+                    outcome.TransitiveMisses, symbolsDir, provided, applicationVersion, country, lines, fromFeeds, ct));
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -1997,7 +2171,7 @@ public sealed class ProjectBuildService
         try
         {
             outcome = await _symbolFeeds.ResolveAsync(
-                new SymbolFeedRequest(dependencies, symbolsDir, provided, applicationVersion, country), ct).ConfigureAwait(false);
+                new SymbolFeedRequest(dependencies, symbolsDir, provided, applicationVersion, country), ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -2051,13 +2225,14 @@ public sealed class ProjectBuildService
         var existing = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
             .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
 
-        // A next-version build parents onto the catalogue's preview of that
-        // Major.Minor, the one the daily sweep imports (#999), and refreshes it
-        // by the sweep's own rule: older than PreviewRefreshAge, a different
-        // insider build, and not mid-ingest. The org keeps one preview per
-        // Major.Minor and country whether or not it has opted into the sweep.
+        // Only a current-version build gets here: a next-version build links the
+        // catalogue's preview as it is (ExistingParentReleaseAsync, #1140) and leaves
+        // refreshing it to the daily sweep. A current build resolves a released
+        // artifact, so the prerelease clause below - the sweep's own refresh rule:
+        // older than PreviewRefreshAge, a different insider build, not mid-ingest -
+        // only applies should a prerelease ever be resolved here.
         int? stalePreviewId = null;
         if (existing is not null)
         {
@@ -2072,7 +2247,7 @@ public sealed class ProjectBuildService
             if (!refresh)
             {
                 return existing.Status == "ingesting"
-                    ? await AfterIngestAsync(buildReleaseId, existing.Id, resolved.Label, ct).ConfigureAwait(false)
+                    ? await AfterIngestAsync(buildReleaseId, existing.Id, resolved.Label, ct)
                     : existing.Id;
             }
             stalePreviewId = existing.Id;
@@ -2093,7 +2268,7 @@ public sealed class ProjectBuildService
             int parentId;
             if (stalePreviewId is null)
             {
-                parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+                parentId = await _importer.BeginReleaseAsync(metadata, ct);
                 createdId = parentId;
                 tracked = _importer.Ingests.Track(parentId);
             }
@@ -2101,12 +2276,12 @@ public sealed class ProjectBuildService
             {
                 // One transaction, so a refused replacement (the quota guard) leaves
                 // the org the preview it had - the same rule the daily sweep keeps.
-                await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
-                var stale = await _db.OeReleases.FirstAsync(r => r.Id == stalePreviewId.Value, ct).ConfigureAwait(false);
+                await using var tx = await _db.Database.BeginTransactionAsync(ct);
+                var stale = await _db.OeReleases.FirstAsync(r => r.Id == stalePreviewId.Value, ct);
                 stale.DeletedAt = stale.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-                parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-                await tx.CommitAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
+                parentId = await _importer.BeginReleaseAsync(metadata, ct);
+                await tx.CommitAsync(ct);
                 createdId = parentId;
                 tracked = _importer.Ingests.Track(parentId);
                 _logger.LogInformation("Replaced release {OldReleaseId} ({Status}) with build {Version} for a project build.",
@@ -2115,7 +2290,7 @@ public sealed class ProjectBuildService
 
             // Whole Business Central releases import one at a time, here and on the
             // import worker alike (#1180).
-            using var heavy = await EnterHeavyImportAsync(buildReleaseId, ct).ConfigureAwait(false);
+            using var heavy = await EnterHeavyImportAsync(buildReleaseId, ct);
             var openedStreams = new List<Stream>();
             System.IO.Compression.ZipArchive? appArchive = null;
             System.IO.Compression.ZipArchive? platArchive = null;
@@ -2129,7 +2304,7 @@ public sealed class ProjectBuildService
                     platArchive = archive;
                     uploads = uploads.Concat(platUploads).ToList();
                 }
-                await _importer.ProcessReleaseAsync(parentId, uploads, storeSymbolReference: false, ct).ConfigureAwait(false);
+                await _importer.ProcessReleaseAsync(parentId, uploads, storeSymbolReference: false, ct);
             }
             finally
             {
@@ -2150,7 +2325,7 @@ public sealed class ProjectBuildService
             // thrown, the build is being cancelled, so that is what it hears.
             if (createdId is { } abandoned)
             {
-                await MarkAbandonedImportFailedAsync(abandoned).ConfigureAwait(false);
+                await MarkAbandonedImportFailedAsync(abandoned);
             }
             ct.ThrowIfCancellationRequested();
             throw;
@@ -2169,7 +2344,7 @@ public sealed class ProjectBuildService
                 .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
                 .Where(r => r.Status != "failed")
                 .Select(r => (int?)r.Id)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             if (adopted is not null)
             {
                 _logger.LogInformation(
@@ -2177,7 +2352,7 @@ public sealed class ProjectBuildService
                     resolved.Label, adopted);
                 return adopted == createdId
                     ? adopted
-                    : await AfterIngestAsync(buildReleaseId, adopted.Value, resolved.Label, ct).ConfigureAwait(false);
+                    : await AfterIngestAsync(buildReleaseId, adopted.Value, resolved.Label, ct);
             }
 
             _logger.LogError(ex,
@@ -2209,7 +2384,7 @@ public sealed class ProjectBuildService
         try
         {
             _db.ChangeTracker.Clear();
-            await _importer.MarkFailedAsync(releaseId, StoppedImportMessage, CancellationToken.None).ConfigureAwait(false);
+            await _importer.MarkFailedAsync(releaseId, StoppedImportMessage, CancellationToken.None);
             _logger.LogInformation("Marked release {ReleaseId} failed: the build importing it was stopped.", releaseId);
         }
         catch (Exception ex)
@@ -2226,8 +2401,7 @@ public sealed class ProjectBuildService
     /// </summary>
     private async Task<IDisposable> EnterHeavyImportAsync(int buildReleaseId, CancellationToken ct) =>
         _importer.Ingests.TryEnterHeavy()
-        ?? await StepAsideAsync(buildReleaseId, () => _importer.Ingests.EnterHeavyAsync(ct), ct, comeBackAtOnce: true)
-            .ConfigureAwait(false);
+        ?? await StepAsideAsync(buildReleaseId, () => _importer.Ingests.EnterHeavyAsync(ct), ct, comeBackAtOnce: true);
 
     /// <summary>Runs <paramref name="wait"/> without holding this build's place in the queue, when there is a queue.</summary>
     private Task<T> StepAsideAsync<T>(int buildReleaseId, Func<Task<T>> wait, CancellationToken ct, bool comeBackAtOnce = false) =>
@@ -2267,11 +2441,11 @@ public sealed class ProjectBuildService
                 var status = await _db.OeReleases.AsNoTracking()
                     .Where(r => r.Id == releaseId)
                     .Select(r => r.Status)
-                    .FirstOrDefaultAsync(token).ConfigureAwait(false);
+                    .FirstOrDefaultAsync(token);
                 var jobs = await _db.OeImportJobs.AsNoTracking()
                     .Where(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"))
                     .Select(j => j.Status)
-                    .ToListAsync(token).ConfigureAwait(false);
+                    .ToListAsync(token);
                 return new IngestState(
                     status,
                     WaitingForWorker: jobs.Contains("queued"),
@@ -2286,8 +2460,7 @@ public sealed class ProjectBuildService
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(r => r.Status, "failed")
                         .SetProperty(r => r.StatusMessage, AbandonedImportMessage)
-                        .SetProperty(r => r.UpdatedAt, _clock.GetUtcNow().UtcDateTime), token)
-                    .ConfigureAwait(false);
+                        .SetProperty(r => r.UpdatedAt, _clock.GetUtcNow().UtcDateTime), token);
             },
             wait => StepAsideAsync(buildReleaseId, wait, ct),
             _clock, _logger, ct);
@@ -2313,9 +2486,9 @@ public sealed class ProjectBuildService
         Func<CancellationToken, Task> markAbandoned, Func<Func<Task<int?>>, Task<int?>> stepAside,
         TimeProvider clock, ILogger logger, CancellationToken ct)
     {
-        var first = await read(ct).ConfigureAwait(false);
+        var first = await read(ct);
         if (Settled(first, releaseId, out var settled)) return settled;
-        return await stepAside(PollAsync).ConfigureAwait(false);
+        return await stepAside(PollAsync);
 
         async Task<int?> PollAsync()
         {
@@ -2334,7 +2507,7 @@ public sealed class ProjectBuildService
                     logger.LogWarning(
                         "Release {Label} (release {ReleaseId}) is importing but nothing is working on it; marking it failed and carrying on without it.",
                         label, releaseId);
-                    await markAbandoned(ct).ConfigureAwait(false);
+                    await markAbandoned(ct);
                     return null;
                 }
                 else
@@ -2347,8 +2520,8 @@ public sealed class ProjectBuildService
                         label, releaseId);
                     return releaseId;
                 }
-                await Task.Delay(IngestPollInterval, clock, ct).ConfigureAwait(false);
-                state = await read(ct).ConfigureAwait(false);
+                await Task.Delay(IngestPollInterval, clock, ct);
+                state = await read(ct);
                 if (Settled(state, releaseId, out var done)) return done;
             }
         }
@@ -2383,7 +2556,7 @@ public sealed class ProjectBuildService
         foreach (var package in packages)
         {
             ct.ThrowIfCancellationRequested();
-            var id = await EnsureVendorReleaseAsync(package, symbolsDir, parentReleaseId, buildReleaseId, lines, ct).ConfigureAwait(false);
+            var id = await EnsureVendorReleaseAsync(package, symbolsDir, parentReleaseId, buildReleaseId, lines, ct);
             if (id is { } found && !ids.Contains(found)) ids.Add(found);
         }
         if (lines.Count > 0) logs.Add(new PendingLog(null, "Symbols", string.Join("\n", lines)));
@@ -2399,14 +2572,14 @@ public sealed class ProjectBuildService
     {
         var dedupKey = VendorDedupKey(package.AppId, package.Version);
         var label = $"{package.Name} {package.Version} (symbols)";
-        var existing = await FindVendorReleaseAsync(dedupKey, ct).ConfigureAwait(false);
-        if (existing is not null) return await AdoptAsync(buildReleaseId, existing.Value, label, lines, ct).ConfigureAwait(false);
+        var existing = await FindVendorReleaseAsync(dedupKey, ct);
+        if (existing is not null) return await AdoptAsync(buildReleaseId, existing.Value, label, lines, ct);
 
         byte[] bytes;
         AppManifest? manifest;
         try
         {
-            bytes = await File.ReadAllBytesAsync(Path.Combine(symbolsDir, Path.GetFileName(package.FileName)), ct).ConfigureAwait(false);
+            bytes = await File.ReadAllBytesAsync(Path.Combine(symbolsDir, Path.GetFileName(package.FileName)), ct);
             using var probe = new MemoryStream(bytes, writable: false);
             manifest = AppPackageReader.TryReadManifest(probe);
         }
@@ -2432,12 +2605,12 @@ public sealed class ProjectBuildService
             var metadata = new ReleaseImportMetadata(
                 Label: label, Kind: "third_party", ParentReleaseId: parentReleaseId, ApplicationVersionId: null,
                 Publisher: manifest.Publisher, DedupKey: dedupKey);
-            var vendorId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+            var vendorId = await _importer.BeginReleaseAsync(metadata, ct);
             createdId = vendorId;
             using var stream = new MemoryStream(bytes, writable: false);
             await _importer.ProcessReleaseAsync(
                 vendorId, [new AppFileUpload(Path.GetFileName(package.FileName), stream, SourceZipStream: null)],
-                storeSymbolReference: false, ct).ConfigureAwait(false);
+                storeSymbolReference: false, ct);
             _logger.LogInformation("Ingested vendor symbols {Label} (release {ReleaseId}) for a project build.", label, vendorId);
             lines.Add($"Added {label} to the Object Explorer.");
             return vendorId;
@@ -2448,7 +2621,7 @@ public sealed class ProjectBuildService
             // rather than leave it importing for later builds to wait on (#1180).
             if (createdId is { } abandoned)
             {
-                await MarkAbandonedImportFailedAsync(abandoned).ConfigureAwait(false);
+                await MarkAbandonedImportFailedAsync(abandoned);
             }
             ct.ThrowIfCancellationRequested();
             throw;
@@ -2458,11 +2631,11 @@ public sealed class ProjectBuildService
             // Same race as the parent (#431): another build may have won the
             // unique dedup-key insert. Adopt its Release if one now exists.
             _db.ChangeTracker.Clear();
-            var adopted = await FindVendorReleaseAsync(dedupKey, ct).ConfigureAwait(false);
+            var adopted = await FindVendorReleaseAsync(dedupKey, ct);
             // Its own failed import is not waited on: nobody else is ingesting it.
             if (adopted is not null && adopted.Value.Id != createdId)
             {
-                return await AdoptAsync(buildReleaseId, adopted.Value, label, lines, ct).ConfigureAwait(false);
+                return await AdoptAsync(buildReleaseId, adopted.Value, label, lines, ct);
             }
 
             _logger.LogWarning(ex, "Failed to ingest vendor symbols {Label}; the build continues without them.", label);
@@ -2476,13 +2649,13 @@ public sealed class ProjectBuildService
         var row = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == dedupKey && r.DeletedAt == null)
             .Select(r => new { r.Id, r.Status })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         return row is null ? null : (row.Id, row.Status);
     }
 
     private async Task<int?> AdoptAsync(int buildReleaseId, (int Id, string Status) release, string label, List<string> lines, CancellationToken ct)
     {
-        if (release.Status == "ingesting" && await AfterIngestAsync(buildReleaseId, release.Id, label, ct).ConfigureAwait(false) is null)
+        if (release.Status == "ingesting" && await AfterIngestAsync(buildReleaseId, release.Id, label, ct) is null)
         {
             release = (release.Id, "failed");
         }
@@ -2513,7 +2686,7 @@ public sealed class ProjectBuildService
             ? new Dictionary<string, string> { ["DOTNET_ROLL_FORWARD"] = "LatestMajor" }
             : null;
 
-        var result = await _processRunner.RunAsync(new ProcessRunRequest(compiler.FileName, args, app.ProjectDir, env, CompileTimeout()), ct).ConfigureAwait(false);
+        var result = await _processRunner.RunAsync(new ProcessRunRequest(compiler.FileName, args, app.ProjectDir, env, CompileTimeout()), ct);
         // alc writes diagnostics to stdout; keep both streams for the build log.
         var log = string.Join("\n", new[] { result.StdOut, result.StdErr }.Where(s => !string.IsNullOrWhiteSpace(s))).Trim();
         if (result.Succeeded && File.Exists(outFile))
@@ -2536,11 +2709,11 @@ public sealed class ProjectBuildService
         var rows = await _db.OeProjectSymbols.AsNoTracking()
             .Where(s => s.ProjectId == projectId)
             .Select(s => new { s.FileName, s.Content })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var packages = new List<StoredSymbolPackage>(rows.Count);
         foreach (var row in rows)
         {
-            var manifest = await AppPackageReader.TryReadManifestAsync(row.Content, ct).ConfigureAwait(false);
+            var manifest = await AppPackageReader.TryReadManifestAsync(row.Content, ct);
             if (manifest is null) continue;
             packages.Add(new StoredSymbolPackage(row.FileName, manifest.AppId, manifest.Publisher, manifest.Name, manifest.Version));
         }
@@ -2563,7 +2736,7 @@ public sealed class ProjectBuildService
                 from e in environments
                 join a in _db.OeEnvironmentApps.AsNoTracking() on e.Id equals a.EnvironmentId
                 select new { e.Name, e.Type, a.AppId, a.Version })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows
             .Select(r => new InstalledAppFact(r.Name, Bc.BcEnvironmentTypes.IsProduction(r.Type), r.AppId, r.Version))
             .ToList();
@@ -2580,13 +2753,13 @@ public sealed class ProjectBuildService
     private async Task FinalizeReleaseAsync(
         int releaseId, string label, int? parentReleaseId, IReadOnlyList<int> dependencyReleaseIds, CancellationToken ct)
     {
-        var release = await _db.OeReleases.FirstOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false);
+        var release = await _db.OeReleases.FirstOrDefaultAsync(r => r.Id == releaseId, ct);
         if (release is null) return;
         release.Label = label;
         release.ParentReleaseId = parentReleaseId;
         release.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
-        var stale = await _db.OeReleaseDependencies.Where(d => d.ReleaseId == releaseId).ToListAsync(ct).ConfigureAwait(false);
+        var stale = await _db.OeReleaseDependencies.Where(d => d.ReleaseId == releaseId).ToListAsync(ct);
         _db.OeReleaseDependencies.RemoveRange(stale.Where(d => !dependencyReleaseIds.Contains(d.DependencyReleaseId)));
         var now = _clock.GetUtcNow().UtcDateTime;
         foreach (var dependencyId in dependencyReleaseIds.Where(id => id != releaseId && stale.All(d => d.DependencyReleaseId != id)))
@@ -2599,7 +2772,7 @@ public sealed class ProjectBuildService
                 CreatedAt = now,
             });
         }
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     // ── Pure helpers (unit-tested) ──────────────────────────────────────
@@ -2721,7 +2894,7 @@ public sealed class ProjectBuildService
         // remote into a fast, non-zero failure instead of a forever-hang.
         ["GIT_TERMINAL_PROMPT"] = "0",
         ["GCM_INTERACTIVE"] = "never",
-        ["GIT_CONFIG_COUNT"] = "5",
+        ["GIT_CONFIG_COUNT"] = "7",
         ["GIT_CONFIG_KEY_0"] = "http.extraHeader",
         ["GIT_CONFIG_VALUE_0"] = BasicAuthHeaderValue(provider, pat),
         ["GIT_CONFIG_KEY_1"] = "credential.helper",
@@ -2732,6 +2905,12 @@ public sealed class ProjectBuildService
         ["GIT_CONFIG_VALUE_3"] = "60",
         ["GIT_CONFIG_KEY_4"] = "core.symlinks",
         ["GIT_CONFIG_VALUE_4"] = "false",
+        // A clone lives for one build, so it never needs tidying, and git's background
+        // repack could otherwise still be running while the build reads the clone (#1453).
+        ["GIT_CONFIG_KEY_5"] = "maintenance.auto",
+        ["GIT_CONFIG_VALUE_5"] = "false",
+        ["GIT_CONFIG_KEY_6"] = "gc.auto",
+        ["GIT_CONFIG_VALUE_6"] = "0",
     };
 
     /// <summary>
@@ -2822,7 +3001,7 @@ public sealed class ProjectBuildService
         return text;
     }
 
-    private static string Sanitize(string text, string secret)
+    internal static string Sanitize(string text, string secret)
     {
         if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(secret)) return text;
         text = text.Replace(secret, "***");
@@ -2950,4 +3129,4 @@ public sealed record ProjectBuildOutcome(
     bool IsPreview = false);
 
 /// <summary>One parsed changelog commit (short hash, author, committer date, subject).</summary>
-public sealed record ChangelogEntry(string ShortHash, string Author, DateTime? CommittedAt, string Subject);
+public sealed record ChangelogEntry(string ShortHash, string Author, DateTime? CommittedAt, string Subject, string? AuthorEmail = null);

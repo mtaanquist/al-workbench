@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Workers;
 
@@ -28,7 +29,113 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
     // the sibling queues: the durable oe_import_jobs row is this queue's guard
     // against a duplicate run, and a re-import of the same release is a
     // legitimate request rather than a double-click to coalesce.
-    public ReleaseImportQueue() : base(capacity: 16) { }
+    //
+    // Given the maintenance flag (production DI always does), an import queued
+    // before a restore replaced the database is dropped rather than run against
+    // the restored one (#1538).
+    public ReleaseImportQueue(Operations.MaintenanceModeState? maintenance = null)
+        : base(capacity: 16, maintenance: maintenance)
+    {
+        _maintenance = maintenance;
+    }
+
+    private readonly Operations.MaintenanceModeState? _maintenance;
+
+    private static readonly DateTime ProcessStartedUtc =
+        System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime();
+
+    /// <summary>
+    /// Since when this queue's jobs come from this process and this database: the
+    /// later of the process start and the last restore. A <c>queued</c> row written
+    /// before then was queued by a process or a database that is gone, so nothing
+    /// feeds it unless startup queued it again, which stamps it anew (#1578, OEI2-3).
+    /// </summary>
+    public DateTime FedSinceUtc
+    {
+        get
+        {
+            var restored = _maintenance?.EpochAdvancedAtUtc ?? default;
+            return restored > ProcessStartedUtc ? restored : ProcessStartedUtc;
+        }
+    }
+
+    /// <summary>
+    /// A job dropped across a restore frees its paced slot like one the worker took,
+    /// and its staged upload, which only the job's run would otherwise delete.
+    /// </summary>
+    protected override void OnDiscarded(ReleaseImportJob job, long epoch)
+    {
+        MarkPickedUp(job);
+        DeleteStagedUpload(job);
+    }
+
+    /// <summary>
+    /// Deletes the temp file an uploaded ZIP or C/AL export was staged to, for a job
+    /// that is dropped without running. Without this the file stays in the
+    /// container's <c>/tmp</c> until the next start sweeps it, and a few dropped
+    /// multi-GB uploads can fill the scratch space new uploads are staged to (#1599).
+    /// </summary>
+    internal static void DeleteStagedUpload(ReleaseImportJob job)
+    {
+        var path = job.Source switch
+        {
+            ReleaseImportSource.StagedZip zip => zip.TempPath,
+            ReleaseImportSource.CalTxt cal => cal.TempPath,
+            ReleaseImportSource.AddModules add => add.TempPath,
+            _ => null,
+        };
+        if (path is null) return;
+        try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>
+    /// How many paced jobs may wait in the channel at once. One keeps the worker
+    /// busy (the next backfill is always ready) while an import someone submits
+    /// meanwhile waits behind at most one of them, plus the one running (#1542).
+    /// </summary>
+    public const int PacedJobLimit = 1;
+
+    private readonly SemaphoreSlim _pacedSlots = new(PacedJobLimit, PacedJobLimit);
+    private readonly ConcurrentDictionary<long, byte> _pacedRowIds = new();
+
+    /// <summary>
+    /// Queues a job of a bulk run (the system-reference backfill of every release)
+    /// without letting the run fill the channel: waits until fewer than
+    /// <see cref="PacedJobLimit"/> paced jobs are waiting, then writes it. The worker
+    /// frees the slot through <see cref="MarkPickedUp"/>. Without this the feed kept
+    /// all sixteen slots full for hours, so a user's import, a Retry or the nightly
+    /// auto-import sat behind sixteen backfills.
+    /// </summary>
+    /// <param name="epoch">
+    /// The restore epoch the job was built under (see <see cref="JobQueue{TJob}.Epoch"/>).
+    /// Defaults to the epoch at the call, taken before the wait for a slot, so a
+    /// restore during that wait still drops the job (#1538).
+    /// </param>
+    public async Task EnqueuePacedAsync(ReleaseImportJob job, CancellationToken ct = default, long? epoch = null)
+    {
+        var builtUnder = epoch ?? Epoch;
+        await _pacedSlots.WaitAsync(ct).ConfigureAwait(false);
+        _pacedRowIds[job.JobRowId] = 0;
+        try
+        {
+            await EnqueueAsync(job, ct, builtUnder).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (_pacedRowIds.TryRemove(job.JobRowId, out _)) _pacedSlots.Release();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The worker calls this as it takes a job off the channel. Frees a paced slot
+    /// when the job was queued by <see cref="EnqueuePacedAsync"/>; any other job is
+    /// ignored.
+    /// </summary>
+    public void MarkPickedUp(ReleaseImportJob job)
+    {
+        if (_pacedRowIds.TryRemove(job.JobRowId, out _)) _pacedSlots.Release();
+    }
 }
 
 /// <summary>
@@ -126,6 +233,17 @@ public abstract record ReleaseImportSource
     /// container-local <c>/tmp</c> and so is never resumed after a restart.
     /// </summary>
     public sealed record CalTxt(string TempPath, string EncodingName) : ReleaseImportSource;
+
+    /// <summary>
+    /// More <c>.app</c> files for a release that is already imported (Add modules,
+    /// #216), staged to a temp ZIP the worker walks like an uploaded folder ZIP. The
+    /// release keeps its data: the request flipped it to <c>ingesting</c>, and the
+    /// job hands it back <c>ready</c> whatever happens. Queued rather than run in the
+    /// request so it takes the one-heavy-import gate (#1549, #1602). Like
+    /// <see cref="StagedZip"/> it is never resumed after a restart; the restart puts
+    /// the release back to <c>ready</c> unchanged instead.
+    /// </summary>
+    public sealed record AddModules(string TempPath) : ReleaseImportSource;
 
     /// <summary>
     /// Maintenance re-extraction over already-stored source: repopulate

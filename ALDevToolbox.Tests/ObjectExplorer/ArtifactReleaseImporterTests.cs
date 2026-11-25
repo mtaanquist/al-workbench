@@ -52,13 +52,13 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
-        var management = new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+        var management = new ReleaseManagementService(ctx, _db.OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
         return new ArtifactReleaseImporter(
             artifacts, importer, queue, persistedJobs, management, ctx, _db.OrgContext, _clock,
             NullLogger<ArtifactReleaseImporter>.Instance);
@@ -191,6 +191,109 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_fails_a_re_run_again_when_its_wipe_is_cut_short()
+    {
+        // #1612: the re-run reopens the release as importing before the long wipe of
+        // the earlier attempt. A wipe cut short (the Artifacts tab left, a timeout)
+        // must not leave it importing with nothing queued.
+        await using (var setup = _db.NewContext())
+        {
+            var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+            failed.StatusMessage = "The download was cut off.";
+            setup.OeReleases.Add(failed);
+            await setup.SaveChangesAsync();
+        }
+        using var request = new CancellationTokenSource();
+        var interceptor = new ReleaseImportRequestServiceTests.OnModuleWipe(token => { request.Cancel(); token.ThrowIfCancellationRequested(); });
+        var queue = new ReleaseImportQueue();
+
+        await using (var ctx = _db.NewContext(interceptor))
+        {
+            var act = () => NewImporter(ctx, queue).ImportAsync("dk", version: null, request.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        interceptor.Calls.Should().Be(1);
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-onprem:28.2:dk");
+        release.Status.Should().Be("failed", "nothing will import it, so the next sweep or click can re-run it");
+        release.StatusMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+        (await read.OeImportJobs.AnyAsync(j => j.ReleaseId == release.Id)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ImportAsync_fails_the_job_row_of_a_re_run_cut_short_at_a_full_queue()
+    {
+        // #1612: the row is written, then the request ends while the queue is full.
+        // Left queued, a restart would resume it and wipe the release, even after a
+        // later re-run had imported it.
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+        failed.StatusMessage = "The download was cut off.";
+        ctx.OeReleases.Add(failed);
+        await ctx.SaveChangesAsync();
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue,
+            new ALDevToolbox.Services.AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+        using var request = new CancellationTokenSource();
+
+        var import = NewImporter(ctx, queue).ImportAsync("dk", version: null, request.Token);
+        while (!import.IsCompleted && !await HasJobRowAsync(failed.Id))
+        {
+            await Task.Delay(20);
+        }
+        await request.CancelAsync();
+
+        await import.Awaiting(t => t.WaitAsync(TimeSpan.FromMinutes(1))).Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failed.Id)).Status.Should().Be("failed");
+        var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.ReleaseId == failed.Id);
+        row.Status.Should().Be("failed");
+        row.ErrorMessage.Should().Be(ReleaseImportService.RetryNotQueuedMessage);
+    }
+
+    private async Task<bool> HasJobRowAsync(int releaseId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeImportJobs.AsNoTracking().AnyAsync(j => j.ReleaseId == releaseId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_does_not_re_run_a_failed_import_for_an_org_over_its_storage_quota()
+    {
+        // #1338: the re-run re-ingests a whole release, so it is a write and the
+        // quota applies to it just as it does to a first import.
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+        failed.StatusMessage = "The download was cut off.";
+        ctx.OeReleases.Add(failed);
+        // A 0 MB default quota puts every org at or over quota.
+        var settings = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        if (settings is null)
+        {
+            settings = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(settings);
+        }
+        settings.DefaultStorageQuotaMb = 0;
+        await ctx.SaveChangesAsync();
+
+        var queue = new ReleaseImportQueue();
+        var act = () => NewImporter(ctx, queue).ImportAsync("dk", version: null);
+
+        (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
+            .Which.Errors.Should().ContainKey("storage");
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failed.Id);
+        release.Status.Should().Be("failed", "the release is left as it was");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+        (await read.OeImportJobs.AnyAsync(j => j.ReleaseId == failed.Id)).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ImportPreviewsAsync_queues_one_flagged_preview_per_upcoming_major()
     {
         await using var ctx = _db.NewContext();
@@ -259,6 +362,38 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse("only the stale preview was re-queued");
     }
 
+    /// <summary>
+    /// #1549: a preview whose import failed is re-run in place the next night, like
+    /// a failed shipped version (#1222), not left failed for the fortnight.
+    /// </summary>
+    [Fact]
+    public async Task ImportPreviewsAsync_re_runs_a_fresh_failed_preview_in_place()
+    {
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk",
+            status: "failed", prerelease: true, importedAt: DateTime.UtcNow.AddDays(-1));
+        failed.StatusMessage = "The download was cut off.";
+        var current = Release("Business Central 30.0 (DK) Preview", "bc-insider:30.0:dk",
+            prerelease: true, bcVersion: "30.0.55227.0");
+        ctx.OeReleases.AddRange(failed, current);
+        await ctx.SaveChangesAsync();
+
+        var queue = new ReleaseImportQueue();
+        var outcomes = await NewImporter(ctx, queue, withInsider: true).ImportPreviewsAsync("dk");
+
+        outcomes.Select(o => o.Status).Should().Equal(ArtifactImportStatus.Queued, ArtifactImportStatus.AlreadyImported);
+        outcomes[0].ReleaseId.Should().Be(failed.Id, "the preview is re-run in place, not duplicated");
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failed.Id);
+        release.Status.Should().Be("ingesting");
+        release.DeletedAt.Should().BeNull();
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.ReleaseId.Should().Be(failed.Id);
+        job.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>()
+            .Which.ApplicationUrl.Should().Be($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.0.55190.0/dk");
+    }
+
     [Fact]
     public async Task ImportPreviewsAsync_keeps_a_fresh_preview_even_when_the_channel_has_a_newer_build()
     {
@@ -280,6 +415,29 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
         await using var read = _db.NewContext();
         (await read.OeReleases.SingleAsync(r => r.Id == fresh.Id)).DeletedAt.Should().BeNull();
+    }
+
+    [Theory]
+    // An hour either side of the refresh age: the boundary is the constant, not a month.
+    [InlineData(-1, false)]
+    [InlineData(1, true)]
+    public async Task ImportPreviewsAsync_replaces_an_older_build_only_once_it_is_past_the_refresh_age(
+        int hoursPastRefreshAge, bool replaced)
+    {
+        await using var ctx = _db.NewContext();
+        var preview = Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk", prerelease: true,
+            bcVersion: "29.0.55000.0",
+            importedAt: DateTime.UtcNow - ArtifactReleaseImporter.PreviewRefreshAge - TimeSpan.FromHours(hoursPastRefreshAge));
+        var current = Release("Business Central 30.0 (DK) Preview", "bc-insider:30.0:dk",
+            prerelease: true, bcVersion: "30.0.55227.0");
+        ctx.OeReleases.AddRange(preview, current);
+        await ctx.SaveChangesAsync();
+
+        var outcomes = await NewImporter(ctx, new ReleaseImportQueue(), withInsider: true).ImportPreviewsAsync("dk");
+
+        outcomes[0].Status.Should().Be(replaced ? ArtifactImportStatus.Replaced : ArtifactImportStatus.AlreadyImported);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.SingleAsync(r => r.Id == preview.Id)).DeletedAt.HasValue.Should().Be(replaced);
     }
 
     [Fact]

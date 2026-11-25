@@ -5,8 +5,9 @@
 
 @*
     "Edit details" on an upgrade's own page (#984): the name, the release it goes to, the
-    evening the team has in mind, and the note. No sheet draws it; it is the header's four
-    fields in the system's dialog, the way the pipeline editors are.
+    evening the team has in mind, the note, and whether a finished update moves the next
+    one's date out. No sheet draws it; it is the header's fields in the system's dialog,
+    the way the pipeline editors are.
 
     The slot is typed as a wall clock in the organisation's display zone - the zone every
     other time on the page is shown in - and stored in UTC. It is advisory: nothing fires
@@ -50,9 +51,8 @@
                         <FieldError Field="TargetVersion" Errors="_errors" />
                     </label>
                     <label class="field">
-                        <span class="field__label">Planned for</span>
+                        <span class="field__label">Planned for<FieldTip Text="@SlotTip" /></span>
                         <input class="input" type="datetime-local" @bind="_plannedLocal" @bind:event="oninput" />
-                        <span class="field__hint">Your time. Start update opens on it.</span>
                     </label>
                 </div>
                 <label class="field">
@@ -62,6 +62,15 @@
                               @bind="_note" @bind:event="oninput"></textarea>
                     <FieldError Field="Note" Errors="_errors" />
                 </label>
+                <div class="field">
+                    <label class="@(_moveDate ? "check is-checked" : "check")">
+                        <input id="udd-move-date" type="checkbox" checked="@_moveDate" disabled="@_saving"
+                               @onchange="e => _moveDate = (bool)(e.Value ?? false)" />
+                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                        <span>Move the next update to the latest date once each environment is updated</span>
+                    </label>
+                    <small class="field__hint">A few minutes after an environment's update finishes, its next update is moved as late as Microsoft allows.</small>
+                </div>
             </div>
             <div class="confirm-dialog__actions">
                 <button type="button" class="btn" @onclick="Cancel" disabled="@_saving">Cancel</button>
@@ -82,6 +91,8 @@
     private string _target = string.Empty;
     private DateTime? _plannedLocal;
     private string _note = string.Empty;
+    private string SlotTip => UpgradeSlotTip.For(Zone);
+    private bool _moveDate = true;
     private Dictionary<string, string> _errors = new();
     private TaskCompletionSource<bool>? _tcs;
 
@@ -100,6 +111,7 @@
         _target = upgrade.TargetVersion;
         _plannedLocal = upgrade.PlannedAt is { } at ? Zone.ToDisplay(at) : null;
         _note = upgrade.Note ?? string.Empty;
+        _moveDate = upgrade.MoveDateAfterUpdate;
         _errors = new();
         _saving = false;
         _open = true;
@@ -115,7 +127,8 @@
         _errors = new();
         try
         {
-            await Upgrades.UpdateDetailsAsync(_upgradeId, _name, _target, ToUtc(_plannedLocal), _note);
+            await Upgrades.UpdateDetailsAsync(_upgradeId, _name, _target, ToUtc(_plannedLocal), _note,
+                moveDateAfterUpdate: _moveDate);
             _open = false;
             _tcs?.TrySetResult(true);
         }

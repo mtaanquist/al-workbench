@@ -40,6 +40,19 @@ public static class AlKindKeywords
     }
 
     /// <summary>
+    /// The static dispatchers whose methods take the object they act on as a
+    /// typed first argument: <c>Page.RunModal(Page::"Customer List")</c>,
+    /// <c>Report.SaveAsPdf(Report::Statement, ...)</c>.
+    /// </summary>
+    public static bool IsStaticDispatcher(string? name) =>
+        name is not null && StaticDispatchers.Contains(name);
+
+    private static readonly HashSet<string> StaticDispatchers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Codeunit", "Page", "Report", "Xmlport", "Query",
+    };
+
+    /// <summary>
     /// True for the extension kinds (<c>tableextension</c>,
     /// <c>pageextension</c>, …). A name shared between a base object and
     /// an extension of it should resolve to the base when the caller gave

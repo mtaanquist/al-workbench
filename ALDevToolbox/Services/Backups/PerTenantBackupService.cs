@@ -86,6 +86,7 @@ public sealed class PerTenantBackupService
     private readonly string _connectionString;
     private readonly string _backupsRoot;
     private readonly DeploymentIdentity? _deployment;
+    private readonly MaintenanceModeState _maintenance;
 
     public PerTenantBackupService(
         AppDbContext db,
@@ -95,6 +96,9 @@ public sealed class PerTenantBackupService
         IConfiguration configuration,
         ILogger<PerTenantBackupService> logger,
         TimeProvider clock,
+        // Required, not optional: a snapshot is refused while the site is closed
+        // (#1610), and an optional parameter would let a caller silently skip that.
+        MaintenanceModeState maintenance,
         // Optional so the tests that build this service by hand keep compiling.
         // In production DI it is always the instance registered from configuration.
         BackupOptions? options = null,
@@ -103,6 +107,7 @@ public sealed class PerTenantBackupService
         DeploymentIdentity? deployment = null)
     {
         _db = db;
+        _maintenance = maintenance;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
         _orgConfig = orgConfig;
@@ -160,6 +165,25 @@ public sealed class PerTenantBackupService
     }
 
     /// <summary>
+    /// Every organisation on this installation, slug to name: the ones an
+    /// off-site snapshot can be pulled back for, by the same rule
+    /// <see cref="OffsiteBackupService.DownloadPerTenantAsync"/> applies. The
+    /// off-site catalogue once derived this from local snapshot rows, which a
+    /// whole-database restore leaves empty, and so called every organisation it
+    /// had just brought back unknown (#1334). SiteAdmin-only; the
+    /// <c>organizations</c> table has no query filter, so nothing is bypassed.
+    /// </summary>
+    public async Task<Dictionary<string, string>> ListOrganizationNamesAsync(CancellationToken ct = default)
+    {
+        _orgContext.RequireSiteAdmin();
+        var orgs = await _db.Organizations
+            .AsNoTracking()
+            .Select(o => new { o.Slug, o.Name })
+            .ToListAsync(ct);
+        return orgs.ToDictionary(o => o.Slug, o => o.Name, StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// Streams a per-tenant snapshot to the caller. Returns <c>null</c> when
     /// the row is missing or the file on disk has been removed out-of-band.
     /// </summary>
@@ -195,6 +219,15 @@ public sealed class PerTenantBackupService
         // user snapshot any org. (Verified: the only Scheduled call site is
         // BackupScheduler; every endpoint passes AdHoc.)
         if (kind == BackupKind.AdHoc) _orgContext.RequireSiteAdmin();
+        // The snapshot reads on a connection of its own, which the restore's wait
+        // for running work cannot see. Holding the backup lock keeps a full restore
+        // from dropping the schema under the read, or closing the site between the
+        // maintenance check below and the read (#1628).
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
+        // Checked under the lock. While a failed full restore holds the site closed,
+        // the organisation's rows are gone or half-loaded: a snapshot of them is
+        // useless, and the retention prune after it would delete good snapshots (#1610).
+        BackupService.RefuseWhileInMaintenance(_maintenance);
         var org = await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == organizationId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
@@ -499,6 +532,9 @@ public sealed class PerTenantBackupService
     public async Task DeleteAsync(int id, CancellationToken ct = default)
     {
         _orgContext.RequireSiteAdmin();
+        // Under the backup lock, so a delete cannot unlink a snapshot a restore is
+        // reading (#1628).
+        await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
         var row = await _db.PerTenantBackups
             .Include(b => b.Organization)
             .FirstOrDefaultAsync(b => b.Id == id, ct);

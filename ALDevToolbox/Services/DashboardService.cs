@@ -152,6 +152,9 @@ public sealed class DashboardService
         var releases = await _db.OeReleases.AsNoTracking()
             .Where(OeRelease.NotAnEmptySymbolPackage)
             .CountAsync(r => r.DeletedAt == null && r.Status == "ready" && r.Kind != ProjectBuildKind, ct);
+        // No visibility rule here, deliberately: /solutions lists a Private solution
+        // the viewer has no grant on as a locked, name-only row and counts it in its
+        // total, so filtering it out would make the tile disagree with the page (#1345).
         var projects = await _db.OeProjects.AsNoTracking()
             .CountAsync(p => p.DeletedAt == null, ct);
         return new ToolCounts(templates, recipes, releases, projects);

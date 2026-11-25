@@ -56,7 +56,7 @@ public sealed class RepositoryReadProbe
             return new Outcome(false, HadCredential: false);
         }
         var gitPath = Environment.GetEnvironmentVariable("GIT_PATH") is { Length: > 0 } configured ? configured : "git";
-        var credentials = await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false);
+        var credentials = await _credentials.ResolveAsync(provider, ct);
         var attempts = credentials
             .Select(c => (Source: c.Source, Env: (IReadOnlyDictionary<string, string>)ProjectBuildService.GitAuthEnv(provider, c.Secret)))
             .Append(("no credential", AnonymousEnv()));
@@ -67,7 +67,7 @@ public sealed class RepositoryReadProbe
             try
             {
                 result = await _processRunner.RunAsync(new ProcessRunRequest(
-                    gitPath, ["ls-remote", "--", url, "HEAD"], null, env, Timeout), ct).ConfigureAwait(false);
+                    gitPath, ["ls-remote", "--", url, "HEAD"], null, env, Timeout), ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

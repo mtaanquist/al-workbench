@@ -19,6 +19,8 @@ public enum NotificationCategory
     Upgrades,
     /// <summary>Business Central schedules or moves an update for a solution the person follows.</summary>
     Solutions,
+    /// <summary>A Sealed link someone sent was opened, or locked after wrong passphrases.</summary>
+    SealedLinks,
 
     /// <summary>
     /// An on-premises gateway goes offline, or comes back. Sent to the organisation's
@@ -40,6 +42,7 @@ public static class NotificationCategories
         NotificationCategory.Deployments => "Deployments",
         NotificationCategory.Upgrades => "Upgrades",
         NotificationCategory.Solutions => "Solutions you follow",
+        NotificationCategory.SealedLinks => "Sealed links you send",
         NotificationCategory.Gateways => "Gateways",
         _ => category.ToString(),
     };

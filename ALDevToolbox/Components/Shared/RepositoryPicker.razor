@@ -184,7 +184,28 @@
         else if (_loaded)
         {
             var matches = Matches();
-            if (_all.Count == 0)
+            if (_all.Count > 0 && _incomplete)
+            {
+                <p class="field__hint">
+                    GitHub stopped answering partway through, so some repositories may be missing.
+                    Try again in a minute.
+                    <button type="button" class="btn btn--sm" @onclick="ReloadAsync">Try again</button>
+                </p>
+            }
+            if (_all.Count == 0 && _incomplete)
+            {
+                @* Nothing came back because GitHub stopped answering, not because there
+                   is nothing to open: don't send the user off to ask for access. *@
+                <div class="empty-state empty-state--quiet">
+                    <span class="empty-state__title">GitHub stopped answering before any repositories came back</span>
+                    <span class="empty-state__text">Try again in a minute.</span>
+                    <button type="button" class="btn empty-state__action" @onclick="ReloadAsync">
+                        <Icon Name="refresh-cw" Width="15" Height="15" />
+                        <span>Try again</span>
+                    </button>
+                </div>
+            }
+            else if (_all.Count == 0)
             {
                 @* A dead end, not a footnote: the same quiet empty state the four
                    guidance states use, with the retry this control already has. *@
@@ -334,6 +355,8 @@
     private IReadOnlyList<GitHubRepositorySummary> _all = [];
     private bool _loading;
     private bool _loaded;
+    // GitHub stopped answering while the list was narrowed to what this person can open (#1754).
+    private bool _incomplete;
     private bool _loadFailed;
     private string _loadError = string.Empty;
     private string _query = string.Empty;
@@ -399,7 +422,9 @@
         StateHasChanged();
         try
         {
-            _all = await ReadAsync(r => r.ListAccessibleAsync(_gone.Token));
+            var listing = await ReadAsync(r => r.ListAccessibleWithTruncationAsync(_gone.Token));
+            _all = listing.Repositories;
+            _incomplete = listing.Incomplete;
             _loaded = true;
         }
         catch (OperationCanceledException) when (_gone.IsCancellationRequested)

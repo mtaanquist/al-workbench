@@ -19,11 +19,57 @@ namespace ALDevToolbox.Data.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.12")
+                .HasAnnotation("ProductVersion", "10.0.14")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.AppLogEntry", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("category");
+
+                    b.Property<string>("Exception")
+                        .HasColumnType("text")
+                        .HasColumnName("exception");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("integer")
+                        .HasColumnName("level");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("message");
+
+                    b.Property<DateTime>("Timestamp")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("timestamp");
+
+                    b.Property<string>("Worker")
+                        .HasColumnType("text")
+                        .HasColumnName("worker");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Timestamp");
+
+                    b.HasIndex("Level", "Id");
+
+                    b.HasIndex("Worker", "Id");
+
+                    b.ToTable("app_log_entries", (string)null);
+                });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ApplicationVersion", b =>
                 {
@@ -193,6 +239,11 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime?>("OffsiteUploadedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("offsite_uploaded_at");
+
+                    b.Property<string>("RecoveredFromDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("recovered_from_deployment_id");
 
                     b.HasKey("Id");
 
@@ -1294,6 +1345,43 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("github_repository_candidates", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCheck", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Application")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("application");
+
+                    b.Property<DateTime>("CheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("checked_at");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("repository");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "Repository")
+                        .IsUnique()
+                        .HasDatabaseName("ux_github_repository_checks_org_repo");
+
+                    b.ToTable("github_repository_checks", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryDrift", b =>
                 {
                     b.Property<int>("Id")
@@ -1361,6 +1449,57 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDatabaseName("ux_github_repository_drift_org_repo_path_field");
 
                     b.ToTable("github_repository_drift", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryFileCheck", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.PrimitiveCollection<List<string>>("ChangedPaths")
+                        .IsRequired()
+                        .HasColumnType("text[]")
+                        .HasColumnName("changed_paths");
+
+                    b.Property<DateTime>("CheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("checked_at");
+
+                    b.PrimitiveCollection<List<string>>("MissingPaths")
+                        .IsRequired()
+                        .HasColumnType("text[]")
+                        .HasColumnName("missing_paths");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int?>("PullRequestNumber")
+                        .HasColumnType("integer")
+                        .HasColumnName("pull_request_number");
+
+                    b.Property<string>("PullRequestUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("pull_request_url");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("repository");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "Repository")
+                        .IsUnique()
+                        .HasDatabaseName("ux_github_repository_file_checks_org_repo");
+
+                    b.ToTable("github_repository_file_checks", (string)null);
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryStandardFile", b =>
@@ -1605,6 +1744,50 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<int>("OrganizationId")
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
+
+                    b.Property<DateTime?>("SourceCheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("source_checked_at");
+
+                    b.Property<string>("SourceCommitSha")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("source_commit_sha");
+
+                    b.Property<string>("SourceDependenciesJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("source_dependencies_json");
+
+                    b.Property<string>("SourceError")
+                        .HasColumnType("text")
+                        .HasColumnName("source_error");
+
+                    b.Property<DateTime?>("SourceFetchedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("source_fetched_at");
+
+                    b.Property<int?>("SourceIdRangeSize")
+                        .HasColumnType("integer")
+                        .HasColumnName("source_id_range_size");
+
+                    b.Property<string>("SourcePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("source_path");
+
+                    b.Property<string>("SourceRef")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("source_ref");
+
+                    b.Property<string>("SourceRepository")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("source_repository");
+
+                    b.Property<string>("SourceSkippedJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("source_skipped_json");
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -2069,6 +2252,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("created_by_user_id");
 
+                    b.Property<bool>("MoveDateAfterUpdate")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("move_date_after_update");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -2122,6 +2311,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(250)
                         .HasColumnType("character varying(250)")
                         .HasColumnName("app_name");
+
+                    b.Property<bool>("Automatic")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("automatic");
 
                     b.Property<Guid?>("BatchId")
                         .HasColumnType("uuid")
@@ -2213,6 +2408,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("requested_by_user_id");
 
+                    b.Property<string>("ScheduledByWindow")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("scheduled_by_window");
+
                     b.Property<DateTime?>("SentAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("sent_at");
@@ -2228,6 +2428,15 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(32)")
                         .HasColumnName("target_version");
 
+                    b.Property<DateTime?>("UpdateCheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("update_checked_at");
+
+                    b.Property<string>("UpdateResult")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("update_result");
+
                     b.Property<int?>("UpgradeId")
                         .HasColumnType("integer")
                         .HasColumnName("upgrade_id");
@@ -2241,6 +2450,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId");
 
                     b.HasIndex("RequestedByUserId");
+
+                    b.HasIndex("SentAt")
+                        .HasDatabaseName("ix_oe_env_upgrade_actions_follow")
+                        .HasFilter("kind = 'RunNow' AND status = 'Sent' AND update_result IS NULL");
 
                     b.HasIndex("UpgradeId")
                         .HasDatabaseName("ix_oe_env_upgrade_actions_upgrade");
@@ -3680,6 +3893,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(250)")
                         .HasColumnName("author");
 
+                    b.Property<string>("AuthorEmail")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("author_email");
+
                     b.Property<DateTime?>("CommittedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("committed_at");
@@ -4460,6 +4678,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("type");
 
+                    b.Property<short>("UpdateWindowDays")
+                        .HasColumnType("smallint")
+                        .HasColumnName("update_window_days");
+
                     b.Property<TimeOnly?>("UpdateWindowEnd")
                         .HasColumnType("time without time zone")
                         .HasColumnName("update_window_end");
@@ -4738,11 +4960,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
 
-                    b.Property<string>("Role")
+                    b.PrimitiveCollection<string[]>("Roles")
                         .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("role");
+                        .HasColumnType("character varying(30)[]")
+                        .HasColumnName("roles");
 
                     b.Property<int>("UserId")
                         .HasColumnType("integer")
@@ -5068,6 +5289,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("allowed_branch");
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("archived_at");
+
                     b.Property<string>("ArtifactSource")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -5177,7 +5402,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ProjectId")
                         .HasDatabaseName("ix_oe_release_pipelines_project");
 
-                    b.ToTable("oe_release_pipelines", (string)null);
+                    b.ToTable("oe_release_pipelines", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_oe_release_pipelines_archived_is_disabled", "archived_at IS NULL OR disabled_at IS NOT NULL");
+                        });
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeRepositoryBranchHead", b =>
@@ -5665,6 +5893,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("entra_enabled");
 
+                    b.Property<int>("EnvironmentRefreshIntervalMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1440)
+                        .HasColumnName("environment_refresh_interval_minutes");
+
                     b.Property<string>("ExtensionPrefix")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
@@ -5751,6 +5985,14 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
+
+                    b.Property<string>("UpgradePermissionScope")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("AssignedTeams")
+                        .HasColumnName("upgrade_permission_scope");
 
                     b.HasKey("Id");
 
@@ -6330,6 +6572,107 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("recipe_suggestion_files", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.RepositoryMigration", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<bool>("AddTemplateExtensions")
+                        .HasColumnType("boolean")
+                        .HasColumnName("add_template_extensions");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int?>("CreatedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("created_by_user_id");
+
+                    b.Property<string>("CustomerName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("customer_name");
+
+                    b.Property<string>("Message")
+                        .HasColumnType("text")
+                        .HasColumnName("message");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int?>("ProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_id");
+
+                    b.Property<string>("RepositoryFullName")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("repository_full_name");
+
+                    b.Property<long?>("RepositoryGitHubId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("repository_github_id");
+
+                    b.Property<string>("RepositoryUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("repository_url");
+
+                    b.Property<string>("ShortName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("short_name");
+
+                    b.Property<string>("SourceProject")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("source_project");
+
+                    b.Property<string>("SourceProjectUrl")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("source_project_url");
+
+                    b.Property<string>("SourceRepositoryIds")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("source_repository_ids");
+
+                    b.Property<string>("Sources")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("sources");
+
+                    b.Property<bool>("Succeeded")
+                        .HasColumnType("boolean")
+                        .HasColumnName("succeeded");
+
+                    b.Property<string>("TemplateKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("template_key");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("OrganizationId", "CreatedAt");
+
+                    b.ToTable("repository_migrations", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.RuntimeTemplate", b =>
                 {
                     b.Property<int>("Id")
@@ -6549,6 +6892,148 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("runtime_template_root_folders", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<byte[]>("Ciphertext")
+                        .HasColumnType("bytea")
+                        .HasColumnName("ciphertext");
+
+                    b.Property<DateTime?>("ClosedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("closed_at");
+
+                    b.Property<string>("ClosedReason")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("closed_reason");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int>("CreatedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("created_by_user_id");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<int>("FailedPassphraseAttempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("failed_passphrase_attempts");
+
+                    b.Property<byte[]>("Iv")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("iv");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("label");
+
+                    b.Property<byte[]>("LinkCheckHash")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("link_check_hash");
+
+                    b.Property<bool>("LockoutNotified")
+                        .HasColumnType("boolean")
+                        .HasColumnName("lockout_notified");
+
+                    b.Property<int>("MaxViews")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_views");
+
+                    b.Property<int>("NotifiedViewCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("notified_view_count");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<byte[]>("PassphraseCheckHash")
+                        .HasColumnType("bytea")
+                        .HasColumnName("passphrase_check_hash");
+
+                    b.Property<byte[]>("PassphraseSalt")
+                        .HasColumnType("bytea")
+                        .HasColumnName("passphrase_salt");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("token");
+
+                    b.Property<int>("ViewCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("view_count");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.HasIndex("OrganizationId", "ExpiresAt");
+
+                    b.HasIndex("OrganizationId", "CreatedByUserId", "CreatedAt");
+
+                    b.ToTable("sealed_links", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLinkEvent", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("IpAddress")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("ip_address");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("kind");
+
+                    b.Property<DateTime>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int>("SealedLinkId")
+                        .HasColumnType("integer")
+                        .HasColumnName("sealed_link_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("SealedLinkId", "OccurredAt");
+
+                    b.ToTable("sealed_link_events", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.SignupRequest", b =>
                 {
                     b.Property<int>("Id")
@@ -6677,6 +7162,18 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<decimal>("IndexSizeMultiplier")
                         .HasColumnType("numeric(6,3)")
                         .HasColumnName("index_size_multiplier");
+
+                    b.Property<int>("LogMinimumLevel")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(2)
+                        .HasColumnName("log_minimum_level");
+
+                    b.Property<int>("LogRetentionDays")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(7)
+                        .HasColumnName("log_retention_days");
 
                     b.Property<bool>("McpEnabled")
                         .HasColumnType("boolean")
@@ -6955,12 +7452,12 @@ namespace ALDevToolbox.Data.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("TargetText"), "gin");
                     NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("TargetText"), new[] { "gin_trgm_ops" });
 
-                    b.HasIndex("OrganizationId", "Score", "HitCount")
-                        .IsDescending(false, true, true)
-                        .HasDatabaseName("ix_translation_memory_rank");
-
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash")
                         .HasDatabaseName("ix_translation_memory_lookup");
+
+                    b.HasIndex("OrganizationId", "Score", "HitCount", "LastSeenAt", "Id")
+                        .IsDescending(false, true, true, true, true)
+                        .HasDatabaseName("ix_translation_memory_rank");
 
                     b.HasIndex("OrganizationId", "SourceLanguage", "TargetLanguage", "SourceHash", "TargetHash")
                         .IsUnique()
@@ -7511,6 +8008,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime?>("LastUsedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_used_at");
+
+                    b.Property<long?>("LastUsedTimeStep")
+                        .HasColumnType("bigint")
+                        .HasColumnName("last_used_time_step");
 
                     b.Property<string>("SecretEncrypted")
                         .IsRequired()
@@ -8301,6 +8802,17 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Organization");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCheck", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryDrift", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment", "Environment")
@@ -8325,6 +8837,17 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Organization");
 
                     b.Navigation("Release");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryFileCheck", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryStandardFile", b =>
@@ -9838,6 +10361,31 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Suggestion");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.RepositoryMigration", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
+                        .WithMany()
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("CreatedByUser");
+
+                    b.Navigation("Organization");
+
+                    b.Navigation("Project");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.RuntimeTemplate", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.ApplicationVersion", "DefaultApplicationVersion")
@@ -9927,6 +10475,42 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Organization");
 
                     b.Navigation("RuntimeTemplate");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLink", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
+                        .WithMany()
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CreatedByUser");
+
+                    b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLinkEvent", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.SealedLink", "SealedLink")
+                        .WithMany("Events")
+                        .HasForeignKey("SealedLinkId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SealedLink");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.SignupRequest", b =>
@@ -10365,6 +10949,11 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("RootFolders");
 
                     b.Navigation("WorkspaceExtensions");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.SealedLink", b =>
+                {
+                    b.Navigation("Events");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.Team", b =>

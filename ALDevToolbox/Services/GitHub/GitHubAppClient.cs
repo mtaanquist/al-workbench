@@ -46,10 +46,15 @@ public sealed record GitHubUserTokens(
 /// the rest" and "there are more than we read", and the two are not the same
 /// thing to say to a person looking at a repository that is missing from a
 /// list.</para>
+///
+/// <para><see cref="Incomplete"/> is a third reason a repository can be missing:
+/// GitHub stopped answering while the list was narrowed to what the person can
+/// open, so the ones it was not asked about were left out (#1754).</para>
 /// </summary>
 public sealed record GitHubInstallationRepositories(
     IReadOnlyList<GitHubRepositorySummary> Repositories,
-    bool Truncated);
+    bool Truncated,
+    bool Incomplete = false);
 
 /// <summary>Who a user-to-server token belongs to: GitHub's stable numeric id and the renameable login.</summary>
 public sealed record GitHubUserIdentity(long Id, string Login);
@@ -386,27 +391,43 @@ public sealed partial class GitHubAppClient
 
     /// <summary>
     /// Throws when a refused repository read says nothing about the person who
-    /// asked: a rate limit (429, or 403 with no requests left), a server error, or
-    /// any other status that is not one of GitHub's ways of saying no (401, 403,
-    /// 404). Returns for those, which are a definite no.
+    /// asked: a rate limit, a server error, or any other status that is not one of
+    /// GitHub's ways of saying no (401, 403, 404). Returns for those, which are a
+    /// definite no.
+    ///
+    /// <para>A rate limit comes in two shapes. The primary limit answers 403 (or
+    /// 429) with <c>x-ratelimit-remaining: 0</c>; the secondary limit - the one a
+    /// burst of per-repository checks trips - answers 403 or 429 with a
+    /// <c>retry-after</c> header and requests still left, and says so in the
+    /// message ("You have exceeded a secondary rate limit"). Either means "ask
+    /// again later", never "no", so the body is read before deciding.</para>
     /// </summary>
     private async Task ThrowIfNoVerdictAsync(HttpResponseMessage response, HttpRequestMessage request, CancellationToken ct)
     {
+        var (message, documentationUrl) = ReadError(await response.Content.ReadAsStringAsync(ct));
         var rateLimited = response.StatusCode == HttpStatusCode.TooManyRequests
-            || (response.StatusCode == HttpStatusCode.Forbidden
-                && response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining)
-                && remaining.Any(r => r.Trim() == "0"));
+            || (response.StatusCode == HttpStatusCode.Forbidden && IsRateLimitRefusal(response, message));
         if (!rateLimited && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
             return;
         }
 
-        var (message, documentationUrl) = ReadError(await response.Content.ReadAsStringAsync(ct));
         _logger.LogWarning(
             "GitHub gave no answer about access for {Method} {Path}: {Status} {Message}",
             request.Method, request.RequestUri, (int)response.StatusCode, message);
         throw new GitHubApiException(response.StatusCode, message, documentationUrl);
     }
+
+    /// <summary>
+    /// Whether a 403 is GitHub's rate limiter speaking rather than a refusal: no
+    /// requests left, a <c>retry-after</c> header (the secondary limit), or a
+    /// message naming a rate limit.
+    /// </summary>
+    private static bool IsRateLimitRefusal(HttpResponseMessage response, string message) =>
+        (response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining)
+            && remaining.Any(r => r.Trim() == "0"))
+        || response.Headers.Contains("retry-after")
+        || message.Contains("rate limit", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether <paramref name="username"/> is a member of <paramref name="org"/>,
@@ -567,6 +588,9 @@ public sealed partial class GitHubAppClient
     /// <summary>How many pages of a hundred an installation listing reads before it stops.</summary>
     private const int MaxRepositoryPages = 10;
 
+    /// <summary>How many of an installation's repositories one listing reads at most: ten pages of 100.</summary>
+    public const int MaxInstallationRepositories = MaxRepositoryPages * 100;
+
     /// <summary>
     /// The repositories of installation <paramref name="installationId"/> that
     /// <paramref name="userToken"/>'s owner can reach themselves, in one paged read
@@ -625,6 +649,19 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// The repository GitHub numbers <paramref name="id"/>, wherever it is now and
+    /// whatever it is called, or null when the credential cannot see one by that
+    /// number (it was deleted, or moved out of sight).
+    /// </summary>
+    public async Task<GitHubRepositorySummary?> GetRepositoryByIdAsync(
+        string credential, long id, CancellationToken ct = default)
+    {
+        using var request = NewRequest(HttpMethod.Get, $"repositories/{id}", credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        return document is null ? null : ReadRepository(document.RootElement);
+    }
+
+    /// <summary>
     /// Creates a repository in <paramref name="org"/>, carrying the
     /// <em>installation</em> token: creating a repository is an act of the
     /// organisation, and no individual should have to hold <c>admin:org</c> for
@@ -634,7 +671,7 @@ public sealed partial class GitHubAppClient
     /// <para>The repository is created empty - no README, no licence, no
     /// .gitignore. Whatever the template says belongs in it arrives in the
     /// first commit, and an auto-initialised commit would have to be worked
-    /// around rather than used.</para>
+    /// around rather than used. Merged branches are deleted automatically.</para>
     ///
     /// <para>Two refusals are answers rather than failures, because the caller
     /// can word both of them for the user: the name is already taken, and the
@@ -654,6 +691,10 @@ public sealed partial class GitHubAppClient
                 description = string.IsNullOrWhiteSpace(description) ? null : description,
                 @private = isPrivate,
                 auto_init = false,
+                // Merged pull-request branches tidy themselves away. GitHub has
+                // no organisation-wide default for this, only the per-repository
+                // setting, so the workbench sets it on every repository it creates.
+                delete_branch_on_merge = true,
             });
         using var response = await SendRawAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
@@ -916,6 +957,22 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// Points an existing branch at <paramref name="commitSha"/> whether or not
+    /// that is a fast-forward. Only for a branch the workbench owns and has
+    /// established nobody is reviewing: anything on it that the new commit does
+    /// not contain stops being reachable from the branch.
+    /// </summary>
+    public async Task ResetBranchAsync(
+        string credential, string owner, string repo, string branch, string commitSha,
+        CancellationToken ct = default)
+    {
+        using var request = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/git/refs/heads/{EscapePath(branch)}", credential,
+            new { sha = commitSha, force = true });
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>
     /// Opens a pull request from <paramref name="head"/> into
     /// <paramref name="baseBranch"/>, as <paramref name="credential"/>'s owner.
     /// </summary>
@@ -1004,7 +1061,41 @@ public sealed partial class GitHubAppClient
             var htmlUrl = item.TryGetProperty("html_url", out var u) ? u.GetString() : null;
             if (number > 0 && !string.IsNullOrEmpty(htmlUrl))
             {
-                return new GitHubPullRequest(number, htmlUrl!, headBranch);
+                var title = item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String
+                    ? t.GetString()
+                    : null;
+                return new GitHubPullRequest(number, htmlUrl!, headBranch, title);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The head commit of the most recently updated closed (or merged) pull
+    /// request from <paramref name="headBranch"/>, or <see langword="null"/>
+    /// when that branch has never had one closed. GitHub keeps that commit
+    /// under the pull request for good, so a branch still pointing at it holds
+    /// nothing that would be lost by moving it.
+    /// </summary>
+    public async Task<string?> GetLatestClosedPullRequestHeadShaAsync(
+        string credential, string owner, string repo, string headBranch, CancellationToken ct = default)
+    {
+        var head = Uri.EscapeDataString($"{owner}:{headBranch}");
+        using var request = NewRequest(
+            HttpMethod.Get,
+            $"{RepoPath(owner, repo)}/pulls?state=closed&head={head}&sort=updated&direction=desc&per_page=1",
+            credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        if (document is null || document.RootElement.ValueKind != JsonValueKind.Array) return null;
+
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            if (item.TryGetProperty("head", out var h)
+                && h.ValueKind == JsonValueKind.Object
+                && h.TryGetProperty("sha", out var sha)
+                && sha.ValueKind == JsonValueKind.String)
+            {
+                return sha.GetString();
             }
         }
         return null;
@@ -1021,11 +1112,17 @@ public sealed partial class GitHubAppClient
     /// answers that with a 409 rather than a 404, and it means the same thing to
     /// a caller: there are no files.</para>
     /// </summary>
+    /// <param name="recursive">
+    /// False lists only the top folder - enough for a caller looking for a file
+    /// at the root, and cheap on a large repository.
+    /// </param>
     public async Task<GitHubTree> ListTreeAsync(
-        string credential, string owner, string repo, string treeIsh, CancellationToken ct = default)
+        string credential, string owner, string repo, string treeIsh, CancellationToken ct = default, bool recursive = true)
     {
         using var request = NewRequest(
-            HttpMethod.Get, $"{RepoPath(owner, repo)}/git/trees/{EscapePath(treeIsh)}?recursive=1", credential);
+            HttpMethod.Get,
+            $"{RepoPath(owner, repo)}/git/trees/{EscapePath(treeIsh)}{(recursive ? "?recursive=1" : string.Empty)}",
+            credential);
         // A repository with no commits answers 409 "Git Repository is empty" from
         // every Git Data route. That is an answer - the repository has no files -
         // and a caller sweeping an organisation must not count it as a failure.
@@ -1168,7 +1265,8 @@ public sealed partial class GitHubAppClient
                 ? d.GetString()
                 : null,
             HtmlUrl: element.TryGetProperty("html_url", out var h) ? h.GetString() ?? string.Empty : string.Empty,
-            CloneUrl: element.TryGetProperty("clone_url", out var c) ? c.GetString() ?? string.Empty : string.Empty);
+            CloneUrl: element.TryGetProperty("clone_url", out var c) ? c.GetString() ?? string.Empty : string.Empty,
+            Id: element.TryGetProperty("id", out var i) && i.ValueKind == JsonValueKind.Number && i.TryGetInt64(out var id) ? id : null);
     }
 
     private static string RepoPath(string owner, string repo) =>

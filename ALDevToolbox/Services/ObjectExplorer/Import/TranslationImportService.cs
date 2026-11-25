@@ -21,7 +21,15 @@ public class TranslationImportService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ALDevToolbox.Services.Translation.TranslationMemoryService _memory;
+    private readonly ALDevToolbox.Services.Organizations.StorageQuotaGuard _quotaGuard;
     private readonly ILogger<TranslationImportService> _logger;
+
+    /// <summary>
+    /// The solution-visibility fence for the admin uploads (#1430): a Private
+    /// solution's build release answers like an unknown id to someone outside its
+    /// teams. Required, so nothing can build the service without the fence.
+    /// </summary>
+    private readonly ProjectAccess _access;
 
     /// <summary>
     /// Per-entry decompression ceiling for an uploaded translation ZIP. A single
@@ -45,13 +53,25 @@ public class TranslationImportService
         AppDbContext db,
         IOrganizationContext orgContext,
         ALDevToolbox.Services.Translation.TranslationMemoryService memory,
-        ILogger<TranslationImportService> logger)
+        ALDevToolbox.Services.Organizations.StorageQuotaGuard quotaGuard,
+        ILogger<TranslationImportService> logger,
+        ProjectAccess access)
     {
         _db = db;
         _orgContext = orgContext;
         _memory = memory;
+        _quotaGuard = quotaGuard;
         _logger = logger;
+        _access = access;
     }
+
+    /// <summary>
+    /// False when the visibility fence hides <paramref name="releaseId"/>. Asked
+    /// before the existence read so a hidden id and an unknown one run the same
+    /// queries and get the same error.
+    /// </summary>
+    private Task<bool> IsReleaseVisibleAsync(int releaseId, CancellationToken ct) =>
+        _access.IsReleaseVisibleAsync(releaseId, ct);
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; TranslationImportService called outside an authenticated request.");
@@ -71,12 +91,14 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(xliff);
         var orgId = RequireOrganizationId();
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
+        var visible = await IsReleaseVisibleAsync(releaseId, ct);
         var module = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.ReleaseId == releaseId)
-            .Select(m => new { m.Id, m.Name })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (module is null)
+            .Select(m => new { m.Id, m.Name, m.Release!.Kind })
+            .SingleOrDefaultAsync(ct);
+        if (module is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -108,7 +130,8 @@ public class TranslationImportService
                 fileName, parsed.OriginalName, module.Name, moduleId);
         }
 
-        var inserted = await ReplaceForModuleAsync(orgId, moduleId, parsed, module.Name, ct).ConfigureAwait(false);
+        var inserted = await ReplaceForModuleAsync(
+            orgId, moduleId, parsed, module.Name, LearnsIntoMemory(module.Kind), ct);
         return new TranslationImportSummary(
             LanguageCode: parsed.TargetLanguage,
             ModuleName: module.Name,
@@ -132,12 +155,14 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(zip);
         var orgId = RequireOrganizationId();
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
+        var visible = await IsReleaseVisibleAsync(releaseId, ct);
         var release = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)
-            .Select(r => new { r.Id })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (release is null)
+            .Select(r => new { r.Id, r.Kind })
+            .SingleOrDefaultAsync(ct);
+        if (release is null || !visible)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -149,7 +174,7 @@ public class TranslationImportService
         var modules = await _db.OeModules.AsNoTracking()
             .Where(m => m.ReleaseId == releaseId)
             .Select(m => new { m.Id, m.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var byName = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in modules)
         {
@@ -208,7 +233,8 @@ public class TranslationImportService
                 continue;
             }
 
-            var inserted = await ReplaceForModuleAsync(orgId, moduleId, parsed, parsed.OriginalName, ct).ConfigureAwait(false);
+            var inserted = await ReplaceForModuleAsync(
+                orgId, moduleId, parsed, parsed.OriginalName, LearnsIntoMemory(release.Kind), ct);
             matched++;
             totalInserted += inserted;
             matchedSummaries.Add(new TranslationImportSummary(
@@ -240,8 +266,21 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(parsed);
         var orgId = RequireOrganizationId();
-        return ReplaceForModuleAsync(orgId, moduleId, parsed, originName, ct);
+        return ReplaceForModuleAsync(orgId, moduleId, parsed, originName, learnIntoMemory: true, ct);
     }
+
+    /// <summary>
+    /// Whether an upload onto a release of <paramref name="releaseKind"/> may feed
+    /// the org-wide translation memory. A solution's build release may not (#1613):
+    /// the memory keeps no link back to the release, so its pairs would reach
+    /// everyone in the organisation, including people a Private solution hides the
+    /// release from. A solution's own strings reach the memory through its
+    /// repositories instead, attributed so the visibility fence still applies
+    /// (<c>.design/github-integration-phase2.md</c>, #631). The upload's
+    /// per-release rows are written either way.
+    /// </summary>
+    private static bool LearnsIntoMemory(string releaseKind) =>
+        !string.Equals(releaseKind, OeRelease.ProjectBuildKind, StringComparison.Ordinal);
 
     // ── Shared parse → clobber → insert → resolve ──────────────────────
 
@@ -254,7 +293,7 @@ public class TranslationImportService
     /// was already uploaded, it's fine for it to clobber existing".
     /// </summary>
     private async Task<int> ReplaceForModuleAsync(
-        int orgId, long moduleId, XliffDocument parsed, string? originName, CancellationToken ct)
+        int orgId, long moduleId, XliffDocument parsed, string? originName, bool learnIntoMemory, CancellationToken ct)
     {
         // Skip XLIFFs whose source-language matches their target-language.
         // That's the shape the AL compiler emits as <Module>.g.xlf — the
@@ -282,7 +321,7 @@ public class TranslationImportService
         var symbols = await _db.OeModuleSymbols.AsNoTracking()
             .Where(s => s.ModuleId == moduleId)
             .Select(s => new { s.Id, s.Name, s.Kind })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var symbolByName = new Dictionary<string, List<(long Id, string Kind)>>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in symbols)
         {
@@ -300,7 +339,7 @@ public class TranslationImportService
         // (#1261). The release amend already runs inside its own
         // transaction; this joins it rather than nesting.
         await using var tx = _db.Database.CurrentTransaction is null
-            ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
+            ? await _db.Database.BeginTransactionAsync(ct)
             : null;
 
         // Clobber existing rows for (module, language) so re-upload
@@ -310,7 +349,7 @@ public class TranslationImportService
         // accidentally double up a trans-unit.
         await _db.OeModuleTranslations
             .Where(t => t.ModuleId == moduleId && t.LanguageCode == parsed.TargetLanguage)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            .ExecuteDeleteAsync(ct);
 
         int inserted = 0;
         int pending = 0;
@@ -353,14 +392,14 @@ public class TranslationImportService
             pending++;
             if (pending >= chunkSize)
             {
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _db.SaveChangesAsync(ct);
                 _db.ChangeTracker.Clear();
                 pending = 0;
             }
         }
         if (pending > 0)
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             _db.ChangeTracker.Clear();
         }
 
@@ -368,7 +407,7 @@ public class TranslationImportService
         {
             // Not cancellable: once every row is written, a request cancelled
             // at the last step should not throw the work away.
-            await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
+            await tx.CommitAsync(CancellationToken.None);
         }
 
         _logger.LogInformation(
@@ -379,8 +418,10 @@ public class TranslationImportService
         // suggestions in the Translator tool (and later as LLM glossary hints).
         // Only meaningful when the file declares a source language; BC XLIFFs
         // carry source-language="en-US". Best-effort — a memory hiccup must not
-        // fail the import the admin actually asked for.
-        if (!string.IsNullOrEmpty(parsed.SourceLanguage))
+        // fail the import the admin actually asked for. Skipped for a solution's
+        // build release, whose pairs the memory could not keep inside the
+        // solution (see LearnsIntoMemory).
+        if (learnIntoMemory && !string.IsNullOrEmpty(parsed.SourceLanguage))
         {
             try
             {
@@ -394,7 +435,7 @@ public class TranslationImportService
                         u.TargetText,
                         AlXliffParser.BucketKind(u.Hint),
                         origin));
-                await _memory.UpsertAsync(pairs, ct).ConfigureAwait(false);
+                await _memory.UpsertAsync(pairs, ct);
             }
             catch (Exception ex)
             {

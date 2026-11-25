@@ -745,13 +745,19 @@ internal sealed class AlProcedureWalker
                 if (_state.At("."))
                 {
                     _state.Pos++; // .
+                    AlToken? memberTok = null;
                     if (_state.Pos < _state.Tokens.Count
                         && (_state.Tokens[_state.Pos].Kind == AlTokenKind.Identifier
                             || _state.Tokens[_state.Pos].Kind == AlTokenKind.QuotedIdentifier))
                     {
+                        memberTok = _state.Tokens[_state.Pos];
                         _state.Pos++; // member
                     }
-                    if (_state.Pos < _state.Tokens.Count && _state.At("(")) WalkBalancedParens();
+                    if (_state.Pos < _state.Tokens.Count && _state.At("("))
+                    {
+                        if (memberTok is { } member) EmitStaticDispatchSystemReference(head, member);
+                        WalkBalancedParens();
+                    }
                     continue;
                 }
                 // Enum-value continuation:
@@ -835,6 +841,56 @@ internal sealed class AlProcedureWalker
         }
 
         WalkMemberChain(receiverType);
+    }
+
+    /// <summary>
+    /// <c>Page.RunModal(Page::"Customer List", Customer)</c>,
+    /// <c>Report.SaveAsPdf(Report::"Statement", Path)</c>,
+    /// <c>Codeunit.Run(Codeunit::"Sales-Post", SalesHeader)</c>: a static
+    /// dispatcher whose first argument names the object it acts on. Recorded
+    /// as a system reference on that object, the same row the instance form
+    /// (<c>CustomerList.RunModal()</c>) produces, so "Find built-in calls" on
+    /// a page or report finds both. Leaves the cursor where it was: the
+    /// arguments are walked afterwards as usual.
+    /// </summary>
+    private void EmitStaticDispatchSystemReference(AlToken head, AlToken memberTok)
+    {
+        if (!AlKindKeywords.IsStaticDispatcher(head.Value)) return;
+        var t = _state.Tokens;
+        var p = _state.Pos; // at `(`
+        if (p + 3 >= t.Count
+            || t[p + 1].Kind != AlTokenKind.Identifier
+            || t[p + 2].Kind != AlTokenKind.DoubleColon
+            || (t[p + 3].Kind != AlTokenKind.Identifier && t[p + 3].Kind != AlTokenKind.QuotedIdentifier))
+        {
+            return;
+        }
+        var kindTok = t[p + 1];
+        if (!string.Equals(kindTok.Value, head.Value, StringComparison.OrdinalIgnoreCase)) return;
+
+        // Namespaced literal: the last dotted segment is the name.
+        var nameTok = t[p + 3];
+        var q = p + 4;
+        while (q + 1 < t.Count && t[q].Kind == AlTokenKind.Punct && t[q].Value == "."
+               && (t[q + 1].Kind == AlTokenKind.Identifier || t[q + 1].Kind == AlTokenKind.QuotedIdentifier))
+        {
+            nameTok = t[q + 1];
+            q += 2;
+        }
+
+        var target = _state.Ctx.Resolver.ResolveTypeByName(nameTok.Value, kindTok.Value);
+        // The resolver falls back to any kind; a Page:: literal that only
+        // matched a same-named table must not land on the table.
+        if (target is null || !string.Equals(target.Kind, kindTok.Value, StringComparison.OrdinalIgnoreCase)) return;
+        _state.EmitSystemReference(new ExtractedSystemReference(
+            Line: memberTok.Line,
+            Column: memberTok.Column,
+            TargetAppId: target.AppId,
+            TargetObjectKind: target.Kind,
+            TargetObjectId: target.ObjectId,
+            TargetObjectName: target.Name,
+            SystemMethodName: memberTok.Value,
+            ReferenceKind: "method_call"));
     }
 
     /// <summary>

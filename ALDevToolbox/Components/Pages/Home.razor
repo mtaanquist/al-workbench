@@ -122,7 +122,8 @@
                 Tile(ToolKey.Translator, "Translator", "Edit an XLIFF file's translation units, filter by state, and fill the gaps.", "languages", "/translator"),
                 // Diff works without an account - link it directly, no lock.
                 Tile(ToolKey.Compare, "Diff", "Paste two texts side by side and see what changed.", "git-compare", "/diff", needsAccount: false),
-                Tile(ToolKey.Piper, "Piper", "Turn a list of values into a pipe-separated filter, an SQL IN list, or another format.", "git-merge", "/piper")),
+                Tile(ToolKey.Piper, "Piper", "Turn a list of values into a pipe-separated filter, an SQL IN list, or another format.", "git-merge", "/piper"),
+                Tile(ToolKey.Sealed, "Sealed", "Send a password or client secret as a link that opens a set number of times, instead of pasting it into an email.", "lock", "/sealed")),
             Group("Connect an assistant",
                 Tile(ToolKey.Mcp, "MCP", "Let Claude, Cursor, or another AI assistant read your templates, recipes and BC objects.", "bot", "/tools/mcp")),
         };

@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Builders;
 using ALDevToolbox.Tests.Infrastructure;
@@ -22,11 +23,11 @@ public sealed class CrossOrgConfigIsolationTests : IDisposable
     public void Dispose() => _db.Dispose();
 
     [Fact]
-    public async Task Generation_uses_only_the_acting_orgs_logo_and_files()
+    public async Task Generation_uses_only_the_acting_orgs_logo()
     {
-        // Two organisations, each with a different logo + always-included file.
-        // The Default org generates a workspace; the resulting ZIP must carry
-        // the Default org's bytes, not Other's.
+        // Two organisations, each with a different logo. The Default org
+        // generates a workspace; the resulting ZIP must carry the Default
+        // org's bytes, not Other's.
         await using (var ctx = _db.NewContext())
         {
             ctx.OrganizationAssets.AddRange(
@@ -46,74 +47,45 @@ public sealed class CrossOrgConfigIsolationTests : IDisposable
                     Content = new byte[] { 0x07, 0x77, 0x07 },
                     UpdatedAt = DateTime.UtcNow,
                 });
-            var defaultFile = new OrganizationFile
-            {
-                OrganizationId = TestDb.DefaultOrgId,
-                Path = ".editorconfig",
-                Content = "default-org-content",
-                Ordering = 0,
-                UpdatedAt = DateTime.UtcNow,
-            };
-            ctx.OrganizationFiles.AddRange(
-                defaultFile,
-                new OrganizationFile
-                {
-                    OrganizationId = TestDb.OtherOrgId,
-                    Path = ".editorconfig",
-                    Content = "other-org-content",
-                    Ordering = 0,
-                    UpdatedAt = DateTime.UtcNow,
-                });
-            // Save the file first so its primary key is populated; the
-            // template-included-files join needs an existing FK target.
-            await ctx.SaveChangesAsync();
-
-            var template = TemplateBuilder.Default("runtime-default", organizationId: TestDb.DefaultOrgId);
-            // Opt the template into the org's .editorconfig — the generator
-            // now filters OrganizationFile rows by the per-template join, so
-            // unopted files don't land in the ZIP.
-            template.IncludedFiles.Add(new RuntimeTemplateIncludedFile
-            {
-                OrganizationId = TestDb.DefaultOrgId,
-                OrganizationFileId = defaultFile.Id,
-                Ordering = 0,
-            });
-            ctx.RuntimeTemplates.Add(template);
+            ctx.RuntimeTemplates.Add(TemplateBuilder.Default("runtime-default", organizationId: TestDb.DefaultOrgId));
             await ctx.SaveChangesAsync();
         }
 
-        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
-        var plan = PlanBuilder.WorkspacePlan(templateKey: "runtime-default");
-
-        await using var genCtx = _db.NewContext();
-        var mustache = new ALDevToolbox.Services.Generation.MustacheRenderer(
-            NullLogger<ALDevToolbox.Services.Generation.MustacheRenderer>.Instance);
-        var gen = new GenerationService(
-            genCtx,
-            _db.NewOrganizationConfigService(genCtx),
-            new FolderTreeHydrator(genCtx),
-            _db.OrgContext,
-            mustache,
-            new ALDevToolbox.Services.Generation.WorkspaceZipBuilder(mustache, new WorkspaceConfigService(genCtx)),
-            NullLogger<GenerationService>.Instance);
-
-        var archive = await gen.GenerateWorkspaceAsync(plan);
-        using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+        using var zip = await GenerateAsAsync(TestDb.DefaultOrgId, "runtime-default");
 
         var logoEntry = zip.GetEntry("AcmeCustomer/.assets/images/logo.png");
         logoEntry.Should().NotBeNull("the workspace pulls the acting org's logo");
-        using (var ms = new MemoryStream())
-        {
-            await using (var s = logoEntry!.Open()) await s.CopyToAsync(ms);
-            ms.ToArray().Should().Equal(new byte[] { 0xDE, 0xFA, 0x01 });
-        }
+        using var ms = new MemoryStream();
+        await using (var s = logoEntry!.Open()) await s.CopyToAsync(ms);
+        ms.ToArray().Should().Equal(new byte[] { 0xDE, 0xFA, 0x01 });
+    }
 
-        var fileEntry = zip.GetEntry("AcmeCustomer/.editorconfig");
-        fileEntry.Should().NotBeNull("the always-included file is written at the workspace root");
-        using (var reader = new StreamReader(fileEntry!.Open()))
+    [Fact]
+    public async Task Each_org_generates_its_own_template_with_its_own_files()
+    {
+        // Same template key and same file path in both orgs, each template
+        // opted into its own org's file. Only the tenant filter tells the two
+        // apart, so a leak shows up as the other org's content.
+        await SeedTemplateWithEditorConfigAsync(TestDb.DefaultOrgId, "shared-key", "default-org-content");
+        await SeedTemplateWithEditorConfigAsync(TestDb.OtherOrgId, "shared-key", "other-org-content");
+
+        using (var defaultZip = await GenerateAsAsync(TestDb.DefaultOrgId, "shared-key"))
         {
-            (await reader.ReadToEndAsync()).Should().Be("default-org-content");
+            ReadEntry(defaultZip, "AcmeCustomer/.editorconfig").Should().Be("default-org-content");
         }
+        using var otherZip = await GenerateAsAsync(TestDb.OtherOrgId, "shared-key");
+        ReadEntry(otherZip, "AcmeCustomer/.editorconfig").Should().Be("other-org-content");
+    }
+
+    [Fact]
+    public async Task Another_orgs_template_cannot_be_generated()
+    {
+        await SeedTemplateWithEditorConfigAsync(TestDb.DefaultOrgId, "default-only", "default-org-content");
+
+        var act = () => GenerateAsAsync(TestDb.OtherOrgId, "default-only");
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("TemplateKey");
     }
 
     [Fact]
@@ -123,7 +95,7 @@ public sealed class CrossOrgConfigIsolationTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = _db.NewOrganizationConfigService(ctx);
 
-        // Its own org: fine.
+        // Another org: refused.
         var act = () => svc.GetForAsync(TestDb.OtherOrgId);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*cross-organisation config read*");
@@ -144,5 +116,57 @@ public sealed class CrossOrgConfigIsolationTests : IDisposable
 
         var act = () => svc.GetForAsync(TestDb.OtherOrgId);
         await act.Should().NotThrowAsync();
+    }
+
+    private async Task SeedTemplateWithEditorConfigAsync(int orgId, string key, string content)
+    {
+        await using var ctx = _db.NewContext();
+        var file = new OrganizationFile
+        {
+            OrganizationId = orgId,
+            Path = ".editorconfig",
+            Content = content,
+            Ordering = 0,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OrganizationFiles.Add(file);
+        // Saved first so the join below has a key to point at.
+        await ctx.SaveChangesAsync();
+
+        var template = TemplateBuilder.Default(key, organizationId: orgId);
+        template.IncludedFiles.Add(new RuntimeTemplateIncludedFile
+        {
+            OrganizationId = orgId,
+            OrganizationFileId = file.Id,
+            Ordering = 0,
+        });
+        ctx.RuntimeTemplates.Add(template);
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<ZipArchive> GenerateAsAsync(int orgId, string templateKey)
+    {
+        _db.OrgContext.CurrentOrganizationId = orgId;
+        var ctx = _db.NewContext();
+        var mustache = new MustacheRenderer(NullLogger<MustacheRenderer>.Instance);
+        var gen = new GenerationService(
+            ctx,
+            _db.NewOrganizationConfigService(ctx),
+            new FolderTreeHydrator(ctx),
+            _db.OrgContext,
+            mustache,
+            new WorkspaceZipBuilder(mustache, new WorkspaceConfigService(ctx)),
+            NullLogger<GenerationService>.Instance);
+
+        var archive = await gen.GenerateWorkspaceAsync(PlanBuilder.WorkspacePlan(templateKey: templateKey));
+        return new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+    }
+
+    private static string ReadEntry(ZipArchive zip, string path)
+    {
+        var entry = zip.GetEntry(path);
+        entry.Should().NotBeNull("{0} should be in the ZIP", path);
+        using var reader = new StreamReader(entry!.Open());
+        return reader.ReadToEnd();
     }
 }

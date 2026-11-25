@@ -11,7 +11,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// before routing. A regression that moves the middleware below
 /// <c>MapStaticAssets</c> would silently drop two of those three.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class SecurityHeadersTests : IDisposable
 {
     private readonly TestDb _db = new();

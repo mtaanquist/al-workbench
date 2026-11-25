@@ -262,6 +262,13 @@ public class OrganizationSettings
     public ValueObjects.LocalLoginPolicy LocalLoginPolicy { get; set; }
 
     /// <summary>
+    /// Where a member's "Can schedule upgrades" grant counts: only on the solutions its
+    /// team is assigned to (the default), or on every solution the member may manage.
+    /// Read by <c>ProjectAccess</c>; set on Administration → Business Central.
+    /// </summary>
+    public ValueObjects.UpgradePermissionScope UpgradePermissionScope { get; set; }
+
+    /// <summary>
     /// The GitHub App installation this organisation connected. Null means "not
     /// connected" and doubles as the master switch for every GitHub feature,
     /// matching how <see cref="AutoImportReleasesEnabled"/> and
@@ -326,6 +333,14 @@ public class OrganizationSettings
 
     /// <summary>End of <see cref="DefaultDeliveryWindowSandboxStart"/>'s window; may wrap past midnight.</summary>
     public TimeOnly? DefaultDeliveryWindowSandboxEnd { get; set; }
+
+    /// <summary>
+    /// How often, in minutes, the background sweep asks Business Central about every
+    /// solution's environments. One of <c>EnvironmentRefreshInterval.Choices</c>, each of
+    /// which divides a day, so every choice still runs at the quiet hour the morning jobs
+    /// read from. Defaults to once a day.
+    /// </summary>
+    public int EnvironmentRefreshIntervalMinutes { get; set; } = 1440;
 
     public DateTime UpdatedAt { get; set; }
 }

@@ -19,8 +19,11 @@ public sealed class ProjectBuildWorker : ReleaseImportWorker
         ProjectBuildQueue queue,
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
-        : base(queue.Reader, services, logger, heartbeats, $"{nameof(ProjectBuildWorker)} {slot}")
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base holds builds back during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
+        : base(queue.Reader, services, logger, heartbeats, $"{nameof(ProjectBuildWorker)} {slot}", maintenance)
     {
         _queue = queue;
     }

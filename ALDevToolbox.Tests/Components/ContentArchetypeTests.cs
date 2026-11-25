@@ -108,12 +108,11 @@ public sealed class ContentArchetypeTests : IDisposable
     }
 
     [Fact]
-    public void SetupSteps_wraps_its_steps_and_widens_on_request()
+    public void SetupSteps_wraps_its_steps()
     {
-        _ctx.Render<SetupSteps>(p => p.Add(c => c.ChildContent, Html("<div class=\"step\"></div>")))
-            .Find("div.steps").ClassList.Should().NotContain("steps--wide");
-        _ctx.Render<SetupSteps>(p => p.Add(c => c.Wide, true))
-            .Find("div.steps").ClassList.Should().Contain("steps--wide");
+        var cut = _ctx.Render<SetupSteps>(p => p.Add(c => c.ChildContent, Html("<div class=\"step\"></div>")));
+        cut.Find("div.steps").ClassName.Should().Be("steps");
+        cut.Find("div.steps > div.step").Should().NotBeNull();
     }
 
     [Fact]

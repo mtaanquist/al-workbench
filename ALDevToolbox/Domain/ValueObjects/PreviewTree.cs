@@ -90,15 +90,19 @@ public static class PreviewTreeBuilder
     /// mutated in place (the side-cars and grafted files are appended to it).
     /// <paramref name="configFileName"/> is passed in rather than referenced
     /// directly so this value-object layer stays free of a Services dependency.
+    /// <paramref name="codeWorkspaceFileName"/> names the workspace file when it
+    /// is not <c>{rootName}.code-workspace</c>: an existing workspace keeps the
+    /// name its settings recorded (#1615).
     /// </summary>
     public static PreviewNode BuildWorkspacePreview(
         string rootName,
         IList<PreviewNode> children,
         string configFileName,
         IEnumerable<string> workspaceRootPaths,
-        IEnumerable<string>? emptyRootFolders = null)
+        IEnumerable<string>? emptyRootFolders = null,
+        string? codeWorkspaceFileName = null)
     {
-        children.Add(PreviewNode.File($"{rootName}.code-workspace"));
+        children.Add(PreviewNode.File(codeWorkspaceFileName ?? $"{rootName}.code-workspace"));
         children.Add(PreviewNode.File(configFileName));
         foreach (var path in workspaceRootPaths)
         {

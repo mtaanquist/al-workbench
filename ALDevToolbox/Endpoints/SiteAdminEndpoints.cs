@@ -150,6 +150,27 @@ internal static class SiteAdminEndpoints
                     "/site-admin/settings/builds"))
             .RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
+        app.MapPost("/site-admin/settings/logs/save", async (
+            HttpContext ctx, SystemSettingsService settings, IAntiforgery antiforgery, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var form = await ctx.Request.ReadFormAsync(ct);
+            // An unparseable value becomes one the service refuses, so the message
+            // comes from the one place the rules live.
+            var days = int.TryParse(form["LogRetentionDays"], out var d) ? d : 0;
+            var level = Enum.TryParse<LogLevel>(form["LogMinimumLevel"], ignoreCase: false, out var l)
+                && Enum.IsDefined(l) ? l : LogLevel.Trace;
+            try
+            {
+                await settings.SaveStoredLogSettingsAsync(new StoredLogSettingsInput(days, level), ct);
+                ctx.Response.Redirect($"/site-admin/settings/logs?{RouteConstants.OkQuery}=saved");
+            }
+            catch (PlanValidationException ex)
+            {
+                RedirectFirstError(ctx, "/site-admin/settings/logs", ex);
+            }
+        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
+
         app.MapPost("/site-admin/settings/entra/save", async (
             HttpContext ctx, SystemSettingsService settings, IAntiforgery antiforgery, CancellationToken ct) =>
         {
@@ -270,22 +291,50 @@ internal static class SiteAdminEndpoints
                     + Uri.EscapeDataString("Pick an object to download."));
                 return;
             }
-            // The form already lists the bucket's objects; cross-checking
-            // membership here costs another S3 round-trip but stops a
-            // tampered submit from triggering a download of an arbitrary
-            // object outside the configured prefix. The download service
-            // ALSO enforces the prefix and dump-suffix rule, so this is
-            // belt-and-braces.
-            var listed = await offsite.ListAsync(maxObjects: 1000, ct);
-            var match = listed.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
-            if (match is null)
+            // Check the submitted key itself - its shape under the configured
+            // prefix and that the object exists - so a tampered submit can't
+            // download an arbitrary object. Checking it against a listing, as
+            // this once did, refused any dump the listing's cap cut off (#1333).
+            // The download service enforces the shape again.
+            string? fileName;
+            try
+            {
+                fileName = await offsite.FindDumpAsync(key, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
-                    + Uri.EscapeDataString("That object is no longer in the bucket or doesn't look like one of our backups."));
+                    + Uri.EscapeDataString("Could not reach off-site storage: " + ex.Message));
                 return;
             }
-            var id = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, match.Key, match.FileName);
+            if (fileName is null)
+            {
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("That backup is no longer in off-site storage, or isn't one of ours."));
+                return;
+            }
+            // Recover only downloads, marked as another installation's; the
+            // restore decides, in its own request, whether this installation is
+            // still fresh enough to take it (#1322). Checked here as well so the
+            // SiteAdmin hears about it before a long download, not after.
+            var recover = string.Equals(form["RecoverFromAnotherInstallation"].ToString(), "true", StringComparison.OrdinalIgnoreCase);
+            if (recover && await offsite.RecoveryBlockerAsync(ct) is { } blocker)
+            {
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString(blocker));
+                return;
+            }
+            var id = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, key, fileName, recover);
             ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?job={Uri.EscapeDataString(id.ToString())}");
+        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
+
+        // Forgets the installation this one was rebuilt from (#1322).
+        app.MapPost("/site-admin/backups/former-installation/remove", async (
+            HttpContext ctx, BackupService backups, IAntiforgery antiforgery, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            backups.ForgetFormerInstallation();
+            ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.OkQuery}=former-removed");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
         app.MapGet("/site-admin/backups/offsite/jobs/{id:guid}", (
@@ -401,6 +450,10 @@ internal static class SiteAdminEndpoints
                 await backups.CreateAsync(BackupKind.AdHoc, ct);
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.OkQuery}=created");
             }
+            catch (PlanValidationException ex)
+            {
+                RedirectFirstError(ctx, RouteConstants.SiteAdminBackups, ex);
+            }
             catch (Exception ex) when (ex is InvalidOperationException or IOException)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}=" + Uri.EscapeDataString(ex.Message));
@@ -443,6 +496,13 @@ internal static class SiteAdminEndpoints
                 RedirectFirstError(ctx, RouteConstants.SiteAdminBackups, ex);
                 return;
             }
+            catch (InvalidOperationException ex)
+            {
+                // A backup or restore holds the lock (#1628).
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString(ex.Message));
+                return;
+            }
             ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.OkQuery}=deleted");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
@@ -468,6 +528,13 @@ internal static class SiteAdminEndpoints
             catch (PlanValidationException ex)
             {
                 RedirectFirstError(ctx, RouteConstants.SiteAdminBackups, ex);
+            }
+            catch (ALDevToolbox.Services.Backups.BackupRestoreFailedException ex)
+            {
+                // The site is held closed; the page's own notice says so and what
+                // to do, so a second message would only repeat it (#1321).
+                logger.LogError(ex, "Restore failed for backup {Id}; the site is held in maintenance mode.", id);
+                ctx.Response.Redirect(RouteConstants.SiteAdminBackups);
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException)
             {
@@ -600,19 +667,29 @@ internal static class SiteAdminEndpoints
                     + Uri.EscapeDataString("Pick a per-tenant object to download."));
                 return;
             }
-            // Cross-check membership in the listed bucket (under the
-            // tenants/ namespace) so a tampered submit can't trigger a
-            // download of an arbitrary key. The download method enforces
-            // the same shape rules internally — this is belt-and-braces.
-            var listed = await offsite.ListPerTenantAsync(maxObjects: 1000, flagOtherDeployments: false, ct);
-            var match = listed.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
-            if (match is null)
+            // Check the submitted key itself - its shape under the tenants/
+            // namespace and that the object exists - so a tampered submit can't
+            // download an arbitrary key. A listing, as this once used, was
+            // capped and refused every snapshot past the cap (#1333). The
+            // download method enforces the same shape rules again.
+            string? fileName;
+            try
+            {
+                fileName = await offsite.FindPerTenantSnapshotAsync(key, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
-                    + Uri.EscapeDataString("That per-tenant object is no longer in the bucket or doesn't look like one of our snapshots."));
+                    + Uri.EscapeDataString("Could not reach off-site storage: " + ex.Message));
                 return;
             }
-            var id = jobs.Enqueue(OffsiteRestoreJobKind.PerTenant, match.Key, match.FileName);
+            if (fileName is null)
+            {
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("That snapshot is no longer in off-site storage, or isn't one of ours."));
+                return;
+            }
+            var id = jobs.Enqueue(OffsiteRestoreJobKind.PerTenant, key, fileName);
             ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?job={Uri.EscapeDataString(id.ToString())}");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole))
           .AddEndpointFilter(BlockInSingleTenant);
@@ -653,6 +730,13 @@ internal static class SiteAdminEndpoints
             catch (PlanValidationException ex)
             {
                 RedirectFirstError(ctx, RouteConstants.SiteAdminTenantBackups, ex);
+                return;
+            }
+            catch (InvalidOperationException ex)
+            {
+                // A backup or restore holds the lock (#1628).
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString(ex.Message));
                 return;
             }
             ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.OkQuery}=deleted");
@@ -723,6 +807,10 @@ internal static class SiteAdminEndpoints
     /// plain-text body and disables status-code-pages re-execute for the same
     /// reason as <see cref="McpEndpoints"/>: a re-executed GET /not-found
     /// would mismatch the POST binding and surface a 400.
+    /// <para>The body goes back as the filter's result rather than being written
+    /// here: a filter that writes the response and returns <c>null</c> has that
+    /// <c>null</c> serialised as JSON after it, which throws once the response
+    /// has started, so every blocked request ended in a broken response.</para>
     /// </summary>
     private static async ValueTask<object?> BlockInSingleTenant(
         EndpointFilterInvocationContext ctx, EndpointFilterDelegate next)
@@ -730,13 +818,10 @@ internal static class SiteAdminEndpoints
         var single = ctx.HttpContext.RequestServices.GetRequiredService<ISingleTenantMode>();
         if (single.IsEnabled)
         {
-            var http = ctx.HttpContext;
-            var statusCodes = http.Features.Get<IStatusCodePagesFeature>();
+            var statusCodes = ctx.HttpContext.Features.Get<IStatusCodePagesFeature>();
             if (statusCodes is not null) statusCodes.Enabled = false;
-            http.Response.StatusCode = StatusCodes.Status404NotFound;
-            http.Response.ContentType = "text/plain; charset=utf-8";
-            await http.Response.WriteAsync("This feature is disabled on this deployment.");
-            return null;
+            return Results.Text("This feature is disabled on this deployment.",
+                "text/plain; charset=utf-8", statusCode: StatusCodes.Status404NotFound);
         }
         return await next(ctx);
     }

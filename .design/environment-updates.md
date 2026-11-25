@@ -82,8 +82,8 @@ found nothing** — "nothing is scheduled" and "we never asked" are different fa
 page says which it has.
 
 Four things fill it. A consultant's Refresh on the project's Business Central tab; a
-nightly sweep (`EnvironmentRefreshScheduler`, a fixed quiet UTC hour, `DeliveryScheduler`'s
-shape) that offers every BC-connected project to the in-process
+scheduled sweep (`EnvironmentRefreshScheduler`, `DeliveryScheduler`'s shape, once a night in a
+quiet UTC hour unless the organisation chose more often - see "How often" below) that offers every BC-connected project to the in-process
 `EnvironmentRefreshQueue`/`Worker` pair so the fleet is fresh each morning without anyone
 opening a project; and the page's own **Refresh** command, which feeds
 the same queue so a sweep and a hand-triggered refresh coalesce. Rather than telling the
@@ -135,9 +135,24 @@ can do is be unhurried and do as we are told.
   drawn once per process), because everything else in the world fires at 03:00 sharp.
 - *Told to slow down, it slows down.* `BcThrottleHandler`, on the shared Business Central
   HTTP client, retries a **read** answered with 429 (or a 503 that names a wait) once,
-  after the `Retry-After` it was given, capped at a minute. A write is never re-sent on
-  our own initiative. Still throttled after that is an ordinary failed read: the customer
-  keeps last night's mirror.
+  after the `Retry-After` it was given, when that is a minute or less. A longer wait is
+  never cut short: the answer is handed back as it is, and the clients carry the wait on
+  the `BcApiException` they throw. A write is never re-sent on our own initiative. The
+  refresh stops at the first throttled read for that customer (the rest would go to the
+  same tenant), the worker records the wait on `EnvironmentRefreshQueue` and breathes up
+  to a minute before the next customer, and the sweep skips that customer until the wait
+  has passed - however often the organisation has asked for sweeps. The wait is held in
+  memory, like the queue's dedupe gate; a restart forgets it at the cost of one more
+  refusal. A person's own Refresh is not held back by it: they are told Business Central
+  asked us to slow down, and for how long.
+- *How often.* Once a night by default. An organisation admin can choose more often on
+  Administration → Business Central (`organization_settings.environment_refresh_interval_minutes`),
+  from a closed list between every fifteen minutes and every twelve hours. Every choice
+  divides a day and runs are counted from the quiet hour plus the start offset, so whatever
+  is chosen one run still lands there, before the 05:00 jobs that read the result
+  (`DependencyDriftScheduler`'s automatic update pull requests). A run whose slot was missed
+  by more than an hour (or by the interval, when shorter) is not made up; the next slot comes
+  round. A stored value not on the list runs as once a night.
 - *A watched update is read on its own.* The Upgrades page's watch after Start update reads
   one environment twice every ten seconds, bounded to ten environments a tick and slower above
   that, and only until the update ends or 45 minutes pass - see "The page".
@@ -326,6 +341,96 @@ panel on a project's Business Central tab — so the history cannot read differe
 on which page somebody opened. Its empty state says nothing has been done to this environment
 yet.
 
+### Following a started update
+
+> **Status: built** ([#1711](https://github.com/mtaanquist/al-workbench/issues/1711)).
+> `UpgradeActionWorker.Follow.cs`.
+
+A `Sent` start only says Business Central accepted "start the update". The update itself is a
+separate operation that Microsoft's scheduler creates, as `SYSTEM`, once it picks the update up,
+and nothing links it back to our request: the write we send shows up as a `Modify` operation of
+its own. Before this, a failed update reached only somebody who had the Upgrades page open at the
+time.
+
+So every sweep also follows each sent start whose update has not been seen to end
+(`update_result` null, sent in the last two days), asking about each one at most every two
+minutes, as the person who started it, by reading the environment's operations. The operation is
+matched on what we do know: type `Update`, going to the version the start recorded (Major.Minor;
+any version when the start recorded none, or when the operation names none), that began after the
+start was sent (two minutes of slack for the clocks) - created then, or started running then, which
+covers an update Business Central had already queued before the start pulled it forward - and
+before the next start on the same environment, the earliest such. One update runs on an
+environment at a time, so that is enough. A start sent again before Business Central began the
+update is `Superseded`: the row stays `Sent`, nobody is told, and the later start is the one
+followed, so one failed update is one notice. Only `Succeeded`, `Failed`, `Canceled` and `Skipped`
+settle anything; any other status is read as still going.
+
+- **Succeeded**: `update_result = Succeeded`, the row stays `Sent`, and the outcome says Business
+  Central finished the update to that version.
+- **Failed, cancelled or skipped**: the row becomes `Failed` with Business Central's error text, so
+  the upgrade's line reads Failed cold, without anybody having watched it.
+- **No update operation a day after the start**: `NeverStarted`, also `Failed`, saying the update
+  was never begun. Only a read that answered counts towards that day; reads that failed say
+  nothing about the update.
+- **Moved to a later date before it began**: `Rescheduled`, the row stays `Sent` and nobody is
+  told, since somebody moved it on purpose (in the admin centre or from another page). Seen as a
+  `Modify` operation created after the start (less the start's own write, with the same two
+  minutes of slack), which is the only time the follower re-reads the environment; the start
+  counts as moved when the next update's date is now more than an hour past the start and
+  Business Central is not busy with the environment. The line goes back to Planned and shows the
+  new date, and the update is then an ordinary one waiting for that date.
+- **Stopped by hand**: on the upgrade's page a Booked line whose start is older than the page's
+  45-minute watch and still not seen to begin offers "Stop waiting for the update". It records `Dismissed` and `Failed`, sends nothing
+  to Business Central and notifies nobody, so the line reads Failed and can be ticked, started
+  again or left for an upgrade made from the leftovers. Gated like the start; refused once the
+  update has been seen to end. This is the way out when Microsoft accepts a start and then never
+  runs it (the November 2026 outage), and for a start past the two-day follow window, which the
+  follower otherwise leaves Booked.
+
+The page's own watch (#982) only joins a sent start younger than its 45-minute span. An older
+one that is still Booked says "Started 16 hours ago. No sign yet that Business Central has begun
+the update." instead of being watched afresh, as "Updating...", on every visit, and only then offers
+"Stop waiting for the update".
+
+On an ending the environment is re-read, so its version and next update are fresh (which is what
+turns the line Updated and tells whoever checks it). A success is only recorded once that re-read
+has worked; recorded without it, the line would stop reading Booked while still showing the old
+version. A failed or never-started update notifies
+the person who started it and the line's assignee on the planned upgrade it came from, whether
+the start was booked or made on the spot. A succeeded one notifies nobody: the "ready to check"
+notice already covers it. A start whose update has ended is no longer **Booked**: one that went
+to an earlier release than the upgrade's target falls back to Planned.
+
+### Moving the next update out after an update
+
+> **Status: built.** `UpgradeActionWorker.Follow.cs`, `BookDateMoveAsync`.
+
+Once a customer is updated, the ops team used to move the environment's next update out to the
+latest date Microsoft allows, by hand, so the next release does not land on them early. A planned
+upgrade now does that itself: the option "Move the next update to the latest date once each
+environment is updated" sits on the New upgrade and Edit details dialogs, ticked by default
+(`oe_environment_upgrades.move_date_after_update`, default true, so upgrades made before the option
+existed have it on too).
+
+When the follower records a `Succeeded` update for a start from such an upgrade, and the
+environment's re-read version is on the upgrade's target or later, it books an ordinary `Pending`
+date move (`PushDateToLatest`, marked `automatic`) on the same upgrade, as the person who started
+the update, due 5 minutes later. The wait is because Business Central's `SYSTEM` writes the next
+version and its date just after an update ends; moved before that, there is nothing to move, or the
+move is overwritten. Being an ordinary booking, it runs through the same path as one a person
+booked (grant re-checked at run time), shows in the history, and can be cancelled until it runs.
+
+Nothing is booked when the update failed, when it stopped short of the target (the next update is
+then the target itself, which must stay where it is), or when something else is already pending on
+the environment, since whoever booked that has a plan of their own. The move does not wait for
+`SYSTEM` beyond those minutes: it runs regardless, and if it finds nothing to move (no next update
+yet, no latest date, or already on the latest date) it ends quietly as `Cancelled` with the reason
+as its outcome, since nobody asked for it. A date move a person booked still fails in that case.
+If the upgrade is marked done during the wait, the move is not sent and ends the same quiet way.
+A second pass made from the leftovers keeps the option as the first pass had it.
+An automatic move that works notifies nobody; one that fails for any other reason tells the person
+who started the update, as any failed booking does.
+
 ## Planned upgrades: a header with lines
 
 > **Status: engine and the upgrade's own page** ([#984](https://github.com/mtaanquist/al-workbench/issues/984), sub-issues B, D and E).
@@ -484,7 +589,10 @@ mode="picker"): the live fleet without deleted environments, the Environments li
 (search, solution, type, Active / Update waiting) and the Fleet table's columns, in a dialog of
 fixed height where only the table scrolls, full screen on a phone. Its selection is its own
 `SelectionSet`, so "4 selected, 1 shown" holds across searches, and **Show selected** brings
-every tick back. A line already on this upgrade is ticked and locked; one on another open
+every tick back. The view select opens on **All eligible**, which leaves out environments
+already on the target or later (the same Major.Minor test as the fill buttons): there is
+nothing for this upgrade to do on them. **All environments** and **With an update waiting**
+are one choice away. A line already on this upgrade is ticked and locked; one on another open
 upgrade is locked and names it in the warning tone (`ListOpenLineOwnersAsync`); one whose
 solution the person may not manage is locked and says so. The two fill buttons, **Production
 not yet on 28.5** and **Sandboxes not yet on 28.5**, add to the selection and never replace it,
@@ -504,7 +612,7 @@ Where it departs from its sheets, and why:
 | The Checked tick, with "Tick when checked" beside it | The same words inside the tick's label | So the tick reads as its own control and not as a second copy of the row's selection box. |
 | The Mark done confirm as one list of the unchecked lines | The leftovers under "Failed or never started (3)", then "The rest, not checked yet (4)", and a line naming any environment still updating | "The 3 that failed or never started" has to point at three rows the reader can see. |
 | No row menu on a phone card | The row menu beside Call, and the note editor under the tick | Retrying the failed one and noting what was checked are the morning's work, and the phone is where the customer is rung. |
-| "Start with" before the picker's fill buttons; the view select as "Active" / "Update waiting"; "None waiting" | "Add to the selection:"; "All environments" / "With an update waiting" (the fleet page's words); "Nothing waiting" | "Start with" read as "start the update on"; "Active" named nothing; one fact, one wording. |
+| "Start with" before the picker's fill buttons; the view select as "Active" / "Update waiting"; "None waiting" | "Add to the selection:"; "All eligible" (the default) / "All environments" / "With an update waiting" (the fleet page's words); "Nothing waiting" | "Start with" read as "start the update on"; "Active" named nothing; one fact, one wording. |
 | "4 selected, 0 shown" | "4 selected, none of them shown" | A zero read as "nothing on screen" with five rows showing. |
 | An open upgrade's overflow with Reopen, disabled | No Reopen until the upgrade is done | Port note left with the sheet: a command the page can never offer here is hidden, not dimmed. |
 | "New upgrade from the leftovers" enabled on an open upgrade | Disabled, with "Mark this upgrade done first. Its environments stay on it while it is open." | The engine needs the source done first (above): while it is open it still holds those environments. |
@@ -662,6 +770,15 @@ under its own heading — the ones that will be passed over and why.
   run is immediate (no booking in this version) and sends only the rows the preview put under
   Will change; the others are reported on their rows with the preview's reason, so a row
   with a booked update never has its version changed under the booking.
+- **Set AppSource cadence...**, in the bar's More menu beside Change the next version, sets how
+  often AppSource apps update on every selected environment. It needs the same grant as the
+  other bulk moves - that is why it lives here and not on the Environments list, where the
+  delivery-window action is gated on managing the solution instead. Picking a cadence previews
+  the rows grouped by the cadence they move from, with the ones already on it (and any without
+  the grant, or deleted) skipped and folded, and the count line says how many will change and
+  how many are skipped. The run writes each changing environment to the customer's tenant in
+  turn and reports how many were updated, skipped and refused. The service side is
+  `ProjectConnectionService.SetAppUpdateCadenceForManyAsync`; see `saas-delivery.md`, 5b.
 
 That dialog re-voices itself on the choice inside it, because immediate and booked carry
 opposite promises. Immediately keeps the danger button, the typed word, and "once it starts
@@ -1024,6 +1141,7 @@ Where it still differs, and why:
 | Sortable Customer and Next update headers; Previous / Next | Fixed order; count only | As on the Environments list. |
 | The table directly in the page | The table in a box that scrolls sideways, with the checkbox, state and Solution columns pinned | The page container clips rather than scrolls (#574), and nine columns do not fit a narrow window. |
 | The view select first in the bar, then the search | The search first, then the view select, then the commands | The order Solutions and Environments use, with the same search width and F3. Maintainer's decision, 2026-09-24 (#966). |
+| (no row) | **Set AppSource cadence...** in the bar's More menu | Ops asked to put many customers on one AppSource cadence without opening each environment. Same grant as the other bulk moves. No sheet draws the dialog. **Needs a design pass upstream.** |
 | Two fleet commands | A third, **Change the next version...**, beside them in the bar and in the row menu | #960. No sheet: it reuses the bar's disabled-until-ticked button and the other dialogs' preview (grouped rows under `upg-preview__head` headings, the count line, the typed word). **Needs a design pass upstream.** |
 | Nothing while an update runs | "Updating... started 6 minutes ago" under the next update while the page watches it, then "Updated to 29.2", or "Update failed" with a link to the environment's Operations tab | #982: the team sits on the page to see a started update finish. No sheet draws a live row; it reuses the row-result line (`upg-note`) and its spinner. **Needs a design pass upstream.** |
 | The solution name alone | The name, then the short name in the Solutions list's quieter tone | #966: customers are called by their abbreviation in daily speech; the search matches it too. |
@@ -1045,7 +1163,7 @@ tab; a solution without a slug keeps the numeric one. See `.design/artifacts.md`
 frame (#809). Named user: an ops engineer with a fleet of customer environments, who would
 otherwise open each customer's admin centre. It follows the sheet top to bottom: crumbs
 through the solution, a `detail-head` with the state pill and the type as a `.tag`, the
-freshness strip, the six-item `.meta-row`, the Updates card's `.kv-grid` with the info alert
+freshness strip, the six-item `.meta-row` (now a rail beside the tabs; see the table), the Updates card's `.kv-grid` with the info alert
 when the two windows overlap, then Apps (Scheduled installs, Installed apps, AppSource
 updates waiting - ready ones first, "Waits for N" with the prerequisites as `.tag`s) and
 Environment settings as a `.setting-list` ending in the `setting--danger` row.
@@ -1093,9 +1211,9 @@ Where it differs from the sheet, and why:
 | The sheet has | We have | Why |
 | --- | --- | --- |
 | "Nothing on this page is stored by the workbench." | "Apps and settings read from Business Central {age}. Version and update dates last checked {age}." | The sheet's sentence is not true for us: the environment row and its next update are mirrored, and the app lists are cached for fifteen minutes. The strip says which half is which. |
-| An overflow menu: Copy environment ID, Open the admin centre, Export the app list, Remove from this solution | "Open the admin centre" as a second button; no menu | We mirror no Business Central environment id, there is no export, and environments are mirrored from Business Central rather than attached by hand, so nothing can be removed. One entry is not a menu. |
+| An overflow menu: Copy environment ID, Open the admin centre, Export the app list, Remove from this solution | "Admin centre" as a second button at the end of the tab row (see the layout row); no menu | We mirror no Business Central environment id, there is no export, and environments are mirrored from Business Central rather than attached by hand, so nothing can be removed. One entry is not a menu. |
 | Refresh for everyone | Refresh for everyone on Operations and Sessions, for people who manage the solution on Overview and Apps | Those two tabs are read live on every visit anyway, so their Refresh gives a reader nothing new; the other two are cached for everybody, and making the customer's tenant answer again is a manager's call. |
-| A region in the subtitle and a country in the meta row | Both, when Business Central reported them | `location_name` and `country_code` are mirrored; an environment read before they were captured shows a dash. |
+| A region in the subtitle and a country in the meta row | Both, as Region and Country in the At a glance card, when Business Central reported them | `location_name` and `country_code` are mirrored; an environment read before they were captured shows a dash. |
 | Overlap alert naming the overlapping hours | The alert without the hours, linking to where the delivery window is set | The two windows can be in different time zones and the overlap moves with daylight saving; `BcUpdateWindow.Overlaps` answers yes or no. |
 | "Reschedule the update" as a button in the Updates card | "Change the next version", with a down arrow, linking to the "Next Business Central update" setting further down the Overview tab | One control writes the version, and it carries the warning and the lock line; a second one in the card would skip both. The label says it goes down the page, because a button that scrolls reads as a button that did nothing. |
 | "Blocked" in the filter, "Waits for N" on the pill | "Waiting" and "Waits for N" | One word for one state on one card. |
@@ -1107,9 +1225,10 @@ Where it differs from the sheet, and why:
 | Nothing after Environment settings | Update history | Who moved this environment's dates and what is still booked; the same feed the Upgrades page shows. |
 | A read-only list of waiting AppSource updates | An **Update** button on the rows that are ready | What #809's report asked for, and the maintainer's decision on #841 to build it without a sheet. Ready rows only: a waiting row names its prerequisites instead, which is the next step. The confirm names the app, both versions, the environment and whether it is production, and asks when - the environment's next update window by default, or now. `ProjectConnectionService.UpdateAppAsync` re-reads the waiting list before it writes and refuses an app that is not on it, a version Business Central is not offering, or an app that still waits for another; dependencies are never pulled along. Manage-gated (it writes to the customer's tenant, though the list it acts on is read by anyone who can see the solution); logged, not audited, as it touches no row of ours. **Not yet tried against a live tenant** - the request shape is from Microsoft's documentation of `POST .../apps/{appId}/update`. Needs a design pass upstream. Since #1001 the update is booked like an upload instead (`BookAppUpdateAsync`, sent by the worker); see `saas-delivery.md`, "Updating an AppSource app". |
 | The result of a write beside its control | One result line under the head | The writes are spread down a long page and each re-reads everything; the top is where the eye is afterwards. |
-| Nothing about copying the environment | **Copy this environment...** as a third outline button in the head, and **Copy...** in the Environments list's row menu; both open the same dialog | The sheet draws a page that only reads and adjusts. Copying is the errand this page's reader would otherwise open the admin centre for, and it is the one write here that adds an environment to the customer's tenant; see "Copying an environment" above. Not shown on a deleted environment, which has nothing to copy. **Not yet tried against a live tenant** - the request shape is from Microsoft's documentation of `POST .../copy`. **There is no sheet for this; it needs a design pass upstream.** |
-| Nothing about a deleted environment | A danger alert above the meta row, with **Recover this environment** | The sheet draws a live environment. A deleted one changes what every number under it means, and it has a deadline; see "Deleted environments" above. |
-| One long page: Updates, Apps, Environment settings | Five tabs under the meta row - **Overview** (the Updates card, both windows, the three settings), **Apps** (scheduled installs, installed apps, AppSource updates waiting, Upload an app), **Operations**, **Sessions**, **Workbench history** | The page had grown past what the sheet drew (uploads, app updates, the delivery window, history) and the thing looked for was a long scroll away. The head, the freshness strip, the result line and the meta row stay above the tabs because they are true on every one. The tabs are real links (`/environments/{id}/apps`), so one can be bookmarked and Back works; the page reads the environment once per id, and a change of tab reads only what that tab shows - Overview and Apps share the one cached panel, Operations has its own read, History asks Business Central nothing. Refresh re-reads the open tab - and Sessions, the one live tab, keeps itself current besides; see "Sessions" above. Maintainer's decision, 2026-09-20; needs a design pass upstream. |
+| Nothing about copying the environment | **Copy environment...** as a third outline button at the end of the tab row, and **Copy...** in the Environments list's row menu; both open the same dialog | The sheet draws a page that only reads and adjusts. Copying is the errand this page's reader would otherwise open the admin centre for, and it is the one write here that adds an environment to the customer's tenant; see "Copying an environment" above. Not shown on a deleted environment, which has nothing to copy. **Not yet tried against a live tenant** - the request shape is from Microsoft's documentation of `POST .../copy`. **There is no sheet for this; it needs a design pass upstream.** |
+| Nothing about a deleted environment | A danger alert under the tabs, on every tab, with **Recover this environment** | The sheet draws a live environment. A deleted one changes what every number under it means, and it has a deadline; see "Deleted environments" above. |
+| One long page: Updates, Apps, Environment settings | Five tabs directly under the head - **Overview** (the Updates card, both windows, the three settings), **Apps** (scheduled installs, installed apps, AppSource updates waiting, Upload an app), **Operations**, **Sessions**, **Workbench history** | The page had grown past what the sheet drew (uploads, app updates, the delivery window, history) and the thing looked for was a long scroll away. The facts that are true on every tab sit beside them, not above them (next row). The tabs are real links (`/environments/{id}/apps`), so one can be bookmarked and Back works; the page reads the environment once per id, and a change of tab reads only what that tab shows - Overview and Apps share the one cached panel, Operations has its own read, History asks Business Central nothing. Refresh re-reads the open tab - and Sessions, the one live tab, keeps itself current besides; see "Sessions" above. Maintainer's decision, 2026-09-20; needs a design pass upstream. |
+| The six facts in a full-width `.meta-row` under the freshness strip, a subtitle under the name, and the actions in the head | Only the name, the state and the type in the head; the tabs straight under it, with the actions at the end of the same row under one full-width rule, as a repository's are on GitHub (**Business Central**, **Admin centre**, **Copy environment...**, each with a hover title saying where it goes; on a narrow page they take their own line above the tabs); then the open tab beside an **At a glance** card in `.detail-body`'s rail (the solution, linked, and the region from the old subtitle, then the meta row's facts); the freshness strip, the result line and the alerts run full width between the tabs and the two columns, since they qualify both | With the facts between the head and the tabs, people did not see there were tabs at all: the row of labels read as the end of the header, not as a menu. A menu under the title and a FactBox beside the content are what a Business Central user expects from a card page. On a narrow screen the card drops below the tab's content rather than above it, so the tabs stay next to what they switch; the Overview's Updates card already carries the version, the next update and the window there. With nothing beside the name, a phone reaches the tabs straight after the title. Maintainer's call, 2026-10-14; needs a design pass upstream. |
 | No operations list | **Operations**: Business Central's own record for the environment (`GET .../environments/{name}/operations`) - app installs, updates and uninstalls, platform updates, restarts, renames, setting changes - newest first, each as a sentence with a status, who started it, when (the solution's time zone) and how long it took; a failure carries Business Central's message | Workbench history is what *we* did from here (named so at the tab strip, where the choice between the two is made); an update started in the admin centre, or one Microsoft ran overnight, is only in Business Central's record. Two tabs rather than one merged timeline until there is real data to judge a merge by. Read live on every visit, never cached: the point is to watch something finish. Read-only, and gated on seeing the solution like the panel. Operation types and statuses are worded in `BcEnvironmentOperationDisplay`; one Microsoft adds later is spaced out into words rather than shown as the wire token. **Not yet tried against a live tenant** - the shape is from Microsoft's documentation. |
 | No notion of who is signed in | **Sessions**: who has a session open on the environment right now (`GET .../environments/{name}/sessions`) - who, how they got in, since when, what they are running and for how long - with **End session** per row behind a confirm | The errand this page's reader would otherwise open the admin centre for while a customer is on the phone with everything locked. The one live tab: it reads on arrival, re-reads every 30 seconds for 10 minutes, and says so. Nothing about a session is stored. Read by anyone who can see the solution; ending one is manage-gated, and the history line names whose session it was and what it was running. **Not yet tried against a live tenant** - the shape is from Microsoft's documentation of the session endpoints, and `currentOperationDuration` is documented as a bare `long` with no unit. See "Sessions" above. **There is no sheet for this; it needs a design pass upstream.** |
 | Scheduled installs drawn only as an empty state | A table with a Cancel install action when there are any | The write exists and a booked install has to be reachable from somewhere. |

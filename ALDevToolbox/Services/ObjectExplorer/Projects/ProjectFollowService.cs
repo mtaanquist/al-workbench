@@ -87,7 +87,19 @@ public sealed class ProjectFollowService
     /// comes back. Reads no signed-in user, so a background job can call it inside the
     /// organisation's scope.
     /// </summary>
-    public async Task<List<int>> ListFollowerIdsAsync(int projectId, CancellationToken ct = default)
+    public Task<List<int>> ListFollowerIdsAsync(int projectId, CancellationToken ct = default) =>
+        ListFollowerIdsAsync(projectId, roles: null, ct);
+
+    /// <summary>
+    /// The followers of solution <paramref name="projectId"/>, as
+    /// <see cref="ListFollowerIdsAsync(int, CancellationToken)"/>, that hear about work
+    /// done by <paramref name="roles"/>: those holding any of them on the People list, and
+    /// those not on the list at all (the owner, someone who pressed Follow), who have no
+    /// role to filter by. Null means every follower. See <c>.design/notifications.md</c>,
+    /// "Following a solution" (#1463).
+    /// </summary>
+    public async Task<List<int>> ListFollowerIdsAsync(
+        int projectId, IReadOnlyCollection<ProjectPersonRole>? roles, CancellationToken ct = default)
     {
         var project = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId && p.DeletedAt == null)
@@ -98,15 +110,17 @@ public sealed class ProjectFollowService
         var choices = await _db.OeProjectFollowers.AsNoTracking()
             .Where(f => f.ProjectId == projectId)
             .ToDictionaryAsync(f => f.UserId, f => f.Following, ct);
-        var defaults = await _db.OeProjectPeople.AsNoTracking()
+        var people = await _db.OeProjectPeople.AsNoTracking()
             .Where(p => p.ProjectId == projectId)
-            .Select(p => p.UserId)
-            .ToListAsync(ct);
+            .Select(p => new { p.UserId, p.Roles })
+            .ToDictionaryAsync(p => p.UserId, p => p.Roles, ct);
+        var defaults = people.Keys.ToList();
         if (project.CreatedByUserId is { } owner) defaults.Add(owner);
 
         var candidates = defaults.Where(id => !choices.TryGetValue(id, out var following) || following)
             .Concat(choices.Where(c => c.Value).Select(c => c.Key))
             .Distinct()
+            .Where(id => roles is null || !people.TryGetValue(id, out var held) || held.Any(roles.Contains))
             .ToList();
         if (candidates.Count == 0) return [];
 

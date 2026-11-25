@@ -53,6 +53,59 @@ public sealed class SystemSettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Stored_log_settings_save_and_apply_to_the_buffer_at_once()
+    {
+        var buffer = new ALDevToolbox.Services.Logging.StoredLogBuffer();
+
+        await NewService(storedLogs: buffer).SaveStoredLogSettingsAsync(
+            new StoredLogSettingsInput(RetentionDays: 14, MinimumLevel: Microsoft.Extensions.Logging.LogLevel.Warning));
+
+        var view = await NewService().GetStoredLogSettingsAsync();
+        view.RetentionDays.Should().Be(14);
+        view.MinimumLevel.Should().Be(Microsoft.Extensions.Logging.LogLevel.Warning);
+        buffer.RetentionDays.Should().Be(14);
+        buffer.MinimumLevel.Should().Be(Microsoft.Extensions.Logging.LogLevel.Warning);
+
+        // Startup and a restore re-read the row into the buffer the same way.
+        var fresh = new ALDevToolbox.Services.Logging.StoredLogBuffer();
+        await NewService(storedLogs: fresh).ApplyInMemoryStateAsync(CancellationToken.None);
+        fresh.RetentionDays.Should().Be(14);
+        fresh.MinimumLevel.Should().Be(Microsoft.Extensions.Logging.LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task Stored_log_settings_default_to_a_week_of_everything()
+    {
+        var view = await NewService().GetStoredLogSettingsAsync();
+        view.RetentionDays.Should().Be(7);
+        view.MinimumLevel.Should().Be(Microsoft.Extensions.Logging.LogLevel.Information);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(31)]
+    public async Task Stored_log_retention_outside_its_range_is_refused_on_its_field(int days)
+    {
+        var act = () => NewService().SaveStoredLogSettingsAsync(
+            new StoredLogSettingsInput(days, Microsoft.Extensions.Logging.LogLevel.Information));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["LogRetentionDays"].Should().Be("Enter a number of days from 1 to 30.");
+    }
+
+    [Theory]
+    [InlineData(Microsoft.Extensions.Logging.LogLevel.Debug)]
+    [InlineData(Microsoft.Extensions.Logging.LogLevel.Trace)]
+    [InlineData(Microsoft.Extensions.Logging.LogLevel.Critical)]
+    public async Task Stored_log_level_the_page_does_not_offer_is_refused(Microsoft.Extensions.Logging.LogLevel level)
+    {
+        var act = () => NewService().SaveStoredLogSettingsAsync(new StoredLogSettingsInput(7, level));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("LogMinimumLevel");
+    }
+
+    [Fact]
     public async Task Clearing_build_concurrency_goes_back_to_the_default()
     {
         var queue = new ProjectBuildQueue(defaultLimit: 3);
@@ -316,11 +369,13 @@ public sealed class SystemSettingsServiceTests : IDisposable
         SystemSettingsService.IsHostAllowed("download.microsoft.com", System.Array.Empty<string>()).Should().BeFalse();
     }
 
-    private SystemSettingsService NewService(SmtpFallbackOptions? smtpFallback = null, ProjectBuildQueue? builds = null)
+    private SystemSettingsService NewService(
+        SmtpFallbackOptions? smtpFallback = null, ProjectBuildQueue? builds = null,
+        ALDevToolbox.Services.Logging.StoredLogBuffer? storedLogs = null)
     {
         var ctx = _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
         return new SystemSettingsService(ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, TimeProvider.System,
-            smtpFallback: smtpFallback, buildQueue: builds);
+            smtpFallback: smtpFallback, buildQueue: builds, storedLogs: storedLogs);
     }
 
     private static SystemSettingsInput NewInput(

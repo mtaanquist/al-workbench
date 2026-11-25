@@ -52,8 +52,9 @@ internal sealed class AuditLogEntryConfiguration : IEntityTypeConfiguration<Audi
         // AuditLog is tenant-scoped by the query filter installed in
         // AppDbContext.OnModelCreating (#678). It is the one filter that also
         // admits rows with a null OrganizationId, because startup seed and
-        // bootstrap inserts run before any org context exists. AuditService
-        // keeps its explicit organization_id predicates on top as belt and
-        // braces.
+        // bootstrap inserts run before any org context exists, and the
+        // deployment-wide SystemSettings / Backup rows are filed under no org.
+        // AuditService's explicit organization_id predicates are what keep
+        // those null-org rows off a tenant's audit page (see AppDbContext).
     }
 }

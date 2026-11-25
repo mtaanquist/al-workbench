@@ -115,6 +115,22 @@ public sealed class GatewayPolicyParserTests
     }
 
     [Fact]
+    public void The_trial_file_in_the_staging_package_reads_once_its_placeholders_are_filled_in()
+    {
+        // The staging workflow zips ALWorkbench.Gateway/trial/ with the program for a
+        // foreground trial on one test server; its README walks through these replacements.
+        var path = ALDevToolbox.Tests.Infrastructure.RepoRoot.Combine("ALWorkbench.Gateway", "trial", "gateway.toml");
+        var text = File.ReadAllText(path);
+        text.Should().MatchRegex(@"^[\x09\x0A\x0D\x20-\x7E]*$", "it is opened in Notepad");
+
+        var policy = Valid(text.Replace("CHANGE-ME", Local));
+
+        var tier = policy.Find(new TierRef(Local, "BC250"))!;
+        tier.Allow.Should().Contain([PolicyPermission.Publish, PolicyPermission.Restart, PolicyPermission.ServiceControl, PolicyPermission.Licence]);
+        GatewayPolicyParser.Parse(text, Local).IsValid.Should().BeFalse("an unedited placeholder must be refused, not mistaken for another computer");
+    }
+
+    [Fact]
     public void An_empty_file_is_valid_and_allows_nothing()
     {
         Valid("# nothing yet\n").Instances.Should().BeEmpty();

@@ -75,7 +75,8 @@ public sealed record StandaloneExtensionPlanInput(
     string RuntimeVersion,
     int IdRangeFrom,
     int IdRangeTo,
-    string Publisher,
+    [property: Description("Optional. Your organisation's publisher, set by an admin, is always used when it has one; this is used only when it has none.")]
+    string? Publisher = null,
     [property: Description("Whether to include the template's example files. Ignored when adding to a repository: examples are always left out there, so they cannot clash with the ones it already has.")]
     bool IncludeExamples = true,
     IReadOnlyList<DependencyEntryInput>? Dependencies = null)
@@ -90,7 +91,7 @@ public sealed record StandaloneExtensionPlanInput(
         IdRangeFrom,
         IdRangeTo,
         IncludeExamples,
-        Publisher,
+        Publisher ?? string.Empty,
         Dependencies?.Select(d => d.ToDomain()).ToList() ?? new List<DependencyEntry>());
 }
 
@@ -100,18 +101,24 @@ public sealed record DependencyEntryInput(string DepId, string DepName, string D
 }
 
 /// <summary>
-/// What a <c>generate_*</c> tool returns. The ZIP is inlined as base64 so
-/// the agent has the bytes in hand without a follow-up download fetch.
+/// What a <c>generate_*</c> tool returns. The ZIP is not inline: base64 made a
+/// typical workspace too large for an assistant's answer (#1508), so the
+/// result carries a short-lived link instead, which only the person who
+/// generated it can open.
 /// </summary>
+/// <param name="DownloadPath">
+/// Where the user fetches the ZIP: appended to the app's base URL, signed in as
+/// themselves, until <paramref name="DownloadExpiresAt"/>. Null when the files
+/// went to a repository, which then holds them.
+/// </param>
 /// <param name="AddedToRepository">
 /// Set only when the caller asked for the result to be added to a GitHub
-/// repository (issue #623). The ZIP alongside it is the same one the pull
-/// request carries, so an agent can hand either to the user.
+/// repository (issue #623). The size and hash are of the ZIP the pull request
+/// carries.
 /// </param>
 /// <param name="CreatedRepository">
 /// Set only when the caller asked for a new repository to be created for the
-/// result (issue #622). As above, the ZIP alongside it is the one that was
-/// committed, not a second generation with different extension GUIDs.
+/// result (issue #622). The size and hash are of the ZIP that was committed.
 /// </param>
 /// <param name="ExtensionPrefix">
 /// The prefix the generated extension names actually carry, once the
@@ -121,7 +128,8 @@ public sealed record DependencyEntryInput(string DepId, string DepName, string D
 /// </param>
 public sealed record WorkspaceResult(
     string FileName,
-    string ContentBase64,
+    string? DownloadPath,
+    DateTime? DownloadExpiresAt,
     int SizeBytes,
     string Sha256,
     RepositoryDeliveryResult? AddedToRepository = null,
@@ -157,7 +165,7 @@ public sealed record WorkspaceResult(
 /// </param>
 /// <param name="Branches">
 /// The branches created beside the default branch at the same commit
-/// (test and staging), empty when none were.
+/// (test), empty when none were.
 /// </param>
 /// <param name="BranchesWarning">Which of those GitHub refused, or null.</param>
 /// <param name="BuildPipelines">
@@ -255,7 +263,11 @@ public sealed record ModuleSummary(
     string Name,
     [property: Description("The folder name and rendered AL extension name this module produces in a generated workspace.")]
     string ExtensionName,
-    bool Deprecated);
+    bool Deprecated,
+    [property: Description("For a module whose files are copied from a GitHub repository, that repository as owner/name; null when the files were written in AL Workbench.")]
+    string? SourceRepository = null,
+    [property: Description("The commit the module's current copy of the repository was made at; null when the files were written in AL Workbench.")]
+    string? SourceCommit = null);
 
 /// <summary>
 /// What <c>get_template</c> returns: everything the New Workspace form knows
@@ -335,7 +347,8 @@ public sealed record RecipeSummary(
     string? MinimumApplication = null,
     decimal? EstimatedValueHours = null);
 
-public sealed record RecipeFileDto(string Path, string Content);
+/// <summary>One recipe file; Content is null when it did not fit in the answer (get_recipe's Note says how to fetch it).</summary>
+public sealed record RecipeFileDto(string Path, string? Content);
 
 public sealed record RecipeDetail(
     int Id,
@@ -348,16 +361,22 @@ public sealed record RecipeDetail(
     string? Instructions = null,
     string? MinimumApplicationVersionName = null,
     string? MinimumApplication = null,
-    decimal? EstimatedValueHours = null);
+    decimal? EstimatedValueHours = null,
+    bool Truncated = false,
+    string? Note = null);
 
 /// <summary>
 /// One file body submitted as part of a <see cref="SuggestRecipeInput"/>.
 /// Distinct from the read-side <see cref="RecipeFileDto"/> (which uses a
 /// single <c>Path</c> field combining folder + name) so the MCP-facing
 /// field names match the domain's <c>RecipeFileInput</c>. <c>RelativePath</c>
-/// is empty for files at the recipe's root.
+/// is empty for files at the recipe's root. <c>Content</c> is nullable for
+/// <c>update_recipe</c>, where a null body means "keep the stored body of the
+/// file at this path": <c>get_recipe</c> lists files that did not fit in its
+/// answer with a null body, and sending that back must not blank them (#1626).
+/// The suggestion tools treat a null body as empty, as before.
 /// </summary>
-public sealed record RecipeFileInputDto(string FileName, string Content, string RelativePath = "");
+public sealed record RecipeFileInputDto(string FileName, string? Content, string RelativePath = "");
 
 /// <summary>
 /// Input shape for the <c>suggest_recipe</c> tool. Mirrors
@@ -378,18 +397,24 @@ public sealed record SuggestRecipeInput(
     IReadOnlyList<RecipeFileInputDto> Files,
     string? Instructions = null,
     int? MinimumApplicationVersionId = null,
-    decimal? EstimatedValueHours = null)
+    decimal? EstimatedValueHours = null,
+    string? MinimumApplication = null)
 {
-    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain() => new(
+    /// <summary>
+    /// Builds the service input. The minimum version id is resolved by the tool
+    /// first, from <c>MinimumApplicationVersionId</c> or the
+    /// <c>MinimumApplication</c> string (#1547), since no tool exposes the id.
+    /// </summary>
+    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain(int? minimumApplicationVersionId) => new(
         Title,
         Description,
         Keywords,
         ParseType(Type),
         Files
-            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content, f.RelativePath))
+            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content ?? string.Empty, f.RelativePath))
             .ToList(),
         Instructions,
-        MinimumApplicationVersionId,
+        minimumApplicationVersionId,
         EstimatedValueHours);
 
     internal static ALDevToolbox.Domain.ValueObjects.RecipeType ParseType(string? raw)
@@ -423,18 +448,24 @@ public sealed record UpdateRecipeSuggestionInput(
     IReadOnlyList<RecipeFileInputDto> Files,
     string? Instructions = null,
     int? MinimumApplicationVersionId = null,
-    decimal? EstimatedValueHours = null)
+    decimal? EstimatedValueHours = null,
+    string? MinimumApplication = null)
 {
-    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain() => new(
+    /// <summary>
+    /// Builds the service input. The minimum version id is resolved by the tool
+    /// first, from <c>MinimumApplicationVersionId</c> or the
+    /// <c>MinimumApplication</c> string (#1547), since no tool exposes the id.
+    /// </summary>
+    public ALDevToolbox.Services.Cookbook.RecipeSuggestionInput ToDomain(int? minimumApplicationVersionId) => new(
         Title,
         Description,
         Keywords,
         SuggestRecipeInput.ParseType(Type),
         Files
-            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content, f.RelativePath))
+            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content ?? string.Empty, f.RelativePath))
             .ToList(),
         Instructions,
-        MinimumApplicationVersionId,
+        minimumApplicationVersionId,
         EstimatedValueHours);
 }
 
@@ -444,9 +475,14 @@ public sealed record UpdateRecipeSuggestionResult(int SuggestionId, string Messa
 /// <summary>
 /// Input shape for the <c>update_recipe</c> tool: a full-replace payload
 /// for an already-published recipe, mirroring <see cref="UpdateRecipeSuggestionInput"/>
-/// plus the fields only published recipes carry. <c>Deprecated</c> is
-/// nullable — omitting it keeps the recipe's current flag rather than
-/// silently un-deprecating on every edit. Requires the same
+/// plus the fields only published recipes carry. The optional fields keep
+/// the recipe's stored value when omitted rather than silently resetting it
+/// on every edit (#1626): <c>Deprecated</c>; <c>EstimatedValueHours</c>
+/// (cleared only by <c>ClearEstimatedValueHours</c>); and the minimum
+/// version, set by <c>MinimumApplicationVersionId</c> or by the
+/// <c>MinimumApplication</c> string <c>get_recipe</c> returns, and cleared by
+/// an empty <c>MinimumApplication</c>. A file sent with a null
+/// <c>Content</c> keeps its stored body. Requires the same
 /// <c>GuidanceToken</c> gate as the suggestion write tools; the caller
 /// must additionally hold the Editor or Admin role.
 /// </summary>
@@ -461,20 +497,30 @@ public sealed record UpdateRecipeInput(
     string? Instructions = null,
     int? MinimumApplicationVersionId = null,
     decimal? EstimatedValueHours = null,
-    bool? Deprecated = null)
+    bool? Deprecated = null,
+    string? MinimumApplication = null,
+    bool ClearEstimatedValueHours = false)
 {
-    public ALDevToolbox.Services.Cookbook.RecipeInput ToDomain(bool currentDeprecated) => new(
+    /// <summary>
+    /// Builds the service input. The tool resolves the parts that need the
+    /// database first: the minimum version id to store (already merged with
+    /// the stored one) and the file list (null bodies already filled from
+    /// the stored files).
+    /// </summary>
+    public ALDevToolbox.Services.Cookbook.RecipeInput ToDomain(
+        bool currentDeprecated,
+        decimal? currentEstimatedValueHours,
+        int? minimumApplicationVersionId,
+        IReadOnlyList<ALDevToolbox.Services.Cookbook.RecipeFileInput> files) => new(
         Title,
         Description,
         Keywords,
         SuggestRecipeInput.ParseType(Type),
         Deprecated ?? currentDeprecated,
-        Files
-            .Select(f => new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, f.Content, f.RelativePath))
-            .ToList(),
+        files,
         Instructions,
-        MinimumApplicationVersionId,
-        EstimatedValueHours);
+        minimumApplicationVersionId,
+        ClearEstimatedValueHours ? null : EstimatedValueHours ?? currentEstimatedValueHours);
 }
 
 /// <summary>What <c>update_recipe</c> returns: the unchanged recipe id plus a confirmation.</summary>
@@ -508,10 +554,14 @@ public sealed record CookbookGuidance(
 /// Null when everything is in place. Otherwise one plain sentence to pass on to
 /// the person, naming the step that unblocks them.
 /// </param>
+/// <param name="Truncated">True when more repositories matched than were returned (#1511).</param>
+/// <param name="Note">What was left out and how to narrow the list; null when nothing was.</param>
 public sealed record RepositoryListResult(
     string Readiness,
     string? Guidance,
-    IReadOnlyList<RepositorySummary> Repositories);
+    IReadOnlyList<RepositorySummary> Repositories,
+    bool Truncated = false,
+    string? Note = null);
 
 /// <summary>
 /// One repository, as an agent needs it: enough to name it in a later call, to

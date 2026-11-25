@@ -41,7 +41,7 @@
         <StatusPill Tone="@AuditActionPill(_entry!.Action)">@_entry.Action</StatusPill>
     </TitleRow>
     <SubtitleContent>
-        What changed when @_entry!.ChangedBy @AuditVerb(_entry.Action) this record.
+        What changed when @AuditActor.Display(_entry!) @AuditVerb(_entry!.Action) this record.
         The "after" side is taken from the next change to the same record in the
         same organisation, so the most recent change has nothing to compare
         against yet.
@@ -53,7 +53,7 @@
         </div>
         <div class="meta-item">
             <span class="meta-item__label">Changed by</span>
-            <span class="meta-item__value">@_entry!.ChangedBy</span>
+            <span class="meta-item__value">@AuditActor.Display(_entry!)</span>
         </div>
         <div class="meta-item">
             <span class="meta-item__label">Organisation</span>

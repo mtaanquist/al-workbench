@@ -302,7 +302,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _error = "Only the solution owner or an admin can deploy this solution's builds.";
+            _error = "Only the solution's owner, someone on its team, or an admin can deploy this solution's builds.";
         }
         catch (Exception ex)
         {

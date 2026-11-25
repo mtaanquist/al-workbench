@@ -54,6 +54,7 @@ public sealed class FolderTreeHydrator
             // ExportService, NewWorkspace/NewExtension previews) leaves it false and stays
             // inside the tenant filter.
             folderQuery = folderQuery.IgnoreQueryFilters();
+            // Same category 5 read, under the same opt-in.
             fileQuery = fileQuery.IgnoreQueryFilters();
         }
         var folders = await folderQuery
@@ -132,6 +133,7 @@ public sealed class FolderTreeHydrator
             // Fence category 5 (system-org fork read): same opt-in as above — only
             // TemplateImportService passes ignoreOrgFilter, with system-org module ids.
             folderQuery = folderQuery.IgnoreQueryFilters();
+            // Same category 5 read, under the same opt-in.
             fileQuery = fileQuery.IgnoreQueryFilters();
         }
         var folders = await folderQuery

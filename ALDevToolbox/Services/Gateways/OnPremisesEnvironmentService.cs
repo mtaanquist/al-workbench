@@ -156,7 +156,7 @@ public sealed class OnPremisesEnvironmentService
     {
         try
         {
-            await GatewayService.EnsureAdminAsync(_db, _orgContext, ct).ConfigureAwait(false);
+            await GatewayService.EnsureAdminAsync(_db, _orgContext, ct);
             return true;
         }
         catch (UnauthorizedAccessException)
@@ -173,7 +173,7 @@ public sealed class OnPremisesEnvironmentService
     /// </summary>
     public async Task<List<LinkableTier>> ListLinkableTiersAsync(int projectId, CancellationToken ct = default)
     {
-        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct).ConfigureAwait(false);
+        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct);
         var now = Now;
         var instances = await _db.GatewayInstances.AsNoTracking()
             .Where(i => i.MissingSince == null
@@ -185,12 +185,12 @@ public sealed class OnPremisesEnvironmentService
                 i.Machine, i.Name, i.Environment, i.Version, i.Multitenant,
                 Tenants = i.Tenants.Where(t => t.MissingSince == null).Select(t => t.TenantId).ToList(),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var linked = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null && e.GatewayInstanceId != null)
             .Select(e => new { e.GatewayInstanceId, e.TenantId, e.ProjectId, ProjectName = e.Project!.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var rows = new List<LinkableTier>();
         foreach (var i in instances)
@@ -225,14 +225,14 @@ public sealed class OnPremisesEnvironmentService
     public async Task<int> LinkAsync(int projectId, LinkTierInput input, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct).ConfigureAwait(false);
+        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct);
         var orgId = _orgContext.CurrentOrganizationId
             ?? throw new InvalidOperationException("Linking a service tier needs an authenticated request.");
 
         var project = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId && p.DeletedAt == null)
             .Select(p => new { p.Id, p.Name, p.HostingType })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw Invalid("Name", "This Solution no longer exists.");
         if (!OeProject.IsOnPremisesHosting(project.HostingType))
         {
@@ -255,7 +255,7 @@ public sealed class OnPremisesEnvironmentService
             instance = await _db.GatewayInstances
                 .Include(i => i.Gateway)
                 .Include(i => i.Tenants)
-                .FirstOrDefaultAsync(i => i.Id == instanceId, ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(i => i.Id == instanceId, ct);
             if (instance is null || instance.Gateway is null || instance.Gateway.RevokedAt is not null)
             {
                 errors["InstanceId"] = "That service tier is no longer reported by a gateway. Choose another.";
@@ -297,7 +297,7 @@ public sealed class OnPremisesEnvironmentService
             .Where(e => e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null
                         && e.GatewayInstanceId == instance!.Id && e.TenantId != null)
             .Select(e => new { e.Id, e.ProjectId, e.Name, e.TenantId, ProjectName = e.Project!.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (current.FirstOrDefault(e => SameTenant(e.TenantId!, tenantId!)) is { } taken)
         {
             throw Invalid("InstanceId", taken.ProjectId == projectId
@@ -307,7 +307,7 @@ public sealed class OnPremisesEnvironmentService
 
         var rows = await _db.OeProjectEnvironments
             .Where(e => e.ProjectId == projectId)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var revived = rows.FirstOrDefault(e => e.Kind == OeEnvironmentKind.OnPremises
                                                && e.GatewayInstanceId == instance!.Id
                                                && e.TenantId is not null && SameTenant(e.TenantId, tenantId!));
@@ -343,16 +343,16 @@ public sealed class OnPremisesEnvironmentService
         Apply(row, instance!, now);
         if (tenant is not null)
         {
-            if (tenant.Id != 0) await _db.Entry(tenant).Collection(t => t.Apps).LoadAsync(ct).ConfigureAwait(false);
+            if (tenant.Id != 0) await _db.Entry(tenant).Collection(t => t.Apps).LoadAsync(ct);
             var existing = row.Id == 0
                 ? []
-                : await _db.OeEnvironmentApps.Where(a => a.EnvironmentId == row.Id).ToListAsync(ct).ConfigureAwait(false);
+                : await _db.OeEnvironmentApps.Where(a => a.EnvironmentId == row.Id).ToListAsync(ct);
             SyncApps(_db, row, tenant, existing, now);
         }
 
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
@@ -378,18 +378,18 @@ public sealed class OnPremisesEnvironmentService
     /// <exception cref="PlanValidationException">Keyed <c>Environment</c> when there is no such linked tier.</exception>
     public async Task UnlinkAsync(int projectId, int environmentId, CancellationToken ct = default)
     {
-        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct).ConfigureAwait(false);
+        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct);
         var row = await _db.OeProjectEnvironments
             .FirstOrDefaultAsync(e => e.Id == environmentId && e.ProjectId == projectId
-                                      && e.Kind == OeEnvironmentKind.OnPremises, ct).ConfigureAwait(false)
+                                      && e.Kind == OeEnvironmentKind.OnPremises, ct)
             ?? throw Invalid("Environment", "That service tier is not linked to this Solution.");
         if (row.MissingSince is not null) return;
 
         row.MissingSince = Now;
         // Removed in the same save as the stamp, so the two cannot come apart.
         _db.OeEnvironmentApps.RemoveRange(
-            await _db.OeEnvironmentApps.Where(a => a.EnvironmentId == row.Id).ToListAsync(ct).ConfigureAwait(false));
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.OeEnvironmentApps.Where(a => a.EnvironmentId == row.Id).ToListAsync(ct));
+        await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "User {UserId} unlinked environment {EnvironmentId} ({EnvironmentName}) from project {ProjectId}.",
             _orgContext.CurrentUserId, row.Id, row.Name, projectId);

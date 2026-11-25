@@ -54,4 +54,28 @@ public sealed class EnvironmentRefreshQueueTests
         queue.IsInFlight(42).Should().BeFalse();
         (await queue.EnqueueAsync(Job(42))).Should().BeTrue("once finished, the project can be refreshed again");
     }
+    [Fact]
+    public void A_project_Business_Central_asked_us_to_leave_alone_stays_deferred_until_the_time_passes()
+    {
+        var queue = new EnvironmentRefreshQueue();
+        var now = new DateTime(2026, 10, 29, 3, 20, 0, DateTimeKind.Utc);
+
+        queue.DeferUntil(42, now.AddMinutes(10));
+
+        queue.DeferredUntil(42, now).Should().Be(now.AddMinutes(10));
+        queue.DeferredUntil(99, now).Should().BeNull("only the throttled project waits");
+        queue.DeferredUntil(42, now.AddMinutes(10)).Should().BeNull("the wait is over at the time it named");
+    }
+
+    [Fact]
+    public void A_shorter_wait_never_cuts_a_longer_one_short()
+    {
+        var queue = new EnvironmentRefreshQueue();
+        var now = new DateTime(2026, 10, 29, 3, 20, 0, DateTimeKind.Utc);
+
+        queue.DeferUntil(42, now.AddMinutes(30));
+        queue.DeferUntil(42, now.AddMinutes(5));
+
+        queue.DeferredUntil(42, now.AddMinutes(10)).Should().Be(now.AddMinutes(30));
+    }
 }

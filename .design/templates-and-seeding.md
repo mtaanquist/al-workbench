@@ -41,7 +41,8 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
         query and reassembled client-side — EF's Include doesn't recurse)
       - workspace_extension_files attached to each folder at its depth
       - workspace_extension_dependencies per extension
-      - default modules + their dependencies
+      - default modules + their dependencies (soft-deleted modules are
+        skipped: the catalogue retired them)
       - default application version
       - included organisation files (the join plus each file's path)
     refuse if the local org already has a template with the same key
@@ -49,9 +50,13 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
         reuse the local module that shares the key, otherwise clone it
         (with its module_dependencies AND its recursive
         module_extension_folders / module_extension_files tree) into the
-        local org
+        local org; if the local module with that key is soft-deleted, the
+        org retired it, so leave it out of the template's defaults rather
+        than restoring it
     for the default application version:
-        reuse the local row that shares the key, otherwise clone it
+        reuse the local row that shares the key, otherwise clone it; if
+        the local row is soft-deleted, leave the template with no default
+        version rather than restoring it
     for each included organisation file:
         point the clone at the acting org's own file with the same path
         (every org carries its own copy, possibly edited); skip a path the
@@ -275,6 +280,22 @@ content = """codeunit 91000 \"{{affix}} Doc Adapter\" { }"""
 ```
 
 Order of `[[module.dependencies]]` blocks is preserved.
+
+A module copied from a GitHub repository exports with a `[module.source]` table (`repository`, `ref`, `path`, `commit`) beside its copied folders. It is a record of where the copy came from; nothing imports it, so a module brought in from an export is an ordinary written-here module holding the same files.
+
+## Modules from a GitHub repository
+
+Issue #1415. Instead of typing a module's files into the editor, an Editor can point the module at a GitHub repository, and AL Workbench copies the extension's files into the module's ordinary folder rows. Generation never knows the difference: it reads the copy from the database like any other module, so New Workspace and Create repository keep working when GitHub is down, and the "generation is read-only against the DB" fence holds.
+
+**What is stored.** `modules.source_repository` (`owner/name`, the canonical casing GitHub returned), `source_ref` (branch, tag or commit; null means the default branch), `source_path` (a folder inside the repository; null means the root), `source_commit_sha` (what the copy was made from), `source_fetched_at`, `source_checked_at` and `source_error` (bookkeeping for the module page), and two JSON columns: `source_skipped_json` (files left out and why) and `source_dependencies_json` (the repository `app.json`'s dependencies). A module with a null `source_repository` is a written-here module; switching a module back to written-here keeps the current copy as editable files.
+
+**Which repositories.** Public repositories on github.com, and private ones in the GitHub organisation connected under Administration, only when the Editor saving the module can see that repository on GitHub themselves (the same check as solution repositories, #1294). Reads use the organisation's installation token when it has one and are anonymous otherwise. The archive is downloaded from `codeload.github.com` only, with no credential on that hop.
+
+**What is copied.** The files of the chosen folder, with placeholders filled at generation time like any module file, and object IDs left exactly as the repository has them (clashes are the new workspace's to resolve). Left out silently: `.git*`, `.vscode`, `.alpackages`, `.snapshots`, `.altestrunner`, `*.app`, and the folder's own `app.json`, which is read instead: its dependencies are added to the generated extension after the typed ones (a typed entry for the same app id wins), and its ID range size is used for the module when the Editor left that blank, following the repository through every refresh (a size the Editor typed always wins). Left out and listed on the module page: files directly in the extension folder (module trees hold folders only), binary or non-UTF-8 files, files over 512 KB, links, unsafe paths and names that differ only in case. A copy over 500 files or 5 MB, or a download over 50 MB, is refused.
+
+**When the copy is refreshed.** On save (a repository that cannot be read refuses the save), on "Update now", on a push to the followed branch through the same GitHub App webhook the pipelines use (`GitHubPullRequestBuildWorker.RecordBranchActivityAsync`), (so only for repositories the connected organisation's App is installed on; a public repository elsewhere relies on the daily pass), and in a daily pass at 03:00 UTC (`ModuleSourceRefreshScheduler`, `DISABLE_MODULE_SOURCE_REFRESH_SCHEDULER`) for anything a push missed. A module pinned to a full commit SHA is skipped by the daily pass. A refresh that finds the same commit only stamps `source_checked_at`; a failed refresh keeps the old copy and records why in `source_error`, which the module page and list show. Each refresh reads the repository again: a renamed repository is followed and the new name stored, and one that has become private outside the connected organisation stops refreshing with the reason shown. The Editor's own access is checked only at save time, as with automatic builds, and a module forked from the system organisation keeps its source as it was. A refresh replaces only the files and the source columns, under a row lock, and is dropped if the module was saved or switched while it downloaded. A new commit that leaves the module's folder as it was only moves the recorded commit; the files are not rewritten. In a push or the daily pass, modules that share a repository share one look at it and one download, a module already at the pushed commit is skipped, and GitHub limiting requests ends the pass with the rest left as they are for next time. Saving a repository module without changing its repository, branch or folder keeps the copy as it is.
+
+**Generated workspaces** carry a plain copy with no link back. `workspace.aldt.toml` records the repository and commit in the extension's identity row so a later reader can tell where the files came from.
 
 ## Catalogue TOML schema
 

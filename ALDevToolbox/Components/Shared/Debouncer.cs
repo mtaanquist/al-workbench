@@ -6,15 +6,21 @@ namespace ALDevToolbox.Components.Shared;
 /// Upgrades filter through it so the table redraws once a word is typed rather than once
 /// per keystroke (#981). The action runs off the renderer's thread, so a component wraps
 /// its body in <c>InvokeAsync</c>. A zero delay runs the action straight away, which is
-/// what the page tests use instead of sleeping.
+/// what the page tests use instead of sleeping; the wait itself runs on the clock it
+/// is given, so its own tests can move time rather than wait for it.
 /// </summary>
 public sealed class Debouncer : IDisposable
 {
     private readonly TimeSpan _delay;
+    private readonly TimeProvider _clock;
     private CancellationTokenSource? _pending;
     private bool _disposed;
 
-    public Debouncer(TimeSpan delay) => _delay = delay;
+    public Debouncer(TimeSpan delay, TimeProvider? clock = null)
+    {
+        _delay = delay;
+        _clock = clock ?? TimeProvider.System;
+    }
 
     /// <summary>Schedules <paramref name="action"/>, dropping any call still waiting.</summary>
     public void Trigger(Func<Task> action)
@@ -43,7 +49,7 @@ public sealed class Debouncer : IDisposable
     {
         try
         {
-            if (_delay > TimeSpan.Zero) await Task.Delay(_delay, ct);
+            if (_delay > TimeSpan.Zero) await Task.Delay(_delay, _clock, ct);
             if (ct.IsCancellationRequested) return;
             await action();
         }

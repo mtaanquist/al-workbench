@@ -133,6 +133,10 @@ public class AppDbContext : DbContext
     public DbSet<PendingSignup> PendingSignups => Set<PendingSignup>();
     public DbSet<PasswordResetToken> PasswordResetTokens => Set<PasswordResetToken>();
     public DbSet<LoginAttempt> LoginAttempts => Set<LoginAttempt>();
+    // Stored log lines for /site-admin/logs. Site-wide and read only by the SiteAdmin
+    // console, so deliberately NOT scoped by the tenant query filter - with no filter
+    // on the table there is nothing for its reads to escape.
+    public DbSet<AppLogEntry> AppLogEntries => Set<AppLogEntry>();
     // Transactional email waiting to be sent (issue #790). Written by pre-auth
     // flows that have no organisation in scope and read by a cross-org SiteAdmin
     // console, so deliberately NOT scoped by the tenant query filter - and with
@@ -168,6 +172,11 @@ public class AppDbContext : DbContext
     public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
     public DbSet<UserExternalLogin> UserExternalLogins => Set<UserExternalLogin>();
 
+    // Sealed links - see .design/sealed.md.
+    public DbSet<SealedLink> SealedLinks => Set<SealedLink>();
+    public DbSet<SealedLinkEvent> SealedLinkEvents => Set<SealedLinkEvent>();
+    public DbSet<RepositoryMigration> RepositoryMigrations => Set<RepositoryMigration>();
+
     // Teams and their membership — see .design/teams-and-visibility.md.
     public DbSet<Team> Teams => Set<Team>();
     public DbSet<TeamMember> TeamMembers => Set<TeamMember>();
@@ -200,6 +209,8 @@ public class AppDbContext : DbContext
     // What a tracked repository's app.json is behind on, as the last drift scan
     // found it — see .design/github-integration-phase2.md.
     public DbSet<GitHubRepositoryDrift> GitHubRepositoryDrift => Set<GitHubRepositoryDrift>();
+    public DbSet<GitHubRepositoryCheck> GitHubRepositoryChecks => Set<GitHubRepositoryCheck>();
+    public DbSet<GitHubRepositoryFileCheck> GitHubRepositoryFileChecks => Set<GitHubRepositoryFileCheck>();
     // Every Business Central update pull request the workbench opened, so the
     // automatic run never offers a closed one again (#1104).
     public DbSet<GitHubUpdatePullRequest> GitHubUpdatePullRequests => Set<GitHubUpdatePullRequest>();
@@ -349,6 +360,8 @@ public class AppDbContext : DbContext
         ScopeToOrganization<OrganizationEmailDomain>(modelBuilder);
         ScopeToOrganization<GitHubRepositoryCandidate>(modelBuilder);
         ScopeToOrganization<GitHubRepositoryDrift>(modelBuilder);
+        ScopeToOrganization<GitHubRepositoryCheck>(modelBuilder);
+        ScopeToOrganization<GitHubRepositoryFileCheck>(modelBuilder);
         ScopeToOrganization<GitHubUpdatePullRequest>(modelBuilder);
         ScopeToOrganization<OeRelease>(modelBuilder);
         ScopeToOrganization<OeReleaseDependency>(modelBuilder);
@@ -434,13 +447,20 @@ public class AppDbContext : DbContext
         ScopeToOrganization<NotificationDigestItem>(modelBuilder);
         ScopeToOrganization<UserNotification>(modelBuilder);
         ScopeToOrganization<OAuthConsent>(modelBuilder);
+        ScopeToOrganization<SealedLink>(modelBuilder);
+        ScopeToOrganization<SealedLinkEvent>(modelBuilder);
+        ScopeToOrganization<RepositoryMigration>(modelBuilder);
         // AuditLogEntry carries a *nullable* organization_id: startup seed and
         // bootstrap-admin inserts happen before any org context exists. The
         // filter therefore admits null-org rows alongside the current org's,
         // so those system rows stay visible while a tenant still cannot read
-        // another tenant's audit history (#678). AuditService keeps its
-        // explicit predicates as belt and braces; the SiteAdmin console reads
-        // cross-org and calls IgnoreQueryFilters() explicitly.
+        // another tenant's audit history (#678). For another org's rows
+        // AuditService's explicit predicates are belt and braces; for the
+        // null-org rows they are the only guard, because SystemSettings and
+        // Backup rows (SMTP host, off-site bucket) are filed under no org since
+        // #1260 and this filter lets every tenant see them. CrossOrgIsolationTests
+        // pins both. The SiteAdmin console reads cross-org and calls
+        // IgnoreQueryFilters() explicitly.
         ScopeToOrganization<AuditLogEntry>(
             modelBuilder,
             e => e.OrganizationId == _orgContext.OrganizationIdForFilter || e.OrganizationId == null);

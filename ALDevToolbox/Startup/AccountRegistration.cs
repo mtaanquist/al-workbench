@@ -1,5 +1,6 @@
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ALDevToolbox.Startup;
 
@@ -15,6 +16,9 @@ public static class AccountRegistration
         services.AddScoped<ALDevToolbox.Services.Account.AuthService>();
         services.AddScoped<ALDevToolbox.Services.Account.EntraSignInService>();
         services.AddScoped<ALDevToolbox.Services.Account.UserAdministrationService>();
+        // Re-checks an interactive page's user against their row before each
+        // circuit event, since a circuit never runs the cookie re-check (#1534).
+        services.TryAddEnumerable(ServiceDescriptor.Scoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, ALDevToolbox.Services.Account.SessionRevalidationCircuitHandler>());
         services.AddScoped<ALDevToolbox.Services.Account.PasswordResetService>();
         services.AddScoped<ALDevToolbox.Services.Account.RecoveryCodeService>();
         services.AddScoped<ALDevToolbox.Services.Account.TotpService>();

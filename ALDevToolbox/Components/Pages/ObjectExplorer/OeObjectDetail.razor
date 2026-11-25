@@ -217,6 +217,15 @@
             }
             else
             {
+                @if (_referencesTruncated)
+                {
+                    <div class="card__body">
+                        <p class="u-muted">
+                            Showing the first @_references.Count.ToString("N0") references. To narrow them,
+                            open the object's source and use Find references there on a field or procedure.
+                        </p>
+                    </div>
+                }
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -274,6 +283,8 @@
     private Guid? _moduleAppId;
     private List<ReferenceMatch>? _references;
     private string? _refSetToken;
+    // True when the search hit its cap, so the list is not every reference.
+    private bool _referencesTruncated;
     private bool _referencesLoading;
 
     /// <summary>Set once the lookup has run, so a null object can be told apart
@@ -319,6 +330,7 @@
                 ? null
                 : await ReferenceSessions.CreateFromSymbolAsync(ObjectId, owner, FromReleaseId);
             _references = session?.Results.ToList() ?? new List<ReferenceMatch>();
+            _referencesTruncated = session?.Truncated == true;
             _refSetToken = session?.Token;
         }
         finally

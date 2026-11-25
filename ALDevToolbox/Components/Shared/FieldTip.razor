@@ -1,0 +1,14 @@
+@*
+    A small info mark beside a field label whose explanation is useful once and noise
+    after that, so it waits for a hover (or keyboard focus) instead of sitting under the
+    field and pushing its row out of line with its neighbours. The browser's own tooltip
+    shows the text; screen readers get the same text as the mark's label.
+*@
+<span class="field-tip" tabindex="0" role="img" title="@Text" aria-label="@Text">
+    <Icon Name="info" Width="13" Height="13" />
+</span>
+
+@code {
+    /// <summary>The explanation, as plain text.</summary>
+    [Parameter, EditorRequired] public string Text { get; set; } = string.Empty;
+}

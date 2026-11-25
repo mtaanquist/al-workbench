@@ -206,6 +206,10 @@ These appear in multiple pages — pulling them into reusable components saves d
 - Icons are Lucide, vendored as SVGs under `ALDevToolbox/Resources/Icons/` (see `VERSION.txt` for the pinned upstream tag) and rendered inline by `Components/Shared/Icon.razor`. No mixing icon families. Don't reintroduce a third-party icon NuGet — the package this replaced (`Lucide.Blazor`) was unmaintained and threw on render when an icon name didn't exist (issue #47); the vendored catalogue logs a warning and renders a placeholder instead.
 - Stick to a single accent colour for "active" or "selected" states throughout.
 
+## Link previews
+
+When a link is pasted into Teams, Slack or an email, the chat app fetches it itself, with no cookie, and caches what it gets. So the preview card is public: it may name the *kind* of page from the path ("Solution in AL Workbench"), but never anything read from the database or echoed from the URL, such as a solution name or slug. A gated link answers with the sign-in page, which reads the original path from its return URL. Sealed links get a generic card. `Components/Layout/LinkPreview.razor` holds the tags and a static brand image (`wwwroot/link-preview.png`); pages do not set their own `og:` tags. Cards with real data would come from a signed-in Teams app (#1502), never from the public page (#1501).
+
 ## Mobile
 
 Not in scope. This is a desktop tool. The layout can collapse the sidebar on narrow viewports if it's free, but don't spend effort on it.

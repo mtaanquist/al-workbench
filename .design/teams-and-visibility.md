@@ -188,7 +188,11 @@ Its consequence for teams: **deleting a team is refused while it is the last tea
 any non-Public project**, listing the projects that block it. The refusal is
 deliberate rather than auto-resetting those projects to Public — silently making a
 Private project world-readable is exactly the failure this feature exists to prevent.
-That refusal lives in `TeamService.DeleteTeamAsync`.
+That refusal lives in `TeamService.DeleteTeamAsync`. It and the access save
+(`ProjectService.SetAccessAsync`) lock the team rows, then the solution rows, before they
+check, so two deletes at once, or a delete and an access save, cannot each pass against
+the state before the other and leave a solution with no team: the second waits and checks
+what the first left (#1603).
 
 ## Authorisation
 
@@ -198,7 +202,7 @@ Two levels, deliberately different:
 
 | Capability | Who |
 |---|---|
-| Create a team, delete a team | Org Admin, SiteAdmin |
+| Create a team, delete a team, set a member's "Can schedule upgrades" flag | Org Admin, SiteAdmin |
 | Rename, add / remove members, promote or demote a manager | The above, plus a member of that team with `IsManager` |
 
 - `CanManageTeamAsync(teamId)` / `EnsureCanManageTeamAsync(teamId)` resolve in that
@@ -266,6 +270,17 @@ to.
   everywhere. A Public project with no teams therefore has no non-admin operators at
   all, which is the intended shape: the fleet page's grant follows the same team
   assignments that already decide who sees the customer.
+- **Where the flag counts is an org choice** (`organization_settings.upgrade_permission_scope`,
+  Administration → Business Central, labelled "Can schedule upgrades applies to"). The
+  default, `AssignedTeams`, is the rule above. `ManagedSolutions` is for a company small
+  enough that the team assignments don't follow who does upgrades: holding the flag on
+  *any* team lets you act on every project you may manage (`CanManageAsync`), which takes
+  in every Public project and the Read-only and Private ones whose teams you are on. It
+  never reaches past manage, so a Private project stays closed to anyone outside its
+  teams. The levels are an enum stored by name; `ProjectAccess.CanManageEnvironmentUpdatesAsync`
+  and `UpdateOpsProjectPredicate` switch over it and must be kept in step when one is
+  added. The scope is read into the access snapshot only for a member who holds the flag
+  and is not an admin, since it changes no one else's answer.
 - **Deliberately not a fourth `UserRole`.** A new role would ripple through the
   hard-coded role lists, label switches, invite pages and MCP checks in ~30 files and
   would still not compose with per-project visibility. The flag touches almost none
@@ -280,10 +295,13 @@ to.
   `ProjectAccess` against the database. That keeps a grant change effective on the
   next page load rather than the next sign-in, and keeps the claims pipeline out of
   the blast radius.
-- Granted from the team roster (`/teams/{id}`) by whoever passes
-  `CanManageTeamAsync` — the same gate as the manager toggle. Unlike that toggle, a
-  membership row that isn't there is a validation error rather than a silent no-op: a
-  grant aimed at the wrong row should not look like it landed.
+- Granted from the team roster (`/teams/{id}`) by an org Admin or SiteAdmin only —
+  `CanAdministerTeamsAsync`, the create/delete gate, not `CanManageTeamAsync`. A team
+  manager sees the column read-only: since managing the team does not grant the flag,
+  a manager must not be able to hand it out either, least of all to themselves
+  ([#1547](https://github.com/mtaanquist/al-workbench/issues/1547)). Unlike the
+  manager toggle, a membership row that isn't there is a validation error rather than
+  a silent no-op: a grant aimed at the wrong row should not look like it landed.
 - Audited with the rest of the membership row; `team_members` has no column gate.
 
 `ProjectAccess` carries it: the snapshot gains `UpdateOpsTeamIds` (the teams where
@@ -356,6 +374,42 @@ all gated as of slice 3:
 - `Endpoints/ArtifactEndpoints.cs` — `ArtifactService`'s byte getters were already
   gated in slice 2, so each handler catches `ProjectAccessDeniedException` and
   answers its existing 404 rather than letting a 500 escape.
+
+**Release-id writes** (#1430). Every authoring write that takes a release id checks
+`IsReleaseVisibleAsync`, and asks it before the existence read so a hidden id and an
+unknown one run the same queries:
+
+- `ReleaseManagementService` — `SoftDeleteAsync`, `RestoreAsync`,
+  `UpdateMetadataAsync`, `HardDeleteAsync`, and `EnsureBackfillableAsync` (the
+  pre-check of the one-release system-reference backfill, which answers 404).
+- `ReleaseImportService.AmendReleaseAsync` — the module upload onto an existing
+  release.
+- `TranslationImportService` — `ImportSingleAsync` and `ImportZipAsync`, the two
+  translation uploads.
+- `ReleaseImportRequestService.RetryAsync` — the manage page's Retry. A hidden
+  release is treated as unknown: its saved source and its release row are read
+  and then discarded, so nothing is reused and the reopen answers not found. A
+  retry of a pipeline build is additionally held to the solution manage check, as
+  pressing Build is.
+- `ReleaseImportRequestService.FindSymbolRecoveryProjectAsync` — the pre-check of
+  manual-symbols recovery, which answers a hidden release with the same "isn't a
+  solution build" refusal as an unknown id, before the solution manage check the
+  rebuild itself holds to.
+- `ReleaseManagementService.ListBackfillableReleaseIdsAsync` — the bulk "backfill
+  every release" action queues only the releases `VisibleReleasePredicate` lets the
+  caller see, so the count it reports leaves the hidden ones out too.
+
+Admin and Editor are the roles that reach them, so the rule is the read rule, not a
+stricter one: an org Admin and a SiteAdmin bypass it, the owner and the assigned
+teams' members pass, and anyone else gets exactly what an unknown id gets (the same
+field error word for word, or the same 404), so the refusal confirms nothing. The
+import services and `ReleaseImportRequestService` take `ProjectAccess` as a required
+constructor argument, so nothing builds one without the fence.
+
+Not gated here: the importer's own soft-delete (`SupersedeAsync`, which
+`ArtifactReleaseImporter` uses to replace or retire a Microsoft artifact release),
+under the worker rule below, since no project owns such a release and the sweep runs
+with nobody signed in.
 
 **MCP** (`Services/Mcp/Tools/`, per the parity guide in `PROJECT.md`), gated as of
 slice 3. Each tool class has exactly one id-resolution choke point, which is where

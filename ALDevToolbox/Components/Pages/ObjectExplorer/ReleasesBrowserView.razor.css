@@ -154,3 +154,43 @@
     color: var(--primary-ink);
     gap: var(--space-2);
 }
+
+/* ---------- Solutions table ---------- */
+
+/* One row per pipeline, so it stays readable at hundreds of customers where a
+   card each would not. The pipeline name is the row's link. */
+.oe-solutions__link {
+    color: var(--primary-ink);
+    font-weight: var(--fw-medium);
+    text-decoration: none;
+}
+
+.oe-solutions__link:hover {
+    color: var(--primary-ink);
+    text-decoration: underline;
+}
+
+.oe-solutions__link:focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
+}
+
+.oe-solutions__built {
+    white-space: nowrap;
+    color: var(--ink-3);
+}
+
+/* A solution's rows read as one block: the rule between customers is the
+   strong one, the rules between one customer's pipelines stay light. */
+.oe-solutions tbody tr:has(+ tr.oe-solutions__first) td {
+    border-bottom-color: var(--border-strong);
+}
+
+/* At phone width the solution, pipeline and version are what tell the rows
+   apart; the counts can go. */
+@media (max-width: 640px) {
+    .oe-solutions .oe-solutions__files,
+    .oe-solutions .oe-solutions__built {
+        display: none;
+    }
+}

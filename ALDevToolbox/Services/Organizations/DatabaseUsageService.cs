@@ -246,11 +246,14 @@ public sealed class DatabaseUsageService
     /// <summary>
     /// Cross-organisation snapshot listing for the SiteAdmin storage page.
     /// LEFT JOIN so an org with no snapshot yet still shows (as zero bytes,
-    /// null <c>ComputedAt</c>). SiteAdmin-only; reads raw SQL so the EF tenant
+    /// null <c>ComputedAt</c>). Refuses a caller who is not a SiteAdmin; reads raw SQL so the EF tenant
     /// filter doesn't apply (matching <see cref="ListAsync"/>'s cross-org reach).
     /// </summary>
     public async Task<IReadOnlyList<OrgUsageRow>> ListFromSnapshotsAsync(CancellationToken ct)
     {
+        // Raw SQL across every organisation, so the page's SiteAdmin role is
+        // not the only gate (fence category 2).
+        _orgContext.RequireSiteAdmin();
         var settings = await _systemSettings.GetViewAsync(ct);
         var connection = _db.Database.GetDbConnection();
         await EnsureOpenAsync(connection, ct);
@@ -313,7 +316,8 @@ public sealed class DatabaseUsageService
     }
 
     /// <summary>
-    /// Persists a per-organisation quota override. SiteAdmin only. Setting
+    /// Persists a per-organisation quota override. Refuses a caller who is not a
+    /// SiteAdmin. Setting
     /// the value to <see langword="null"/> reverts to the system default.
     /// </summary>
     public async Task SetOrgQuotaAsync(int organizationId, int? quotaMb, CancellationToken ct)
@@ -322,6 +326,9 @@ public sealed class DatabaseUsageService
         {
             throw new ArgumentOutOfRangeException(nameof(quotaMb), "Quota must be non-negative.");
         }
+        // Writes any organisation's row by id, so it checks for SiteAdmin itself
+        // rather than leaning on the endpoint's role alone (fence category 2).
+        _orgContext.RequireSiteAdmin();
         // Quota override, reached only from /site-admin/backup-storage/storage;
         // pinned to o.Id == organizationId.
         var org = await _db.Organizations

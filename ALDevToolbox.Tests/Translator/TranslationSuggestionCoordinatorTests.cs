@@ -94,6 +94,35 @@ public sealed class TranslationSuggestionCoordinatorTests : IDisposable
         (await NewMemory(read).SuggestAsync("Amount", "en-US", "da-DK")).Should().ContainSingle();
     }
 
+    /// <summary>
+    /// #1324: the Translator's repository save names where it wrote, and that
+    /// is what keeps a Private solution's strings with its own team.
+    /// </summary>
+    [Fact]
+    public async Task Learning_after_a_repository_save_records_the_repository_and_path()
+    {
+        await using var shared = _db.NewContext();
+        using var coordinator = new TranslationSuggestionCoordinator(NewMemory(shared));
+        const string xml = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2">
+              <file datatype="xml" source-language="en-US" target-language="da-DK" original="App">
+                <body><group id="body">
+                  <trans-unit id="u1"><source>Amount</source><target state="translated">Beløb</target></trans-unit>
+                </group></body>
+              </file>
+            </xliff>
+            """;
+
+        await coordinator.LearnGatedAsync(xml, "App.da-DK.xlf", ["u1"],
+            "cronus-dk/customer-app", "App/Translations/App.da-DK.xlf");
+
+        await using var read = _db.NewContext();
+        var row = await read.TranslationMemory.SingleAsync(e => e.SourceText == "Amount");
+        row.SourceRepository.Should().Be("cronus-dk/customer-app");
+        row.SourcePath.Should().Be("App/Translations/App.da-DK.xlf");
+    }
+
     [Fact]
     public async Task Gate_serialises_lookup_and_delete_on_one_shared_context()
     {

@@ -265,7 +265,7 @@
                                     <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                                     <span>Only release and deploy extensions that changed</span>
                                 </label>
-                                <small class="field__hint">If nothing in an extension's folder has changed since this pipeline last built it, it keeps its earlier .app file and version. It's left out of the release, and deployments don't reinstall it. Extensions that depend on a changed one are always rebuilt.</small>
+                                <small class="field__hint">If nothing in an extension's folder has changed since this pipeline last built it, it keeps its earlier .app file and version. It's left out of the release, and deployments don't reinstall it. An extension that depends on a changed one is compiled again to check it still builds. If it does, it keeps its earlier version; if not, the build reports it as failed.</small>
                             </div>
                             @if (_releaseRepositories is { Count: > 0 })
                             {
@@ -400,6 +400,7 @@
 
     private PeriodicTimer? _poll;
     private CancellationTokenSource? _pollCts;
+    private readonly PageCalls _calls = new();
 
     /// <summary>True while the cache is being read or a background discovery is running.</summary>
     private bool IsDiscovering => _loadingDiscovery || _poll is not null;
@@ -664,10 +665,11 @@
 
     private void StartPoll()
     {
-        if (_poll is not null) return;
+        // A load that comes back after the page has gone must not start a timer.
+        if (_poll is not null || _calls.IsGone) return;
         _pollCts = new CancellationTokenSource();
         _poll = new PeriodicTimer(PollInterval);
-        _ = PollLoopAsync(_poll, _projectId, _pollCts.Token);
+        _ = _calls.Track(PollLoopAsync(_poll, _projectId, _pollCts.Token));
     }
 
     private async Task PollLoopAsync(PeriodicTimer timer, int projectId, CancellationToken token)
@@ -892,9 +894,11 @@
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         StopPoll();
-        return ValueTask.CompletedTask;
+        // Wait for a tick already on its way to the database, so leaving the page
+        // means nothing of its is still reading.
+        await _calls.LeaveAsync();
     }
 }

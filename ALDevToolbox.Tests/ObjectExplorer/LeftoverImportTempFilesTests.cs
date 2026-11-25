@@ -22,6 +22,7 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
         Directory.CreateDirectory(clone);
         File.WriteAllText(Path.Combine(clone, "HEAD"), "ref: refs/heads/main");
         Directory.CreateDirectory(Path.Combine(_root, "oe-build-discover-4567"));
+        Directory.CreateDirectory(Path.Combine(_root, "aldt-migrate-89ab", "repo-0"));
         foreach (var file in new[] { "oe-artifact-1.zip", "oe-dvd-2.zip", "oe-nested-3.zip", "oe-folder-4.zip", "oe-cal-5.txt" })
         {
             File.WriteAllText(Path.Combine(_root, file), "x");
@@ -29,7 +30,7 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
 
         var removed = LeftoverImportTempFiles.Sweep(_root, Now, NullLogger.Instance);
 
-        removed.Should().Be(7);
+        removed.Should().Be(8);
         Directory.EnumerateFileSystemEntries(_root).Should().BeEmpty();
     }
 

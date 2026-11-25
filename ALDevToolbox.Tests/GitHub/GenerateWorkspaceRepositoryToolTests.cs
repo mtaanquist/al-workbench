@@ -72,7 +72,7 @@ public sealed class GenerateWorkspaceRepositoryToolTests : IDisposable
         var result = await tools.GenerateWorkspaceAsync(PlanInput());
 
         result.CreatedRepository.Should().BeNull();
-        result.ContentBase64.Should().NotBeEmpty();
+        result.DownloadPath.Should().StartWith(GeneratedDownloadStore.PathPrefix, "without a repository the link is how the user gets the ZIP");
         api.Calls.Should().BeEmpty("nothing is asked of GitHub unless a repository was asked for");
     }
 
@@ -94,7 +94,7 @@ public sealed class GenerateWorkspaceRepositoryToolTests : IDisposable
         result.CreatedRepository.FileCount.Should().BeGreaterThan(0);
         // The ZIP alongside it is the one whose files are in the repository, not
         // a second generation with different extension GUIDs.
-        result.ContentBase64.Should().NotBeEmpty();
+        result.DownloadPath.Should().BeNull("the repository holds the files");
     }
 
     [Fact]
@@ -266,12 +266,14 @@ public sealed class GenerateWorkspaceRepositoryToolTests : IDisposable
         var client = _db.NewGitHubAppClient(ctx, api);
         var access = _db.NewGitHubAccessService(ctx, client);
         var tools = new WorkspaceTools(
-            new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx)),
-            new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx)),
+            new TemplateService(ctx, NullLogger<TemplateService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
             new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext),
             _db.NewGenerationService(ctx),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),
             _db.NewGitHubWorkspaceRepositoryService(ctx, client, access),
+            new GeneratedDownloadStore(TimeProvider.System),
+            _db.OrgContext,
             Options);
         return (tools, ctx);
     }
@@ -308,11 +310,10 @@ public sealed class GenerateWorkspaceRepositoryToolTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()

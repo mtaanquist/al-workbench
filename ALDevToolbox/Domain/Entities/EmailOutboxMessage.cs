@@ -55,12 +55,20 @@ public enum EmailPurpose
     UpgradeNotification,
     /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
     SolutionNotification,
+    /// <summary>A Sealed link notification: a link the person sent was opened, or locked.</summary>
+    SealedLinkNotification,
 
     /// <summary>A gateway notification: an on-premises gateway went offline or came back. To Admins.</summary>
     GatewayNotification,
 
     /// <summary>"A passkey was added to your account", to the account's own address. Queued, like every security notice.</summary>
     PasskeyAdded,
+
+    /// <summary>"An authenticator app was set up / turned off", to the account's own address (#1614). Queued, like every security notice.</summary>
+    AuthenticatorAppChanged,
+
+    /// <summary>"An access token was created for your account", to the account's own address. Queued, like every security notice.</summary>
+    AccessTokenCreated,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>

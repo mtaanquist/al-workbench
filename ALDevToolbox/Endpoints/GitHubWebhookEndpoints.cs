@@ -85,6 +85,7 @@ public static class GitHubWebhookEndpoints
             GitHubWebhookQueue queue,
             GitHubWebhookBodyGate gate,
             GitHubHookAddressAllowList senders,
+            ALDevToolbox.Services.Operations.MaintenanceModeState maintenance,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -125,6 +126,14 @@ public static class GitHubWebhookEndpoints
             // status-pages middleware skip the rewrite. Same reasoning as
             // McpEndpoints.
             var secret = await settings.ResolveGitHubWebhookSecretAsync(ct);
+            if (secret is null && maintenance.IsActive)
+            {
+                // A restore loads system_settings' row after it creates the table, so
+                // during one "no secret" may only mean "not loaded yet". GitHub resends
+                // a 503 and never a 401, so the delivery is not lost (#1599).
+                ctx.Response.Headers.RetryAfter = "60";
+                return Results.Text("The site is being restored from a backup. Try again shortly.", "text/plain", statusCode: 503);
+            }
             if (secret is null)
             {
                 log.LogWarning("Refused a GitHub webhook delivery: no webhook secret is configured for this deployment.");

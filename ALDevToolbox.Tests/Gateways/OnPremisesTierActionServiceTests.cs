@@ -350,7 +350,7 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var rows = await ctx.OeEnvironmentUpgradeActions.AsNoTracking()
             .Select(a => new UpgradeActionRow(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status, a.RequestedBy, a.RequestedAt,
-                a.ExecuteAfter, a.SentAt, a.Outcome, a.CancelledBy, a.CancelledAt, null, null, null, null, null, null, null, null, null, a.GatewayCommandId, null, null))
+                a.ExecuteAfter, a.SentAt, a.Outcome, a.CancelledBy, a.CancelledAt, null, null, null, null, null, null, null, null, null, null, false, null, null, false, a.GatewayCommandId, null, null))
             .ToListAsync();
         var read = await ServiceTierActionOutcome.ApplyAsync(ctx, rows, CancellationToken.None);
         read.Single().Outcome.Should().Be("Restarted 2 service tiers: CRONUS-BC01 / BC250, CRONUS-BC02 / BC250. They are all running.");

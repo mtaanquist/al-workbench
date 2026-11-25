@@ -64,7 +64,9 @@ public class CatalogService
         for (var i = 0; i < inputs.Count; i++)
         {
             var input = inputs[i];
-            var depId = input.DepId.Trim();
+            // Stored in the one form app.json uses, so "{...}" or 32 digits typed
+            // here reach the picker and the generated file as a plain GUID (#1615).
+            var depId = Guid.Parse(input.DepId.Trim()).ToString("D");
             var depName = input.DepName.Trim();
             var depPublisher = input.DepPublisher.Trim();
             var depVersionDefault = input.DepVersionDefault.Trim();
@@ -115,7 +117,7 @@ public class CatalogService
     private static void Validate(IReadOnlyList<CatalogEntryInput> inputs)
     {
         var errors = new Dictionary<string, string>();
-        var seenDepIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenDepIds = new HashSet<Guid>();
 
         for (var i = 0; i < inputs.Count; i++)
         {
@@ -129,11 +131,12 @@ public class CatalogService
             {
                 errors[$"Entries[{i}].DepId"] = "Dependency id is required.";
             }
-            else if (!Guid.TryParse(depId, out _))
+            else if (!Guid.TryParse(depId, out var parsedId))
             {
                 errors[$"Entries[{i}].DepId"] = "Dependency id must be a GUID.";
             }
-            else if (!seenDepIds.Add(depId))
+            // Compared as GUIDs, so the same id typed in two forms is still a duplicate.
+            else if (!seenDepIds.Add(parsedId))
             {
                 errors[$"Entries[{i}].DepId"] = $"Duplicate dependency id '{depId}'.";
             }

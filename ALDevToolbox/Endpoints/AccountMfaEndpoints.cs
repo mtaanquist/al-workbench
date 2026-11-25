@@ -37,6 +37,15 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresTotp: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // A code that is not six digits cannot be right, so it is turned away
+            // before it takes a guess: a few typos must not lock the person out.
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var code = form["Code"].ToString();
+            if (!TotpService.IsWellFormed(code))
+            {
+                ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=invalid");
+                return;
+            }
             // Brute-force guard: the attacker already has the password (that's
             // how they reached the challenge), so cap wrong second-factor
             // guesses. The attempt is taken before verifying, so parallel
@@ -47,8 +56,6 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
             }
-            var form = await ctx.Request.ReadFormAsync(ct);
-            var code = form["Code"].ToString();
             if (!await totp.VerifyAsync(state.UserId, code, ct))
             {
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=invalid");
@@ -108,13 +115,31 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresEmail: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // A code that is not six digits cannot be right, so it is turned away
+            // before it takes a guess: a few typos must not lock the person out.
             var form = await ctx.Request.ReadFormAsync(ct);
             var code = form["Code"].ToString();
+            if (!EmailMfaService.IsWellFormed(code))
+            {
+                ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=invalid");
+                return;
+            }
+            // Same shared counter as the TOTP and recovery challenges. Sending a
+            // new email code gives that code fresh guesses (#1432), so the email
+            // service's own cap alone would let re-sends keep guessing; this one
+            // caps the person's wrong second-factor guesses whatever the code.
+            var attempt = await auth.TryReserveMfaAttemptAsync(state.UserId, ResolveIp(ctx), ct);
+            if (attempt is null)
+            {
+                ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=too-many-attempts");
+                return;
+            }
             if (!await mfa.VerifyAsync(state.UserId, code, ct))
             {
                 ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=invalid");
                 return;
             }
+            await auth.ReleaseMfaAttemptAsync(attempt.Value, ct);
             await CompleteMfaSignIn(ctx, auth, state, SignInMethod.EmailCode, ct, logger);
         });
 
@@ -127,6 +152,14 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var state = ReadChallengeState(ctx, protection, clock, requiresTotp: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
+            // Turned away before it takes a guess, as on the TOTP path.
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var code = form["Code"].ToString();
+            if (!RecoveryCodeService.IsWellFormed(code))
+            {
+                ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=invalid");
+                return;
+            }
             // Same brute-force guard as the TOTP path — recovery codes are a
             // longer but still finite space, and the counter is shared so an
             // attacker can't dodge it by alternating methods. See #477.
@@ -136,8 +169,6 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
             }
-            var form = await ctx.Request.ReadFormAsync(ct);
-            var code = form["Code"].ToString();
             if (!await recovery.ConsumeAsync(state.UserId, code, ct))
             {
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=invalid");
@@ -150,14 +181,27 @@ internal static class AccountMfaEndpoints
         // --- TOTP self-service ----------------------------------------------
 
         app.MapPost("/auth/account/2fa/totp/confirm", async (
-            HttpContext ctx, TotpService totp, IOrganizationContext org,
-            IDataProtectionProvider protection, IAntiforgery antiforgery, CancellationToken ct) =>
+            HttpContext ctx, TotpService totp, StepUpService stepUp, IOrganizationContext org, AppDbContext db,
+            IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin, TimeProvider clock,
+            IDataProtectionProvider protection, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
+            // The same proof as adding a passkey: a recent second step, or the
+            // current password when the account has nothing to step up with
+            // (#1614). The page asks for it first; this is the backstop.
+            var refusal = await stepUp.TotpEnrollmentRefusalAsync(
+                ctx.User, org.CurrentUserId!.Value, form["Password"].ToString(), ResolveIp(ctx), ct);
+            if (refusal is not null)
+            {
+                ctx.Response.Redirect($"/account/2fa/totp/setup?{RouteConstants.ErrQuery}=Password&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(refusal)}");
+                return;
+            }
             try
             {
                 var codes = await totp.ConfirmEnrollmentAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct);
+                await NotifyAuthenticatorAppChangedAsync(ctx, db, email, emailRenderer, publicOrigin, clock,
+                    org.CurrentUserId.Value, turnedOn: true, loggerFactory.CreateLogger("TotpSetup"));
                 // Stash the plaintext codes in a 60-second protected cookie so the
                 // recovery-codes page can render them once.
                 SetOneShotRecoveryCodesCookie(ctx, protection, codes);
@@ -166,19 +210,26 @@ internal static class AccountMfaEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"/account/2fa/totp/setup?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                // A wrong code goes back to the form to try again. Anything about the setup
+                // itself (already on, never started) goes to the security page, which the setup
+                // page would bounce an already-on user to anyway, and which offers new codes.
+                var page = first.Key == "Totp" ? "/account/security" : "/account/2fa/totp/setup";
+                ctx.Response.Redirect($"{page}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         app.MapPost("/auth/account/2fa/totp/disable", async (
             HttpContext ctx, TotpService totp, AuthService auth, AppDbContext db,
-            IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
+            IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin, TimeProvider clock,
+            IOrganizationContext org, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
             var user = await AccountEndpoints.LoadUserAndVerifyPasswordAsync(ctx, db, auth, org, form["Password"].ToString(), ct);
             if (user is null) return;
             await totp.DisableAsync(user.Id, ct);
+            await NotifyAuthenticatorAppChangedAsync(ctx, db, email, emailRenderer, publicOrigin, clock,
+                user.Id, turnedOn: false, loggerFactory.CreateLogger("TotpSetup"));
             ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=totp-disabled");
         }).RequireAuthorization();
 
@@ -193,7 +244,7 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!await emailSvc.IsConfiguredAsync(ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("SMTP isn't configured. Ask a SiteAdmin.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailNotConfigured}");
                 return;
             }
             try
@@ -201,7 +252,7 @@ internal static class AccountMfaEndpoints
                 var code = await mfa.IssueChallengeAsync(org.CurrentUserId!.Value, ct);
                 if (code is null)
                 {
-                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Try again in a few minutes.")}");
+                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailCodeThrottled}");
                     return;
                 }
                 // Fence category 4 (explicitly scoped user-id lookup): pinned to the signed-in
@@ -217,7 +268,7 @@ internal static class AccountMfaEndpoints
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Email-MFA setup failed.");
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Failed to send code.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailCodeNotSent}");
             }
         }).RequireAuthorization();
 
@@ -229,7 +280,7 @@ internal static class AccountMfaEndpoints
             var form = await ctx.Request.ReadFormAsync(ct);
             if (!await mfa.VerifyAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Code&{RouteConstants.MsgQuery}={Uri.EscapeDataString("That code didn't match. Request a new one.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Code&{RouteConstants.ReasonQuery}={FormErrorReasons.EmailCodeWrong}");
                 return;
             }
             await mfa.EnableAsync(org.CurrentUserId!.Value, ct);
@@ -261,13 +312,13 @@ internal static class AccountMfaEndpoints
             if (user is null) return;
             if (!user.TotpEnabled)
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Enable TOTP first.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.ReasonQuery}={FormErrorReasons.TotpFirst}");
                 return;
             }
             var codes = await recovery.RegenerateAsync(user.Id, ct);
             SetOneShotRecoveryCodesCookie(ctx, protection, codes);
             ctx.Response.Redirect("/account/2fa/recovery-codes?show=1");
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         return app;
     }
@@ -298,6 +349,36 @@ internal static class AccountMfaEndpoints
     }
 
     /// <summary>
+    /// Queues the "authenticator app set up / turned off" notice to the
+    /// account's own address, so a second step someone else added with a
+    /// borrowed session (which would lock the owner out of password sign-in)
+    /// or took away does not go unnoticed (#1614). Like the passkey-added
+    /// notice it is sent after the change is saved and a failure is logged,
+    /// not shown: the change already happened.
+    /// </summary>
+    private static async Task NotifyAuthenticatorAppChangedAsync(
+        HttpContext ctx, AppDbContext db, IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin,
+        TimeProvider clock, int userId, bool turnedOn, ILogger logger)
+    {
+        try
+        {
+            // Filtered: the signed-in user's own row, inside their org.
+            var owner = await db.Users.AsNoTracking()
+                .Where(u => u.Id == userId)
+                .Select(u => new { u.Email, u.DisplayName })
+                .FirstAsync(CancellationToken.None);
+            var changedAt = clock.GetUtcNow().UtcDateTime.ToString("d MMM yyyy, HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+            var content = await AuthenticatorAppChangedEmail.RenderAsync(emailRenderer, owner.DisplayName, turnedOn, changedAt,
+                $"{publicOrigin.For(ctx)}{RouteConstants.AccountSecurity}", CancellationToken.None);
+            await email.SendAsync(owner.Email, content, EmailPurpose.AuthenticatorAppChanged, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not queue the authenticator-app notice for user {UserId}.", userId);
+        }
+    }
+
+    /// <summary>
     /// Finalises an MFA-gated login: completes the second factor, issues the
     /// auth cookie, clears the pending-MFA cookie and redirects to the stashed
     /// return URL. Shared by the TOTP / email-code / recovery-code challenge
@@ -310,9 +391,15 @@ internal static class AccountMfaEndpoints
             await StepUpEndpoints.CompleteStepUpAsync(ctx, auth, state, method, ct, logger);
             return;
         }
-        var user = await auth.CompleteMfaAsync(state.UserId, ResolveIp(ctx), ct);
-        await SignInUserAsync(ctx, user, method);
+        var (user, refusedWith) = await auth.CompleteMfaAsync(state.UserId, state.IssuedAt, ResolveIp(ctx), ct);
         ClearMfaPendingCookie(ctx);
+        if (user is null)
+        {
+            logger.LogInformation("MFA-gated sign-in for user {UserId} refused at completion ({Reason}).", state.UserId, refusedWith);
+            ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}={refusedWith}");
+            return;
+        }
+        await SignInUserAsync(ctx, user, method);
         logger.LogInformation("MFA-gated sign-in completed for {Email} (org {OrgId}).", user.Email, user.OrganizationId);
         ctx.Response.Redirect(string.IsNullOrEmpty(state.ReturnUrl) ? "/" : state.ReturnUrl);
     }

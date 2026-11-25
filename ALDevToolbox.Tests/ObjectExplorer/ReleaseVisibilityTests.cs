@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -5,7 +6,9 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Services.Translation;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -78,7 +81,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
         var access = Access(ctx);
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance);
     }
 
     private ReferenceQueryService References(AppDbContext ctx) =>
@@ -410,16 +413,33 @@ public sealed class ReleaseVisibilityTests : IDisposable
         await LinkByBuildAsync(projectId, seeded.ReleaseId);
         var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
 
+        // The same reads, in the same order, as the non-member test above: each empty
+        // answer there is only proof of the fence if the same call answers here.
         ActAs(MemberUserId);
         await using (var ctx = _db.NewContext())
         {
             (await Explorer(ctx).GetReleaseAsync(seeded.ReleaseId)).Should().NotBeNull();
             (await Explorer(ctx).ListModulesAsync(seeded.ReleaseId, new ModuleListFilter())).Should().ContainSingle();
+            (await Explorer(ctx).ListModuleSummariesAsync(seeded.ReleaseId)).Should().ContainSingle();
+            (await Explorer(ctx).ListObjectsAsync(seeded.ModuleId, new ObjectListFilter(), 0, 50)).Rows.Should().ContainSingle();
             (await Explorer(ctx).GetObjectAsync(seeded.ObjectId)).Should().NotBeNull();
+            (await Explorer(ctx).GetObjectOutlineAsync(seeded.ReleaseId, "table", "Loyalty Card")).Should().NotBeNull();
+
             (await Search(ctx).SearchObjectsInReleaseAsync(
                 seeded.ReleaseId, new ObjectListFilter(Search: "Loyalty"))).Should().ContainSingle();
+            (await Search(ctx).ListObjectKindsInReleaseAsync(seeded.ReleaseId)).Should().NotBeEmpty();
+
             (await Viewer(ctx).GetFileAsync(seeded.FileId)).Should().NotBeNull();
+            (await Viewer(ctx).GetFileHeaderAsync(seeded.FileId)).Should().NotBeNull();
+            (await Tree(ctx).ListModuleFilesAsync(seeded.ModuleId)).Should().NotBeEmpty();
+            (await Tree(ctx).SearchTreeAsync(seeded.ReleaseId, "Loyalty")).Should().NotBeEmpty();
+
             (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Rows.Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleasesAsync(open.ReleaseId, seeded.ReleaseId)).Should().NotBeNull();
+            (await Comparison(ctx).FindObjectFileInReleaseAsync(seeded.ReleaseId, "table", 50100, "Loyalty Card"))
+                .Should().NotBeNull();
+
             (await Explorer(ctx).ListLatestPipelineBuildReleasesAsync())
                 .Should().ContainSingle(r => r.Id == seeded.ReleaseId);
         }
@@ -554,6 +574,155 @@ public sealed class ReleaseVisibilityTests : IDisposable
         {
             (await Sessions(ctx).CreateFromMemberSymbolAsync(symbolId, "member", visible.ReleaseId)).Should().NotBeNull();
         }
+    }
+
+    /// <summary>
+    /// OEX-6: the two built-in calls paths #1531 added - a right-click in the
+    /// code, and the method picker narrowing a list - refuse a Private
+    /// solution's release the same way the paths above do. A click in a hidden
+    /// file, or in a visible file viewed from a hidden release, mints nothing;
+    /// and a list a member made stops answering once they can no longer see it.
+    /// </summary>
+    [Fact]
+    public async Task Built_in_calls_from_a_click_or_the_method_picker_refuse_a_hidden_release()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var visible = await SeedReleaseAsync("BC 26.0 (DK)", kind: "first_party");
+        // The object name in `table 50100 "Loyalty Card"`, line 1.
+        const int line = 1, column = 15;
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var sessions = Sessions(ctx);
+            (await sessions.CreateSystemReferencesAtPositionAsync(hidden.FileId, line, column, "outsider"))
+                .Should().BeNull("the file is in a release the outsider cannot see");
+            (await sessions.CreateSystemReferencesAtPositionAsync(visible.FileId, line, column, "outsider", hidden.ReleaseId))
+                .Should().BeNull("the click is viewed from a release the outsider cannot see");
+            (await sessions.CreateSystemReferencesAtPositionAsync(visible.FileId, line, column, "outsider"))
+                .Should().NotBeNull("the visible release's own file still works");
+        }
+
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            Microsoft.Extensions.Options.Options.Create(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+        string token;
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var session = await Sessions(ctx, cache).CreateSystemReferencesAtPositionAsync(hidden.FileId, line, column, "member");
+            session.Should().NotBeNull("a member may list the calls in their own solution");
+            token = session!.Token;
+            (await Sessions(ctx, cache).NarrowSystemReferencesAsync(token, "member", "Insert")).Should().NotBeNull();
+        }
+
+        // The member loses access: the same browser, the same list, a fresh request.
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Sessions(ctx, cache).NarrowSystemReferencesAsync(token, "member", "Insert")).Should().BeNull();
+        }
+    }
+
+    /// <summary>
+    /// OEX-6, the variable branches of a right-click: a global variable (its
+    /// type read from the variable row, with a visibility check of its own) and
+    /// a local one (its type read from the declaration in the file). Both are
+    /// clicked in a visible file; viewed from a hidden release they mint
+    /// nothing, and viewed from the file's own release they work.
+    /// </summary>
+    [Fact]
+    public async Task Built_in_calls_on_a_variable_refuse_a_hidden_release_it_is_viewed_from()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var visible = await SeedReleaseAsync("BC 26.0 (DK)", kind: "first_party");
+        const string code =
+            "codeunit 50101 \"Loyalty Mgt.\"\n" +
+            "{\n" +
+            "    var\n" +
+            "        Card: Record \"Loyalty Card\";\n" +
+            "    procedure Grant()\n" +
+            "    begin\n" +
+            "        Card.Insert();\n" +
+            "        Points.Modify();\n" +
+            "    end;\n" +
+            "}\n";
+        var fileId = await SeedCodeunitFileAsync(visible, code, globalVariable: "Points");
+        const int localLine = 7, globalLine = 8, column = 10;
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var sessions = Sessions(ctx);
+            (await sessions.CreateSystemReferencesAtPositionAsync(fileId, globalLine, column, "outsider", hidden.ReleaseId))
+                .Should().BeNull("the global variable is viewed from a release the outsider cannot see");
+            (await sessions.CreateSystemReferencesAtPositionAsync(fileId, localLine, column, "outsider", hidden.ReleaseId))
+                .Should().BeNull("the local variable is viewed from a release the outsider cannot see");
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var sessions = Sessions(ctx);
+            (await sessions.CreateSystemReferencesAtPositionAsync(fileId, globalLine, column, "outsider"))
+                .Should().NotBeNull("the global-variable branch resolves from the file's own release");
+            (await sessions.CreateSystemReferencesAtPositionAsync(fileId, localLine, column, "outsider"))
+                .Should().NotBeNull("the local-variable branch resolves from the file's own release");
+        }
+    }
+
+    // A codeunit file in the seeded release's module, with one global variable
+    // row of type Record "Loyalty Card" (the seeded table) when one is named.
+    private async Task<long> SeedCodeunitFileAsync(SeededRelease release, string content, string globalVariable)
+    {
+        await using var ctx = _db.NewContext();
+        var hash = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        ctx.OeFileContents.Add(new OeFileContent
+        {
+            ContentHash = hash,
+            Content = content,
+            ContentLength = content.Length,
+            LineCount = content.Split('\n').Length,
+        });
+        var file = new OeModuleFile
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ModuleId = release.ModuleId,
+            Path = "src/LoyaltyMgt.Codeunit.al",
+            ContentHash = hash,
+            LineCount = content.Split('\n').Length,
+        };
+        ctx.OeModuleFiles.Add(file);
+        await ctx.SaveChangesAsync();
+        var codeunit = new OeModuleObject
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ModuleId = release.ModuleId,
+            Kind = "codeunit",
+            ObjectId = 50101,
+            Name = "Loyalty Mgt.",
+            LineNumber = 1,
+            SourceFileId = file.Id,
+        };
+        ctx.OeModuleObjects.Add(codeunit);
+        await ctx.SaveChangesAsync();
+        var appId = await ctx.OeModules.Where(m => m.Id == release.ModuleId).Select(m => m.AppId).SingleAsync();
+        ctx.OeModuleVariables.Add(new OeModuleVariable
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ModuleId = release.ModuleId,
+            ObjectId = codeunit.Id,
+            Name = globalVariable,
+            TypeKeyword = "Record",
+            TypeName = "\"Loyalty Card\"",
+            TargetAppId = appId,
+            TargetObjectKind = "table",
+            TargetObjectId = 50100,
+            TargetObjectName = "Loyalty Card",
+        });
+        await ctx.SaveChangesAsync();
+        return file.Id;
     }
 
     /// <summary>
@@ -730,15 +899,17 @@ public sealed class ReleaseVisibilityTests : IDisposable
     /// The "Compare with release" picker lists every other release holding the
     /// same file. Without its visibility filter it would name a Private
     /// project's release, and hand out its file id, to anyone viewing the same
-    /// file in a public release.
+    /// file in a public release. (A pipeline build is offered only from another
+    /// build of its own Solution since #1570, so the private release here is one
+    /// imported under the project.)
     /// </summary>
     [Fact]
     public async Task The_compare_target_picker_offers_a_private_release_only_to_its_teams_members()
     {
         var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
         var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
-        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
-        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var hidden = await SeedReleaseAsync("CRONUS 1.0", kind: "third_party");
+        await LinkByImportJobAsync(projectId, hidden.ReleaseId);
         await using (var ctx = _db.NewContext())
         {
             // Same app and path in both releases: the shape the picker matches on.
@@ -778,12 +949,493 @@ public sealed class ReleaseVisibilityTests : IDisposable
         var session = await sessions.CreateFromSymbolAsync(seeded.ObjectId, "user-a");
 
         session.Should().NotBeNull();
-        sessions.Get(session!.Token, "user-b").Should().BeNull();
-        sessions.Get(session.Token, "user-a").Should().NotBeNull();
+        (await sessions.GetAsync(session!.Token, "user-b")).Should().BeNull();
+        (await sessions.GetAsync(session.Token, "user-a")).Should().NotBeNull();
     }
 
-    private ReferenceSessionService Sessions(AppDbContext ctx) =>
-        new(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+    /// <summary>
+    /// OEX2-3: a Find references list holds code lines. Once its owner can no
+    /// longer see the release - removed from a Private solution's team - the
+    /// link in their open tab stops showing it on the next load, rather than
+    /// for as long as they keep reloading inside the sliding expiry.
+    /// </summary>
+    [Fact]
+    public async Task A_reference_session_stops_answering_once_its_owner_loses_access_to_the_release()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            Microsoft.Extensions.Options.Options.Create(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+
+        string token;
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var session = await Sessions(ctx, cache).CreateFromSymbolAsync(hidden.ObjectId, "member");
+            session.Should().NotBeNull();
+            token = session!.Token;
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await Sessions(ctx, cache).GetAsync(token, "member")).Should().NotBeNull("the member can still see it");
+        }
+
+        // The same browser, the same link, after the member left the team.
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Sessions(ctx, cache).GetAsync(token, "member")).Should().BeNull();
+        }
+    }
+
+
+    // ── The admin writes (#1430) ────────────────────────────────────────
+
+    /// <summary>Every write keyed by a release id that the authoring endpoints reach.</summary>
+    public enum ReleaseWrite
+    {
+        SoftDelete, Restore, UpdateMetadata, HardDelete, Amend, TranslationFile, TranslationZip, Backfill,
+    }
+
+    public static TheoryData<ReleaseWrite, Linkage> AllWritesBothLinkages
+    {
+        get
+        {
+            var data = new TheoryData<ReleaseWrite, Linkage>();
+            foreach (var write in Enum.GetValues<ReleaseWrite>())
+            {
+                data.Add(write, Linkage.Build);
+                data.Add(write, Linkage.ImportJob);
+            }
+            return data;
+        }
+    }
+
+    public static TheoryData<ReleaseWrite, int> AllWritesForAllowedUsers
+    {
+        get
+        {
+            var data = new TheoryData<ReleaseWrite, int>();
+            foreach (var write in Enum.GetValues<ReleaseWrite>())
+            {
+                data.Add(write, MemberUserId);
+                data.Add(write, AdminUserId);
+            }
+            return data;
+        }
+    }
+
+    /// <summary>An id no release has, distinctive enough to find again inside an error message.</summary>
+    private const int UnknownReleaseId = 987_654_321;
+
+    private const string WriteLabel = "CRONUS on BC 26.0";
+
+    private static readonly string FixtureRoot =
+        Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
+
+    private ReleaseManagementService Management(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, Access(ctx), NullLogger<ReleaseManagementService>.Instance);
+
+    private TranslationImportService Translations(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext,
+            new ALDevToolbox.Services.Translation.TranslationMemoryService(
+                ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, Access(ctx));
+
+    private ReleaseImportService Importer(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), Translations(ctx),
+            new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
+            NullLogger<ReleaseImportService>.Instance, Access(ctx));
+
+    /// <summary>
+    /// A Private solution's release, linked by <paramref name="linkage"/>. Seeded
+    /// already soft-deleted for <see cref="ReleaseWrite.Restore"/> and
+    /// <see cref="ReleaseWrite.HardDelete"/>, which only act on a soft-deleted
+    /// release, so each write has something to change.
+    /// </summary>
+    private static bool SeedsSoftDeleted(ReleaseWrite write) =>
+        write is ReleaseWrite.Restore or ReleaseWrite.HardDelete;
+
+    private async Task<SeededRelease> SeedPrivateReleaseAsync(ReleaseWrite write, Linkage linkage = Linkage.Build)
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var seeded = await SeedReleaseAsync(WriteLabel);
+        await LinkAsync(linkage, projectId, seeded.ReleaseId);
+        if (SeedsSoftDeleted(write))
+        {
+            await using var ctx = _db.NewContext();
+            var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
+            release.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+        return seeded;
+    }
+
+    /// <summary>
+    /// Runs one write as the current user and returns the refusal it got, or null
+    /// when it went through. The backfill pre-check answers "absent" with false,
+    /// which the endpoint turns into a 404; that comes back as a <c>Status</c> entry.
+    /// </summary>
+    private async Task<Dictionary<string, string>?> RunWriteAsync(ReleaseWrite write, int releaseId, long moduleId)
+    {
+        await using var ctx = _db.NewContext();
+        try
+        {
+            switch (write)
+            {
+                case ReleaseWrite.SoftDelete: await Management(ctx).SoftDeleteAsync(releaseId); break;
+                case ReleaseWrite.Restore: await Management(ctx).RestoreAsync(releaseId); break;
+                case ReleaseWrite.UpdateMetadata: await Management(ctx).UpdateMetadataAsync(releaseId, "Renamed A/S", "Renamed"); break;
+                case ReleaseWrite.HardDelete: await Management(ctx).HardDeleteAsync(releaseId, WriteLabel); break;
+                case ReleaseWrite.Amend:
+                {
+                    await using var app = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+                    await Importer(ctx).AmendReleaseAsync(releaseId, new[] { new AppFileUpload("Microsoft_DK_Core.app", app, null) });
+                    break;
+                }
+                case ReleaseWrite.TranslationFile:
+                {
+                    await using var xlf = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+                    await Translations(ctx).ImportSingleAsync(releaseId, moduleId, xlf, "OIOUBL.daDK.xlf");
+                    break;
+                }
+                case ReleaseWrite.TranslationZip:
+                {
+                    using var zip = new MemoryStream();
+                    using (var archive = new ZipArchive(zip, ZipArchiveMode.Create, leaveOpen: true))
+                    {
+                        archive.CreateEntryFromFile(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"), "OIOUBL.daDK.xlf");
+                    }
+                    zip.Position = 0;
+                    await Translations(ctx).ImportZipAsync(releaseId, zip);
+                    break;
+                }
+                case ReleaseWrite.Backfill:
+                    if (!await Management(ctx).EnsureBackfillableAsync(releaseId))
+                    {
+                        return new Dictionary<string, string> { ["Status"] = "404" };
+                    }
+                    break;
+            }
+            return null;
+        }
+        catch (PlanValidationException ex)
+        {
+            return new Dictionary<string, string>(ex.Errors);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(AllWritesBothLinkages))]
+    public async Task Every_release_write_answers_a_non_member_exactly_as_it_answers_an_unknown_id(
+        ReleaseWrite write, Linkage linkage)
+    {
+        var seeded = await SeedPrivateReleaseAsync(write, linkage);
+
+        ActAs(OutsiderUserId);
+        var unknown = await RunWriteAsync(write, UnknownReleaseId, seeded.ModuleId);
+        var hidden = await RunWriteAsync(write, seeded.ReleaseId, seeded.ModuleId);
+
+        // Word for word, with only the id swapped, so the refusal confirms nothing.
+        unknown.Should().NotBeNull();
+        hidden.Should().Equal(unknown!.ToDictionary(
+            e => e.Key, e => e.Value.Replace(UnknownReleaseId.ToString(), seeded.ReleaseId.ToString())));
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
+        release.Should().NotBeNull("a refused hard delete removes nothing");
+        (release!.DeletedAt is not null).Should().Be(SeedsSoftDeleted(write), "the deleted flag is as seeded");
+        release.Publisher.Should().BeNull("a refused metadata edit changes nothing");
+        (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId))
+            .Should().Be(1, "a refused amend adds no module");
+        (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == seeded.ModuleId))
+            .Should().BeFalse("a refused translation upload stores nothing");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllWritesForAllowedUsers))]
+    public async Task Every_release_write_goes_through_for_a_team_member_and_an_org_Admin(ReleaseWrite write, int userId)
+    {
+        var seeded = await SeedPrivateReleaseAsync(write);
+
+        ActAs(userId);
+        (await RunWriteAsync(write, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleOrDefaultAsync(r => r.Id == seeded.ReleaseId);
+        switch (write)
+        {
+            case ReleaseWrite.SoftDelete: release!.DeletedAt.Should().NotBeNull(); break;
+            case ReleaseWrite.Restore: release!.DeletedAt.Should().BeNull(); break;
+            case ReleaseWrite.UpdateMetadata: release!.Publisher.Should().Be("Renamed A/S"); break;
+            case ReleaseWrite.HardDelete: release.Should().BeNull(); break;
+            case ReleaseWrite.Amend:
+                (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId)).Should().Be(2);
+                break;
+            case ReleaseWrite.TranslationFile:
+                (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == seeded.ModuleId)).Should().BeTrue();
+                break;
+            // The ZIP's XLIFF names a module this release doesn't have, so it is
+            // skipped; getting a summary rather than a refusal is the point.
+            case ReleaseWrite.TranslationZip: break;
+            case ReleaseWrite.Backfill: break;
+        }
+    }
+
+    // ── Translation uploads and the org-wide memory (#1613) ─────────────
+
+    /// <summary>A sentence from the OIOUBL fixture XLIFF, which it translates into Danish.</summary>
+    private const string FixtureSource = "The total Line Discount Amount cannot be negative.";
+
+    private TranslationMemoryService Memory(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance);
+
+    /// <summary>
+    /// Names the seeded module after the fixture XLIFF's <c>original</c>, so the
+    /// ZIP upload matches it rather than skipping the file.
+    /// </summary>
+    private async Task NameModuleForFixtureAsync(long moduleId)
+    {
+        await using var ctx = _db.NewContext();
+        var module = await ctx.OeModules.SingleAsync(m => m.Id == moduleId);
+        module.Name = "OIOUBL";
+        await ctx.SaveChangesAsync();
+    }
+
+    public static TheoryData<ReleaseWrite> TranslationUploads =>
+        new() { ReleaseWrite.TranslationFile, ReleaseWrite.TranslationZip };
+
+    [Theory]
+    [MemberData(nameof(TranslationUploads))]
+    public async Task A_translation_upload_onto_a_Private_solution_build_does_not_teach_the_org_memory(ReleaseWrite upload)
+    {
+        var seeded = await SeedPrivateReleaseAsync(upload);
+        await NameModuleForFixtureAsync(seeded.ModuleId);
+
+        ActAs(MemberUserId);
+        (await RunWriteAsync(upload, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.OeModuleTranslations.AsNoTracking().CountAsync(t => t.ModuleId == seeded.ModuleId))
+                .Should().Be(436, "the release still gets the uploaded translations");
+            (await read.TranslationMemory.AsNoTracking().AnyAsync())
+                .Should().BeFalse("the memory has no way to keep the pairs inside the solution");
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Memory(ctx).SuggestAsync(FixtureSource, "en-US", "da-DK"))
+                .Should().BeEmpty("someone outside the solution's team must not get its strings");
+            (await Memory(ctx).SearchAsync(new MemorySearchQuery(TargetLanguage: "da-DK"))).Items
+                .Should().BeEmpty();
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(TranslationUploads))]
+    public async Task A_translation_upload_onto_a_Microsoft_release_still_teaches_the_org_memory(ReleaseWrite upload)
+    {
+        var seeded = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+        await NameModuleForFixtureAsync(seeded.ModuleId);
+
+        ActAs(AdminUserId);
+        (await RunWriteAsync(upload, seeded.ReleaseId, seeded.ModuleId)).Should().BeNull();
+
+        ActAs(OutsiderUserId);
+        await using var ctx = _db.NewContext();
+        (await Memory(ctx).SuggestAsync(FixtureSource, "en-US", "da-DK"))
+            .Should().Contain(h => h.TargetText.Contains("linjerabat"),
+                "a Microsoft release's translations are for the whole organisation");
+    }
+
+    [Fact]
+    public async Task The_bulk_backfill_queues_only_the_releases_the_caller_can_see()
+    {
+        var (privateId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(privateId, hidden.ReleaseId);
+        var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+
+        async Task<List<int>> ListAsAsync(int userId)
+        {
+            ActAs(userId);
+            await using var ctx = _db.NewContext();
+            return await Management(ctx).ListBackfillableReleaseIdsAsync();
+        }
+
+        (await ListAsAsync(OutsiderUserId)).Should().Equal(open.ReleaseId);
+        (await ListAsAsync(MemberUserId)).Should().Equal(hidden.ReleaseId, open.ReleaseId);
+        (await ListAsAsync(AdminUserId)).Should().Equal(hidden.ReleaseId, open.ReleaseId);
+    }
+
+    // ── Retry (#1484) ───────────────────────────────────────────────────
+
+    private const string RetryArtifactUrl = "https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk";
+
+    private ReleaseImportRequestService Retries(AppDbContext ctx, ReleaseImportQueue queue)
+    {
+        var importer = Importer(ctx);
+        var management = Management(ctx);
+        var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
+        var projectBuilds = new ProjectBuildImporter(
+            importer, management, new ProjectBuildQueue(), persistedJobs, ctx, _db.OrgContext, Access(ctx),
+            new CloneCredentialResolver(
+                new ALDevToolbox.Services.Account.UserRepositoryTokenService(
+                    ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Account.UserRepositoryTokenService>.Instance,
+                    _db.DataProtectionProvider),
+                _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new ALDevToolbox.Tests.GitHub.FakeGitHubApi())),
+                _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance),
+            TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
+        var downloads = new DvdDownloadService(
+            new NoDownloads(), _db.NewSystemSettingsService(ctx), NullLogger<DvdDownloadService>.Instance);
+        return new ReleaseImportRequestService(
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds, Access(ctx),
+            new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance),
+            NullLogger<ReleaseImportRequestService>.Instance);
+    }
+
+    /// <summary>How the release a retry acts on was last imported.</summary>
+    public enum RetryOrigin
+    {
+        /// <summary>A Microsoft artifact import, retried with nothing to upload: the saved source is reused.</summary>
+        Artifact,
+
+        /// <summary>The same, retried with a C/AL file: the release is reopened and wiped.</summary>
+        ArtifactWithFile,
+
+        /// <summary>A solution's pipeline build, which a retry rebuilds.</summary>
+        ProjectBuild,
+    }
+
+    /// <summary>
+    /// A failed Private-solution release. For the artifact origins it is linked by
+    /// its pipeline build and its latest import job is a Microsoft artifact import:
+    /// the retry path that does not go through the build's manage check. For a
+    /// project build, its latest job is the build's own import job.
+    /// </summary>
+    private async Task<SeededRelease> SeedFailedPrivateReleaseAsync(RetryOrigin origin = RetryOrigin.Artifact)
+    {
+        var seeded = await SeedPrivateReleaseAsync(ReleaseWrite.UpdateMetadata,
+            origin == RetryOrigin.ProjectBuild ? Linkage.ImportJob : Linkage.Build);
+        await using var ctx = _db.NewContext();
+        var release = await ctx.OeReleases.SingleAsync(r => r.Id == seeded.ReleaseId);
+        release.Status = "failed";
+        await ctx.SaveChangesAsync();
+        if (origin != RetryOrigin.ProjectBuild)
+        {
+            await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.BcArtifact(RetryArtifactUrl), storeSymbolReference: false);
+        }
+        return seeded;
+    }
+
+    private static ReleaseRetrySubmission RetryWith(bool calFile) => new(
+        DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null,
+        CalTxtFile: calFile ? new UploadedFile("CRONUS.txt", 3, () => new MemoryStream("OBJ"u8.ToArray())) : null);
+
+    private async Task<(Dictionary<string, string>? Error, ReleaseImportOutcome? Outcome)> RetryAsAsync(
+        int releaseId, ReleaseRetrySubmission submission, ReleaseImportQueue queue)
+    {
+        await using var ctx = _db.NewContext();
+        try
+        {
+            return (null, await Retries(ctx, queue).RetryAsync(releaseId, submission));
+        }
+        catch (PlanValidationException ex)
+        {
+            return (new Dictionary<string, string>(ex.Errors), null);
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            // What a rebuild answers someone who cannot manage the solution:
+            // an answer an unknown id never gets.
+            return (new Dictionary<string, string> { ["Access"] = "denied" }, null);
+        }
+    }
+
+    [Theory]
+    [InlineData(RetryOrigin.Artifact)]
+    [InlineData(RetryOrigin.ArtifactWithFile)]
+    [InlineData(RetryOrigin.ProjectBuild)]
+    public async Task Retry_answers_a_non_member_exactly_as_it_answers_an_unknown_id(RetryOrigin origin)
+    {
+        // Without a file the saved artifact source would be reused; with one the
+        // release would be reopened and wiped; a build would be refused by the
+        // manage check, which says the release is there. None of that may happen
+        // for a release the caller cannot see.
+        var seeded = await SeedFailedPrivateReleaseAsync(origin);
+        var queue = new ReleaseImportQueue();
+        var calFile = origin == RetryOrigin.ArtifactWithFile;
+
+        ActAs(OutsiderUserId);
+        var unknown = await RetryAsAsync(UnknownReleaseId, RetryWith(calFile), queue);
+        var hidden = await RetryAsAsync(seeded.ReleaseId, RetryWith(calFile), queue);
+
+        unknown.Error.Should().NotBeNull();
+        hidden.Error.Should().Equal(unknown.Error!.ToDictionary(
+            e => e.Key, e => e.Value.Replace(UnknownReleaseId.ToString(), seeded.ReleaseId.ToString())));
+        queue.Reader.TryRead(out _).Should().BeFalse("a refused retry queues nothing");
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == seeded.ReleaseId)).Status.Should().Be("failed");
+        (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == seeded.ReleaseId))
+            .Should().Be(1, "a refused retry wipes nothing");
+    }
+
+    [Theory]
+    [InlineData(MemberUserId)]
+    [InlineData(AdminUserId)]
+    public async Task Retry_goes_through_for_a_team_member_and_an_org_Admin(int userId)
+    {
+        var seeded = await SeedFailedPrivateReleaseAsync();
+        var queue = new ReleaseImportQueue();
+
+        ActAs(userId);
+        var result = await RetryAsAsync(seeded.ReleaseId, RetryWith(calFile: false), queue);
+
+        result.Error.Should().BeNull();
+        result.Outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>()
+            .Which.ApplicationUrl.Should().Be(RetryArtifactUrl);
+    }
+
+    // ── Manual-symbols recovery (#1484) ─────────────────────────────────
+
+    [Fact]
+    public async Task Symbol_recovery_answers_a_non_member_exactly_as_it_answers_an_unknown_id()
+    {
+        var seeded = await SeedFailedPrivateReleaseAsync(RetryOrigin.ProjectBuild);
+
+        async Task<int?> FindAsAsync(int userId, int releaseId)
+        {
+            ActAs(userId);
+            await using var ctx = _db.NewContext();
+            return await Retries(ctx, new ReleaseImportQueue()).FindSymbolRecoveryProjectAsync(releaseId);
+        }
+
+        (await FindAsAsync(OutsiderUserId, UnknownReleaseId)).Should().BeNull();
+        (await FindAsAsync(OutsiderUserId, seeded.ReleaseId))
+            .Should().BeNull("a hidden build reads as no solution build at all");
+        (await FindAsAsync(MemberUserId, seeded.ReleaseId)).Should().NotBeNull();
+        (await FindAsAsync(AdminUserId, seeded.ReleaseId)).Should().NotBeNull();
+    }
+
+    // A retry here re-runs a saved artifact address, which is only queued, never fetched.
+    private sealed class NoDownloads : System.Net.Http.IHttpClientFactory
+    {
+        public System.Net.Http.HttpClient CreateClient(string name) =>
+            throw new InvalidOperationException("A retry must not download anything.");
+    }
+
+    // Pass a cache to share one across requests, as the app's singleton memory
+    // cache does; each call is otherwise one request's service.
+    private ReferenceSessionService Sessions(AppDbContext ctx,
+        Microsoft.Extensions.Caching.Memory.IMemoryCache? cache = null) =>
+        new(cache ?? new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 Microsoft.Extensions.Options.Options.Create(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             References(ctx), ctx, new ReferenceResolver(ctx), Access(ctx),

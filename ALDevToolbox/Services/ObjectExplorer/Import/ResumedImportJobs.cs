@@ -24,14 +24,24 @@ internal static class ResumedImportJobs
         IReadOnlyList<ReleaseImportJob> jobs,
         ILogger logger)
     {
+        // The jobs were built from the database as it is now; a restore before they are
+        // all fed replaces it, and the feed then drops what is left (#1538).
+        var epoch = queue.Epoch;
         var imports = new List<ReleaseImportJob>();
+        var backfills = new List<ReleaseImportJob>();
         var resumedBuilds = 0;
         foreach (var job in jobs)
         {
             if (job.Source is ReleaseImportSource.ProjectBuild or ReleaseImportSource.PullRequestBuild)
             {
-                builds.Enqueue(job);
+                builds.Enqueue(job, epoch);
                 resumedBuilds++;
+            }
+            else if (job.Source is ReleaseImportSource.Backfill)
+            {
+                // A bulk backfill cut off by the restart can be hundreds of
+                // jobs; paced, so it does not crowd out the imports (#1542).
+                backfills.Add(job);
             }
             else
             {
@@ -40,33 +50,64 @@ internal static class ResumedImportJobs
         }
         if (resumedBuilds > 0) logger.LogInformation("Resumed {Count} build(s) after restart.", resumedBuilds);
 
-        if (imports.Count == 0) return;
-        lifetime.ApplicationStarted.Register(() =>
-            _ = EnqueueAllAsync(queue, imports, logger, lifetime.ApplicationStopping));
+        if (imports.Count > 0)
+        {
+            lifetime.ApplicationStarted.Register(() =>
+                _ = EnqueueAllAsync(queue, imports, logger, "resumed after restart", lifetime.ApplicationStopping, epoch: epoch));
+        }
+        if (backfills.Count > 0)
+        {
+            lifetime.ApplicationStarted.Register(() =>
+                _ = EnqueueAllAsync(queue, backfills, logger, "backfills resumed after restart", lifetime.ApplicationStopping, paced: true, epoch: epoch));
+        }
     }
 
-    /// <summary>Writes <paramref name="jobs"/> in order, waiting whenever the queue is full. Never throws.</summary>
+    /// <summary>
+    /// Writes <paramref name="jobs"/> in order, waiting whenever the queue is full. Never
+    /// throws. Also the feeder behind the bulk system-reference backfill (#1542), which
+    /// must not hold a request while the queue drains. <paramref name="purpose"/> only
+    /// labels the log lines. <paramref name="paced"/> writes through
+    /// <see cref="ReleaseImportQueue.EnqueuePacedAsync"/>, so a long run never holds more
+    /// than a slot or so of the queue and other imports get in promptly.
+    /// <paramref name="epoch"/> is the restore epoch the jobs were built under
+    /// (defaults to now): every job is stamped with it, and the feed stops once a
+    /// restore has moved it on, since the rest belong to the database that was
+    /// replaced (#1538).
+    /// </summary>
     internal static async Task EnqueueAllAsync(
         ReleaseImportQueue queue,
         IReadOnlyList<ReleaseImportJob> jobs,
         ILogger logger,
-        CancellationToken ct)
+        string purpose,
+        CancellationToken ct,
+        bool paced = false,
+        long? epoch = null)
     {
+        var builtUnder = epoch ?? queue.Epoch;
         try
         {
             foreach (var job in jobs)
             {
-                await queue.EnqueueAsync(job, ct).ConfigureAwait(false);
+                if (queue.Epoch != builtUnder)
+                {
+                    logger.LogWarning(
+                        "Stopped queuing release imports, {Purpose}: a restore replaced the database they were read from.",
+                        purpose);
+                    return;
+                }
+                if (paced) await queue.EnqueuePacedAsync(job, ct, builtUnder).ConfigureAwait(false);
+                else await queue.EnqueueAsync(job, ct, builtUnder).ConfigureAwait(false);
             }
-            logger.LogInformation("Resumed {Count} release import(s) after restart.", jobs.Count);
+            logger.LogInformation("Queued {Count} release import(s), {Purpose}.", jobs.Count, purpose);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Shutting down; the rows are still queued and the next start resumes them.
+            // Shutting down; the rows are still queued and the next start's reconcile
+            // resumes them.
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Resuming {Count} release import(s) after restart failed.", jobs.Count);
+            logger.LogError(ex, "Queuing {Count} release import(s), {Purpose}, failed.", jobs.Count, purpose);
         }
     }
 }

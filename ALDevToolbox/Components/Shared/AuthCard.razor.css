@@ -1,0 +1,9 @@
+/* The auth card is 372px wide, and both grid tracks around it size to their content,
+   so on a phone the card ran into the right edge: the sign-in pages and a Sealed
+   link's recipient page alike. Capping the column at the viewport less the page's
+   side padding, and letting its own track shrink, lets the card's max-width: 100%
+   take effect. */
+.auth__col {
+    max-width: calc(100vw - 2 * var(--space-5));
+    grid-template-columns: minmax(0, 1fr);
+}

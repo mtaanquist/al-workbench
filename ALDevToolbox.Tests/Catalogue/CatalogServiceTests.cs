@@ -68,6 +68,43 @@ public sealed class CatalogServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveAsync_with_the_same_id_typed_in_two_forms_keys_the_second_row()
+    {
+        var svc = NewService();
+        var inputs = new[]
+        {
+            new CatalogEntryInput(null, "437DBF0E-84FF-417A-965D-ED2BB9650972", "Base", "Microsoft", "1.0.0.0", null),
+            new CatalogEntryInput(null, "{437dbf0e-84ff-417a-965d-ed2bb9650972}", "Base again", "Microsoft", "1.0.0.0", null),
+        };
+
+        var ex = (await svc.Invoking(s => s.SaveAsync(inputs))
+            .Should().ThrowAsync<PlanValidationException>()).Which;
+
+        ex.Errors.Should().ContainKey("Entries[1].DepId");
+    }
+
+    /// <summary>
+    /// #1615: an id typed with braces, in capitals or as 32 bare digits is
+    /// stored in the plain form app.json uses, so the picker hands that form on.
+    /// </summary>
+    [Theory]
+    [InlineData("{437dbf0e-84ff-417a-965d-ed2bb9650972}")]
+    [InlineData("437DBF0E-84FF-417A-965D-ED2BB9650972")]
+    [InlineData("437dbf0e84ff417a965ded2bb9650972")]
+    [InlineData("  437dbf0e-84ff-417a-965d-ed2bb9650972  ")]
+    public async Task SaveAsync_stores_the_id_in_its_plain_form(string typed)
+    {
+        await NewService().SaveAsync(new[]
+        {
+            new CatalogEntryInput(null, typed, "Base Application", "Microsoft", "1.0.0.0", null),
+        });
+
+        await using var ctx = _db.NewContext();
+        var row = await ctx.WellKnownDependencies.AsNoTracking().SingleAsync();
+        row.DepId.Should().Be("437dbf0e-84ff-417a-965d-ed2bb9650972");
+    }
+
+    [Fact]
     public async Task SaveAsync_inserts_then_removes_rows_missing_from_input()
     {
         var svc = NewService();

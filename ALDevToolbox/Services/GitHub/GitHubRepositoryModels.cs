@@ -21,6 +21,10 @@ namespace ALDevToolbox.Services.GitHub;
 /// <param name="Description">GitHub's one-line description, when it has one.</param>
 /// <param name="HtmlUrl">The repository's page, for links out.</param>
 /// <param name="CloneUrl">The HTTPS clone URL, which issue #624 fills a pipeline's field from.</param>
+/// <param name="Id">
+/// GitHub's own number for the repository, which survives a rename or a
+/// transfer where the full name does not. Null when GitHub's answer had none.
+/// </param>
 public sealed record GitHubRepositorySummary(
     string FullName,
     string Owner,
@@ -29,7 +33,8 @@ public sealed record GitHubRepositorySummary(
     bool IsPrivate,
     string? Description,
     string HtmlUrl,
-    string CloneUrl);
+    string CloneUrl,
+    long? Id = null);
 
 /// <summary>What one person may do in one repository, as GitHub told them.</summary>
 /// <param name="CanSee">They can read it.</param>
@@ -46,8 +51,12 @@ public sealed record GitHubFileContent(string Path, string Text, string Sha);
 /// <summary>One file to commit: its repository-relative path and its bytes.</summary>
 public sealed record GitHubCommitFile(string Path, byte[] Content);
 
-/// <summary>A pull request the workbench opened, as the success state needs it.</summary>
-public sealed record GitHubPullRequest(int Number, string HtmlUrl, string HeadBranch);
+/// <summary>
+/// A pull request the workbench opened, as the success state needs it.
+/// <see cref="Title"/> is filled in when it was read back from GitHub, and null
+/// when it was not known.
+/// </summary>
+public sealed record GitHubPullRequest(int Number, string HtmlUrl, string HeadBranch, string? Title = null);
 
 /// <summary>Who a commit is credited to, when the workbench has to say (issue #622).</summary>
 /// <param name="Name">The display name git records as the author.</param>

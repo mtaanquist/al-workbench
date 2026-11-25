@@ -37,7 +37,7 @@
     solution's Pipelines. Doubles as the create form (/solutions/new), which shows
     just General + Repositories until the solution exists.
 
-    Only the owner or an org admin can edit or delete — the management sections are
+    Only the owner, someone on its team, or an org admin can edit or delete — the management sections are
     hidden for everyone else, who still sees the repositories read-only and can
     follow through to download builds. Named user: the BC consultant who owns a
     customer's solution, opening Settings to point it at a repo or wire up delivery.
@@ -197,7 +197,7 @@
         @if (!_canManage)
         {
             <p class="u-muted">
-                You're viewing this solution. Only its owner@(_header?.OwnerName is { } ownerName ? $" ({ownerName})" : "") or an admin can change or build it — you can still
+                You're viewing this solution. Only its owner@(_header?.OwnerName is { } ownerName ? $" ({ownerName})" : ""), someone on its team, or an admin can change or build it — you can still
                 @* The Pipelines list searched for this solution, not /pipelines/{Id}:
                    that route takes a pipeline's id, so it opened whichever pipeline
                    happened to share this solution's number - or nothing. *@
@@ -425,8 +425,16 @@
         }
     }
 
+    /// <summary>
+    /// The load the address sets off, which chains several reads on the circuit's
+    /// context: leaving cancels it and waits for the read under way, so the scope does
+    /// not go from under it.
+    /// </summary>
+    private readonly PageCalls _calls = new();
+
     public async ValueTask DisposeAsync()
     {
+        await _calls.LeaveAsync();
         if (_tabsModule is null) return;
         try { await _tabsModule.DisposeAsync(); }
         catch (JSDisconnectedException) { }
@@ -524,8 +532,8 @@
 
     private async Task LoadAccessAsync()
     {
-        _allTeams = await Teams.ListTeamsAsync();
-        _accessBaseline = await Projects.GetAccessAsync(Id!.Value);
+        _allTeams = await Teams.ListTeamsAsync(_calls.Token);
+        _accessBaseline = await Projects.GetAccessAsync(Id!.Value, _calls.Token);
     }
 
     /// <summary>
@@ -556,7 +564,9 @@
     /// <summary>Set while the page hides itself for the address it just navigated to - see OnParametersSetAsync.</summary>
     private bool _leaving;
 
-    protected override async Task OnParametersSetAsync()
+    protected override Task OnParametersSetAsync() => _calls.Track(LoadForParametersAsync());
+
+    private async Task LoadForParametersAsync()
     {
         if (!await ResolveAddressAsync()) return;
 
@@ -651,7 +661,7 @@
 
         if (Slug is not null)
         {
-            Id = await Projects.FindIdBySlugAsync(Slug);
+            Id = await Projects.FindIdBySlugAsync(Slug, _calls.Token);
             if (Id is not null) return true;
             // Not "loaded": a later /solutions/new has Id null too, and must not be
             // mistaken for this page again.
@@ -671,7 +681,7 @@
             Nav.NavigateTo(SolutionLinks.Solution(known, shown, SegmentFor(SectionFor(TabName ?? OpenTab))), replace: true);
             return false;
         }
-        if (Id is { } id && await Projects.FindVisibleSlugAsync(id) is { } slug)
+        if (Id is { } id && await Projects.FindVisibleSlugAsync(id, _calls.Token) is { } slug)
         {
             Nav.NavigateTo(SolutionLinks.Solution(slug, id, SegmentFor(SectionFor(TabName ?? OpenTab))), replace: true);
             return false;
@@ -733,7 +743,7 @@
         _newAccess = new(ProjectVisibility.Public, Array.Empty<int>());
 
         _section = SectionFor(Id is null ? OpenTab : TabName);
-        _providers = (await Config.GetAllowedProvidersAsync()).ToList();
+        _providers = (await Config.GetAllowedProvidersAsync(_calls.Token)).ToList();
 
         if (Id is null)
         {
@@ -745,16 +755,16 @@
             _edit = new EditModel();
             // The Access tab needs the org's teams to offer them, and there is no
             // solution to read a baseline from yet.
-            _allTeams = await Teams.ListTeamsAsync();
+            _allTeams = await Teams.ListTeamsAsync(_calls.Token);
         }
         else
         {
             await LoadAsync();
             if (!_notFound)
             {
-                _canManage = await Projects.CanManageAsync(Id.Value);
-                _canChangeAccess = await Projects.CanChangeAccessAsync(Id.Value);
-                _following = await Follows.IsFollowingAsync(Id.Value);
+                _canManage = await Projects.CanManageAsync(Id.Value, _calls.Token);
+                _canChangeAccess = await Projects.CanChangeAccessAsync(Id.Value, _calls.Token);
+                _following = await Follows.IsFollowingAsync(Id.Value, _calls.Token);
                 HydrateEdit();
                 if (_canChangeAccess)
                 {
@@ -777,7 +787,11 @@
         if (!_canManage || _notFound || !_providers.Contains(RepositoryProvider.GitHub)) return;
         try
         {
-            _canPickFromGitHub = (await GitHubRepos.GetAccessAsync()).IsReady;
+            _canPickFromGitHub = (await GitHubRepos.GetAccessAsync(_calls.Token)).IsReady;
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            throw; // the page was left mid-read; see DisposeAsync
         }
         catch (Exception ex)
         {
@@ -789,11 +803,11 @@
     {
         try
         {
-            var solution = await Projects.GetProjectAsync(Id!.Value);
+            var solution = await Projects.GetProjectAsync(Id!.Value, _calls.Token);
             if (solution is null) { _notFound = true; return; }
-            _header = await Artifacts.GetProjectHeaderAsync(Id.Value);
-            _pipelines = await PipelinesSvc.ListPipelinesAsync(Id.Value);
-            _waitingForApproval = await ReleasePipelinesSvc.ListWaitingForApprovalAsync(Id.Value);
+            _header = await Artifacts.GetProjectHeaderAsync(Id.Value, _calls.Token);
+            _pipelines = await PipelinesSvc.ListPipelinesAsync(Id.Value, _calls.Token);
+            _waitingForApproval = await ReleasePipelinesSvc.ListWaitingForApprovalAsync(Id.Value, _calls.Token);
             _loadedProject = solution;
         }
         catch (ProjectAccessDeniedException)
@@ -1042,7 +1056,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+            _errors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change this solution." };
         }
         catch (Exception ex)
         {
@@ -1068,7 +1082,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+            _errors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change this solution." };
         }
         catch (PlanValidationException ex)
         {
@@ -1102,7 +1116,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+            _errors = new() { ["_"] = "Only the solution's owner, someone on its team, or an admin can change this solution." };
         }
         catch (PlanValidationException ex)
         {

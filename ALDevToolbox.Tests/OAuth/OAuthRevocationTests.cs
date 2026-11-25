@@ -23,7 +23,6 @@ namespace ALDevToolbox.Tests.OAuth;
 /// Through the real app: a person signs in, approves a registered client, the
 /// client trades the code for an access token and calls <c>/mcp</c> with it.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class OAuthRevocationTests : IDisposable
 {
     private const string Email = "consultant@cronus.example";
@@ -174,8 +173,7 @@ public sealed class OAuthRevocationTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = Email,
                 DisplayName = "Nils Consultant",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                    .HashPassword(Password),
+                PasswordHash = TestPasswords.Hash(Password),
                 Role = UserRole.User,
                 Status = UserStatus.Active,
                 CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),

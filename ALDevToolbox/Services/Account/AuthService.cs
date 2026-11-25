@@ -17,10 +17,10 @@ public sealed class AuthService
     public const int MaxAttemptsPerIp = 30;
     public const int LockoutThreshold = 5;
     /// <summary>
-    /// Wrong second-factor guesses (TOTP / recovery code) allowed within the
-    /// lockout window before the challenge endpoints refuse. Mirrors the
-    /// email-MFA verify cap so the 6-digit space can't be walked inside the
-    /// renewable MfaPending window. See #477.
+    /// Wrong second-factor guesses (TOTP, recovery code or email code) allowed
+    /// within the lockout window before the challenge endpoints refuse, so the
+    /// 6-digit space can't be walked inside the renewable MfaPending window,
+    /// however many email codes are sent. See #477 and #1432.
     /// </summary>
     public const int MaxMfaAttempts = 5;
     public static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(15);
@@ -142,8 +142,19 @@ public sealed class AuthService
     /// code / recovery code) has been verified. Stamps <c>LastLoginAt</c> and
     /// records the success in <c>login_attempts</c>. The caller sets the auth
     /// cookie.
+    /// <para>
+    /// The account is checked again, since up to ten minutes can pass after
+    /// the password leg (#1614): the result carries a login error code
+    /// instead of the user when the account is no longer active, its
+    /// organisation has moved to Microsoft-only sign-in, or a credential
+    /// changed after <paramref name="pendingIssuedAt"/> (a password reset, an
+    /// email change). Without the last check, a half-finished sign-in from
+    /// before a reset could finish after it with a session newer than the
+    /// reset's cut-off.
+    /// </para>
     /// </summary>
-    public async Task<User> CompleteMfaAsync(int userId, string ip, CancellationToken ct = default)
+    public async Task<(User? User, string? RefusedWith)> CompleteMfaAsync(
+        int userId, DateTime pendingIssuedAt, string ip, CancellationToken ct = default)
     {
         var now = _clock.GetUtcNow().UtcDateTime;
         // Fence category 1 (pre-auth routing): finishes a half-authenticated MFA login;
@@ -151,10 +162,13 @@ public sealed class AuthService
         var user = await _db.Users.IgnoreQueryFilters()
             .Include(u => u.Organization)
             .FirstAsync(u => u.Id == userId, ct);
+        if (user.Status != UserStatus.Active) return (null, "disabled");
+        if (await IsLocalLoginDisabledAsync(user, ct)) return (null, "entra-only");
+        if (user.CredentialsChangedAt is { } changedAt && changedAt > pendingIssuedAt) return (null, "invalid");
         user.LastLoginAt = now;
         await _db.SaveChangesAsync(ct);
         await RecordAttemptAsync(user.Email, ip, succeeded: true, now, ct);
-        return user;
+        return (user, null);
     }
 
     /// <summary>
@@ -169,13 +183,23 @@ public sealed class AuthService
     public async Task<bool> IsLocalLoginDisabledAsync(User user, CancellationToken ct = default)
     {
         if (user.IsSiteAdmin) return false;
-        // Pre-auth: every caller but one is a login / password-reset /
-        // magic-link path running before a cookie exists, so there is no
-        // current organisation. The read is pinned to the subject's own org.
-        return await _db.OrganizationSettings.IgnoreQueryFilters().AsNoTracking()
-            .AnyAsync(s => s.OrganizationId == user.OrganizationId
-                && s.LocalLoginPolicy == Domain.ValueObjects.LocalLoginPolicy.EntraOnly, ct);
+        return await IsMicrosoftOnlyOrganizationAsync(user.OrganizationId, ct);
     }
+
+    /// <summary>
+    /// True when the organisation refuses password, reset and magic-link
+    /// sign-in for its members. The SiteAdmin exception lives in
+    /// <see cref="IsLocalLoginDisabledAsync"/>; this is the organisation's
+    /// rule alone, for an invite whose account does not exist yet (#1336).
+    /// </summary>
+    public async Task<bool> IsMicrosoftOnlyOrganizationAsync(int organizationId, CancellationToken ct = default) =>
+        // Fence category 1 (pre-auth routing): every caller but one is a login /
+        // password-reset / magic-link / invite path running before a cookie exists,
+        // so there is no current organisation. Pinned to s.OrganizationId == organizationId,
+        // the subject's own org (or the org that issued the invite).
+        await _db.OrganizationSettings.IgnoreQueryFilters().AsNoTracking()
+            .AnyAsync(s => s.OrganizationId == organizationId
+                && s.LocalLoginPolicy == Domain.ValueObjects.LocalLoginPolicy.EntraOnly, ct);
 
     /// <summary>
     /// True when the user has at least one strong-auth method enrolled:
@@ -270,7 +294,7 @@ public sealed class AuthService
 
     /// <summary>
     /// Takes one second-factor attempt for the user before the code is
-    /// checked. Gates the TOTP and recovery-code challenges so their short
+    /// checked. Gates the TOTP, recovery-code and email-code challenges so their short
     /// code space can't be brute-forced inside the renewable MfaPending
     /// window: after <see cref="MaxMfaAttempts"/> failed attempts for the
     /// user's email within the lockout window and since their last completed
@@ -325,6 +349,32 @@ public sealed class AuthService
         await _db.LoginAttempts.Where(a => a.Id == attemptId).ExecuteDeleteAsync(ct);
     }
 
+    /// <summary>What the signed-in account pages are told for a refused current password while the email is locked out.</summary>
+    public const string CurrentPasswordLockedOutMessage =
+        "Too many wrong passwords. Wait 15 minutes, then try again.";
+
+    /// <summary>
+    /// Checks the current password a signed-in account action asks for
+    /// (changing the password, turning two-step off, new recovery codes, the
+    /// passkey fallback). A wrong one is recorded as a failed sign-in attempt
+    /// for the account's email and the action is refused once the email is
+    /// locked out, exactly as at sign-in: without it a session that lacks the
+    /// password (a stolen cookie, an unattended browser) could run a breach
+    /// list against these forms with no limit (#1614). An empty password is
+    /// refused without counting, since it guesses nothing.
+    /// </summary>
+    public async Task<CurrentPasswordCheck> CheckCurrentPasswordAsync(
+        string email, string passwordHash, string? password, string ip, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var normalised = NormaliseEmail(email);
+        if (await IsLockedOutAsync(normalised, now, ct)) return CurrentPasswordCheck.LockedOut;
+        if (string.IsNullOrEmpty(password)) return CurrentPasswordCheck.Wrong;
+        if (VerifyPassword(password, passwordHash)) return CurrentPasswordCheck.Correct;
+        await RecordAttemptAsync(normalised, ip, succeeded: false, now, ct);
+        return CurrentPasswordCheck.Wrong;
+    }
+
     public async Task RecordAttemptAsync(string email, string ip, bool succeeded, DateTime timestamp, CancellationToken ct)
     {
         _db.LoginAttempts.Add(new LoginAttempt
@@ -336,4 +386,13 @@ public sealed class AuthService
         });
         await _db.SaveChangesAsync(ct);
     }
+}
+
+/// <summary>The answer of <see cref="AuthService.CheckCurrentPasswordAsync"/>.</summary>
+public enum CurrentPasswordCheck
+{
+    Correct,
+    Wrong,
+    /// <summary>Too many wrong passwords for this email lately; refused without checking.</summary>
+    LockedOut,
 }

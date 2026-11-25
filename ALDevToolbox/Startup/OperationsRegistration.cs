@@ -49,6 +49,10 @@ public static class OperationsRegistration
         // The per-IP limit below meters each caller of the Diff endpoint; this
         // caps how many of its diffs run at once across all of them.
         services.AddSingleton(_ => new CompareDiffGate(CompareDiffGate.DefaultSlots));
+        // The Object Explorer's file compare page gets its own, so Diff tool
+        // traffic can never starve signed-in readers of a slot (#1339).
+        services.AddKeyedSingleton(CompareDiffGate.FileCompareKey,
+            (_, _) => new CompareDiffGate(CompareDiffGate.FileCompareSlots, CompareDiffGate.FileCompareSlotWait));
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -173,6 +177,21 @@ public static class OperationsRegistration
                     {
                         PermitLimit = 300,
                         Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                    }));
+
+            // A Sealed link's reveal is anonymous. A person presses Show secret a
+            // handful of times at most (a wrong passphrase or two, a link that opens
+            // more than once), so 20 in ten minutes per address never stands in their
+            // way, while a script holding a link cannot hammer its passphrase faster
+            // than the link locks anyway (SealedLinkService.MaxPassphraseAttempts).
+            options.AddPolicy(SealedEndpoints.RevealRateLimitPolicy, httpContext =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 20,
+                        Window = TimeSpan.FromMinutes(10),
                         QueueLimit = 0,
                     }));
         });

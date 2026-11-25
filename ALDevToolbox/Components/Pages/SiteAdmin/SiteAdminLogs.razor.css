@@ -1,0 +1,53 @@
+/* The stored log as a list, not a table: a message can be a long unbroken
+   path or URL, and a table column would push the page past the screen edge. */
+.log-list { list-style: none; margin: 0; padding: 0; }
+
+.log-line {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    min-width: 0;
+}
+
+.log-line:first-child { border-top: 0; }
+
+.log-line__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+.log-line__time { font-variant-numeric: tabular-nums; }
+
+.log-line__source { color: var(--ink-2); font-weight: 500; }
+
+.log-line__message {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.log-line__error summary {
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+.log-line__error pre {
+    margin: 6px 0 0;
+    padding: 10px;
+    max-height: 320px;
+    overflow: auto;
+    background: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    font-size: var(--text-xs);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

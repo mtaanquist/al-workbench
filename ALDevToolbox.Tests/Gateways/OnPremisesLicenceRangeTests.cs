@@ -399,8 +399,8 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         // A list of builds carries the outcome per environment, not the objects.
         foreach (var listed in new[]
                  {
-                     (await tools.ListPipelineBuildsAsync(seed.PipelineId)).Single(),
-                     (await tools.ListProjectBuildsAsync(seed.ProjectId.ToString())).Single(),
+                     (await tools.ListPipelineBuildsAsync(seed.PipelineId)).Rows.Single(),
+                     (await tools.ListProjectBuildsAsync(seed.ProjectId.ToString())).Rows.Single(),
                  })
         {
             var row = listed.LicenceCheckRows!.Single();
@@ -431,9 +431,9 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         var notChecked = (await tools.GetProjectBuildAsync(notRead.BuildId)).LicenceChecks!.Single();
         notChecked.Outcome.Should().Be(LicenceCheckOutcome.NotChecked);
         notChecked.Reason.Should().StartWith("AL Workbench has not read the licence");
-        (await tools.ListPipelineBuildsAsync(notRead.PipelineId)).Single().LicenceCheckRows!.Single().Summary
+        (await tools.ListPipelineBuildsAsync(notRead.PipelineId)).Rows.Single().LicenceCheckRows!.Single().Summary
             .Should().StartWith("Licence not checked for Production. AL Workbench has not read");
-        (await tools.ListPipelineBuildsAsync(online.PipelineId)).Single().LicenceCheckRows.Should().BeNull();
+        (await tools.ListPipelineBuildsAsync(online.PipelineId)).Rows.Single().LicenceCheckRows.Should().BeNull();
         (await tools.GetProjectBuildAsync(online.BuildId)).LicenceChecks.Should().BeNull();
     }
 
@@ -690,7 +690,7 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         return new ArtifactsTools(
             new ArtifactService(ctx, access),
             new ReleaseComparisonService(ctx, access, NullLogger<ReleaseComparisonService>.Instance),
-            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance));
+            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance));
     }
 
     private sealed class NoTokens : IDeliveryTokenSource

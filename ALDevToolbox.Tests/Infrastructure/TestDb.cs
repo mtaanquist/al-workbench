@@ -48,8 +48,25 @@ namespace ALDevToolbox.Tests.Infrastructure;
 /// </summary>
 public sealed class TestDb : IDisposable
 {
-    public const int DefaultOrgId = 1;
+    /// <summary>
+    /// The singleton system organisation the migration seeds and stamps
+    /// <c>is_system</c>. Tests act as it only when they mean system-org
+    /// behaviour (the canonical catalogue, the quota exemption); everything
+    /// else acts as <see cref="DefaultOrgId"/>, an ordinary tenant (#1441).
+    /// </summary>
+    public const int SystemOrgId = 1;
+
+    /// <summary>A second ordinary tenant, for cross-organisation isolation tests.</summary>
     public const int OtherOrgId = 2;
+
+    /// <summary>
+    /// The ordinary tenant <see cref="OrgContext"/> acts as by default. Seeded
+    /// the way signup creates an organisation, platform files included.
+    /// </summary>
+    public const int DefaultOrgId = 3;
+
+    /// <summary>The slug of <see cref="DefaultOrgId"/>, which names its per-tenant backup folder.</summary>
+    public const string DefaultOrgSlug = "tenant";
 
     private static readonly Lazy<PostgresHost> SharedHost = new(PostgresHost.Start, isThreadSafe: true);
 
@@ -70,7 +87,7 @@ public sealed class TestDb : IDisposable
     /// </summary>
     public string ConnectionString => _connectionString;
 
-    public AmbientOrganizationContext OrgContext { get; } = new() { CurrentOrganizationId = DefaultOrgId };
+    public TestOrganizationContext OrgContext { get; } = new() { CurrentOrganizationId = DefaultOrgId };
 
     /// <summary>
     /// Counts EF commands still holding a connection on this fixture's
@@ -83,17 +100,31 @@ public sealed class TestDb : IDisposable
 
     /// <summary>
     /// Waits for component-initiated queries to finish before teardown pulls
-    /// the DbContext out from under them. Bounded; returns whether it settled
-    /// so a caller could assert on it, though none needs to today.
+    /// the DbContext out from under them. Bounded; returns whether it settled.
+    /// A wait that runs out is written to the test's output, since it means a
+    /// query never finished and the test spent ten seconds waiting on it (#1552).
     /// </summary>
-    public bool WaitForQueriesToSettle() =>
-        CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10));
+    public bool WaitForQueriesToSettle()
+    {
+        if (CommandTracker.WaitUntilIdle(TimeSpan.FromSeconds(10))) return true;
 
-    public TestDb()
+        var message = $"TestDb: {CommandTracker.InFlight} database command(s) still running after 10 s at teardown. "
+            + "A component query never finished; find the page or teardown step that leaves it open:"
+            + Environment.NewLine + CommandTracker.DescribeInFlight();
+        TestContext.Current.TestOutputHelper?.WriteLine(message);
+        TestContext.Current.SendDiagnosticMessage(message);
+        return false;
+    }
+
+    public TestDb() : this(SharedTemplate.Value)
+    {
+    }
+
+    private TestDb(string template)
     {
         var host = SharedHost.Value;
         _databaseName = "aldt_test_" + Guid.NewGuid().ToString("N");
-        host.CloneDatabase(_databaseName, SharedTemplate.Value);
+        host.CloneDatabase(_databaseName, template);
         _connectionString = host.ConnectionStringFor(_databaseName);
 
         _options = BuildOptions(_connectionString);
@@ -114,6 +145,71 @@ public sealed class TestDb : IDisposable
     private readonly Lazy<ServiceProvider> _openIddict;
 
     /// <summary>
+    /// Seeded templates built so far, by key. Each is built once per process
+    /// on first use, like <see cref="SharedTemplate"/>.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<(string Template, object? Value)>> SeededTemplates = new();
+
+    /// <summary>
+    /// Returns a fixture cloned from a template that already holds the rows
+    /// <paramref name="seed"/> writes. The seed runs once per process for each
+    /// <paramref name="key"/>, on a clone of the shared template, and every
+    /// later call clones its result: a clone costs tens of milliseconds where
+    /// importing the Object Explorer <c>.app</c> fixtures costs over a second
+    /// (#1552). <paramref name="value"/> is what the seed returned, typically
+    /// the ids of the rows it wrote; ids and sequences survive the clone.
+    ///
+    /// <para>The same key must always mean the same seed. The seed runs with
+    /// the default <see cref="OrgContext"/>.</para>
+    /// </summary>
+    public static TestDb FromSeed<T>(string key, Func<TestDb, Task<T>> seed, out T value)
+    {
+        var lazy = SeededTemplates.GetOrAdd(key, _ => new Lazy<(string, object?)>(
+            () => BuildSeededTemplate(seed), isThreadSafe: true));
+        (string Template, object? Value) built;
+        try
+        {
+            built = lazy.Value;
+        }
+        catch
+        {
+            // A Lazy caches its exception. Forget the failed build so the next
+            // test tries again instead of failing on this one's error.
+            SeededTemplates.TryRemove(new KeyValuePair<string, Lazy<(string, object?)>>(key, lazy));
+            throw;
+        }
+        value = (T)built.Value!;
+        return new TestDb(built.Template);
+    }
+
+    private static (string Template, object? Value) BuildSeededTemplate<T>(Func<TestDb, Task<T>> seed)
+    {
+        var db = new TestDb(SharedTemplate.Value);
+        T value;
+        try
+        {
+            // Off the caller's synchronization context: the seed is async and
+            // this blocks inside a test.
+            value = Task.Run(() => seed(db)).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            db.Dispose();
+            throw;
+        }
+        db.ReleaseConnections();
+
+        var name = db._databaseName;
+        var host = SharedHost.Value;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { host.DropDatabase(name); }
+            catch (Exception) { /* best effort: the run is already over */ }
+        };
+        return (name, value);
+    }
+
+    /// <summary>
     /// An OpenIddict token manager over this fixture's database, for services
     /// that revoke a user's OAuth tokens (<see cref="ALDevToolbox.Services.Account.UserAdministrationService"/>).
     /// </summary>
@@ -122,7 +218,8 @@ public sealed class TestDb : IDisposable
 
     /// <summary>Org-admin actions on user accounts, wired to this fixture's clock and token manager.</summary>
     public ALDevToolbox.Services.Account.UserAdministrationService NewUserAdministrationService(AppDbContext ctx, TimeProvider clock) =>
-        new(ctx, clock, OpenIddictTokens, OrgContext);
+        new(ctx, clock, OpenIddictTokens, OrgContext,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ALDevToolbox.Services.Account.UserAdministrationService>.Instance);
 
     /// <summary>
     /// Builds the process-wide template database: migrate once, seed once. Every
@@ -149,22 +246,35 @@ public sealed class TestDb : IDisposable
         {
             ctx.Database.Migrate();
 
-            // Migration seeds the Default organisation and stamps it as the
-            // singleton system org. Add the Other organisation tests use to
-            // verify cross-org isolation; it stays a regular org.
+            // Migration seeds org 1 and stamps it as the singleton system org.
+            // Add two ordinary tenants: the one tests act as by default, and
+            // the Other one cross-org isolation tests compare it against. The
+            // default gets the platform files signup gives a new org; Other
+            // stays bare, as the isolation tests expect.
+            var now = DateTime.UtcNow;
             ctx.Organizations.Add(new Organization
             {
                 Id = OtherOrgId,
                 Name = "Other",
                 Slug = "other",
-                CreatedAt = DateTime.UtcNow,
+                CreatedAt = now,
             });
+            ctx.Organizations.Add(new Organization
+            {
+                Id = DefaultOrgId,
+                Name = "Tenant",
+                Slug = DefaultOrgSlug,
+                CreatedAt = now,
+            });
+            ctx.SaveChanges();
+            PlatformOrganizationFileSeeder.EnsureForOrganizationAsync(ctx, DefaultOrgId, now)
+                .GetAwaiter().GetResult();
             ctx.SaveChanges();
 
             // Postgres identity sequences don't advance when a row is inserted
             // with an explicit id; the next nextval() would otherwise collide
-            // with our seeded OtherOrg at id=2. Re-align the sequence to MAX(id)
-            // so SignupAsync-style inserts in tests get a free id.
+            // with the orgs seeded above. Re-align the sequence to MAX(id) so
+            // SignupAsync-style inserts in tests get a free id.
             ctx.Database.ExecuteSqlRaw(
                 "SELECT setval(pg_get_serial_sequence('organizations', 'id'), (SELECT MAX(id) FROM organizations))");
         }
@@ -192,9 +302,9 @@ public sealed class TestDb : IDisposable
     public AppDbContext NewContext() => new(_options, OrgContext);
 
     /// <summary>
-    /// Returns a fresh context scoped by <paramref name="orgContext"/> instead of the
-    /// fixture's shared one - an <c>HttpOrganizationContext</c> over a real principal,
-    /// say, to prove what that principal's requests can read.
+    /// Returns a fresh context whose tenant filter reads <paramref name="orgContext"/>
+    /// instead of <see cref="OrgContext"/>, for a test that watches how the filter
+    /// reads the caller.
     /// </summary>
     public AppDbContext NewContext(IOrganizationContext orgContext) => new(_options, orgContext);
 
@@ -240,16 +350,32 @@ public sealed class TestDb : IDisposable
 
     public void Dispose()
     {
+        ReleaseConnections();
+        SharedHost.Value.DropDatabase(_databaseName);
+    }
+
+    /// <summary>
+    /// Disposes what holds a connection to this fixture's database and closes
+    /// its idle pooled connections, so the database can be dropped or cloned.
+    /// </summary>
+    private void ReleaseConnections()
+    {
         _memoryCache.Dispose();
-        // Before ClearAllPools: this provider owns scoped AppDbContexts, and a
-        // live one would hand a connection straight back to the pool after the
-        // clear and block the drop.
+        // Before clearing the pool: this provider owns scoped AppDbContexts, and
+        // a live one would hand a connection straight back to the pool after the
+        // clear.
         if (_scopeProvider.IsValueCreated) _scopeProvider.Value.Dispose();
         if (_openIddict.IsValueCreated) _openIddict.Value.Dispose();
-        // Idle pool connections hold open the per-fixture database and would
-        // block DROP DATABASE; clear them before issuing the drop.
-        NpgsqlConnection.ClearAllPools();
-        SharedHost.Value.DropDatabase(_databaseName);
+        // Close this fixture's idle pooled connections, so the drop has no
+        // sessions of ours to end. Only this database's pool: ClearAllPools()
+        // also threw away the idle connections of every fixture running beside
+        // this one, and each paid a new physical connection and Npgsql's type
+        // load on its next query (#1583). A connection opened under another
+        // connection string is ended by the drop's WITH (FORCE).
+        using (var connection = new NpgsqlConnection(_connectionString))
+        {
+            NpgsqlConnection.ClearPool(connection);
+        }
     }
 
     private readonly MemoryCache _memoryCache = new(Options.Create(new MemoryCacheOptions()));
@@ -432,6 +558,25 @@ public sealed class TestDb : IDisposable
     }
 
     /// <summary>
+    /// Modules copied from a GitHub repository (#1415), with
+    /// <paramref name="client"/> standing in for GitHub.
+    /// </summary>
+    public ALDevToolbox.Services.Templates.ModuleSourceService NewModuleSourceService(
+        AppDbContext ctx, ALDevToolbox.Services.GitHub.GitHubAppClient client, TimeProvider? clock = null)
+    {
+        var access = NewGitHubAccessService(ctx, client);
+        return new ALDevToolbox.Services.Templates.ModuleSourceService(
+            ctx,
+            new ModuleService(ctx, NullLogger<ModuleService>.Instance, OrgContext, new FolderTreeHydrator(ctx), NewQuotaGuard(ctx)),
+            client,
+            NewGitHubConnectionService(ctx, access),
+            access,
+            OrgContext,
+            clock ?? TimeProvider.System,
+            NullLogger<ALDevToolbox.Services.Templates.ModuleSourceService>.Instance);
+    }
+
+    /// <summary>
     /// A <see cref="SystemSettingsService"/> on this fixture's context and
     /// in-memory key ring. The singleton row is created on first write.
     /// </summary>
@@ -520,6 +665,29 @@ public sealed class TestDb : IDisposable
             logger ?? NullLogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>.Instance);
 
     /// <summary>
+    /// The last step of Migrate repositories (#1701) on this fixture's context.
+    /// With no <paramref name="client"/>, GitHub cannot be reached, which is all
+    /// a preview needs.
+    /// </summary>
+    public ALDevToolbox.Services.Migration.RepositoryMigrationPublisher NewRepositoryMigrationPublisher(
+        AppDbContext ctx,
+        ALDevToolbox.Services.GitHub.GitHubAppClient? client = null,
+        ALDevToolbox.Services.GitHub.GitHubAccessService? access = null)
+    {
+        client ??= NewGitHubAppClient(ctx, new UnreachableHandler());
+        access ??= NewGitHubAccessService(ctx, client);
+        return new(
+            NewGitHubWorkspaceRepositoryService(ctx, client, access),
+            NewGitHubConnectionService(ctx, access),
+            client,
+            NewProjectService(ctx, access),
+            new ALDevToolbox.Services.ObjectExplorer.ProcessRunner(),
+            ctx,
+            TimeProvider.System,
+            NullLogger<ALDevToolbox.Services.Migration.RepositoryMigrationPublisher>.Instance);
+    }
+
+    /// <summary>
     /// The "is this tool switched on for the acting organisation" service. There
     /// is no HttpContext in a test, so it answers from the organisation row -
     /// which is what an MCP request does too.
@@ -568,7 +736,7 @@ public sealed class TestDb : IDisposable
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var github = gitHubAccess ?? NewOfflineGitHubAccessService(ctx);
         return new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github),
+            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github), NewQuotaGuard(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
     }
 
@@ -617,7 +785,7 @@ public sealed class TestDb : IDisposable
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var projects = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access),
+            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access), NewQuotaGuard(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
         return new ALDevToolbox.Services.GitHub.RepositoryDiscoveryService(
             ctx, client, access, NewGitHubConnectionService(ctx, access), NewOrganizationConfigService(ctx),
@@ -667,7 +835,7 @@ public sealed class TestDb : IDisposable
 
     /// <summary>The Cookbook's recipe service, wired to this fixture's database.</summary>
     public RecipeService NewRecipeService(AppDbContext ctx) =>
-        new(ctx, NullLogger<RecipeService>.Instance, OrgContext, NewQuotaGuard(ctx));
+        new(ctx, NullLogger<RecipeService>.Instance, OrgContext, NewQuotaGuard(ctx), new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext));
 
     /// <summary>"Apply a recipe to a repository": the access gate, the commit, and the attribution row.</summary>
     public ALDevToolbox.Services.GitHub.GitHubRecipeDeliveryService NewGitHubRecipeDeliveryService(
@@ -717,6 +885,13 @@ public sealed class TestDb : IDisposable
         services.AddScoped<ALDevToolbox.Services.GitHub.RepositoryDiscoveryService>();
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerLinks>();
         services.AddScoped<ALDevToolbox.Services.GitHub.DependencyDriftService>();
+        services.AddScoped<ALDevToolbox.Services.GitHub.RepositoryListService>();
+        services.AddScoped<ALDevToolbox.Services.GitHub.RepositoryFilesService>();
+        // A push refreshes the modules copied from the pushed branch (#1415).
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped<FolderTreeHydrator>();
+        services.TryAddScoped<ModuleService>();
+        services.TryAddScoped<ALDevToolbox.Services.Templates.ModuleSourceService>();
         // "Create repository" asks whether this organisation uses Solutions
         // before it registers one (#772), so the toggles have to resolve too.
         AddToolServices(services);
@@ -758,6 +933,30 @@ public sealed class TestDb : IDisposable
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
             throw new HttpRequestException("api.github.com is not reachable from tests.");
+    }
+
+    /// <summary>
+    /// Puts every organisation at or over its storage quota (a 0 MB default:
+    /// billable bytes are always at least 0), the cheapest way to force a
+    /// service's quota refusal without staging real bytes. Clears the guard's
+    /// cached decision for both test organisations.
+    /// </summary>
+    public async Task SetZeroStorageQuotaAsync()
+    {
+        await using var ctx = NewContext();
+        var row = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        if (row is null)
+        {
+            row = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(row);
+        }
+        row.DefaultStorageQuotaMb = 0;
+        await ctx.SaveChangesAsync();
+        // The guard caches its decision per organisation, so a write made before
+        // this call would otherwise keep answering "under quota".
+        var guard = NewQuotaGuard(ctx);
+        guard.Invalidate(DefaultOrgId);
+        guard.Invalidate(OtherOrgId);
     }
 
     /// <summary>
@@ -844,7 +1043,10 @@ internal sealed class PostgresHost
             return new PostgresHost(fromEnv, container: null);
         }
 
+        // Data directory on tmpfs, as in CI: the per-class template clone is
+        // about ten times faster in memory than on disk (#1535).
         var container = new PostgreSqlBuilder("postgres:18-alpine")
+            .WithTmpfsMount("/var/lib/postgresql")
             .Build();
         container.StartAsync().GetAwaiter().GetResult();
         return new PostgresHost(container.GetConnectionString(), container);

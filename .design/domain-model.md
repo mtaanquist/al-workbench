@@ -211,6 +211,8 @@ Indexes:
 
 The relation is purely cosmetic for end-users — generation does not consult it. A user who deselects a default module gets a workspace without that module, just as they would by leaving an unticked module unticked. Soft-deleted modules are silently dropped from the pre-selection at form load time.
 
+Deleting a module leaves its rows here. The template editor and its TOML leave a soft-deleted module out (it has no checkbox to untick), and saving keeps its row, ordered after the live ones, so restoring the module makes it a default again (#1326).
+
 The write-path reconciler in `TemplateService.UpdateAsync` matches existing rows by `module_id` (the natural identity), **not** by list position — position-based mutation would trip the `(runtime_template_id, module_id)` unique index when two rows swap places, and EF would refuse with a circular-dependency error. Reorders rewrite `ordering`; `module_id` stays put on each row.
 
 ### `runtime_template_included_files`
@@ -333,7 +335,7 @@ These are domain rules — they should be enforced in service code, not just at 
 - `workspace_extension_folders.path` must be a single segment (no `/`). Top-level siblings under one extension can't share a path; nested siblings under one parent can't share a path.
 - `workspace_extension_files.path` must be a filename (no `/`, no `..`). Unique within a folder.
 - `workspace_extension_files.content` is UTF-8 text. Audit snapshots store a SHA-256 hash of the content (plus the path) rather than the content itself, so the audit log doesn't bloat with copies of every AL file on every save.
-- `workspace_extension_dependencies`: exactly one of `ref_extension_path`, `ref_module_key`, `lit_id` is non-null. When `ref_extension_path` is set, it must resolve to another extension in the same template; the save validator rejects unresolvable references rather than letting them slip through to generation.
+- `workspace_extension_dependencies`: exactly one of `ref_extension_path`, `ref_module_key`, `lit_id` is non-null. When `ref_extension_path` is set, it must resolve to another extension in the same template; the save validator rejects unresolvable references rather than letting them slip through to generation. When `ref_module_key` is set and the key is new in that save (not already on the template), it must name a live module in the org; a blank key is refused. A key the template already had is accepted even if its module has since been deleted, and generation drops it.
 - `module_extension_folders` / `module_extension_files`: same path-segment rules as the workspace mirrors.
 - `modules.key` must match `^[a-z0-9-]+$` and be unique within an org.
 - `module_dependencies.dep_id` must be a GUID format.

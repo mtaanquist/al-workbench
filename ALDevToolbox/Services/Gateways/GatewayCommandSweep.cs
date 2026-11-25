@@ -24,13 +24,17 @@ public sealed class GatewayCommandSweep : PolledScheduler
     private readonly IServiceProvider _services;
     private readonly ILogger<GatewayCommandSweep> _logger;
 
-    public GatewayCommandSweep(IServiceProvider services, ILogger<GatewayCommandSweep> logger, WorkerHeartbeatRegistry heartbeats)
+    public GatewayCommandSweep(IServiceProvider services, ILogger<GatewayCommandSweep> logger, WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(GatewayCommandSweep),
             pollInterval: TimeSpan.FromSeconds(30),
             // A tick is a handful of updates per organisation, and a few notifications.
             maxActiveDuration: TimeSpan.FromMinutes(5),
             maxIdleSilence: TimeSpan.FromMinutes(3),
-            disableEnvVar: DisableEnvVar)
+            disableEnvVar: DisableEnvVar,
+            maintenance: maintenance)
     {
         _services = services;
         _logger = logger;

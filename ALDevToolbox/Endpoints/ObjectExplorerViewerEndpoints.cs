@@ -153,11 +153,10 @@ internal static class ObjectExplorerViewerEndpoints
             if (match.Hash is null || match.Content is null) return Results.NotFound();
 
             var safe = SanitiseFileName(match.Label) + "-" + SanitiseFileName(match.Name) + ".SymbolReference.json";
-            ctx.Response.ContentType = "application/json; charset=utf-8";
-            ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{safe}\"";
+            WriteAttachmentHeaders(ctx, safe, "application/json; charset=utf-8");
             await using var writer = new StreamWriter(ctx.Response.Body, System.Text.Encoding.UTF8, bufferSize: 64 * 1024, leaveOpen: true);
-            await writer.WriteAsync(match.Content.AsMemory(), ct).ConfigureAwait(false);
-            await writer.FlushAsync(ct).ConfigureAwait(false);
+            await writer.WriteAsync(match.Content.AsMemory(), ct);
+            await writer.FlushAsync(ct);
             return Results.Empty;
         }).RequireAuthorization();
 
@@ -233,14 +232,15 @@ internal static class ObjectExplorerViewerEndpoints
             return session is null ? Results.NotFound() : Results.Ok(session);
         }).RequireAuthorization();
 
-        app.MapGet("/api/object-explorer/references/sessions/{token}", (
+        app.MapGet("/api/object-explorer/references/sessions/{token}", async (
             string token,
             HttpContext ctx,
-            ReferenceSessionService sessions) =>
+            ReferenceSessionService sessions,
+            CancellationToken ct) =>
         {
             var owner = OwnerKey(ctx);
             if (owner is null) return Results.Unauthorized();
-            var session = sessions.Get(token, owner);
+            var session = await sessions.GetAsync(token, owner, ct);
             return session is null ? Results.NotFound() : Results.Ok(session);
         }).RequireAuthorization();
 
@@ -260,6 +260,37 @@ internal static class ObjectExplorerViewerEndpoints
             if (owner is null) return Results.Unauthorized();
             var session = await sessions.CreateAtPositionAsync(fileId, line, column, owner, from, ct);
             return session is null ? Results.NoContent() : Results.Ok(session);
+        }).RequireAuthorization();
+
+        // "Find built-in calls" from a right-click anywhere in the code.
+        app.MapGet("/api/object-explorer/system-references/sessions/at-position", async (
+            long fileId,
+            int line,
+            int column,
+            HttpContext ctx,
+            ReferenceSessionService sessions,
+            CancellationToken ct,
+            int? from = null) =>
+        {
+            var owner = OwnerKey(ctx);
+            if (owner is null) return Results.Unauthorized();
+            var session = await sessions.CreateSystemReferencesAtPositionAsync(fileId, line, column, owner, from, ct);
+            return session is null ? Results.NoContent() : Results.Ok(session);
+        }).RequireAuthorization();
+
+        // The method picker on a long built-in calls list: one method's calls,
+        // queried again so the cap does not hide any.
+        app.MapGet("/api/object-explorer/system-references/sessions/{token}/narrow", async (
+            string token,
+            HttpContext ctx,
+            ReferenceSessionService sessions,
+            CancellationToken ct,
+            string? method = null) =>
+        {
+            var owner = OwnerKey(ctx);
+            if (owner is null) return Results.Unauthorized();
+            var session = await sessions.NarrowSystemReferencesAsync(token, owner, method, ct);
+            return session is null ? Results.NotFound() : Results.Ok(session);
         }).RequireAuthorization();
 
         return app;

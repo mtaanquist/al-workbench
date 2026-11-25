@@ -100,6 +100,14 @@ public sealed class BcTokenService
                 // The login endpoint returns a JSON error; surface its short code, never
                 // the secret. The most common cause is a wrong/expired client secret.
                 _logger.LogWarning("BC token request failed for tenant {Tenant}: {Status}.", tenantId, response.StatusCode);
+                // Being told to slow down is not a rejection, and must not read as one.
+                if (BcThrottleHandler.RequestedWait(response, TimeProvider.System.GetUtcNow()) is { } wait)
+                {
+                    throw new BcApiException(response.StatusCode, "Microsoft sign-in asked us to slow down. Try again in a few minutes.")
+                    {
+                        RetryAfter = wait,
+                    };
+                }
                 throw new BcApiException(response.StatusCode, "The Business Central credentials were rejected.");
             }
 

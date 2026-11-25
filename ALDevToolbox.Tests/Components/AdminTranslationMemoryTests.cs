@@ -166,17 +166,70 @@ public sealed class AdminTranslationMemoryTests : IDisposable
 
         cut.WaitForAssertion(() =>
             cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
-                .Should().BeTrue());
+                .Should().BeTrue("the organisation is connected; the page logged:\n"
+                    + _logs.ErrorsForFailureMessage(LogLevel.Warning)));
+    }
+
+    /// <summary>
+    /// A connection check that fails is not an answer, so it must not hide the button
+    /// the way "nothing is connected" does (#1752): the refresh reports its own failure.
+    /// </summary>
+    [Fact]
+    public async Task Refresh_from_repositories_is_still_offered_when_the_connection_check_fails()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            // The connection check reads the site's GitHub App settings; take them away.
+            await ctx.Database.ExecuteSqlRawAsync("ALTER TABLE system_settings RENAME TO system_settings_gone");
+        }
+
+        var cut = _ctx.Render<AdminTranslationMemory>();
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
+                .Should().BeTrue("the page logged:\n"
+                    + _logs.ErrorsForFailureMessage(LogLevel.Warning)));
+        _logs.Messages.Should().Contain(m => m.Contains("Could not tell whether GitHub is connected"));
     }
 
     [Fact]
     public void Refresh_from_repositories_is_not_offered_when_nothing_is_connected()
     {
         var cut = _ctx.Render<AdminTranslationMemory>();
+        // The empty memory first: the page draws it only once its whole load, the
+        // GitHub read included, has come back. Before that the button is absent anyway.
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("No translations learned yet"));
+
+        cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
+            .Should().BeFalse("a button whose only answer would be 'nothing is connected' is worse than none");
+        // And hidden because the check said so, not because it failed.
+        _logs.Messages.Should().NotContain(m => m.Contains("Could not tell whether GitHub is connected"));
+    }
+
+    [Fact]
+    public async Task A_memory_past_the_count_limit_says_more_than_and_still_pages()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var insert = $"""
+                INSERT INTO translation_memory (organization_id, source_language, target_language,
+                    source_text, target_text, source_hash, target_hash, kind, hit_count, score,
+                    created_at, updated_at, last_seen_at)
+                SELECT {TestDb.DefaultOrgId}, 'en-US', 'da-DK', 'Source ' || g, 'Kilde ' || g,
+                    md5('s' || g), md5('t' || g), 'caption', 1, 0, now(), now(), now()
+                FROM generate_series(1, {MemorySearchQuery.CountLimit + 1}) g
+                """;
+            await ctx.Database.ExecuteSqlRawAsync(insert);
+        }
+
+        var cut = _ctx.Render<AdminTranslationMemory>();
 
         cut.WaitForAssertion(() =>
-            cut.FindAll("button").Any(b => b.TextContent.Contains("Read from repositories"))
-                .Should().BeFalse("a button whose only answer would be 'nothing is connected' is worse than none"));
+        {
+            cut.Find(".tr-mem-count").TextContent.Should().Contain($"More than {MemorySearchQuery.CountLimit:N0} entries");
+            cut.Find(".tr-mem-pager .pager__count").TextContent.Trim().Should().Be("Page 1");
+            cut.FindAll(".tr-mem-pager button").Last().HasAttribute("disabled").Should().BeFalse();
+        });
     }
 
     // --- helpers ------------------------------------------------------------
@@ -202,7 +255,7 @@ public sealed class AdminTranslationMemoryTests : IDisposable
         await _db.NewSystemSettingsService(ctx).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: System.Security.Cryptography.RSA.Create(2048).ExportRSAPrivateKeyPem(),
+            PrivateKeyPem: TestKeys.GitHubAppPem,
             ClearPrivateKey: false));
     }
 

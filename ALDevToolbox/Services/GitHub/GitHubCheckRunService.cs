@@ -72,9 +72,21 @@ public sealed class GitHubCheckRunService
         var parts = repositoryFullName.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 2) return null;
 
+        string token;
         try
         {
-            var token = await _github.GetInstallationTokenAsync(installationId, ct);
+            token = await _github.GetInstallationTokenAsync(installationId, ct);
+        }
+        catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException)
+        {
+            _logger.LogWarning(ex,
+                "Could not open a check run on {Repository} at {HeadSha}; the build runs anyway.",
+                repositoryFullName, headSha);
+            return null;
+        }
+
+        try
+        {
             return await _github.CreateCheckRunAsync(
                 token, parts[0], parts[1],
                 name: CheckRunName(solutionName),
@@ -83,6 +95,16 @@ public sealed class GitHubCheckRunService
                 detailsUrl: DetailsUrl(projectId),
                 externalId: projectId?.ToString(),
                 ct: ct);
+        }
+        catch (GitHubApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden && !ex.IsRateLimited)
+        {
+            // Said in full because the bare 403 reads like the build failed: it is a
+            // permission an organisation owner grants, and the build is unaffected.
+            _logger.LogWarning(ex,
+                "Could not open a check run on {Repository} at {HeadSha}: the GitHub App is not allowed to report build results on pull requests "
+                + "(Checks: read and write, accepted on the installation). The build runs anyway.",
+                repositoryFullName, headSha);
+            return null;
         }
         catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException)
         {
@@ -169,17 +191,17 @@ public sealed class GitHubCheckRunService
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ReleaseId == releaseId)
             .Select(b => new { b.Id, b.ProjectId, b.Status, b.FailureMessage, b.CheckRunId, b.BcVersion })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (build?.CheckRunId is not long checkRunId) return;
 
         var allDiagnostics = await _db.OeProjectBuildDiagnostics.AsNoTracking()
             .Where(d => d.ProjectBuildId == build.Id)
             .OrderBy(d => d.Ordering)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var results = await _db.OeProjectBuildResults.AsNoTracking()
             .Where(r => r.ReleaseId == releaseId)
             .Select(r => new { r.AppName, r.Status, r.Message })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // A solution can list several repositories, and a pull request is about
         // exactly one of them. Annotating another repository's file would put a
@@ -191,7 +213,7 @@ public sealed class GitHubCheckRunService
         var repositoryIds = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.ProjectId == build.ProjectId)
             .Select(r => new { r.Id, r.Url })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var wanted = GitHubPullRequestBuildWorker.NormaliseRepositoryUrl($"https://github.com/{repositoryFullName}");
         var underReview = repositoryIds
             .Where(r => GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(r.Url) == wanted)

@@ -43,7 +43,7 @@ public sealed class TranslationQueryService
             .GroupBy(t => t.LanguageCode)
             .Select(g => new { LanguageCode = g.Key, Count = g.Count() })
             .OrderBy(x => x.LanguageCode)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows.Select(r => new TranslationLanguageSummary(r.LanguageCode, r.Count)).ToList();
     }
 
@@ -61,7 +61,7 @@ public sealed class TranslationQueryService
             .GroupBy(t => new { t.ModuleId, t.LanguageCode })
             .Select(g => new { g.Key.ModuleId, g.Key.LanguageCode, Count = g.Count() })
             .OrderBy(x => x.ModuleId).ThenBy(x => x.LanguageCode)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows.Select(r => new ModuleTranslationLanguageRow(r.ModuleId, r.LanguageCode, r.Count)).ToList();
     }
 
@@ -136,6 +136,6 @@ public sealed class TranslationQueryService
                 t.SourceText,
                 t.TargetText,
                 t.SymbolId))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
     }
 }

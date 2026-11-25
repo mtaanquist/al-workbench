@@ -1,0 +1,424 @@
+using System.Data.Common;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using ALDevToolbox.Services;
+using ALDevToolbox.Services.Operations;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+
+namespace ALDevToolbox.Data;
+
+/// <summary>
+/// Keeps ordinary work off the database while a restore replaces it (#1571).
+/// <see cref="MaintenanceModeState"/> stops HTTP requests (the middleware) and
+/// background work (the worker bases), but an interactive page's click runs
+/// inside a long-lived circuit: it can have started before the restore and
+/// still be issuing commands after it, so no gate at the edge can see it
+/// finish. This one sits on every <see cref="AppDbContext"/> command instead.
+/// <list type="bullet">
+/// <item>While the site is open, each command is counted on
+/// <see cref="MaintenanceModeState.ActiveJobs"/> from the moment it is sent
+/// until it completes (for a query, until its reader is disposed), so the
+/// restore's wait sees a command in flight and does not drop the schema under
+/// it.</item>
+/// <item>While maintenance mode is on, a command is refused with
+/// <see cref="DatabaseClosedForMaintenanceException"/>, except:
+/// <list type="bullet">
+/// <item>in a flow given <see cref="MaintenanceModeState.AllowDatabase"/>:
+/// the restore's own work, and a background job counted before the restore
+/// began;</item>
+/// <item>a read (a plain <c>SELECT</c>) in a flow given
+/// <see cref="MaintenanceModeState.AllowDatabaseReads"/>: a request that
+/// arrived during maintenance, on its way to the maintenance page or past
+/// it;</item>
+/// <item>a SiteAdmin on the SiteAdmin console (a <c>/site-admin</c> request,
+/// or a circuit currently showing a <c>/site-admin</c> page), so they can
+/// watch, or recover, the restore. These commands are not counted, so a
+/// SiteAdmin saving a console setting during a restore can still collide
+/// with it.</item>
+/// </list>
+/// So an open page's circuit, a request or job that was already running
+/// uncounted when the restore began, and any write by a request that arrived
+/// during the restore are refused.</item>
+/// </list>
+/// A guarantee per command, not per operation. Something that issued its first
+/// command before the restore began, and so has no allowance, has its later
+/// async commands held rather than refused (#1599): a restore that is refused,
+/// or fails before dropping anything, reopens the site on the same database,
+/// and work refused part-way would leave rows it had already committed (a
+/// release left "importing") with nothing to put them right. A held command
+/// waits for the flag to clear, for no longer than the restore waits for
+/// running jobs plus <see cref="HoldMargin"/>, and then runs if the database
+/// is the one it started on. It is refused if a restore replaced the database,
+/// and at once if the restore has already gone ahead; after that refusal the
+/// scope's later commands are refused too, so the work's failure handling does
+/// not write into the restored database (for an open page that means until it
+/// is reloaded, which the circuit handler does after maintenance). Two kinds
+/// are still refused at once: a command inside an open transaction, whose locks
+/// would keep the restore from dropping the schema (it rolls back, and what
+/// the work does after that is held as usual), and a synchronous command,
+/// which would block its thread. Commands sent on a raw connection outside EF
+/// are not seen.
+/// </summary>
+public sealed class MaintenanceDatabaseGuard : DbCommandInterceptor, IDisposable
+{
+    private static readonly object Counted = new();
+
+    private readonly MaintenanceModeState _maintenance;
+    private readonly IOrganizationContext _org;
+    private readonly ConditionalWeakTable<DbCommand, object> _counted = new();
+    private readonly TimeSpan _holdMargin;
+
+    public MaintenanceDatabaseGuard(MaintenanceModeState maintenance, IOrganizationContext org,
+        // Tests shorten it; production always uses HoldMargin.
+        TimeSpan? holdMargin = null)
+    {
+        _maintenance = maintenance;
+        _org = org;
+        _holdMargin = holdMargin ?? HoldMargin;
+    }
+
+    /// <summary>
+    /// Set by the circuit handler for a circuit's scope: whether the page the
+    /// circuit shows right now is on the SiteAdmin console. Null outside a circuit.
+    /// </summary>
+    internal Func<bool>? CircuitOnSiteAdminConsole { get; set; }
+
+    /// <summary>
+    /// The same question for whatever a SiteAdmin's circuit event runs, in any DI
+    /// scope. The property above sits on the circuit scope's guard only, so work a
+    /// console page does in a scope of its own (a cache miss that opens one) got a
+    /// guard without it and was refused during a restore (#1599). The circuit
+    /// handler sets this around each event of a SiteAdmin's circuit; being an
+    /// <see cref="AsyncLocal{T}"/>, it follows the event's work into child scopes
+    /// and ends with it. Only set for a SiteAdmin, so it answers for both halves.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<bool>?> SiteAdminCircuitOnConsole = new();
+
+    /// <summary>
+    /// True for the rest of a SiteAdmin's <c>/site-admin</c> request, set by
+    /// <c>UseSiteAdminConsoleRequests</c> on the request thread once
+    /// authentication has run. The guard used to work this out itself from
+    /// <c>HttpContext</c>, but EF calls it after its own internal awaits, so that
+    /// read could run on a pool thread while a server render read the user too,
+    /// and <c>HttpContext</c> is not thread-safe (#1731). Being an
+    /// <see cref="AsyncLocal{T}"/>, the answer follows the request's work into
+    /// any thread and scope, and so into anything the request starts and does not
+    /// await: unlike the old check, that would keep the allowance after the
+    /// request ends. As with <see cref="MaintenanceModeState.AllowDatabase"/>, a
+    /// console request must not leave detached work behind.
+    /// </summary>
+    internal static readonly AsyncLocal<bool> SiteAdminRequestOnConsole = new();
+
+    /// <summary>How much longer than the restore's own wait a held command waits (#1599).</summary>
+    internal static readonly TimeSpan HoldMargin = TimeSpan.FromSeconds(30);
+
+    private static readonly TimeSpan HoldPoll = TimeSpan.FromMilliseconds(100);
+
+    // Set once a held command is refused: the restore went ahead, so whatever this
+    // scope's work was part of is in the database being replaced. Everything after
+    // it is refused too, or the work's own failure handling (stamping a release
+    // failed, putting it back to ready) would write into the restored database
+    // once the site reopens (#1599).
+    private volatile bool _workOutlivedItsDatabase;
+
+    private int _heldCommands;
+
+    /// <summary>
+    /// How many of this scope's commands are being held right now. Each one read
+    /// <see cref="MaintenanceModeState.Epoch"/> before it was counted here, so a
+    /// test that waits for this before replacing the database knows the command
+    /// saw the old one (#1707); a fixed delay could not tell a held command from
+    /// one still opening its connection.
+    /// </summary>
+    internal int HeldCommands => Volatile.Read(ref _heldCommands);
+
+    private void Begin(DbCommand command)
+    {
+        if (_workOutlivedItsDatabase || !TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+    }
+
+    private async ValueTask BeginAsync(DbCommand command, CommandEventData eventData, CancellationToken ct)
+    {
+        // Before anything else, so a restore that completes in between is seen.
+        var epoch = _maintenance.Epoch;
+        if (_workOutlivedItsDatabase) throw new DatabaseClosedForMaintenanceException();
+        if (TryPass(command)) return;
+        // A request that arrived during maintenance (it has the read allowance) is on
+        // its way to the maintenance page: refuse it now. So is a command in an open
+        // transaction, which may hold locks the restore's drop would wait on.
+        if (_maintenance.DatabaseReadsAllowedHere || eventData.Context?.Database.CurrentTransaction is not null)
+        {
+            throw new DatabaseClosedForMaintenanceException();
+        }
+
+        // Work that was already running when the restore began: hold it until the
+        // site reopens, so a refused restore lets it carry on (#1599).
+        Interlocked.Increment(ref _heldCommands);
+        try
+        {
+            await HoldAsync(ct);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _heldCommands);
+        }
+        // A restore replaced the database meanwhile: whatever this was part of is gone.
+        if (_maintenance.Epoch != epoch)
+        {
+            _workOutlivedItsDatabase = true;
+            throw new DatabaseClosedForMaintenanceException();
+        }
+        if (!TryPass(command)) throw new DatabaseClosedForMaintenanceException();
+    }
+
+    private async Task HoldAsync(CancellationToken ct)
+    {
+        while (_maintenance.IsActive)
+        {
+            // Not once the restore has gone ahead (or is held closed after failing):
+            // nothing held would run, and each holds a pooled connection the restore
+            // may need. Read each time: the restore sets its wait after turning the
+            // flag on.
+            if (_maintenance.RestoreGoingAhead
+                || _maintenance.IsHeldAfterFailedRestore
+                || DateTime.UtcNow >= _maintenance.StartedAtUtc + _maintenance.ActiveJobsWait + _holdMargin)
+            {
+                _workOutlivedItsDatabase = true;
+                throw new DatabaseClosedForMaintenanceException();
+            }
+            await Task.Delay(HoldPoll, ct);
+        }
+    }
+
+    /// <summary>
+    /// True when the command may run now: counted while the site is open, or let
+    /// through by an allowance or the SiteAdmin console while it is closed.
+    /// </summary>
+    private bool TryPass(DbCommand command)
+    {
+        if (_maintenance.TryBeginJob())
+        {
+            _counted.AddOrUpdate(command, Counted);
+            return true;
+        }
+        if (_maintenance.DatabaseAllowedHere) return true;
+        if (_maintenance.DatabaseReadsAllowedHere && IsRead(command.CommandText)) return true;
+        return OnSiteAdminConsole();
+    }
+
+    // No HttpContext here: see SiteAdminRequestOnConsole. The circuit hook is null
+    // outside a circuit, so a request never reaches the read of the caller.
+    private bool OnSiteAdminConsole() =>
+        SiteAdminRequestOnConsole.Value
+        || (CircuitOnSiteAdminConsole?.Invoke() == true && _org.IsSiteAdmin)
+        || SiteAdminCircuitOnConsole.Value?.Invoke() == true;
+
+    /// <summary>
+    /// Whether a command only reads. Deliberately conservative, since a wrong
+    /// "yes" lets a write into the database being restored and a wrong "no"
+    /// only refuses a read: comments are stripped (nested block comments
+    /// included; SQL whose comments or dollar quotes cannot be parsed is not a
+    /// read), and what is left must be one <c>SELECT</c> statement (a trailing
+    /// <c>;</c> at most) with no row-lock clause, no <c>INTO</c>, and none of
+    /// the functions that change state from inside a query (sequences,
+    /// advisory locks, settings, notifications, large objects). Anything else,
+    /// including a data-modifying CTE, counts as a write.
+    /// </summary>
+    internal static bool IsRead(string? sql)
+    {
+        if (string.IsNullOrWhiteSpace(sql) || DollarQuote.IsMatch(sql)) return false;
+        if (StripComments(sql) is not { } code) return false;
+
+        var statement = code.Trim();
+        if (statement.EndsWith(';')) statement = statement[..^1].TrimEnd();
+        return statement.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
+            && !statement.Contains(';')
+            && !LockClause.IsMatch(statement)
+            && !Into.IsMatch(statement)
+            && !StateChangingFunction.IsMatch(statement);
+    }
+
+    private static readonly Regex DollarQuote = new(@"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", RegexOptions.Compiled);
+    private static readonly Regex LockClause = new(
+        @"\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex Into = new(@"\bINTO\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex StateChangingFunction = new(
+        @"\b(nextval|setval|pg_advisory\w*|pg_try_advisory\w*|set_config|pg_notify|pg_terminate_backend|pg_cancel_backend|dblink\w*)\b|\blo_\w+",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The SQL with its comments replaced by spaces, or null when a comment is
+    /// left open. String literals and quoted identifiers are kept as they are
+    /// and skipped over, so a comment marker inside one is not taken for a
+    /// comment; a <c>;</c> or a function name inside one makes the classifier
+    /// say "not a read", which is the safe side. A literal with a backslash in
+    /// it is not parsed at all.
+    /// </summary>
+    private static string? StripComments(string sql)
+    {
+        var result = new System.Text.StringBuilder(sql.Length);
+        var i = 0;
+        while (i < sql.Length)
+        {
+            var c = sql[i];
+            if (c is '\'' or '"')
+            {
+                var close = i + 1;
+                while (true)
+                {
+                    close = sql.IndexOf(c, close);
+                    if (close < 0) return null;
+                    // A doubled quote is an escaped one, not the end.
+                    if (close + 1 < sql.Length && sql[close + 1] == c) { close += 2; continue; }
+                    break;
+                }
+                // A backslash may be an escape (an E'' string), which would move the
+                // end of the literal; rather than parse those, it is not a read.
+                if (sql.AsSpan(i, close - i + 1).Contains('\\')) return null;
+                result.Append(sql, i, close - i + 1);
+                i = close + 1;
+            }
+            else if (c == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
+            {
+                var newline = sql.IndexOf('\n', i);
+                if (newline < 0) return null;
+                result.Append(' ');
+                i = newline + 1;
+            }
+            else if (c == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
+            {
+                // Postgres block comments nest.
+                var depth = 1;
+                i += 2;
+                while (depth > 0)
+                {
+                    if (i + 1 >= sql.Length) return null;
+                    if (sql[i] == '/' && sql[i + 1] == '*') { depth++; i += 2; }
+                    else if (sql[i] == '*' && sql[i + 1] == '/') { depth--; i += 2; }
+                    else i++;
+                }
+                result.Append(' ');
+            }
+            else
+            {
+                result.Append(c);
+                i++;
+            }
+        }
+        return result.ToString();
+    }
+
+    private void End(DbCommand command)
+    {
+        if (_counted.Remove(command)) _maintenance.EndJob();
+    }
+
+    /// <summary>
+    /// Releases any count a command still holds when the scope ends. A reader
+    /// whose close threw before <see cref="DataReaderDisposing"/> ran would
+    /// otherwise hold its count forever, and every later restore would wait
+    /// it out and refuse.
+    /// </summary>
+    public void Dispose()
+    {
+        foreach (var (command, _) in _counted.ToList())
+        {
+            End(command);
+        }
+    }
+
+    public override InterceptionResult<DbDataReader> ReaderExecuting(
+        DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+    {
+        Begin(command);
+        return result;
+    }
+
+    public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+        DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+    {
+        await BeginAsync(command, eventData, cancellationToken);
+        return result;
+    }
+
+    public override InterceptionResult<int> NonQueryExecuting(
+        DbCommand command, CommandEventData eventData, InterceptionResult<int> result)
+    {
+        Begin(command);
+        return result;
+    }
+
+    public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+        DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+    {
+        await BeginAsync(command, eventData, cancellationToken);
+        return result;
+    }
+
+    public override InterceptionResult<object> ScalarExecuting(
+        DbCommand command, CommandEventData eventData, InterceptionResult<object> result)
+    {
+        Begin(command);
+        return result;
+    }
+
+    public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+        DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken cancellationToken = default)
+    {
+        await BeginAsync(command, eventData, cancellationToken);
+        return result;
+    }
+
+    public override int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)
+    {
+        End(command);
+        return result;
+    }
+
+    public override ValueTask<int> NonQueryExecutedAsync(
+        DbCommand command, CommandExecutedEventData eventData, int result, CancellationToken cancellationToken = default)
+    {
+        End(command);
+        return ValueTask.FromResult(result);
+    }
+
+    public override object? ScalarExecuted(DbCommand command, CommandExecutedEventData eventData, object? result)
+    {
+        End(command);
+        return result;
+    }
+
+    public override ValueTask<object?> ScalarExecutedAsync(
+        DbCommand command, CommandExecutedEventData eventData, object? result, CancellationToken cancellationToken = default)
+    {
+        End(command);
+        return ValueTask.FromResult(result);
+    }
+
+    // A query stays counted until its reader is disposed: a batch's later
+    // statements run while the reader moves to their results.
+    public override InterceptionResult DataReaderDisposing(
+        DbCommand command, DataReaderDisposingEventData eventData, InterceptionResult result)
+    {
+        End(command);
+        return result;
+    }
+
+    public override void CommandFailed(DbCommand command, CommandErrorEventData eventData) => End(command);
+
+    public override Task CommandFailedAsync(
+        DbCommand command, CommandErrorEventData eventData, CancellationToken cancellationToken = default)
+    {
+        End(command);
+        return Task.CompletedTask;
+    }
+
+    public override void CommandCanceled(DbCommand command, CommandEndEventData eventData) => End(command);
+
+    public override Task CommandCanceledAsync(
+        DbCommand command, CommandEndEventData eventData, CancellationToken cancellationToken = default)
+    {
+        End(command);
+        return Task.CompletedTask;
+    }
+}

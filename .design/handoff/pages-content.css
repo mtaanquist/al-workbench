@@ -115,13 +115,12 @@
 /* ---------- callouts (info / warn / tip / danger) ----------
    Reuses the .alert colour language, restyled for prose: heading + body, and
    a named label so the kind is readable without relying on the tint. */
-/* The 82ch is the handoff's own: PageMcpSetup.dc.html carries
-   `style="max-width: 82ch"` on its trailing note. Same value, named, so no page
-   spells it inline - and a note is prose by definition, so it wants a measure
-   wherever it is put. A no-op for every note we render today, all of which sit
-   in something already narrower; it earns its place on the one page whose
-   container just stopped being. */
-.note { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-left: 3px solid var(--ink-4); border-radius: var(--r); background: var(--surface-2); max-width: 82ch; }
+/* No max-width (divergence 75, #1723): a note is a box in a page layout, and
+   a box fills its container. The handoff caps its trailing MCP note at 82ch
+   inline; outside the docs and setup pages that left notes ending halfway
+   across a list or tool page. Prose that wants a measure gets it from its own
+   container (.docs__main) or its own element (.step__text). */
+.note { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-left: 3px solid var(--ink-4); border-radius: var(--r); background: var(--surface-2); }
 .note__icon { grid-row: span 2; margin-top: 1px; color: var(--ink-3); }
 .note__icon svg { width: 17px; height: 17px; }
 .note__title { font-size: var(--text-sm); font-weight: var(--fw-semibold); color: var(--ink); }
@@ -141,21 +140,10 @@
 .note--tint-body.note--danger .note__body { color: var(--danger-text); }
 
 /* ---------- MCP setup: numbered step cards ---------- */
-.steps { display: grid; gap: var(--space-4); max-width: 82ch; counter-reset: step; }
-/* A step list whose bodies are UI and code rather than prose. The 82ch above is
-   a READING measure, and it is right for a guide you read top to bottom - but
-   PageMcpSetup.dc.html's own steps hold code blocks, inputs and buttons, and
-   ours additionally hold a two-up card row the archetype never had. Held to
-   82ch on a 1144px page that came to 619px of content beside 525px of nothing,
-   the pair of cards was crushed to 265px each and a server address wrapped
-   mid-token - and the trailing card, uncapped, left a ragged edge halfway
-   across the page.
-
-   DIVERGENCE (72): so the cap becomes opt-out, and the measure moves to the
-   prose that actually wanted it (`.step__text` below). Same `--wide` escape as
-   `.settings__body--wide` and `.detail-body--wide`; a step list that is genuinely
-   a read keeps the default and says nothing. */
-.steps--wide { max-width: none; }
+.steps { display: grid; gap: var(--space-4); counter-reset: step; }
+/* No max-width on the list (divergences 72 and 75): its bodies hold cards,
+   fields and code, not just prose. The reading measure sits on .step__text,
+   the only part of a step that is prose. */
 .step { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: var(--space-2) var(--space-4); padding: var(--space-4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow-xs); position: relative; }
 .step__n { grid-row: span 3; display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--r-pill); background: var(--primary-weak); color: var(--primary-ink); font-family: var(--font-mono); font-size: var(--text-sm); font-weight: var(--fw-semibold); }
 .step.is-done .step__n { background: var(--success-bg); color: var(--success-text); }

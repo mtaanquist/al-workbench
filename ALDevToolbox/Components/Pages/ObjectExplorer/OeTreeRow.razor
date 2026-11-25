@@ -18,7 +18,7 @@
 @if (Node.Kind == "overflow")
 {
     @* Not a destination, and not pretending to be one. *@
-    <span class="otree__row sv-tree-overflow" style="--d: @Node.Depth">
+    <span class="otree__row sv-tree-overflow" style="--d: @Node.Depth" hidden="@Node.IsHidden">
         <span class="otree__caret" aria-hidden="true"></span>
         <span class="otree__name">@Node.Name</span>
     </span>
@@ -27,6 +27,7 @@ else if (Node.Kind == "file")
 {
     <a class="otree__row @(Node.IsActive ? "is-active" : null)"
        style="--d: @Node.Depth"
+       hidden="@Node.IsHidden"
        href="@Href"
        title="@Tooltip"
        data-file-id="@Node.FileId"
@@ -56,6 +57,7 @@ else
     <button type="button"
             class="otree__row @(Node.Kind == "module" ? "otree__row--app" : null) @(Node.Kind == "section" ? "sv-tree-section" : null) @(Node.IsOpen ? "is-open" : null)"
             style="--d: @Node.Depth"
+            hidden="@Node.IsHidden"
             title="@Tooltip"
             data-tree-toggle="@(Node.HasChildren ? string.Empty : null)"
             data-tree-loaded="@(Node.Kind == "section" ? "1" : null)"

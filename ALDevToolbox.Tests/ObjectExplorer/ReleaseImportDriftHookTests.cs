@@ -73,7 +73,9 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
         await AmendAsync(releaseId, DriftingApi());
 
         await using var read = _db.NewContext();
-        var rows = await read.GitHubRepositoryDrift.ToListAsync();
+        // The app numbers itself (1.0.0.0), so beside the application there is only the
+        // offer to switch it, which is not something it is behind on.
+        var rows = await read.GitHubRepositoryDrift.Where(d => d.Field != "version-adopt").ToListAsync();
         rows.Should().ContainSingle()
             .Which.Should().Match<GitHubRepositoryDrift>(
                 d => d.Repository == RepoA && d.Field == "application"
@@ -134,9 +136,9 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
                 new ALDevToolbox.Services.Translation.TranslationMemoryService(
                     ctx, _db.OrgContext,
                     NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-                NullLogger<TranslationImportService>.Instance),
+                _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance,
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext),
             _db.NewDependencyDriftService(ctx, client, access));
 
         return await importer.AmendReleaseAsync(
@@ -232,11 +234,10 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
 
     private async Task ReadyAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new OrganizationSettings

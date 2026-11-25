@@ -31,6 +31,9 @@ public sealed class AvatarTests
     [InlineData("<admin@cronus.example>", "A")]
     // Seed-time rows have no actor at all.
     [InlineData("unknown", "U")]
+    // System writes: the worker in brackets is not a second name.
+    [InlineData("System (BackupScheduler)", "S")]
+    [InlineData("System", "S")]
     [InlineData("", "?")]
     [InlineData(null, "?")]
     public void Initials_reads_the_person_out_of_whatever_shape_it_is_given(string? who, string expected)

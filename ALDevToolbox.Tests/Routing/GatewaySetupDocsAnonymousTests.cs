@@ -11,7 +11,6 @@ namespace ALDevToolbox.Tests.Routing;
 /// component or an injected service that needs a signed-in organisation would show
 /// up here as a redirect or a failure rather than in production.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GatewaySetupDocsAnonymousTests : IDisposable
 {
     private readonly TestDb _db = new();

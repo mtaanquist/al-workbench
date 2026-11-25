@@ -139,6 +139,7 @@ public sealed class RepositoryDiscoverySchedulerTests : IDisposable
         services.AddSingleton(new ProjectDiscoveryQueue());
         services.AddScoped<ProjectDiscoveryService>();
         services.AddScoped<ProjectService>();
+        services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(services);
         _db.AddGitHubServices(services, api);
         return services.BuildServiceProvider();
@@ -202,10 +203,9 @@ public sealed class RepositoryDiscoverySchedulerTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 }

@@ -39,13 +39,17 @@ public sealed class GitHubHookAddressRefreshScheduler : PolledScheduler
         GitHubHookAddressAllowList allowList,
         TimeProvider clock,
         ILogger<GitHubHookAddressRefreshScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // One call with a thirty-second deadline: two minutes active is a hang.
         : base(logger, heartbeats, nameof(GitHubHookAddressRefreshScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(2),
             maxIdleSilence: TimeSpan.FromMinutes(45),
-            disableEnvVar: "DISABLE_GITHUB_HOOK_ADDRESS_REFRESH")
+            disableEnvVar: "DISABLE_GITHUB_HOOK_ADDRESS_REFRESH",
+            maintenance: maintenance)
     {
         _services = services;
         _allowList = allowList;

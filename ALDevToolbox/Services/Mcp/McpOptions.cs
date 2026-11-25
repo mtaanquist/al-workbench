@@ -12,10 +12,10 @@ public sealed class McpOptions
     public bool Enabled { get; set; } = true;
 
     /// <summary>
-    /// Cap on the base64 payload size returned from a single generate call.
-    /// Workspaces are tens-to-hundreds of KB today; the cap exists to refuse
-    /// pathological inputs that would otherwise return a megabyte-class
-    /// inline blob over MCP. 5 MB by default.
+    /// Cap on the ZIP a single generate call may produce. Workspaces are
+    /// tens-to-hundreds of KB today; the cap refuses pathological inputs, since
+    /// the archive is held in memory until its download link expires
+    /// (<see cref="GeneratedDownloadStore"/>). 5 MB by default.
     /// </summary>
     public int MaxWorkspaceBytes { get; set; } = 5 * 1024 * 1024;
 

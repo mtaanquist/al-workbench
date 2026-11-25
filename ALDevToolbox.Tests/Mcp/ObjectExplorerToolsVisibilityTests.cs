@@ -1,3 +1,4 @@
+using System.Reflection;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -11,6 +12,7 @@ using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
+using ModelContextProtocol.Server;
 
 namespace ALDevToolbox.Tests.Mcp;
 
@@ -30,13 +32,23 @@ namespace ALDevToolbox.Tests.Mcp;
 /// </summary>
 public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
 {
-    private readonly TestDb _db = new();
+    // Created on first use, so a test that starts by seeding gets a clone of the
+    // seeded template instead of importing two apps itself (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
+
+    public ObjectExplorerToolsVisibilityTests()
+    {
+    }
+
+    /// <summary>An instance over the template being seeded, so the seed runs the same helpers.</summary>
+    private ObjectExplorerToolsVisibilityTests(TestDb database) => _database = database;
 
     private const int OwnerUserId = 9600;
     private const int MemberUserId = 9601;
     private const int OutsiderUserId = 9602;
 
-    public void Dispose() => _db.Dispose();
+    public void Dispose() => _database?.Dispose();
 
     // ── Fixture ─────────────────────────────────────────────────────────
 
@@ -53,7 +65,23 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         long ProcedureSymbolId,
         long CallingSymbolId);
 
-    private async Task<Fixture> SeedAsync()
+    /// <summary>
+    /// The seeded scenario, acting as the owner. The writes run once per test
+    /// process into a template every test clones; ids survive the clone, and the
+    /// acting identity, which lives outside the database, is set again here.
+    /// </summary>
+    private Task<Fixture> SeedAsync()
+    {
+        if (_database is not null) return SeedHereAsync();
+        _database = TestDb.FromSeed(
+            "mcp-object-explorer-visibility",
+            db => new ObjectExplorerToolsVisibilityTests(db).SeedHereAsync(),
+            out var fixture);
+        ActAs(OwnerUserId);
+        return Task.FromResult(fixture);
+    }
+
+    private async Task<Fixture> SeedHereAsync()
     {
         await SeedUsersAsync();
         ActAs(OwnerUserId);
@@ -102,9 +130,10 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
 
     /// <summary>
     /// Every release-keyed tool in <c>ObjectExplorerTools</c>, invoked with the
-    /// hidden release as its release argument. The list is the enumeration of
-    /// the class: a new release-keyed tool that forgets the choke point has to
-    /// be added here to compile the intent, and fails this test if it answers.
+    /// hidden release as its release argument. A name may carry a parenthesised
+    /// variant ("(by symbolId)"); the part before it is the MCP tool name, and
+    /// <see cref="Every_tool_that_takes_a_release_is_in_the_matrix"/> holds the
+    /// list to the class, so a new release-keyed tool cannot be left out of it.
     /// </summary>
     private static IEnumerable<(string Name, Func<ObjectExplorerTools, string, Fixture, Task> Invoke)> ReleaseKeyedTools()
     {
@@ -113,7 +142,7 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         yield return ("compare_release_files", (t, key, f) => t.CompareReleaseFilesAsync(key, f.OpenReleaseLabel));
         yield return ("compare_release_files (hidden on the right)", (t, key, f) => t.CompareReleaseFilesAsync(f.OpenReleaseLabel, key));
         yield return ("search_objects", (t, key, f) => t.SearchObjectsAsync(key, namePattern: ""));
-        yield return ("search_procedures", (t, key, f) => t.SearchProceduresAsync(key, namePattern: ""));
+        yield return ("search_procedures", (t, key, f) => t.SearchProceduresAsync(key, namePattern: f.ProcedureName));
         yield return ("search_content", (t, key, f) => t.SearchContentAsync(key, query: "procedure"));
         yield return ("find_references", (t, key, f) => t.FindReferencesAsync(key, f.ObjectName, f.ObjectKind));
         yield return ("find_system_references", (t, key, f) => t.FindSystemReferencesAsync(key, f.ObjectName, f.ObjectKind));
@@ -132,6 +161,43 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         yield return ("download_symbol_reference", (t, key, f) => t.DownloadSymbolReferenceAsync(key, f.ModuleName));
     }
 
+    /// <summary>
+    /// Tools that take no release, so there is nothing to fence. Each one needs a
+    /// reason; the test below also refuses an entry that does take a release.
+    /// </summary>
+    private static readonly HashSet<string> ToolsWithoutARelease = new(StringComparer.Ordinal)
+    {
+        // Lists the releases the caller may see; the list itself is fenced by the service.
+        "list_releases",
+    };
+
+    private static List<(string Name, MethodInfo Method)> RegisteredTools() =>
+        typeof(ObjectExplorerTools).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
+            .Select(m => (Attribute: m.GetCustomAttribute<McpServerToolAttribute>(), Method: m))
+            .Where(t => t.Attribute is not null)
+            .Select(t => (t.Attribute!.Name ?? t.Method.Name, t.Method))
+            .ToList();
+
+    private static string UnknownSymbol(long symbolId) =>
+        $"Symbol id {symbolId} doesn't exist. Call get_object_outline to see the current ids for an object.";
+
+    private static bool TakesARelease(MethodInfo method) =>
+        method.GetParameters().Any(p => p.Name!.Contains("release", StringComparison.OrdinalIgnoreCase));
+
+    [Fact]
+    public void Every_tool_that_takes_a_release_is_in_the_matrix()
+    {
+        var registered = RegisteredTools();
+        registered.Should().NotBeEmpty("the reflection must find the tools, or this test proves nothing");
+        var inMatrix = ReleaseKeyedTools().Select(t => t.Name.Split(" (")[0]).ToHashSet(StringComparer.Ordinal);
+
+        registered.Where(t => TakesARelease(t.Method)).Select(t => t.Name)
+            .Should().BeEquivalentTo(inMatrix, "a release-keyed tool missing here is never checked against the fence");
+        registered.Select(t => t.Name).Except(inMatrix)
+            .Should().BeEquivalentTo(ToolsWithoutARelease, "every other tool is listed with the reason it takes no release");
+        registered.Where(t => ToolsWithoutARelease.Contains(t.Name)).Should().OnlyContain(t => !TakesARelease(t.Method));
+    }
+
     [Fact]
     public async Task Every_release_keyed_tool_refuses_a_private_projects_release_for_a_non_member()
     {
@@ -146,8 +212,21 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
             {
                 await using var ctx = _db.NewContext();
                 var tools = NewTools(ctx);
-                await ((Func<Task>)(() => invoke(tools, key, fixture)))
-                    .Should().ThrowAsync<McpException>($"{name} must not answer a non-member (release key '{key}')");
+                // Word for word what a release that does not exist gets, so the refusal
+                // gives away nothing about the hidden one.
+                // The symbolId forms never resolve the release: the symbol check refuses
+                // them, with the wording an unknown symbol id gets.
+                var unknown = name switch
+                {
+                    "get_procedure_source (by symbolId)" => UnknownSymbol(fixture.ProcedureSymbolId),
+                    "list_procedure_calls (by symbolId)" => UnknownSymbol(fixture.CallingSymbolId),
+                    _ => int.TryParse(key, out var id)
+                        ? $"Release {id} does not exist."
+                        : $"Release '{key}' was not found. Call list_releases to see available labels.",
+                };
+                (await ((Func<Task>)(() => invoke(tools, key, fixture)))
+                    .Should().ThrowAsync<McpException>($"{name} must not answer a non-member (release key '{key}')"))
+                    .Which.Message.Should().Be(unknown, name);
             }
         }
     }
@@ -198,6 +277,41 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// list_releases takes no release, but it lists each pipeline's newest build,
+    /// and a Private solution's build must stay out of that list for anyone
+    /// outside its team. The hidden release is restamped as a build's own kind so
+    /// it is listed through the pipeline path alone, the one this guards.
+    /// </summary>
+    [Fact]
+    public async Task List_releases_lists_a_private_solutions_build_only_to_a_member()
+    {
+        var fixture = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeReleases.Where(r => r.Id == fixture.HiddenReleaseId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Kind, "project"));
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var outsider = await NewTools(ctx).ListReleasesAsync(search: "CRONUS Denmark");
+            outsider.Rows.Should().BeEmpty("a non-member must not learn the Private solution's build exists");
+            outsider.Truncated.Should().BeFalse();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var member = await NewTools(ctx).ListReleasesAsync(search: "CRONUS Denmark");
+            var row = member.Rows.Should().ContainSingle().Subject;
+            row.Id.Should().Be(fixture.HiddenReleaseId);
+            row.Kind.Should().Be("solution");
+            row.SolutionName.Should().Be("CRONUS Denmark");
+        }
+    }
+
     [Fact]
     public async Task A_symbolId_from_a_private_projects_release_is_served_to_a_member()
     {
@@ -210,7 +324,7 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
         (await tools.GetProcedureSourceAsync(fixture.OpenReleaseLabel, symbolId: fixture.ProcedureSymbolId))
             .SymbolId.Should().Be(fixture.ProcedureSymbolId);
         (await tools.ListProcedureCallsAsync(fixture.OpenReleaseLabel, symbolId: fixture.CallingSymbolId))
-            .Should().NotBeEmpty();
+            .Rows.Should().NotBeEmpty();
     }
 
     // ── Seeding ─────────────────────────────────────────────────────────
@@ -290,7 +404,7 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
                 ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
             var projects = new ProjectService(
-                ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
+                ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance);
             await projects.SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
@@ -341,9 +455,9 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
                 new ALDevToolbox.Services.Translation.TranslationMemoryService(
                     ctx, _db.OrgContext,
                     NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-                NullLogger<TranslationImportService>.Instance),
+                _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         await using var stream = File.OpenRead(Path.Combine(FixtureRoot, appFileName));
         var summary = await importer.ImportReleaseAsync(new ReleaseImportRequest(
             Label: label,

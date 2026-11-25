@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Net;
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
@@ -284,5 +285,106 @@ public sealed class AlSymbolFeedResolverTests : IDisposable
         using (var zip = new ZipArchive(plainZip, ZipArchiveMode.Create, leaveOpen: true)) zip.CreateEntry("x.txt");
         plainZip.Position = 0;
         AppPackageReader.TryReadManifest(plainZip).Should().BeNull();
+    }
+}
+
+/// <summary>
+/// The two rules that keep an unverified feed package in its place: an entry
+/// name becomes a file in the cache folder and nowhere else, and every redirect
+/// hop stays on HTTPS, a bounded number of times.
+/// </summary>
+public sealed class AlSymbolFeedResolverGuardTests
+{
+    private static readonly string Cache = Path.Combine(Path.GetTempPath(), "feed-guard-" + Guid.NewGuid().ToString("N"));
+
+    [Theory]
+    [InlineData("../x.app")]
+    [InlineData("sub/x.app")]
+    [InlineData("/etc/x.app")]
+    [InlineData("..")]
+    [InlineData(".")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void GuardedPath_refuses_an_entry_that_is_not_a_plain_file_name(string entryName)
+    {
+        var act = () => AlSymbolFeedResolver.GuardedPath(Cache, entryName);
+
+        act.Should().Throw<InvalidDataException>().WithMessage("*is not a plain file name*");
+    }
+
+    [Fact]
+    public void GuardedPath_places_a_plain_file_name_inside_the_cache()
+    {
+        AlSymbolFeedResolver.GuardedPath(Cache, "Continia_Core_29.0.0.1.app")
+            .Should().Be(Path.Combine(Path.GetFullPath(Cache), "Continia_Core_29.0.0.1.app"));
+    }
+
+    [Fact]
+    public async Task A_redirect_to_plain_http_is_refused_before_it_is_followed()
+    {
+        var handler = new RedirectingHandler(_ => Redirect("http://blob.example/pkg.nupkg"));
+        using var http = new HttpClient(handler);
+
+        var act = () => AlSymbolFeedResolver.GetBytesFollowingRedirectsAsync(http, "https://feed.example/pkg.nupkg", CancellationToken.None);
+
+        (await act.Should().ThrowAsync<HttpRequestException>()).WithMessage("*non-HTTPS*");
+        handler.Requested.Should().Equal(new Uri("https://feed.example/pkg.nupkg"));
+    }
+
+    [Fact]
+    public async Task A_plain_http_starting_address_is_never_requested()
+    {
+        var handler = new RedirectingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        using var http = new HttpClient(handler);
+
+        var act = () => AlSymbolFeedResolver.GetBytesFollowingRedirectsAsync(http, "http://feed.example/index.json", CancellationToken.None);
+
+        (await act.Should().ThrowAsync<HttpRequestException>()).WithMessage("*non-HTTPS*");
+        handler.Requested.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_redirect_loop_gives_up_after_five_hops()
+    {
+        var handler = new RedirectingHandler(_ => Redirect("https://feed.example/again"));
+        using var http = new HttpClient(handler);
+
+        var act = () => AlSymbolFeedResolver.GetBytesFollowingRedirectsAsync(http, "https://feed.example/start", CancellationToken.None);
+
+        (await act.Should().ThrowAsync<HttpRequestException>()).WithMessage("too many redirects");
+        handler.Requested.Should().HaveCount(6, "the first request plus the five redirects it may follow");
+    }
+
+    [Fact]
+    public async Task An_https_redirect_is_followed_to_the_package()
+    {
+        // The feed's own shape: a 303 from the package address to a blob URL.
+        var handler = new RedirectingHandler(uri => uri.Host == "feed.example"
+            ? Redirect("https://blob.example/pkg.nupkg", HttpStatusCode.SeeOther)
+            : new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) });
+        using var http = new HttpClient(handler);
+
+        var bytes = await AlSymbolFeedResolver.GetBytesFollowingRedirectsAsync(http, "https://feed.example/pkg.nupkg", CancellationToken.None);
+
+        bytes.Should().Equal(1, 2, 3);
+        handler.Requested.Select(u => u.Host).Should().Equal("feed.example", "blob.example");
+    }
+
+    private static HttpResponseMessage Redirect(string location, HttpStatusCode status = HttpStatusCode.Found)
+    {
+        var response = new HttpResponseMessage(status);
+        response.Headers.Location = new Uri(location);
+        return response;
+    }
+
+    private sealed class RedirectingHandler(Func<Uri, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        public List<Uri> Requested { get; } = new();
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requested.Add(request.RequestUri!);
+            return Task.FromResult(respond(request.RequestUri!));
+        }
     }
 }

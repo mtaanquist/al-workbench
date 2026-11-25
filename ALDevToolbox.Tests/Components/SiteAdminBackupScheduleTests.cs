@@ -32,6 +32,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly MaintenanceModeState _maintenance = new();
     private readonly string _deploymentDir = Path.Combine(Path.GetTempPath(), "aldt-test-deploy-" + Guid.NewGuid().ToString("N"));
 
     public SiteAdminBackupScheduleTests()
@@ -56,16 +57,17 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         _ctx.Services.AddSingleton<IConfiguration>(config);
         _ctx.Services.AddDataProtection();
         _ctx.Services.AddScoped<SystemSettingsService>();
-        _ctx.Services.AddSingleton(new MaintenanceModeState());
+        _ctx.Services.AddSingleton(_maintenance);
         _ctx.Services.AddScoped<BackupService>();
         _ctx.Services.AddScoped(sp => new PerTenantBackupService(
             sp.GetRequiredService<AppDbContext>(), _db.OrgContext,
             _db.NewQuotaGuard(sp.GetRequiredService<AppDbContext>()),
             _db.NewOrganizationConfigService(sp.GetRequiredService<AppDbContext>()), config,
-            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System));
+            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System, _maintenance));
         _ctx.Services.AddSingleton<IOffsiteStorageProviderFactory>(new OffsiteStorageProviderFactory(NullLoggerFactory.Instance));
         _ctx.Services.AddSingleton(DeploymentIdentity.LoadOrCreate(_deploymentDir, NullLogger.Instance));
         _ctx.Services.AddScoped<OffsiteBackupService>();
+        _ctx.Services.AddScoped<DatabaseUsageService>();
         _ctx.Services.AddSingleton(sp => new OffsiteRestoreJobs(TimeProvider.System));
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
@@ -202,6 +204,122 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             cut.Find("p.card__sub").TextContent.Should().Contain("daily at 04:00 (Europe/Copenhagen).");
             cut.Markup.Should().NotContain("04:00 UTC").And.NotContain("02:00 UTC.");
             cut.Markup.Should().Contain("2026-07-01 04:00:00", "the listed backup ran at the scheduled time, shown in the same zone");
+        });
+    }
+
+    /// <summary>
+    /// A restore that fails after the drop keeps the site in maintenance mode
+    /// (#1321). The SiteAdmin lands back on the backups page, which has to say
+    /// so, or nothing tells them the site is still closed to everyone else.
+    /// </summary>
+    [Fact]
+    public void After_a_failed_restore_the_backups_page_says_the_site_is_held_closed()
+    {
+        At(Summer);
+        _maintenance.HoldAfterFailedRestore(
+            "Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed. The database may be empty or only partly loaded.");
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alerts = cut.FindAll("[role=alert]");
+            alerts.Should().ContainSingle("one notice, not a failure message beside a maintenance warning");
+            var alert = alerts[0].TextContent;
+            alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+            alert.Should().Contain("may be empty or only partly loaded");
+            alert.Should().Contain("Restore another backup below to reopen it.");
+            alert.Should().Contain("New backups are paused until then.");
+            // A backup of the empty database would push real ones out of retention (#1610).
+            cut.Find("form[action='/site-admin/backups/create'] button").HasAttribute("disabled").Should().BeTrue();
+        });
+    }
+
+    [Fact]
+    public void While_a_restore_runs_the_backups_page_says_the_site_is_closed_until_it_finishes()
+    {
+        At(Summer);
+        _maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump");
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alert = cut.Find("[role=alert]").TextContent;
+            alert.Should().Contain("closed to everyone except site administrators until it finishes");
+            alert.Should().NotContain("Restore another backup");
+        });
+    }
+
+    [Fact]
+    public void The_backups_page_has_no_maintenance_notice_when_the_site_is_open()
+    {
+        At(Summer);
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("A complete copy of everything on this site.");
+            cut.Markup.Should().NotContain("closed to everyone");
+            cut.Find("form[action='/site-admin/backups/create'] button").HasAttribute("disabled").Should().BeFalse();
+        });
+    }
+
+    /// <summary>
+    /// The per-organisation "Back up now" is disabled while a failed restore holds
+    /// the site closed (#1610). A disabled button alone does not say why, so the
+    /// Space used page says it, and where to go to reopen the site.
+    /// </summary>
+    [Fact]
+    public void After_a_failed_restore_the_space_used_page_says_why_back_up_now_is_paused()
+    {
+        At(Summer);
+        _maintenance.HoldAfterFailedRestore("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+
+        var cut = _ctx.Render<SiteAdminStorage>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alert = cut.Find("[role=alert]");
+            alert.TextContent.Should().Contain("A restore failed").And.Contain("\"Back up now\" is paused");
+            alert.QuerySelector("a")!.GetAttribute("href").Should().Be("/site-admin/backup-storage/database");
+            var buttons = cut.FindAll("form[action$='/backup'] button");
+            buttons.Should().NotBeEmpty();
+            buttons.Should().OnlyContain(b => b.HasAttribute("disabled"));
+        });
+    }
+
+    [Fact]
+    public void While_a_restore_runs_the_space_used_page_says_back_up_now_waits_for_the_site_to_reopen()
+    {
+        At(Summer);
+        _maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump");
+
+        var cut = _ctx.Render<SiteAdminStorage>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alert = cut.Find("[role=alert]").TextContent;
+            alert.Should().Contain("closed for maintenance").And.Contain("paused until it reopens");
+            alert.Should().NotContain("A restore failed");
+            cut.FindAll("form[action$='/backup'] button").Should().OnlyContain(b => b.HasAttribute("disabled"));
+        });
+    }
+
+    [Fact]
+    public void The_space_used_page_has_no_maintenance_notice_when_the_site_is_open()
+    {
+        At(Summer);
+
+        var cut = _ctx.Render<SiteAdminStorage>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var buttons = cut.FindAll("form[action$='/backup'] button");
+            buttons.Should().NotBeEmpty();
+            buttons.Should().OnlyContain(b => !b.HasAttribute("disabled"));
+            cut.FindAll("[role=alert]").Should().BeEmpty();
         });
     }
 

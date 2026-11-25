@@ -56,7 +56,7 @@ public static class BcAppOperationPoller
             try
             {
                 operation = await apps.GetAppOperationAsync(
-                    accessToken, applicationFamily, environmentName, appId, started.Id, ct).ConfigureAwait(false);
+                    accessToken, applicationFamily, environmentName, appId, started.Id, ct);
                 consecutiveErrors = 0;
                 refreshed = false;
             }
@@ -68,7 +68,7 @@ public static class BcAppOperationPoller
                 refreshed = true;
                 try
                 {
-                    accessToken = await refreshToken(ct).ConfigureAwait(false);
+                    accessToken = await refreshToken(ct);
                 }
                 catch (BcApiException signInFailed)
                 {
@@ -76,6 +76,21 @@ public static class BcAppOperationPoller
                     return BcAppOperationResult.Unconfirmed(
                         "Business Central accepted the app, but signing in again to ask whether the install had finished failed, so it wasn't confirmed here. " + signInFailed.Message);
                 }
+                continue;
+            }
+            catch (BcApiException ex) when (ex.RetryAfter is { } wait)
+            {
+                // Told to wait longer than the HTTP handler sits out. Asking again on the
+                // usual beat would only be refused again until the run of errors gave up on
+                // an install Business Central is still running, so wait what it asked, up
+                // to the deadline, without counting it as a failed poll.
+                var left = deadline - DateTime.UtcNow;
+                if (left <= TimeSpan.Zero)
+                {
+                    return BcAppOperationResult.Unconfirmed("Business Central was still installing the app when the workbench stopped waiting, so the install wasn't confirmed here.");
+                }
+                var pause = wait > pollDelay ? wait : pollDelay;
+                await Task.Delay(pause < left ? pause : left, ct);
                 continue;
             }
             catch (BcApiException) when (++consecutiveErrors < MaxConsecutivePollErrors)
@@ -109,7 +124,7 @@ public static class BcAppOperationPoller
             {
                 return BcAppOperationResult.Unconfirmed("Business Central was still installing the app when the workbench stopped waiting, so the install wasn't confirmed here.");
             }
-            await Task.Delay(pollDelay, ct).ConfigureAwait(false);
+            await Task.Delay(pollDelay, ct);
         }
     }
 

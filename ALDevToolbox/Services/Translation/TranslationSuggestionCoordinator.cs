@@ -177,14 +177,18 @@ public sealed class TranslationSuggestionCoordinator : IDisposable
     /// the save runs on the circuit's context while a prefetch or an on-demand
     /// lookup may be using it, and overlapping the two failed one of them -
     /// leaving the panel empty or the learning abandoned (#1268, L43).
+    /// <paramref name="sourceRepository"/> and <paramref name="sourcePath"/>
+    /// name where a repository save landed, so its pairs stay as private as
+    /// the solutions tracking that repository (#1324).
     /// </summary>
     public async Task<int> LearnGatedAsync(
-        string xml, string? origin, IReadOnlyCollection<string>? unitIds, CancellationToken ct = default)
+        string xml, string? origin, IReadOnlyCollection<string>? unitIds,
+        string? sourceRepository = null, string? sourcePath = null, CancellationToken ct = default)
     {
         await _memoryGate.WaitAsync(ct);
         try
         {
-            return await _memory.LearnFromXliffAsync(xml, origin, ct, unitIds);
+            return await _memory.LearnFromXliffAsync(xml, origin, ct, unitIds, sourceRepository, sourcePath);
         }
         finally
         {

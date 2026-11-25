@@ -42,6 +42,102 @@ public sealed class PersistedImportJobs
         bool storeSymbolReference,
         CancellationToken ct = default)
     {
+        var row = NewRow(releaseId, identity, source, storeSymbolReference);
+        _db.OeImportJobs.Add(row);
+        await _db.SaveChangesAsync(ct);
+        return row.Id;
+    }
+
+    /// <summary>
+    /// Writes a <c>queued</c> backfill row for each of <paramref name="releaseIds"/> that
+    /// needs one, all in one transaction, and returns the rows it wrote. All or nothing:
+    /// a cancelled request or a failed write leaves no row behind that nothing will ever
+    /// feed to the queue, and that would block the next attempt at the same release
+    /// (#1542). Two submits that race can still both pass the checks; the cost is a
+    /// repeated backfill, which is harmless, so it is not worth a lock.
+    ///
+    /// <para>A release is left alone when a backfill of it is running, or queued by
+    /// this process, or when its newest finished backfill completed (not failed) after
+    /// the release last changed (#1578, OEI2-1): a second click during a bulk run would
+    /// otherwise queue again every release the run had just finished. A <c>queued</c>
+    /// row written, or a <c>running</c> row started, before
+    /// <paramref name="staleBefore"/> (this process's start, or the last restore) is one
+    /// nothing feeds or runs: a restored database brings those rows without the process
+    /// that owned them (OEI2-3). It is failed, and the release gets a fresh row like any
+    /// other.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<(int ReleaseId, long JobRowId)>> CreateBackfillsAsync(
+        IReadOnlyList<int> releaseIds,
+        AmbientOrganizationScope.OrganizationIdentity identity,
+        DateTime staleBefore,
+        CancellationToken ct = default)
+    {
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        var ids = releaseIds.Distinct().ToList();
+        var now = _clock.GetUtcNow().UtcDateTime;
+
+        var stale = await _db.OeImportJobs
+            .Where(j => j.Kind == BackfillKind && ids.Contains(j.ReleaseId)
+                && ((j.Status == "queued" && j.CreatedAt < staleBefore)
+                    || (j.Status == "running" && j.StartedAt < staleBefore)))
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(j => j.Status, "failed")
+                .SetProperty(j => j.ErrorMessage, StaleBackfillMessage)
+                .SetProperty(j => j.CompletedAt, now), ct);
+
+        var active = await ListReleasesWithActiveBackfillAsync(ct);
+        // Decided on the newest finished row, completed or failed: a backfill that
+        // failed after an earlier one completed (cut off, references incomplete) still
+        // needs running.
+        var finished = await _db.OeImportJobs.AsNoTracking()
+            .Where(j => j.Kind == BackfillKind && (j.Status == "completed" || j.Status == "failed")
+                && j.CompletedAt != null && ids.Contains(j.ReleaseId))
+            .Join(_db.OeReleases, j => j.ReleaseId, r => r.Id, (j, r) => new { j.ReleaseId, j.Id, j.Status, j.CompletedAt, r.UpdatedAt })
+            .ToListAsync(ct);
+        var done = finished
+            .GroupBy(x => x.ReleaseId)
+            .Select(g => g.OrderByDescending(x => x.CompletedAt).ThenByDescending(x => x.Id).First())
+            .Where(x => x.Status == "completed" && x.CompletedAt > x.UpdatedAt)
+            .Select(x => x.ReleaseId)
+            .ToHashSet();
+
+        var source = new ReleaseImportSource.Backfill();
+        var rows = ids
+            .Where(id => !active.Contains(id) && !done.Contains(id))
+            .Select(id => NewRow(id, identity, source, storeSymbolReference: false))
+            .ToList();
+        _db.OeImportJobs.AddRange(rows);
+        await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
+        return rows.Select(r => (r.ReleaseId, r.Id)).ToList();
+    }
+
+    private const string BackfillKind = "backfill_system_references";
+
+    /// <summary>What a queued backfill row that nothing was feeding is failed with.</summary>
+    internal const string StaleBackfillMessage =
+        "Did not finish: it was queued or running before the last restart or restore. A new backfill was queued in its place.";
+
+    /// <summary>
+    /// Puts a backfill a restore stopped back to <c>queued</c> (#1578, OEI2-4). Keeps
+    /// the organisation filter on: the worker runs the job in its own organisation.
+    /// Never cancelled, since the job's token is what stopped it.
+    /// </summary>
+    public Task MarkQueuedAgainAsync(long jobRowId) =>
+        _db.OeImportJobs
+            .Where(j => j.Id == jobRowId && j.Status == "running")
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(j => j.Status, "queued")
+                .SetProperty(j => j.StartedAt, (DateTime?)null), CancellationToken.None);
+
+    private OeImportJob NewRow(
+        int releaseId,
+        AmbientOrganizationScope.OrganizationIdentity identity,
+        ReleaseImportSource source,
+        bool storeSymbolReference)
+    {
         var row = new OeImportJob
         {
             OrganizationId = identity.OrganizationId,
@@ -90,54 +186,89 @@ public sealed class PersistedImportJobs
                 // No payload — re-extracts from already-stored source (#291).
                 row.Kind = "backfill_system_references";
                 break;
+            case ReleaseImportSource.AddModules add:
+                // Like a staged zip, never resumed; a restart hands the release
+                // back ready instead (#1549).
+                row.Kind = AddModulesKind;
+                row.StagedZipPath = add.TempPath;
+                break;
             default:
                 throw new InvalidOperationException($"Unknown import source {source.GetType().Name}.");
         }
-        _db.OeImportJobs.Add(row);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-        return row.Id;
+        return row;
     }
 
     public async Task MarkRunningAsync(long jobRowId, CancellationToken ct = default)
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct);
         if (row is null) return;
         row.Status = "running";
         row.StartedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
-    public async Task MarkCompletedAsync(long jobRowId, CancellationToken ct = default)
+    /// <param name="note">
+    /// What to say about the run, kept in the message column as the backfill note is,
+    /// so no schema change is needed: an Add modules job's counts, for its page (#1549).
+    /// </param>
+    public async Task MarkCompletedAsync(long jobRowId, CancellationToken ct = default, string? note = null)
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct);
         if (row is null) return;
         row.Status = "completed";
         row.CompletedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        if (note is not null) row.ErrorMessage = Truncate(note, 4000);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Fails a <c>queued</c> row a request wrote but could not put on the in-memory
+    /// queue (the request ended while the queue was full). Left queued, the startup
+    /// reconciler would resume it, and a resumed job wipes its release first, by then
+    /// perhaps one a later Retry has imported (#1612). Unlike
+    /// <see cref="MarkFailedAsync"/> this keeps the organisation filter on: the row
+    /// was written by the calling request, for its own organisation. Never cancelled,
+    /// since the request's token may be why the enqueue failed.
+    /// </summary>
+    public Task FailUnqueuedAsync(long jobRowId, string errorMessage)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var message = Truncate(errorMessage, 4000);
+        return _db.OeImportJobs
+            .Where(j => j.Id == jobRowId && j.Status == "queued")
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(j => j.Status, "failed")
+                .SetProperty(j => j.ErrorMessage, message)
+                .SetProperty(j => j.CompletedAt, now), CancellationToken.None);
     }
 
     public async Task MarkFailedAsync(long jobRowId, string errorMessage, CancellationToken ct = default)
     {
         // Fence category 3 (background worker, no request org): pinned to j.Id == jobRowId.
         var row = await _db.OeImportJobs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(j => j.Id == jobRowId, ct);
         if (row is null) return;
         row.Status = "failed";
         row.ErrorMessage = Truncate(errorMessage, 4000);
         row.CompletedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
-    /// Startup reconciliation. Returns the URL-source jobs to re-enqueue; the
-    /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>, oldest first.
+    /// Startup reconciliation. Returns the resumable jobs to re-enqueue (URL,
+    /// artifact and build imports, backfills that never started, and a backfill
+    /// a restart cut off, once - see <see cref="CutOffBackfillNote"/>); the
+    /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>,
+    /// oldest first, with the cut-off backfills last.
     /// Staged-zip jobs are flipped to <c>failed</c> in-place (their temp file
     /// is gone) along with their owning <c>oe_releases</c> row so the admin sees
-    /// the failure reason on the list and can re-submit.
+    /// the failure reason on the list and can re-submit. An Add modules job
+    /// loses its upload the same way, but its release is handed back
+    /// <c>ready</c>: the amend writes in one transaction, so nothing of it landed.
     /// </summary>
     public async Task<IReadOnlyList<ReleaseImportJob>> ReconcileOnStartupAsync(CancellationToken ct = default)
     {
@@ -145,8 +276,11 @@ public sealed class PersistedImportJobs
         // migration / seed / interrupted-release reconciliation already
         // sits in (see StartupTasks). No user in scope at startup; reading
         // every org's job rows here is the design.
-        // A build's row comes along so it resumes in its place in the build queue (#1137).
-        // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
+        // A build's row comes along so it resumes in its place in the build queue (#1137),
+        // and the release's status so a finished import is closed, not redone (#1549).
+        // The filter is off for those reads too; they are pinned to b.ReleaseId ==
+        // j.ReleaseId and r.Id == j.ReleaseId, the job's own release.
+        // Fence category 3 (startup, no request org): each job carries its own org id.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
             // Oldest first, so waiting push builds resume in the order they were pushed.
@@ -158,21 +292,37 @@ public sealed class PersistedImportJobs
                     .Where(b => b.ReleaseId == j.ReleaseId)
                     .Select(b => new { b.PipelineId, b.BcTarget, b.Trigger, b.Status })
                     .FirstOrDefault(),
+                ReleaseStatus = _db.OeReleases
+                    .Where(r => r.Id == j.ReleaseId)
+                    .Select(r => r.Status)
+                    .FirstOrDefault(),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (survivors.Count == 0) return Array.Empty<ReleaseImportJob>();
 
         var now = _clock.GetUtcNow().UtcDateTime;
         var toResume = new List<ReleaseImportJob>();
+        // Backfills a restart cut off go after everything else (see below).
+        var cutOffBackfills = new List<ReleaseImportJob>();
         // releaseId → human noun for the lost upload, so the failure copy names
         // the right thing (a ZIP vs a C/AL file).
         var lostReleases = new Dictionary<int, string>();
+        var amendedReleases = new HashSet<int>();
 
         foreach (var survivor in survivors)
         {
             var row = survivor.Job;
             switch (row.Kind)
             {
+                case "url" or "bc_artifact" when survivor.ReleaseStatus == "ready":
+                    // The import had saved its release ready, and the process died in
+                    // the steps after (the drift scan) before the row was closed.
+                    // Resuming would wipe a finished release and download it again,
+                    // and a failed re-download would turn it failed (#1549), so the
+                    // row is closed instead, as a finished build's is (#1181).
+                    row.Status = "completed";
+                    row.CompletedAt = now;
+                    break;
                 case "url" when !string.IsNullOrEmpty(row.DownloadUrl):
                     // Reset to queued so the worker re-runs from scratch. The
                     // download is idempotent: it writes to a fresh temp file.
@@ -234,15 +384,63 @@ public sealed class PersistedImportJobs
                             : ProjectBuildOrder.Unordered,
                         Resumed: true));
                     break;
-                case "backfill_system_references":
-                    // A maintenance backfill interrupted by a restart. The
-                    // release stays ready (backfill never flips its status); its
-                    // system refs may be partially repopulated. Nothing to
-                    // resume — mark failed so the admin re-triggers, which is
-                    // cheap and idempotent. No lost upload to report. See #291.
+                case "backfill_system_references" when row.Status == "running" && row.ErrorMessage == CutOffBackfillNote:
+                    // Cut off a second time. It may be the backfill itself that
+                    // takes the process down (out of memory, say); running it
+                    // again on every start would loop the container and the
+                    // rest of the run would never finish. So it fails, and an
+                    // admin decides.
                     row.Status = "failed";
-                    row.ErrorMessage = "The system-reference backfill was interrupted by a restart. Re-trigger it from the release.";
+                    row.ErrorMessage = "The system-reference backfill was cut off by a restart twice, so it was not "
+                        + "started again. Its system references may be incomplete. Re-trigger it from the release.";
                     row.CompletedAt = now;
+                    break;
+                case "backfill_system_references":
+                {
+                    // A bulk run queues every release and works through them for
+                    // hours, so a deploy in the middle must not fail the rest
+                    // (#1542). One that never started has changed nothing; one
+                    // the restart cut off had deleted the release's system
+                    // references and emitted only some of them again, and left
+                    // failed it would leave Find System References quietly
+                    // incomplete for that release (OEI2-2). Both run again: a
+                    // backfill deletes before it emits, so a second run is safe.
+                    // Not Resumed, which would wipe the release's rows. A cut-off
+                    // one is marked, so a second cut-off fails it (above), and
+                    // goes last, so the rest of the run is not stuck behind it.
+                    var cutOff = row.Status == "running";
+                    row.Status = "queued";
+                    row.StartedAt = null;
+                    // Queued again by this process, which feeds it: stamped now, so the
+                    // bulk action does not take it for a row nothing feeds (OEI2-3).
+                    row.CreatedAt = now;
+                    if (cutOff) row.ErrorMessage = CutOffBackfillNote;
+                    (cutOff ? cutOffBackfills : toResume).Add(new ReleaseImportJob(
+                        ReleaseId: row.ReleaseId,
+                        Identity: new AmbientOrganizationScope.OrganizationIdentity(
+                            row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
+                        Source: new ReleaseImportSource.Backfill(),
+                        StoreSymbolReference: false,
+                        JobRowId: row.Id));
+                    break;
+                }
+                case AddModulesKind when survivor.ReleaseStatus == "ready":
+                    // The amend had committed and handed the release back ready, and
+                    // the process died in the steps after (the drift scan) before the
+                    // row was closed. A graceful stop closes the row itself, so a
+                    // running row with a ready release is one that finished.
+                    row.Status = "completed";
+                    row.CompletedAt = now;
+                    break;
+                case AddModulesKind:
+                    // The staged upload is gone with the container's temp folder. The
+                    // amend writes in one transaction, so a cut-off run left nothing
+                    // behind: the release is handed back ready with what it held, not
+                    // failed like a new import (#1549).
+                    row.Status = "failed";
+                    row.ErrorMessage = AddModulesLostMessage;
+                    row.CompletedAt = now;
+                    amendedReleases.Add(row.ReleaseId);
                     break;
                 default:
                     // Staged-zip / cal-txt can't be resumed — the temp file is
@@ -259,25 +457,77 @@ public sealed class PersistedImportJobs
         }
 
         // For lost staged-zip / cal-txt jobs, flip the matching OeRelease row to
-        // failed with the same message so the list-page surfaces the cause.
-        if (lostReleases.Count > 0)
+        // failed with the same message so the list-page surfaces the cause. A lost
+        // Add modules job hands its release back ready instead: nothing of it landed.
+        if (lostReleases.Count > 0 || amendedReleases.Count > 0)
         {
-            var ids = lostReleases.Keys.ToList();
+            var ids = lostReleases.Keys.Concat(amendedReleases).Distinct().ToList();
             // Fence category 3 (startup reconciliation, no request org): pinned to the release
             // ids collected from the lost jobs above.
             var releases = await _db.OeReleases.IgnoreQueryFilters()
                 .Where(r => ids.Contains(r.Id) && r.Status == "ingesting")
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             foreach (var r in releases)
             {
+                if (amendedReleases.Contains(r.Id))
+                {
+                    r.Status = "ready";
+                    r.StatusMessage = null;
+                    r.UpdatedAt = now;
+                    continue;
+                }
                 r.Status = "failed";
                 r.StatusMessage = $"The uploaded {lostReleases.GetValueOrDefault(r.Id, "file")} was lost when the container restarted. Re-submit to try again.";
                 r.UpdatedAt = now;
             }
         }
 
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
+        toResume.AddRange(cutOffBackfills);
         return toResume;
+    }
+
+    /// <summary>
+    /// Left on a backfill row that a restart cut off and that startup queued
+    /// again. Found on a row that is running at the next start, it means the
+    /// second run was cut off too, and the row is failed rather than queued a
+    /// third time. Kept in the existing message column so no schema change is
+    /// needed; it stays on the row once the backfill completes, as a note.
+    /// </summary>
+    internal const string CutOffBackfillNote = "Started again after a restart cut it off.";
+
+    /// <summary>The <c>oe_import_jobs.kind</c> of an Add modules job (#1549).</summary>
+    public const string AddModulesKind = "add_modules";
+
+    /// <summary>What a restart that lost an Add modules upload leaves on its job row.</summary>
+    public const string AddModulesLostMessage =
+        "The server restarted before these modules were added, and the uploaded files were lost with it. The release is unchanged. Add the modules again.";
+
+    /// <summary>
+    /// The newest Add modules job for <paramref name="releaseId"/> in the current
+    /// organisation (EF query filter), for the Add modules page to say how the last
+    /// upload went, or null when there has been none.
+    /// </summary>
+    public Task<AddModulesJobState?> GetLatestAddModulesAsync(int releaseId, CancellationToken ct = default) =>
+        _db.OeImportJobs.AsNoTracking()
+            .Where(j => j.ReleaseId == releaseId && j.Kind == AddModulesKind)
+            .OrderByDescending(j => j.Id)
+            .Select(j => new AddModulesJobState(j.Status, j.CreatedAt, j.CompletedAt, j.ErrorMessage))
+            .FirstOrDefaultAsync(ct);
+
+    /// <summary>
+    /// The releases of the current organisation (EF query filter) that already have a
+    /// system-reference backfill queued or running, so the bulk backfill does not
+    /// queue the same release twice (#1542).
+    /// </summary>
+    public async Task<HashSet<int>> ListReleasesWithActiveBackfillAsync(CancellationToken ct = default)
+    {
+        var ids = await _db.OeImportJobs.AsNoTracking()
+            .Where(j => j.Kind == "backfill_system_references" && (j.Status == "queued" || j.Status == "running"))
+            .Select(j => j.ReleaseId)
+            .Distinct()
+            .ToListAsync(ct);
+        return ids.ToHashSet();
     }
 
     /// <summary>
@@ -287,17 +537,21 @@ public sealed class PersistedImportJobs
     /// <see cref="OeImportJob.DownloadUrl"/> lets a retry re-run without the admin
     /// re-pasting the link, and the kind / DVD flag tell the UI whether a
     /// re-upload is required (the staged-zip / cal-txt temp file is gone).
+    /// Backfill jobs are skipped: they never carry a source (#1338).
     /// </summary>
     public async Task<ImportJobOrigin?> GetLatestForReleaseAsync(int releaseId, CancellationToken ct = default)
     {
         return await _db.OeImportJobs.AsNoTracking()
-            .Where(j => j.ReleaseId == releaseId)
+            // A maintenance backfill re-scans stored source; it is never how the
+            // release got its content, so it can't be the source a retry reuses.
+            // Add modules is the same: it added to a release that was already there (#1549).
+            .Where(j => j.ReleaseId == releaseId && j.Kind != "backfill_system_references" && j.Kind != AddModulesKind)
             // Newest first; tie-break on the serial id so two jobs created within
             // the clock's resolution still resolve to the genuinely-latest row.
             .OrderByDescending(j => j.CreatedAt)
             .ThenByDescending(j => j.Id)
             .Select(j => new ImportJobOrigin(j.Kind, j.DownloadUrl, j.StagedIsDvd, j.StoreSymbolReference, j.ProjectId))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>Snapshot for the admin "Background workers" page — depth + recent rows.</summary>
@@ -306,19 +560,21 @@ public sealed class PersistedImportJobs
         // Fence category 2 (SiteAdmin cross-org console): the snapshot's only caller is
         // /site-admin/workers, gated by [Authorize(Roles = SiteAdminRole)].
         var pending = await _db.OeImportJobs.IgnoreQueryFilters()
-            .CountAsync(j => j.Status == "queued" || j.Status == "running", ct).ConfigureAwait(false);
+            .CountAsync(j => j.Status == "queued" || j.Status == "running", ct);
+        // Same category 2 read, for the same SiteAdmin-only page.
         var jobs = await _db.OeImportJobs.IgnoreQueryFilters()
             .OrderByDescending(j => j.CreatedAt)
             .Take(recentLimit)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Resolve release labels cross-org (this is the SiteAdmin console) so
         // the workers page can name each import rather than show a bare id.
         var releaseIds = jobs.Select(j => j.ReleaseId).Distinct().ToList();
+        // Fence category 2 (SiteAdmin cross-org console): pinned to the job rows' release ids.
         var labels = await _db.OeReleases.IgnoreQueryFilters()
             .Where(r => releaseIds.Contains(r.Id))
             .Select(r => new { r.Id, r.Label })
-            .ToDictionaryAsync(x => x.Id, x => x.Label, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(x => x.Id, x => x.Label, ct);
 
         var recent = jobs
             .Select(j => new ImportQueueRow(
@@ -341,6 +597,9 @@ public sealed class PersistedImportJobs
 /// prefill / re-upload prompt.
 /// </summary>
 public sealed record ImportJobOrigin(string Kind, string? DownloadUrl, bool? StagedIsDvd, bool StoreSymbolReference, int? ProjectId = null);
+
+/// <summary>Where the newest Add modules upload of a release stands.</summary>
+public sealed record AddModulesJobState(string Status, DateTime CreatedAt, DateTime? CompletedAt, string? ErrorMessage);
 
 public sealed record ImportQueueSnapshot(int Pending, IReadOnlyList<ImportQueueRow> Recent);
 

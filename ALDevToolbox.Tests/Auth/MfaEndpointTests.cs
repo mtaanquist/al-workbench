@@ -6,7 +6,6 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 using OtpNet;
 
 namespace ALDevToolbox.Tests.Auth;
@@ -16,24 +15,23 @@ namespace ALDevToolbox.Tests.Auth;
 /// throttle as the endpoints wire it (#1271), and confirming a two-step
 /// change on an account that signs in with Microsoft and has no password
 /// it knows (#1259).
+///
+/// <para>The cases share one host (#1536). Every test signs in an address no
+/// other test uses, so the attempts one test counts are only its own.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class MfaEndpointTests : IDisposable
+public sealed class MfaEndpointTests : IClassFixture<SharedEndpointHost>
 {
     private const string Password = "correct horse battery staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
 
-    public MfaEndpointTests()
+    public MfaEndpointTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Fact]
@@ -60,12 +58,121 @@ public sealed class MfaEndpointTests : IDisposable
 
         for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
         {
-            using var wrong = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", "AAAA-BBBB"));
+            using var wrong = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", "AAAAA-BBBBB"));
             wrong.Headers.Location!.OriginalString.Should().Contain("err=invalid");
         }
 
         using var right = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", recoveryCodes[0]));
         right.Headers.Location!.OriginalString.Should().Contain("err=too-many-attempts");
+    }
+
+    [Fact]
+    public async Task A_typo_shaped_totp_code_does_not_count_toward_the_lockout()
+    {
+        const string email = "typo-totp@cronus.example";
+        await SeedTotpUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+
+        // The shared counter covers every second-factor method, so typos here would
+        // lock the person out of recovery codes too.
+        foreach (var typo in new[] { "", "12345", "abcdef", "1234567", "12345" })
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/totp", token, ("Code", typo));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+
+        (await CountFailedAttemptsAsync(email)).Should().Be(0, "a code that cannot be right is not a guess");
+    }
+
+    [Fact]
+    public async Task A_typo_shaped_recovery_code_does_not_count_toward_the_lockout()
+    {
+        const string email = "typo-recovery@cronus.example";
+        var (_, _, recoveryCodes) = await SeedTotpUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+
+        foreach (var typo in new[] { "", "AAAA-BBBB", "AAAAA-BBBBBB", "-", "AAAAA" })
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", typo));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        (await CountFailedAttemptsAsync(email)).Should().Be(0, "a code that cannot be right is not a guess");
+
+        using var right = await PostAsync(client, "/auth/login/challenge/recovery", token, ("Code", recoveryCodes[0]));
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
+    }
+
+    [Fact]
+    public async Task Sending_new_email_codes_does_not_reset_the_shared_cap()
+    {
+        // Each new email code gets fresh guesses of its own (#1432); the shared
+        // second-factor counter is what keeps re-sends from adding up.
+        var userId = await SeedEmailMfaUserAsync("throttle-email@cronus.example");
+        var (client, token) = await PasswordLegAsync("throttle-email@cronus.example");
+
+        // Five wrong guesses spread over three codes (2 + 2 + 1), so no single
+        // code reaches its own cap and only the shared counter can refuse.
+        string code = "";
+        foreach (var guesses in new[] { 2, 2, 1 })
+        {
+            code = await IssueEmailCodeAsync(userId);
+            var wrong = code == "000000" ? "111111" : "000000";
+            for (var i = 0; i < guesses; i++)
+            {
+                using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", wrong));
+                guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+            }
+        }
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+        right.Headers.Location!.OriginalString.Should().Contain("err=too-many-attempts");
+    }
+
+    [Fact]
+    public async Task A_right_email_code_gives_its_attempt_back()
+    {
+        const string email = "release-email@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+        var code = await IssueEmailCodeAsync(userId);
+        var wrong = code == "000000" ? "111111" : "000000";
+        for (var i = 0; i < AuthService.MaxMfaAttempts - 1; i++)
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", wrong));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        var failuresBefore = await CountFailedAttemptsAsync(email);
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
+        (await CountFailedAttemptsAsync(email)).Should().Be(failuresBefore, "a right code is not a failed attempt");
+    }
+
+    [Fact]
+    public async Task A_typo_shaped_email_code_does_not_count_toward_the_lockout()
+    {
+        const string email = "typo-email@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        var (client, token) = await PasswordLegAsync(email);
+        var code = await IssueEmailCodeAsync(userId);
+
+        // An empty box, a short code and letters are typos, not guesses at the code.
+        foreach (var typo in new[] { "", "12345", "abcdef", "1234567" })
+        {
+            using var guess = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", typo));
+            guess.Headers.Location!.OriginalString.Should().Contain("err=invalid");
+        }
+        (await CountFailedAttemptsAsync(email)).Should().Be(0, "a code that cannot be right is not a guess");
+
+        using var right = await PostAsync(client, "/auth/login/challenge/email/verify", token, ("Code", code));
+        right.Headers.Location!.OriginalString.Should().NotContain("err=");
+    }
+
+    private async Task<int> CountFailedAttemptsAsync(string email)
+    {
+        await using var read = _db.NewContext();
+        return await read.LoginAttempts.IgnoreQueryFilters().CountAsync(a => a.Email == email && !a.Succeeded);
     }
 
     [Fact]
@@ -118,6 +225,310 @@ public sealed class MfaEndpointTests : IDisposable
         (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task A_microsoft_linked_account_whose_confirmation_lapsed_is_told_to_confirm_again_not_that_its_password_is_wrong()
+    {
+        // The page hides the password box while the session is fresh; when the
+        // window closes before the form is sent, the post arrives with no
+        // password. Here the session was never fresh (password only, no
+        // second factor), which is the same post the server sees.
+        await SeedPasswordOnlyMicrosoftUserAsync("lapsed@cronus.example");
+        var client = _factory.CreateClient();
+        using var loginPage = await client.GetAsync("/login");
+        using var login = await PostAsync(client, "/auth/login",
+            AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()),
+            ("Email", "lapsed@cronus.example"), ("Password", Password));
+        login.Headers.Location!.OriginalString.Should().NotContain("err=");
+
+        using var page = await client.GetAsync("/account/security");
+        using var response = await PostAsync(client, "/auth/account/2fa/email/disable",
+            AntiforgeryToken(await page.Content.ReadAsStringAsync()), ("Password", ""));
+
+        var location = response.Headers.Location!.OriginalString;
+        location.Should().Contain("reason=" + FormErrorReasons.ConfirmationExpired);
+        location.Should().NotContain(FormErrorReasons.PasswordWrong);
+    }
+
+    [Fact]
+    public async Task Turning_the_authenticator_app_on_and_off_emails_the_owner()
+    {
+        // A second step added with a borrowed session locks the owner out of
+        // password sign-in, so it must not happen silently (#1614).
+        const string email = "app-notice@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        using (var loginPage = await client.GetAsync("/login"))
+        using (var login = await PostAsync(client, "/auth/login",
+                   AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password)))
+        {
+            login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        }
+        string secret;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            secret = (await scope.ServiceProvider.GetRequiredService<TotpService>().BeginEnrollmentAsync(userId)).SecretBase32;
+        }
+
+        using var security = await client.GetAsync("/account/security");
+        var token = AntiforgeryToken(await security.Content.ReadAsStringAsync());
+        using (var on = await PostAsync(client, "/auth/account/2fa/totp/confirm", token,
+                   ("Code", CurrentCode(secret)), ("Password", Password)))
+        {
+            on.Headers.Location!.OriginalString.Should().StartWith("/account/2fa/recovery-codes");
+        }
+        using (var off = await PostAsync(client, "/auth/account/2fa/totp/disable", token, ("Password", Password)))
+        {
+            off.Headers.Location!.OriginalString.Should().Contain("ok=totp-disabled");
+        }
+
+        await using var read = _db.NewContext();
+        var notices = await read.EmailOutboxMessages.IgnoreQueryFilters().AsNoTracking()
+            .Where(m => m.ToEmail == email && m.Purpose == EmailPurpose.AuthenticatorAppChanged)
+            .OrderBy(m => m.Id)
+            .Select(m => m.Subject)
+            .ToListAsync();
+        notices.Should().Equal(
+            ALDevToolbox.Components.Email.AuthenticatorAppChangedEmail.TurnedOnSubject,
+            ALDevToolbox.Components.Email.AuthenticatorAppChangedEmail.TurnedOffSubject);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not the password")]
+    public async Task Turning_on_an_authenticator_app_without_the_password_is_refused(string password)
+    {
+        // A borrowed session on a password-only account could otherwise add a
+        // second step the owner doesn't have and lock them out (#1614, AUTH4-3).
+        var email = $"app-no-proof-{password.Length}@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        using (var loginPage = await client.GetAsync("/login"))
+        using (var login = await PostAsync(client, "/auth/login",
+                   AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password)))
+        {
+            login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        }
+        string secret;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            secret = (await scope.ServiceProvider.GetRequiredService<TotpService>().BeginEnrollmentAsync(userId)).SecretBase32;
+        }
+        using var security = await client.GetAsync("/account/security");
+
+        using var on = await PostAsync(client, "/auth/account/2fa/totp/confirm",
+            AntiforgeryToken(await security.Content.ReadAsStringAsync()),
+            ("Code", CurrentCode(secret)), ("Password", password));
+
+        on.Headers.Location!.OriginalString.Should().StartWith("/account/2fa/totp/setup?err=Password");
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeFalse();
+        (await read.EmailOutboxMessages.IgnoreQueryFilters().AnyAsync(m => m.ToEmail == email && m.Purpose == EmailPurpose.AuthenticatorAppChanged))
+            .Should().BeFalse("nothing was turned on");
+    }
+
+    [Fact]
+    public async Task An_account_that_can_confirm_is_refused_even_with_the_right_password()
+    {
+        // Email codes are on, so the account has a proper way to confirm and
+        // the password alone is not enough, as when adding a passkey (#1614).
+        var (client, userId) = await SignInThenTurnOnEmailCodesAsync("app-step-up@cronus.example");
+        string secret;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            secret = (await scope.ServiceProvider.GetRequiredService<TotpService>().BeginEnrollmentAsync(userId)).SecretBase32;
+        }
+        using var security = await client.GetAsync("/account/security");
+
+        using var on = await PostAsync(client, "/auth/account/2fa/totp/confirm",
+            AntiforgeryToken(await security.Content.ReadAsStringAsync()),
+            ("Code", CurrentCode(secret)), ("Password", Password));
+
+        on.Headers.Location!.OriginalString.Should().Be(
+            "/account/2fa/totp/setup?err=Password&reason=" + FormErrorReasons.CodeFor(StepUpService.TotpStepUpFirstMessage));
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_setup_page_makes_no_secret_until_a_session_that_must_step_up_has_done_so()
+    {
+        var (client, userId) = await SignInThenTurnOnEmailCodesAsync("app-no-secret@cronus.example");
+
+        using var page = await client.GetAsync("/account/2fa/totp/setup");
+
+        page.StatusCode.Should().Be(HttpStatusCode.OK);
+        WebUtility.HtmlDecode(await page.Content.ReadAsStringAsync()).Should().Contain("Confirm it's you first");
+        await using var read = _db.NewContext();
+        (await read.UserTotpSecrets.IgnoreQueryFilters().AnyAsync(s => s.UserId == userId))
+            .Should().BeFalse("no QR code or secret before the person has confirmed");
+    }
+
+    [Fact]
+    public async Task The_setup_page_shows_its_secret_again_only_to_the_browser_that_started_it()
+    {
+        // Coming back from a refused confirm keeps the scanned entry working,
+        // but a second session on the account must not read the owner's
+        // pending secret: it gets a new one, so the owner's confirm then
+        // fails instead of turning on a factor someone else holds (#1614).
+        const string email = "app-two-sessions@cronus.example";
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var owner = await SignInWithPasswordAsync(email);
+        var other = await SignInWithPasswordAsync(email);
+
+        var first = await SetupSecretAsync(owner);
+        var again = await SetupSecretAsync(owner);
+        var intruder = await SetupSecretAsync(other);
+
+        again.Should().Be(first, "the browser that started setup comes back to the same secret");
+        intruder.Should().NotBe(first, "another session gets its own secret, never the owner's");
+    }
+
+    private async Task<HttpClient> SignInWithPasswordAsync(string email)
+    {
+        var client = _factory.CreateClient();
+        using var loginPage = await client.GetAsync("/login");
+        using var login = await PostAsync(client, "/auth/login",
+            AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password));
+        login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        return client;
+    }
+
+    private static async Task<string> SetupSecretAsync(HttpClient client)
+    {
+        using var page = await client.GetAsync("/account/2fa/totp/setup");
+        page.StatusCode.Should().Be(HttpStatusCode.OK);
+        var match = System.Text.RegularExpressions.Regex.Match(await page.Content.ReadAsStringAsync(), "<pre>([A-Z2-7]+)</pre>");
+        match.Success.Should().BeTrue("the setup page shows the secret to type in");
+        return match.Groups[1].Value;
+    }
+
+    /// <summary>
+    /// A password sign-in on an account that then turns email codes on: the
+    /// session is not recently confirmed, and the account now has a way to.
+    /// </summary>
+    private async Task<(HttpClient Client, int UserId)> SignInThenTurnOnEmailCodesAsync(string email)
+    {
+        var userId = await SeedEmailMfaUserAsync(email);
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        using (var loginPage = await client.GetAsync("/login"))
+        using (var login = await PostAsync(client, "/auth/login",
+                   AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()), ("Email", email), ("Password", Password)))
+        {
+            login.Headers.Location!.OriginalString.Should().NotContain("err=");
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).EmailMfaEnabled = true;
+            await ctx.SaveChangesAsync();
+        }
+        return (client, userId);
+    }
+
+    [Fact]
+    public async Task A_day_long_step_up_window_still_asks_for_the_password_after_fifteen_minutes()
+    {
+        // Turning two-step off or minting recovery codes is as lasting as adding
+        // a passkey, so it gets the passkey cap, whatever the organisation chose
+        // for its tools (#1614).
+        var userId = await SeedPasswordOnlyMicrosoftUserAsync("long-window@cronus.example");
+        int previousWindow;
+        await using (var ctx = _db.NewContext())
+        {
+            var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+            previousWindow = org.StepUpWindowMinutes;
+            org.StepUpWindowMinutes = 24 * 60;
+            await ctx.SaveChangesAsync();
+        }
+        try
+        {
+            var now = _factory.Services.GetRequiredService<TimeProvider>().GetUtcNow().UtcDateTime;
+            (await MayConfirmWithoutPasswordAsync(userId, now.AddMinutes(-5))).Should().BeTrue();
+            (await MayConfirmWithoutPasswordAsync(userId, now.AddMinutes(-20)))
+                .Should().BeFalse("past the fifteen-minute cap the password is asked for again");
+        }
+        finally
+        {
+            await using var ctx = _db.NewContext();
+            (await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId)).StepUpWindowMinutes = previousWindow;
+            await ctx.SaveChangesAsync();
+        }
+    }
+
+    private async Task<bool> MayConfirmWithoutPasswordAsync(int userId, DateTime strongAuthAt)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var http = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+            User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+            [
+                new(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim, userId.ToString()),
+                new(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString()),
+                new(StepUpAuth.StrongAuthAtClaim, strongAuthAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture)),
+            ], "test")),
+        };
+        var accessor = scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>();
+        var previous = accessor.HttpContext;
+        accessor.HttpContext = http;
+        try
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Data.AppDbContext>();
+            return await ALDevToolbox.Endpoints.AccountEndpoints.MayConfirmWithoutPasswordAsync(http, db, userId, CancellationToken.None);
+        }
+        finally
+        {
+            accessor.HttpContext = previous;
+        }
+    }
+
+    private async Task<int> SeedPasswordOnlyMicrosoftUserAsync(string email)
+    {
+        await using var seed = _db.NewContext();
+        var user = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = email,
+            DisplayName = "Nils Consultant",
+            PasswordHash = _host.HashPassword(Password),
+            Role = UserRole.User,
+            Status = UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        seed.Users.Add(user);
+        await seed.SaveChangesAsync();
+        seed.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = user.Id,
+            Provider = EntraSignInService.ProviderName,
+            Issuer = "11111111-1111-1111-1111-111111111111",
+            Subject = "oid-" + user.Id,
+            DisplayIdentity = email,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await seed.SaveChangesAsync();
+        return user.Id;
+    }
+
     private async Task<(int UserId, string Secret, IReadOnlyList<string> RecoveryCodes)> SeedTotpUserAsync(
         string email, bool linkMicrosoft = false)
     {
@@ -129,7 +540,7 @@ public sealed class MfaEndpointTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = email,
                 DisplayName = "Nils Consultant",
-                PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+                PasswordHash = _host.HashPassword(Password),
                 Role = UserRole.User,
                 Status = UserStatus.Active,
                 CreatedAt = DateTime.UtcNow,
@@ -159,6 +570,34 @@ public sealed class MfaEndpointTests : IDisposable
         var enrollment = await totp.BeginEnrollmentAsync(userId);
         var codes = await totp.ConfirmEnrollmentAsync(userId, CurrentCode(enrollment.SecretBase32));
         return (userId, enrollment.SecretBase32, codes);
+    }
+
+    private async Task<int> SeedEmailMfaUserAsync(string email)
+    {
+        await using var seed = _db.NewContext();
+        var user = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = email,
+            DisplayName = "Nils Consultant",
+            PasswordHash = _host.HashPassword(Password),
+            Role = UserRole.User,
+            Status = UserStatus.Active,
+            EmailMfaEnabled = true,
+            CreatedAt = DateTime.UtcNow,
+        };
+        seed.Users.Add(user);
+        await seed.SaveChangesAsync();
+        return user.Id;
+    }
+
+    /// <summary>Issues an email code through the app's own service, standing in for the email.</summary>
+    private async Task<string> IssueEmailCodeAsync(int userId)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var code = await scope.ServiceProvider.GetRequiredService<EmailMfaService>().IssueChallengeAsync(userId);
+        code.Should().NotBeNull();
+        return code!;
     }
 
     private static string CurrentCode(string secret) =>

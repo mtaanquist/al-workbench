@@ -1,0 +1,57 @@
+@page "/login/magic/confirm"
+@layout ALDevToolbox.Components.Layout.AuthLayout
+@using ALDevToolbox.Components.Shared
+
+<PageTitle>Sign in with a link · AL Workbench</PageTitle>
+<HeadContent>
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+</HeadContent>
+
+@*
+    Where the emailed sign-in link lands. Opening the link changes nothing;
+    only the button's POST spends the token. Mail scanners (Outlook Safe
+    Links, Defender) and chat link previews fetch a link before the person
+    clicks it, and when this was a GET straight to the consume endpoint they
+    used the link up and were handed the session cookie themselves (#1500).
+*@
+
+@if (string.IsNullOrEmpty(Token))
+{
+    <AuthCard Title="That link is missing something">
+        <Sub>
+            This link looks incomplete — email apps sometimes cut long links in half.
+            Open it from the email again, or ask for a new one.
+        </Sub>
+        <ChildContent>
+            <a class="btn btn--primary" href="/login/magic" style="height: var(--control-h-lg)">
+                <Icon Name="mail" Width="16" Height="16" />
+                <span>Send a new link</span>
+            </a>
+        </ChildContent>
+        <Foot>
+            <a class="auth__link" href="/login">Use a password instead</a>
+        </Foot>
+    </AuthCard>
+}
+else
+{
+    <AuthCard Title="Sign in to AL Workbench" FormAction="/auth/login/magic/consume">
+        <Sub>Press the button to finish signing in with the link from your email.</Sub>
+        <ChildContent>
+            <input type="hidden" name="Token" value="@Token" />
+            <button type="submit" class="btn btn--primary" style="height: var(--control-h-lg)" autofocus>
+                <Icon Name="log-in" Width="16" Height="16" />
+                <span>Sign in</span>
+            </button>
+        </ChildContent>
+        <Foot>
+            <a class="auth__link" href="/login">Use a password instead</a>
+        </Foot>
+        <Legal>The link works once and expires 15 minutes after it was sent.</Legal>
+    </AuthCard>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "token")] public string? Token { get; set; }
+}

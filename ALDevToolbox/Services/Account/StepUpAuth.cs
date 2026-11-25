@@ -121,15 +121,24 @@ public static class StepUpAuth
         Enum.TryParse<SignInMethod>(principal?.FindFirst(MethodClaim)?.Value, out var method) ? method : null;
 
     /// <summary>
-    /// Copies the two stamps from the properties onto the identity as claims,
-    /// replacing any earlier copy. Called at sign-in and by the cookie
-    /// revalidation after it rebuilds the principal.
+    /// Copies the two stamps, and the session's sign-in moment
+    /// (<see cref="Endpoints.EndpointHelpers.SignedInAtKey"/>), from the
+    /// properties onto the identity as claims, replacing any earlier copy.
+    /// Called at sign-in and by the cookie revalidation after it rebuilds the
+    /// principal. The sign-in moment is mirrored for the interactive-page
+    /// re-check, which only sees claims and must compare a credential change
+    /// with when the session started, not when the page opened (#1567).
     /// </summary>
     public static void ApplyClaims(ClaimsIdentity identity, AuthenticationProperties properties)
     {
-        foreach (var stale in identity.FindAll(c => c.Type is MethodClaim or StrongAuthAtClaim).ToList())
+        foreach (var stale in identity.FindAll(c => c.Type is MethodClaim or StrongAuthAtClaim
+            or Endpoints.EndpointHelpers.SignedInAtClaim).ToList())
         {
             identity.RemoveClaim(stale);
+        }
+        if (properties.Items.TryGetValue(Endpoints.EndpointHelpers.SignedInAtKey, out var signedInAt) && !string.IsNullOrEmpty(signedInAt))
+        {
+            identity.AddClaim(new Claim(Endpoints.EndpointHelpers.SignedInAtClaim, signedInAt));
         }
         if (properties.Items.TryGetValue(MethodKey, out var method) && !string.IsNullOrEmpty(method))
         {

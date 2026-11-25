@@ -727,7 +727,7 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = Tools(ctx);
 
-        var listed = (await tools.ListEnvironmentsAsync()).Should().ContainSingle().Subject;
+        var listed = (await tools.ListEnvironmentsAsync()).Rows.Should().ContainSingle().Subject;
         listed.EnvironmentId.Should().Be(id);
         listed.OnPremises.Should().BeTrue();
         listed.Type.Should().Be("Sandbox");
@@ -816,7 +816,7 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         ActAs(_editor);
 
         await using var ctx = _db.NewContext();
-        var entry = (await Tools(ctx).ListEnvironmentHistoryAsync(id)).Should().ContainSingle().Subject;
+        var entry = (await Tools(ctx).ListEnvironmentHistoryAsync(id)).Rows.Should().ContainSingle().Subject;
 
         entry.Action.Should().Be("RestartServiceTier");
         entry.ServiceTier.Should().Be("CRONUS-BC01 / BC250");
@@ -836,7 +836,7 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
             NullLogger<ProjectDiscoveryService>.Instance);
         return new DeliverTools(
-            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance),
+            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance),
             CustomerInfo(ctx),
             connections,
             Fleet(ctx),

@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.GitHub;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
@@ -325,6 +326,8 @@ public sealed class AccountService
         // Race: a user for this email could have appeared between verification
         // and completion (e.g. an admin invite was accepted in the meantime).
         // Refuse rather than duplicate — mirrors the SignupAsync guard.
+        // Fence category 1 (pre-auth routing): signup completes before any cookie
+        // exists; existence-only probe pinned to the verified email.
         var existingUser = await _db.Users.IgnoreQueryFilters()
             .AnyAsync(u => u.Email == normalised, ct);
         if (existingUser)
@@ -343,6 +346,8 @@ public sealed class AccountService
             // Verified ownership of a claimed domain joins active immediately
             // only when the org opted in; otherwise it's the historical
             // Pending-awaiting-approval behaviour.
+            // Fence category 1 (pre-auth routing): no cookie yet; pinned to
+            // s.OrganizationId == org.Id, the org the verified domain routed to.
             autoActive = await _db.OrganizationSettings.IgnoreQueryFilters()
                 .Where(s => s.OrganizationId == org.Id)
                 .Select(s => (bool?)s.AutoJoinVerifiedDomainUsers)
@@ -406,8 +411,8 @@ public sealed class AccountService
 
     /// <summary>
     /// The signed-in person's own account row, their organisation, and whether
-    /// that organisation offers Microsoft sign-in — what the Account page opens
-    /// with.
+    /// that organisation offers Microsoft sign-in or requires it — what the
+    /// Account page opens with.
     /// </summary>
     /// <remarks>
     /// Runs inside the organisation query filter. The page used to read these
@@ -422,19 +427,43 @@ public sealed class AccountService
 
         var organization = await _db.Organizations.AsNoTracking()
             .FirstOrDefaultAsync(o => o.Id == user.OrganizationId, ct);
-        var entraEnabled = await _db.OrganizationSettings.AsNoTracking()
-            .AnyAsync(s => s.OrganizationId == user.OrganizationId && s.EntraEnabled, ct);
+        var settings = await _db.OrganizationSettings.AsNoTracking()
+            .Where(s => s.OrganizationId == user.OrganizationId)
+            .Select(s => new { s.EntraEnabled, s.LocalLoginPolicy })
+            .FirstOrDefaultAsync(ct);
+        // The same rule as AuthService.IsLocalLoginDisabledAsync, read inside
+        // the filter: a SiteAdmin keeps their password as break-glass.
+        var passwordSignInDisabled = !user.IsSiteAdmin
+            && settings?.LocalLoginPolicy == Domain.ValueObjects.LocalLoginPolicy.EntraOnly;
 
-        return new AccountOverview(user, organization, entraEnabled);
+        return new AccountOverview(user, organization, settings?.EntraEnabled == true, passwordSignInDisabled);
     }
 
-    /// <summary>Self-service password change. Verifies the current password before applying the new one.</summary>
-    public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default)
+    /// <summary>
+    /// Self-service password change. Verifies the current password before applying the new one,
+    /// and refuses members of a Microsoft-only organisation (SiteAdmins excepted).
+    /// </summary>
+    /// <param name="ip">The caller's address, recorded on a failed current-password attempt.</param>
+    public async Task ChangePasswordAsync(int userId, string currentPassword, string newPassword, string ip, CancellationToken ct = default)
     {
-        var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
-        if (!_auth.VerifyPassword(currentPassword, user.PasswordHash))
+        // Filtered: the signed-in user's own row is in their own organisation.
+        var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
+        // A Microsoft-only organisation refuses password sign-in, so a password
+        // set now would only come back to life if the policy were relaxed later
+        // (#1455). SiteAdmins keep theirs as break-glass, as at sign-in.
+        if (await _auth.IsLocalLoginDisabledAsync(user, ct))
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Password"] = "Your organisation signs in with Microsoft, so there is no password to change here. Use \"Sign in with Microsoft\" instead.",
+            });
+        }
+        switch (await _auth.CheckCurrentPasswordAsync(user.Email, user.PasswordHash, currentPassword, ip, ct))
+        {
+            case CurrentPasswordCheck.LockedOut:
+                throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = AuthService.CurrentPasswordLockedOutMessage });
+            case CurrentPasswordCheck.Wrong:
+                throw new PlanValidationException(new Dictionary<string, string> { ["CurrentPassword"] = "Current password is incorrect." });
         }
         var errors = new Dictionary<string, string>();
         AuthService.ValidatePassword(newPassword, errors, fieldName: "NewPassword");
@@ -505,7 +534,8 @@ public sealed class AccountService
     /// <summary>Self-service display-name change.</summary>
     public async Task ChangeDisplayNameAsync(int userId, string newDisplayName, CancellationToken ct = default)
     {
-        var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
+        // Filtered: the signed-in user's own row is in their own organisation.
+        var user = await _db.Users.FirstAsync(u => u.Id == userId, ct);
         var errors = new Dictionary<string, string>();
         ValidateDisplayName(newDisplayName, errors);
         if (errors.Count > 0) throw new PlanValidationException(errors);
@@ -602,6 +632,9 @@ public sealed class AccountService
             CreatedAt = now,
         };
         _db.Organizations.Add(org);
+        // The repository standards a new organisation starts with (the workflow
+        // that keeps test up to date with main). Its Admins own them from here.
+        DefaultRepositoryStandardFiles.AddForNewOrganization(_db, org, now);
         await _db.SaveChangesAsync(ct);
 
         // Seed the platform-default workspace files (.gitignore, the shared
@@ -623,5 +656,10 @@ public sealed class AccountService
     }
 }
 
-/// <summary>What the Account page needs about the signed-in person up front.</summary>
-public sealed record AccountOverview(User User, Organization? Organization, bool OrganizationEntraEnabled);
+/// <summary>
+/// What the Account page needs about the signed-in person up front.
+/// <c>PasswordSignInDisabled</c> is true when their organisation only allows
+/// Microsoft sign-in and they are not a SiteAdmin, so there is no password to change.
+/// </summary>
+public sealed record AccountOverview(
+    User User, Organization? Organization, bool OrganizationEntraEnabled, bool PasswordSignInDisabled);

@@ -42,14 +42,18 @@ public sealed class PreviewCheckScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<PreviewCheckScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A sweep reads Microsoft's preview index once per country and queues builds
         // (the builds run on the ProjectBuildWorkers), so ten minutes is ample.
         : base(logger, heartbeats, nameof(PreviewCheckScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromMinutes(30),
-            disableEnvVar: "DISABLE_PREVIEW_CHECK_SCHEDULER")
+            disableEnvVar: "DISABLE_PREVIEW_CHECK_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

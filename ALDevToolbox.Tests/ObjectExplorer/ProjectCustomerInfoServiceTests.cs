@@ -264,32 +264,145 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_colleague_is_listed_once_and_their_role_is_edited_rather_than_stacked()
+    public async Task A_colleague_is_listed_once_and_their_roles_are_edited_rather_than_stacked()
     {
         var id = await SeedAsync();
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx);
-        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, ProjectPersonRole.Consultant, "finance"));
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], "finance"));
 
-        var again = () => svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, ProjectPersonRole.Developer, null));
+        var again = () => svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Developer], null));
         (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UserId");
 
         var row = (await svc.ListPeopleAsync(id)).Single();
-        await svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, ProjectPersonRole.Architect, "finance, warehouse"));
+        await svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Architect], "finance, warehouse"));
 
         (await svc.ListPeopleAsync(id)).Single().Should().BeEquivalentTo(
-            new { UserId = OtherUserId, Role = ProjectPersonRole.Architect, Areas = "finance, warehouse", Email = "other@example.com" });
+            new { UserId = OtherUserId, Roles = new[] { ProjectPersonRole.Architect }, Areas = "finance, warehouse", Email = "other@example.com" });
     }
 
     [Fact]
-    public async Task A_colleague_has_to_be_someone_in_the_organisation()
+    public async Task A_colleague_can_hold_several_roles_kept_in_the_lists_order_without_repeats()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId,
+            [ProjectPersonRole.ProjectLeader, ProjectPersonRole.Developer, ProjectPersonRole.ProjectLeader], null));
+
+        await using var read = _db.NewContext();
+        (await Svc(read).ListPeopleAsync(id)).Single().Roles.Should()
+            .Equal(ProjectPersonRole.Developer, ProjectPersonRole.ProjectLeader);
+    }
+
+    /// <summary>
+    /// The picker offers active accounts only; the service holds the same rule, so a
+    /// stale form or a crafted post cannot name someone who can no longer sign in (#1603).
+    /// </summary>
+    [Fact]
+    public async Task A_disabled_colleague_cannot_be_put_on_the_people_list()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        await ctx.Users.Where(u => u.Id == OtherUserId)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
+            .Should().Be("That account can't sign in right now. Choose someone with an active account.");
+        await using var read = _db.NewContext();
+        (await Svc(read).ListPeopleAsync(id)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_colleague_disabled_since_can_still_have_their_entry_edited()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
+        var row = (await svc.ListPeopleAsync(id)).Single();
+        await ctx.Users.Where(u => u.Id == OtherUserId)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+
+        await svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Architect], "finance"));
+
+        await using var read = _db.NewContext();
+        var saved = (await Svc(read).ListPeopleAsync(id)).Single();
+        saved.Roles.Should().Equal(ProjectPersonRole.Architect);
+        saved.Areas.Should().Be("finance");
+    }
+
+    [Fact]
+    public async Task An_entry_cannot_be_switched_to_a_disabled_colleague()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OwnerUserId, [ProjectPersonRole.Consultant], null));
+        var row = (await svc.ListPeopleAsync(id)).Single();
+        await ctx.Users.Where(u => u.Id == OtherUserId)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, UserStatus.Disabled));
+
+        var act = () => svc.SavePersonAsync(id, row.Id, new CustomerPersonInput(OtherUserId, [ProjectPersonRole.Consultant], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
+            .Should().Be("That account can't sign in right now. Choose someone with an active account.");
+    }
+
+    [Fact]
+    public async Task A_colleague_needs_at_least_one_role()
     {
         var id = await SeedAsync();
         await using var ctx = _db.NewContext();
 
-        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(424242, ProjectPersonRole.Consultant, null));
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(OtherUserId, [], null));
 
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UserId");
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Roles");
+    }
+
+    [Fact]
+    public async Task A_role_the_tool_does_not_know_does_not_count_as_one()
+    {
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null,
+            new CustomerPersonInput(OtherUserId, [(ProjectPersonRole)99], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Roles");
+    }
+
+    /// <summary>
+    /// The person is real and active, just in another organisation: only the tenant
+    /// boundary can turn them away, from the list and from the picker that offers it.
+    /// </summary>
+    [Fact]
+    public async Task A_colleague_has_to_be_someone_in_the_organisation()
+    {
+        const int strangerId = 9895;
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(new User
+            {
+                Id = strangerId, OrganizationId = TestDb.OtherOrgId, Email = "someone@fabrikam.example", PasswordHash = "x",
+                DisplayName = "Someone Else", Role = UserRole.Editor, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var id = await SeedAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx).SavePersonAsync(id, null, new CustomerPersonInput(strangerId, [ProjectPersonRole.Consultant], null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UserId"]
+            .Should().Be("Choose one of your colleagues.");
+        (await ctx.OeProjectPeople.AnyAsync(p => p.ProjectId == id)).Should().BeFalse();
+        var offered = (await Svc(ctx).ListAssignableUsersAsync()).Select(u => u.UserId).ToList();
+        offered.Should().Contain(OtherUserId);
+        offered.Should().NotContain(strangerId, "the picker offers this organisation's people only");
     }
 
     [Fact]
@@ -316,7 +429,7 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
 
         await svc.SaveNotesAsync(id, new CustomerNotes("VPN, then CRONUS-BC01", null, null));
         await svc.SaveContactAsync(id, null, new CustomerContactInput(ProjectContactType.Customer, "Annette Hill", null, "annette@cronus.example", null));
-        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OwnerUserId, ProjectPersonRole.Consultant, null));
+        await svc.SavePersonAsync(id, null, new CustomerPersonInput(OwnerUserId, [ProjectPersonRole.Consultant], null));
         await svc.SaveIntegrationAsync(id, null, new CustomerIntegrationInput("Webshop", ProjectIntegrationDirection.Both));
 
         var all = await svc.GetAllAsync(id);

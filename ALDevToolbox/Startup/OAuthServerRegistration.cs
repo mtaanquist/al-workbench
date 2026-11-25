@@ -88,11 +88,8 @@ public static class OAuthServerRegistration
                 // ever added, re-enable resource validation (or add an explicit
                 // audience requirement) before doing so.
                 //
-                // TODO: Revisit once OpenIddict ships native DCR / CIMD support
-                // (tracked in openiddict/openiddict-core#2404, targeted at 7.6.0)
-                // — that release will likely introduce a more idiomatic way to
-                // register resources dynamically from a CIMD application descriptor,
-                // at which point both opt-outs can come back on.
+                // Both opt-outs exist only because OpenIddict has no native CIMD
+                // support yet; #1744 tracks turning them back on when it does.
                 o.DisableResourceValidation();
                 o.IgnoreResourcePermissions();
 
@@ -180,6 +177,14 @@ public static class OAuthServerRegistration
                     b.UseScopedHandler<ALDevToolbox.Services.OAuth.CimdClientResolver>()
                      .SetOrder(int.MinValue + 100_000));
 
+                // The same resolver on the token endpoint, ahead of OpenIddict's
+                // ValidateAuthentication (which validates the client assertion): a
+                // private_key_jwt client that rotated its key gets its stored key set
+                // re-read from its jwks_uri, so token refresh keeps working (#1576).
+                o.AddEventHandler<OpenIddict.Server.OpenIddictServerEvents.ValidateTokenRequestContext>(b =>
+                    b.UseScopedHandler<ALDevToolbox.Services.OAuth.CimdClientResolver>()
+                     .SetOrder(int.MinValue + 100_000));
+
                 // Registration (DCR and CIMD) only stores redirect URIs that
                 // OAuthRedirectUriPolicy accepts, but rows written before that
                 // rule existed may still hold a refused one. Checking the
@@ -251,7 +256,11 @@ public static class OAuthServerRegistration
             {
                 AllowAutoRedirect = false,
                 ConnectCallback = ALDevToolbox.Services.OAuth.SsrfGuard.ConnectAsync,
+                // Through an HTTPS_PROXY the guard would vet only the proxy's address:
+                // a private proxy fails every fetch, a public one hides the target (#1576).
+                UseProxy = false,
             });
+        services.AddSingleton<ALDevToolbox.Services.OAuth.CimdFetchLimiter>();
         services.AddScoped<ALDevToolbox.Services.OAuth.CimdClientResolver>();
         return services;
     }

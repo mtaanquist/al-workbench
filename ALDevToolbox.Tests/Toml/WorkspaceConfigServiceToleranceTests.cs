@@ -148,10 +148,22 @@ public sealed class WorkspaceConfigServiceToleranceTests : IDisposable
         ex.Which.Errors.Should().ContainKey("Template");
     }
 
+    /// <summary>
+    /// #1328: the saved module list is history. A key that names no module, or
+    /// a module deleted since the workspace was generated, is kept as saved
+    /// rather than refused, so an extension can still be added beside the others.
+    /// </summary>
     [Fact]
-    public async Task Workspace_referencing_unknown_module_keys_fails_with_a_modules_keyed_error()
+    public async Task Workspace_listing_unknown_or_deleted_module_keys_is_read_back_with_them()
     {
         await SeedTemplateAsync("runtime-15");
+        await using (var seed = _db.NewContext())
+        {
+            var retired = ModuleBuilder.Default("retired");
+            retired.DeletedAt = DateTime.UtcNow;
+            seed.Modules.AddRange(ModuleBuilder.Default("live"), retired);
+            await seed.SaveChangesAsync();
+        }
         var toml = $$"""
             schema_version = {{WorkspaceConfigService.CurrentSchemaVersion}}
             kind = "workspace"
@@ -165,13 +177,13 @@ public sealed class WorkspaceConfigServiceToleranceTests : IDisposable
             core_id_range_to = 99
             include_examples = true
             extension_prefix = "X"
-            modules = ["ghost"]
+            modules = ["live", "retired", "ghost"]
             """;
         using var ctx = _db.NewContext();
 
-        Func<Task> act = () => new WorkspaceConfigService(ctx).ParseAsync(toml);
-        var ex = await act.Should().ThrowAsync<PlanValidationException>();
-        ex.Which.Errors.Should().ContainKey("Modules");
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.Workspace!.SelectedModuleKeys.Should().Equal("live", "retired", "ghost");
     }
 
     [Fact]

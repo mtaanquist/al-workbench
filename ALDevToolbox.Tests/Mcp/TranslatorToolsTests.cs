@@ -1,7 +1,9 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Mcp.Tools;
 using ALDevToolbox.Services.Translation;
+using ALDevToolbox.Services.Translation.Providers;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -32,8 +34,8 @@ public sealed class TranslatorToolsTests : IDisposable
     private readonly TestDb _db = new();
     public void Dispose() => _db.Dispose();
 
-    // machine_translate is the only member that touches the machine-translation
-    // service and none of these tests call it, so it is never constructed.
+    // Only machine_translate touches the machine-translation service; the tests
+    // that call it build their own with NewMachineTranslationTools.
     private TranslatorTools NewTools(AppDbContext ctx) =>
         new(new TranslationMemoryService(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance),
             machineTranslation: null!,
@@ -240,6 +242,45 @@ public sealed class TranslatorToolsTests : IDisposable
         hits[0].SourcePath.Should().BeNull();
     }
 
+    // ---- search_translation_memory: removed entries are the Editor's view (#1547)
+
+    private async Task<long> SeedRemovedEntryAsync()
+    {
+        var entryId = await SeedEntryAsync();
+        await using var ctx = _db.NewContext();
+        await ctx.TranslationMemory.Where(e => e.Id == entryId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.DeletedAt, DateTime.UtcNow));
+        return entryId;
+    }
+
+    [Fact]
+    public async Task A_plain_User_asking_for_removed_entries_does_not_get_them()
+    {
+        await SeedUserAsync(9109, UserRole.User);
+        await SeedRemovedEntryAsync();
+
+        await using var ctx = _db.NewContext();
+        var hits = await NewTools(ctx).SearchTranslationMemoryAsync("Posting Date", includeRemoved: true);
+
+        hits.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(UserRole.Editor, false)]
+    [InlineData(UserRole.Admin, false)]
+    [InlineData(UserRole.User, true)] // SiteAdmin overrides the org role
+    public async Task An_editor_asking_for_removed_entries_gets_them(UserRole role, bool isSiteAdmin)
+    {
+        await SeedUserAsync(9110, role, isSiteAdmin);
+        var entryId = await SeedRemovedEntryAsync();
+
+        await using var ctx = _db.NewContext();
+        var hits = await NewTools(ctx).SearchTranslationMemoryAsync("Posting Date", includeRemoved: true);
+
+        hits.Should().ContainSingle().Which.EntryId.Should().Be(entryId);
+        hits[0].Removed.Should().BeTrue();
+    }
+
     [Fact]
     public async Task Vote_on_another_orgs_entry_surfaces_as_not_found()
     {
@@ -250,5 +291,76 @@ public sealed class TranslatorToolsTests : IDisposable
         var act = () => NewTools(ctx).VoteTranslationAsync(otherOrgEntry, "up");
 
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("not found");
+    }
+    [Fact]
+    public async Task Machine_translate_without_a_provider_set_up_points_at_the_settings()
+    {
+        await using var ctx = _db.NewContext();
+        var tools = NewMachineTranslationTools(ctx, new ThrowingProvider());
+
+        var act = () => tools.MachineTranslateAsync("Hello", "da-DK");
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("not configured");
+    }
+
+    [Fact]
+    public async Task Machine_translate_reports_a_provider_failure_as_a_failure_not_as_missing_setup()
+    {
+        // A used-up quota or a refused language used to read as "not configured"
+        // and sent the admin to a settings page that was already right (#1344).
+        await using var ctx = _db.NewContext();
+        var settings = _db.NewMachineTranslationSettingsService(ctx);
+        await settings.SaveMachineTranslationAsync(new MtSettingsInput("deepl", "k:fx", false, MtTrigger.OnDemand));
+        var tools = NewMachineTranslationTools(ctx, new ThrowingProvider());
+
+        var act = () => tools.MachineTranslateAsync("Hello", "da-DK");
+
+        var ex = (await act.Should().ThrowAsync<McpException>()).Which;
+        ex.Message.Should().Contain("refused or failed");
+        ex.Message.Should().NotContain("not configured");
+    }
+
+    [Fact]
+    public async Task Machine_translate_refuses_text_longer_than_one_string_before_the_provider_is_asked()
+    {
+        // #1576: the provider bills per character on the organisation's key. The
+        // throwing provider shows which side of the ceiling reached it: a refusal
+        // from the provider says "refused or failed", the ceiling says "limit".
+        await using var ctx = _db.NewContext();
+        var settings = _db.NewMachineTranslationSettingsService(ctx);
+        await settings.SaveMachineTranslationAsync(new MtSettingsInput("deepl", "k:fx", false, MtTrigger.OnDemand));
+        var tools = NewMachineTranslationTools(ctx, new ThrowingProvider());
+
+        var tooLong = () => tools.MachineTranslateAsync(new string('a', TranslatorTools.MaxMachineTranslateSource + 1), "da-DK");
+        (await tooLong.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("one string at a time");
+
+        var longContext = () => tools.MachineTranslateAsync("Hello", "da-DK",
+            context: new string('c', TranslatorTools.MaxMachineTranslateContext + 1));
+        (await longContext.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("limit");
+
+        var atTheLimit = () => tools.MachineTranslateAsync(new string('a', TranslatorTools.MaxMachineTranslateSource), "da-DK");
+        (await atTheLimit.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("refused or failed",
+            "a string at the limit still goes to the provider");
+    }
+
+    private TranslatorTools NewMachineTranslationTools(AppDbContext ctx, IMachineTranslationProvider provider) =>
+        new(new TranslationMemoryService(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance),
+            new MachineTranslationService(
+                _db.NewMachineTranslationSettingsService(ctx),
+                new SingleProviderFactory(provider),
+                NullLogger<MachineTranslationService>.Instance),
+            ctx,
+            _db.OrgContext);
+
+    private sealed class SingleProviderFactory(IMachineTranslationProvider provider) : IMachineTranslationProviderFactory
+    {
+        public IMachineTranslationProvider Create(ResolvedMtSettings settings) => provider;
+    }
+
+    private sealed class ThrowingProvider : IMachineTranslationProvider
+    {
+        public Task<MtTestResult> TestConnectionAsync(CancellationToken ct) => Task.FromResult(new MtTestResult(false, "x"));
+        public Task<MtTranslation> TranslateAsync(string sourceText, string? sourceLanguage, string targetLanguage, string? context, CancellationToken ct)
+            => throw new HttpRequestException("Quota exceeded");
     }
 }

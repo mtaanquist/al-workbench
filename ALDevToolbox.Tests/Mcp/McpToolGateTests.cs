@@ -45,6 +45,31 @@ public sealed class McpToolGateTests : IDisposable
     }
 
     [Fact]
+    public async Task Build_reads_follow_the_build_pipelines_switch_whose_pages_show_them()
+    {
+        // The builds' only pages are /pipelines and /artifacts, so switching Build
+        // pipelines off has to take the build tools with it (#1344, MCP-2), while
+        // the Solutions switch alone leaves them be.
+        await DisableForOrgAsync(ToolKey.Pipelines);
+        await using (var ctx = _db.NewContext())
+        {
+            var gate = new McpToolGate(_db.NewToolEnablement(ctx));
+            (await gate.IsAvailableAsync("list_solution_builds")).Should().BeFalse();
+            (await gate.IsAvailableAsync("get_solution_build")).Should().BeFalse();
+            (await gate.IsAvailableAsync("compare_solution_builds")).Should().BeFalse();
+            (await gate.IsAvailableAsync("list_solutions")).Should().BeTrue();
+        }
+
+        await DisableForOrgAsync(ToolKey.Projects);
+        await using (var ctx = _db.NewContext())
+        {
+            var gate = new McpToolGate(_db.NewToolEnablement(ctx));
+            (await gate.IsAvailableAsync("get_solution_build")).Should().BeTrue();
+            (await gate.IsAvailableAsync("list_solutions")).Should().BeFalse();
+        }
+    }
+
+    [Fact]
     public async Task A_tool_switched_off_site_wide_is_refused_even_where_the_organisation_left_it_on()
     {
         var site = TestDb.EverythingEnabled();
@@ -66,8 +91,32 @@ public sealed class McpToolGateTests : IDisposable
 
         await gate.EnsureAvailableAsync("deploy_build");
         (await gate.IsAvailableAsync("list_repositories")).Should().BeTrue(
-            "it serves several tools at once, so only the MCP switch turns it off");
+            "it serves several tools at once, and Templates and Cookbook are still on");
         (await gate.IsAvailableAsync("search_bcquality")).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task List_repositories_goes_once_every_tool_that_takes_a_repository_is_off()
+    {
+        // #1547, MCP-5: it would otherwise keep calling GitHub with the person's
+        // token for an answer nothing left on the surface can use.
+        await DisableForOrgAsync(ToolKey.Templates, ToolKey.Cookbook);
+        await using (var ctx = _db.NewContext())
+        {
+            var gate = new McpToolGate(_db.NewToolEnablement(ctx));
+            (await gate.IsAvailableAsync("list_repositories")).Should().BeTrue("Translator still takes one");
+        }
+
+        await DisableForOrgAsync(ToolKey.Templates, ToolKey.Cookbook, ToolKey.Translator);
+        await using (var ctx = _db.NewContext())
+        {
+            var gate = new McpToolGate(_db.NewToolEnablement(ctx));
+            (await gate.IsAvailableAsync("list_repositories")).Should().BeFalse();
+            var act = () => gate.EnsureAvailableAsync("list_repositories");
+            (await act.Should().ThrowAsync<McpException>())
+                .Which.Message.Should().Contain("all switched off");
+            (await gate.IsAvailableAsync("search_bcquality")).Should().BeTrue("it names no tool at all");
+        }
     }
 
     private async Task DisableForOrgAsync(params ToolKey[] keys)

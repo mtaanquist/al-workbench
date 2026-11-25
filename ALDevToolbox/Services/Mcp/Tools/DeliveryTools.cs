@@ -48,15 +48,31 @@ public sealed class DeliveryTools
         _artifacts = artifacts;
     }
 
+    private const int DefaultPipelineLimit = 25;
+
+    private static bool Has(string? value, string needle) =>
+        !string.IsNullOrEmpty(value) && value.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
     [McpServerTool(Name = "list_deployment_pipelines", ReadOnly = true)]
-    [Description("Lists the deployment pipelines you can see in the organisation — each is a named 'deploy this build pipeline's builds to this Business Central environment' target. The target can be a Business Central online environment or a customer's on-premises service tier, which is deployed to through the customer's gateway (targetIsOnPremises). Returns each pipeline's id, name, its owning solution (id and name), its source build pipeline (or, for a pipeline that installs a repository's GitHub releases, that repository), the target environment (name, Production/Sandbox type, and whether it is still present in Business Central), when installs run (its deployment schedule), schema sync mode, and whether a new successful build prepares a deployment for a person to approve (prepareDeploymentOnNewBuild; nothing installs until someone approves it in the web UI), and its branch rule: when restrictBranch is true it only deploys builds made from allowedBranch (null means the repositories' default branch). buildPipelineDeleted is true when its source build pipeline was deleted, so no new builds will reach it. disabled is true when someone disabled the deployment pipeline: deploy_build refuses it and nothing deploys through it until a person enables it again in the web UI. buildPipelineDisabled is true when its source build pipeline is disabled, so no new builds will reach it, though its earlier builds can still be deployed. Deploying refuses a build from another branch, and an app older than the version the environment already has. Pipelines under a private solution you are not on the team for are not listed. Use an id with deploy_build (to deploy a build) or list_deployments (to see its history).")]
-    public async Task<IReadOnlyList<ReleasePipelineRow>> ListReleasePipelinesAsync(
+    [Description("Lists the deployment pipelines you can see in the organisation — each is a named 'deploy this build pipeline's builds to this Business Central environment' target. The target can be a Business Central online environment or a customer's on-premises service tier, which is deployed to through the customer's gateway (targetIsOnPremises). Returns each pipeline's id, name, its owning solution (id and name), its source build pipeline (or, for a pipeline that installs a repository's GitHub releases, that repository), the target environment (name, Production/Sandbox type, and whether it is still present in Business Central), when installs run (its deployment schedule), schema sync mode, and whether a new successful build prepares a deployment for a person to approve (prepareDeploymentOnNewBuild; nothing installs until someone approves it in the web UI), and its branch rule: when restrictBranch is true it only deploys builds made from allowedBranch (null means the repositories' default branch). buildPipelineDeleted is true when its source build pipeline was deleted, so no new builds will reach it. disabled is true when someone disabled the deployment pipeline: deploy_build refuses it and nothing deploys through it until a person enables it again in the web UI. buildPipelineDisabled is true when its source build pipeline is disabled, so no new builds will reach it, though its earlier builds can still be deployed. Deploying refuses a build from another branch, and an app older than the version the environment already has. Archived deployment pipelines (kept only for their history) and pipelines under a private solution you are not on the team for are not listed. Returns the first 25 unless you raise limit; Truncated and Note say whether more were left out, so pass search or solutionId to narrow it. Use an id with deploy_build (to deploy a build) or list_deployments (to see its history).")]
+    public async Task<CappedRows<ReleasePipelineRow>> ListReleasePipelinesAsync(
         [Description("Optional solution id to list only that solution's deployment pipelines.")] int? solutionId = null,
+        [Description("Optional case-insensitive substring of the deployment pipeline's name, its solution, its environment's name or type, its build pipeline, or the repository it installs releases from, e.g. a customer name or 'Production'.")] string? search = null,
+        [Description(McpCatalogueLimit.Description + " Default 25.")] int limit = DefaultPipelineLimit,
         CancellationToken ct = default)
     {
         try
         {
-            return await _releasePipelines.ListReleasePipelinesAsync(solutionId, ct);
+            var rows = await _releasePipelines.ListReleasePipelinesAsync(solutionId, ct: ct);
+            var needle = search?.Trim();
+            var matched = string.IsNullOrEmpty(needle)
+                ? rows
+                : rows.Where(r => Has(r.Name, needle) || Has(r.ProjectName, needle)
+                                  || Has(r.EnvironmentName, needle) || Has(r.EnvironmentType, needle)
+                                  || Has(r.BuildPipelineName, needle) || Has(r.GithubReleaseRepositoryName, needle)).ToList();
+            return CappedRows<ReleasePipelineRow>.From(matched, McpCatalogueLimit.Clamp(limit), "deployment pipelines",
+                "ordered by name", "Pass search or solutionId to narrow the list.",
+                CappedRows<ReleasePipelineRow>.RaiseLimitHint);
         }
         catch (ProjectAccessDeniedException)
         {
@@ -67,14 +83,88 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_deployments", ReadOnly = true)]
-    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result (an app's status is 'pending', 'uploading', 'installing', 'scheduled', 'completed', 'failed', 'skipped', 'unconfirmed', or 'refused': 'refused' is on-premises only and means the customer's gateway refused that app before anything ran for it - the file was not the app declared, or the customer's gateway settings do not allow it - so nothing was changed for it). For an on-premises service tier, tiersRestarted says whether the gateway restarted the service tiers afterwards, and gatewaySteps lists what it did around the apps in order: kind 'before-script' (the customer's own script, run before anything is installed; when it fails nothing is installed), 'restart' (one service tier, name 'SERVER / INSTANCE'; every tier on the database is restarted after the install, which signs everyone on it out) or 'after-script', each with outcome 'done', 'failed' or 'not-done' and the gateway's message. A failed deployment whose apps are all completed failed after the install: a tier did not come back or the after script failed, so the apps are in and deploying again changes nothing. tiersRestarted false with no gatewaySteps means people who stay signed in keep running the previous version until each tier is restarted. On-premises, 'unconfirmed' apps on a failed deployment mean the gateway stopped before it said what it installed: the failure message says to check the tier's apps after the gateway's next inventory, and some may well have gone in. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit; a number above 1 on the oldest row means there are older ones.")]
-    public async Task<IReadOnlyList<DeliveryHistoryRow>> ListDeliveriesAsync(
+    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result (an app's status is 'pending', 'uploading', 'installing', 'scheduled', 'completed', 'failed', 'skipped', 'unconfirmed', or 'refused': 'refused' is on-premises only and means the customer's gateway refused that app before anything ran for it - the file was not the app declared, or the customer's gateway settings do not allow it - so nothing was changed for it). For an on-premises service tier, tiersRestarted says whether the gateway restarted the service tiers afterwards, and gatewaySteps lists what it did around the apps in order: kind 'before-script' (the customer's own script, run before anything is installed; when it fails nothing is installed), 'restart' (one service tier, name 'SERVER / INSTANCE'; every tier on the database is restarted after the install, which signs everyone on it out) or 'after-script', each with outcome 'done', 'failed' or 'not-done' and the gateway's message. A failed deployment whose apps are all completed failed after the install: a tier did not come back or the after script failed, so the apps are in and deploying again changes nothing. tiersRestarted false with no gatewaySteps means people who stay signed in keep running the previous version until each tier is restarted. On-premises, 'unconfirmed' apps on a failed deployment mean the gateway stopped before it said what it installed: the failure message says to check the tier's apps after the gateway's next inventory, and some may well have gone in. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit, and fewer when the deployments carry many apps, so the answer stays readable; Truncated and Note say when more were left out, and passing the oldest returned id as beforeDeploymentId reads further back (a number above 1 on the oldest row also means there are older ones). In the list, the failure message and each app's message are cut at 300 characters; pass deploymentId to read that one deployment with its failure message whole (each app's message too, unless together they are too long for one answer).")]
+    public async Task<CappedRows<DeliveryHistoryRow>> ListDeliveriesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
+        [Description("Optional deployment id from this list: returns just that deployment, with its failure message and each app's message whole.")] int? deploymentId = null,
+        [Description("Optional deployment id from this list: returns the deployments older than it, for reading further back. An id that is not this pipeline's returns nothing.")] int? beforeDeploymentId = null,
         CancellationToken ct = default)
     {
         await _releasePipelines.EnsureReleasePipelineExistsAsync(deploymentPipelineId, ct);
-        return await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, McpListLimit.Clamp(limit), ct);
+        if (deploymentId is not null && beforeDeploymentId is not null)
+            throw new McpException("Pass deploymentId or beforeDeploymentId, not both.");
+        if (deploymentId is { } id)
+        {
+            var one = await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, 1, ct, onlyDeliveryId: id);
+            if (one.Count == 0)
+                throw new McpException($"Deployment {id} is not one of deployment pipeline {deploymentPipelineId}'s deployments.");
+            return FitOneDeployment(one[0]);
+        }
+
+        // Business Central's install errors run to thousands of characters and twenty of
+        // them ran past what an assistant can read in one answer (#1525). Cutting them is
+        // not enough on its own: each deployment carries a row per app, so twenty
+        // deployments of a five-app solution still ran past the answer budget (#1572).
+        const string whole = "list_deployments with deploymentId";
+        var cap = McpListLimit.Clamp(limit);
+        var rows = await _deliveries.ListDeliveryHistoryAsync(
+            deploymentPipelineId, cap + 1, ct, beforeDeliveryId: beforeDeploymentId);
+        var shortened = rows.Select(d => d with
+        {
+            FailureMessage = McpListLimit.ShortenFailure(d.FailureMessage, whole),
+            Apps = d.Apps.Select(a => a with { Message = McpListLimit.ShortenFailure(a.Message, whole) }).ToList(),
+        }).ToList();
+        return CappedRows<DeliveryHistoryRow>.From(shortened, cap, "deployments", "newest first",
+            "Pass the oldest deployment's id as beforeDeploymentId to read the rest.",
+            cap < McpListLimit.Max ? CappedRows<DeliveryHistoryRow>.RaiseLimitHint : null);
+    }
+
+    /// <summary>
+    /// One deployment read whole, unless it is too long for one answer: a 20-app
+    /// solution that failed carries a Business Central install error per app, each
+    /// of which can run to thousands of characters (#1601, GBC-3). The deployment's
+    /// own failure message stays whole; the per-app messages share what is left of
+    /// the answer budget, and the note says so.
+    /// </summary>
+    private static CappedRows<DeliveryHistoryRow> FitOneDeployment(DeliveryHistoryRow row)
+    {
+        if (Serialized(row) <= McpAnswerBudget.Characters || row.Apps.Count == 0)
+            return new CappedRows<DeliveryHistoryRow>([row], false, null);
+
+        // The budget counts serialised characters, and the serialiser escapes quotes and
+        // non-ASCII letters ("Beløb" grows), so a raw character cut can still overshoot.
+        // Start from an even share of what is left and shrink until the row fits, or the
+        // share reaches the list's own cut, below which nothing is gained.
+        var withoutAppMessages = row with { Apps = row.Apps.Select(a => a with { Message = null }).ToList() };
+        var left = McpAnswerBudget.Characters - Serialized(withoutAppMessages);
+        var perApp = Math.Max(McpListLimit.MaxListFailureMessage, left / row.Apps.Count);
+        var fitted = Cut(row, perApp);
+        while (Serialized(fitted) > McpAnswerBudget.Characters && perApp > McpListLimit.MaxListFailureMessage)
+        {
+            perApp = Math.Max(McpListLimit.MaxListFailureMessage, perApp * 3 / 4);
+            fitted = Cut(row, perApp);
+        }
+
+        var anyCut = fitted.Apps.Zip(row.Apps).Any(pair => !string.Equals(pair.First.Message, pair.Second.Message, StringComparison.Ordinal));
+        return anyCut
+            ? new CappedRows<DeliveryHistoryRow>([fitted], true,
+                "Each long app message was cut so the deployment fits in one answer; the deployment's own failure message is whole. "
+                + "The deployment's page in the workbench has every message in full.")
+            : new CappedRows<DeliveryHistoryRow>([row], false, null);
+
+        static DeliveryHistoryRow Cut(DeliveryHistoryRow r, int perApp) => r with
+        {
+            Apps = r.Apps.Select(a => a with
+            {
+                Message = a.Message is { } m && m.Length > perApp
+                    ? m[..perApp] + "... (cut; the deployment's page in the workbench has the whole message)"
+                    : a.Message,
+            }).ToList(),
+        };
+
+        static int Serialized(DeliveryHistoryRow r) =>
+            System.Text.Json.JsonSerializer.Serialize(r, ModelContextProtocol.McpJsonUtilities.DefaultOptions).Length;
     }
 
     [McpServerTool(Name = "deploy_build", ReadOnly = false, Idempotent = false)]
@@ -102,7 +192,7 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_github_releases", ReadOnly = true)]
-    [Description("Lists the GitHub releases a deployment pipeline can install, newest first, with each release's tag, title, publication date and the app files attached to it. Only works for a deployment pipeline whose apps come from a repository's GitHub releases - one that deploys a build pipeline's builds is refused, and you should use list_pipeline_builds for that. Releases with no app files attached cannot be installed. Requires permission to manage the solution, and a connected GitHub account that can see the repository.")]
+    [Description("Lists the newest 30 GitHub releases a deployment pipeline can install, newest first, with each release's tag, title, publication date and the app files attached to it. Only works for a deployment pipeline whose apps come from a repository's GitHub releases - one that deploys a build pipeline's builds is refused, and you should use list_pipeline_builds for that. Releases with no app files attached cannot be installed. Requires permission to manage the solution, and a connected GitHub account that can see the repository.")]
     public async Task<IReadOnlyList<GitHubReleaseOption>> ListGitHubReleasesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
         CancellationToken ct = default)

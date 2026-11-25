@@ -3,6 +3,10 @@ using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Startup;
 
+// Before anything formats a number or a date, including the host's own
+// startup logging: the server's LANG must not decide "5,000" vs "5.000".
+AppCulture.Apply();
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Legacy C/AL TXT exports are Windows-1252 / codepage 850, neither of which
@@ -18,6 +22,10 @@ builder.Logging.AddSimpleConsole(options =>
     options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ ";
     options.UseUtcTimestamp = true;
 });
+// A copy of each line goes to the database as well, for /site-admin/logs; the
+// writer is a hosted service in AddBackgroundWorkers. See Services/Logging/.
+builder.Services.AddSingleton<ALDevToolbox.Services.Logging.StoredLogBuffer>();
+builder.Logging.Services.AddSingleton<ILoggerProvider, ALDevToolbox.Services.Logging.StoredLogProvider>();
 
 // Service registration — one Add* per area, each in its own file under
 // Startup/. New registrations go into the matching Add* method rather than
@@ -37,6 +45,7 @@ builder.Services.AddBcQuality();
 builder.Services.AddGeneration();
 builder.Services.AddOrganizationServices();
 builder.Services.AddGitHub();
+builder.Services.AddRepositoryMigration();
 builder.Services.AddAccountServices(builder.Configuration);
 builder.Services.AddOAuthServer(builder.Environment);
 builder.Services.AddDeploymentIdentity();
@@ -54,6 +63,13 @@ ForwardedHeadersSetup.Log(app.Logger, trustedProxies);
 PublicOrigin.Log(app.Logger, publicOrigin);
 
 app.UseForwardedHeaders();
+
+// A request that arrives during a restore may read the database but not write
+// it, and the OAuth token endpoints and the Microsoft sign-in callback, which
+// run inside authentication, get the maintenance page here; the gate further
+// down decides the rest (#1571). First, so it covers everything the request
+// runs. See Endpoints/MaintenanceModeMiddleware.cs.
+app.UseMaintenanceDatabaseAllowance();
 
 // Baseline security response headers (nosniff, Referrer-Policy,
 // X-Frame-Options and a CSP). Registered this early so *every* response
@@ -89,6 +105,10 @@ app.UseMcpAcceptCompatibility();
 app.UseGatewayVersionGate();
 
 app.UseAuthentication();
+
+// Marks a SiteAdmin's /site-admin request for the maintenance database guard,
+// on the request thread. See Endpoints/MaintenanceModeMiddleware.cs.
+app.UseSiteAdminConsoleRequests();
 
 // Tool visibility gate: 404 a disabled tool's end-user routes (site-wide or
 // per-org) so a hidden tool isn't reachable by typing its URL. Runs after
@@ -145,6 +165,7 @@ app.MapAccountEndpoints();
 app.MapNotificationEndpoints();
 app.MapEntraAuthEndpoints();
 app.MapStepUpEndpoints();
+app.MapSessionRefresh();
 app.MapGitHubAppEndpoints();
 app.MapGitHubWebhookEndpoints();
 app.MapGatewayEndpoints();
@@ -152,6 +173,7 @@ app.MapAdminUserEndpoints();
 app.MapObjectExplorerEndpoints();
 app.MapCookbookEndpoints();
 app.MapCompareEndpoints();
+app.MapSealedEndpoints();
 app.MapPaletteEndpoints();
 app.MapLegacyRedirects();
 app.MapSiteAdminEndpoints();

@@ -15,7 +15,6 @@ namespace ALDevToolbox.Tests.Tools;
 /// probed by its address. Boots the real <c>Program.cs</c> so middleware order
 /// is exactly production's.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class ToolAccessGateTests : IDisposable
 {
     private readonly TestDb _db = new();
@@ -200,6 +199,53 @@ public sealed class ToolAccessGateTests : IDisposable
         // not 404'd. Its admin authoring sibling is never gated.
         (await client.GetAsync("/translator")).StatusCode.Should().Be(HttpStatusCode.Redirect);
         (await client.GetAsync("/object-explorer")).StatusCode.Should().Be(HttpStatusCode.Redirect);
+    }
+
+    /// <summary>
+    /// A tool's own /api endpoints - the recipe download, the Translator's export,
+    /// the Object Explorer's file reads - close with it, not only its pages (#1343).
+    /// </summary>
+    [Fact]
+    public async Task A_disabled_tools_own_api_endpoints_404()
+    {
+        await DisableToolsAsync(ToolKey.Cookbook, ToolKey.Translator, ToolKey.ObjectExplorer, ToolKey.Templates);
+
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+
+        (await client.GetAsync("/api/cookbook/1/download")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await client.GetAsync("/api/object-explorer/files/1/download")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await client.GetAsync("/api/snippets/1/download")).StatusCode.Should().Be(HttpStatusCode.MovedPermanently,
+            "the old address only redirects, to the gated one");
+        using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
+        // The gate's 404 re-executes /not-found with the same POST, which the page
+        // endpoint refuses as a 400; either way it is not the login redirect an
+        // enabled tool's endpoint gives a signed-out caller.
+        export.StatusCode.Should().BeOneOf(HttpStatusCode.NotFound, HttpStatusCode.BadRequest);
+        // The generator's posts and download links go with Templates (#1615).
+        (await client.GetAsync("/generate/download/abc")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        using var generate = await client.PostAsync("/generate/workspace", new FormUrlEncodedContent([]));
+        generate.StatusCode.Should().BeOneOf(HttpStatusCode.NotFound, HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task An_enabled_tools_api_endpoints_are_not_404d()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+
+        (await client.GetAsync("/api/cookbook/1/download")).StatusCode.Should().NotBe(HttpStatusCode.NotFound,
+            "signed out, the download sends you to sign in");
+        // The disabled test's 404 for this route only means something if the
+        // route exists: a renamed route would 404 there on routing alone.
+        (await client.GetAsync("/api/object-explorer/files/1/download")).StatusCode.Should().Be(HttpStatusCode.Redirect,
+            "signed out, the file download sends you to sign in");
+        using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
+        export.StatusCode.Should().Be(HttpStatusCode.Redirect, "signed out, the export sends you to sign in");
+        (await client.GetAsync("/generate/download/abc")).StatusCode.Should().Be(HttpStatusCode.Redirect,
+            "signed out, the generated download sends you to sign in");
+        using var generate = await client.PostAsync("/generate/workspace", new FormUrlEncodedContent([]));
+        generate.StatusCode.Should().Be(HttpStatusCode.Redirect, "signed out, the generator sends you to sign in");
     }
 
     [Fact]

@@ -122,6 +122,14 @@ internal static class TenantTableCatalog
         // oe_releases, so a restore that deleted the releases would take these
         // with them and put nothing back.
         "github_repository_drift",
+        // What the last drift scan read from each repository (#1719). Recomputable
+        // by a rescan, restored like the drift beside it; its only parent is
+        // organizations.
+        "github_repository_checks",
+        // What the last workspace files check found in each repository (#1719).
+        // Recomputable by a check, restored like the checks beside it; its only
+        // parent is organizations.
+        "github_repository_file_checks",
         // Which Business Central versions have already been offered to each
         // repository (#1104). Restorable content: without it the nightly run would
         // open again every update pull request somebody had closed. Its only
@@ -179,6 +187,10 @@ internal static class TenantTableCatalog
         "gateway_instance_licences",
         "gateway_instance_licence_ranges",
         "audit_log",
+        // The record of past migrations (#1701): who moved which customer from
+        // where, and into which repository. History, like the audit log, so a
+        // restore keeps it as it is rather than rolling it back.
+        "repository_migrations",
     ];
 
     /// <summary>
@@ -195,6 +207,8 @@ internal static class TenantTableCatalog
             ["email_outbox"] = "Transactional email in flight. Restoring it would re-send mail the recipient either already got or no longer needs, carrying reset and invite links that expired long before the restore. Rows are pruned within a day of sending anyway, and its organization_id is a label for the SiteAdmin list rather than a tenant link - there is no foreign key to cascade. See issue #790.",
             ["notification_digest_items"] = "Notifications waiting for someone's next daily or weekly digest. Restoring them would send old news again in the next digest, and they are deleted as soon as that digest goes out (or after 30 days). A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
             ["gateway_seen_tokens"] = "The replay memory for on-premises gateway requests: one row per request, kept for about two minutes and then cleared. Restoring it would bring back rows for tokens that expired long ago, and losing it costs nothing once they have. A restore never cascade-deletes it, since its parents (organizations, gateways) are not restored content. See .design/on-prem-gateway.md.",
+            ["sealed_links"] = "Sealed secret links. Restoring one would bring back an encrypted secret its sender revoked, or a link that was already used up, expired or locked. Links close within a week and are deleted 30 days later anyway, and they are tied to users (which are not restored). See .design/sealed.md.",
+            ["sealed_link_events"] = "The opens and wrong passphrases of a sealed link, deleted with it. Excluded with sealed_links, for the same reasons. See .design/sealed.md.",
             ["user_notifications"] = "The in-app list of notifications. Restoring it would bring back old news as unread, it is tied to users (which are not restored), and rows are deleted after 30 days anyway. A restore also removes the ones about a solution, by cascade from oe_projects, which is the same outcome. See .design/notifications.md.",
         };
 

@@ -88,6 +88,16 @@ public sealed class MustacheVariableCatalogTests : IDisposable
                 $"the generator should substitute '{{{{{v.Name}}}}}' — if this fails, " +
                 "either remove the variable from the catalogue or add it to GenerationService.SubstituteMustache.");
         }
+
+        // Gone is not enough: a renderer that blanked every name would pass the
+        // loop above. These are always set for a workspace, so each must render
+        // to something.
+        foreach (var name in new[] { "name", "workspace_name", "customer_name", "short_name", "workspace_folder", "publisher", "extension_prefix", "affix", "guid" })
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(content, $"\"probe_{name}\"\\s*:\\s*\"<([^>]*)>\"");
+            match.Success.Should().BeTrue("the probe for {0} should be in the file", name);
+            match.Groups[1].Value.Should().NotBeEmpty("{{{{{0}}}}} always has a value in a workspace", name);
+        }
     }
 
     // ===== helpers =====

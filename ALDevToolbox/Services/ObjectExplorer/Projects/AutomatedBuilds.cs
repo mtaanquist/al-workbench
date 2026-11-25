@@ -46,7 +46,7 @@ public static class AutomatedBuilds
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.PreviewCheckBlocked, reason), ct)
             : pipelines.Where(p => p.BuildOnPushBlocked != reason)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.BuildOnPushBlocked, reason), ct);
-        await update.ConfigureAwait(false);
+        await update;
     }
 
     /// <summary>
@@ -67,7 +67,7 @@ public static class AutomatedBuilds
         await using var scope = services.CreateAsyncScope();
         try
         {
-            await start(scope.ServiceProvider.GetRequiredService<ProjectBuildImporter>()).ConfigureAwait(false);
+            await start(scope.ServiceProvider.GetRequiredService<ProjectBuildImporter>());
             return new AutomatedStart(true, null, null);
         }
         catch (ProjectAccessDeniedException)

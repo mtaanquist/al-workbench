@@ -207,7 +207,7 @@ public sealed class GatewayCommandService
         var gateway = await _db.Gateways.AsNoTracking()
             .Where(g => g.Id == request.GatewayId)
             .Select(g => new { g.Name, g.State, g.RevokedAt })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (gateway is null)
         {
             errors["gateway"] = "That gateway no longer exists.";
@@ -251,7 +251,7 @@ public sealed class GatewayCommandService
             long size;
             if (file.ProjectBuildArtifactId is { } artifactId)
             {
-                if (await ArtifactHashAsync(orgId, artifactId, ct).ConfigureAwait(false) is not { } artifact)
+                if (await ArtifactHashAsync(orgId, artifactId, ct) is not { } artifact)
                 {
                     errors["files"] = $"The build file {name} no longer exists.";
                     break;
@@ -308,7 +308,7 @@ public sealed class GatewayCommandService
             });
         }
         _db.GatewayCommands.Add(command);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         // Inside the caller's transaction (a deployment recording the command it queued,
         // #1367) the row is not visible to the gateway until the caller commits, so waking
@@ -348,7 +348,7 @@ public sealed class GatewayCommandService
                 Length = c.Log.Length,
                 Tail = c.Log.Length > offset ? c.Log.Substring(offset) : string.Empty,
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (row is null) return null;
         var result = string.IsNullOrWhiteSpace(row.ResultJson) ? null : JsonNode.Parse(row.ResultJson) as JsonObject;
         return new GatewayCommandProgress(row.Status, row.FailureMessage, result, row.Tail, Math.Max(offset, row.Length),
@@ -370,8 +370,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, message), ct)
-            .ConfigureAwait(false);
+                .SetProperty(c => c.FailureMessage, message), ct);
         if (cancelled > 0)
         {
             _logger.LogInformation("Took back gateway command {CommandId} before the gateway collected it.", commandId);
@@ -402,7 +401,7 @@ public sealed class GatewayCommandService
         var gateway = await _db.Gateways.AsNoTracking()
             .Where(g => g.Id == gatewayId)
             .Select(g => new { g.State, g.RevokedAt })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (gateway is null || gateway.RevokedAt is not null) return new(GatewayClaimOutcome.Revoked);
         if (gateway.State != GatewayState.Approved) return new(GatewayClaimOutcome.NotApproved);
 
@@ -416,7 +415,7 @@ public sealed class GatewayCommandService
                             && c.DueAt <= now && c.ExpiresAt > now)
                 .OrderBy(c => c.DueAt).ThenBy(c => c.Id)
                 .Select(c => (long?)c.Id)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             if (candidate is not { } id) return new(GatewayClaimOutcome.Nothing);
 
             var won = await _db.GatewayCommands
@@ -424,14 +423,14 @@ public sealed class GatewayCommandService
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(c => c.Status, GatewayCommandStatus.Claimed)
                     .SetProperty(c => c.ClaimedAt, now)
-                    .SetProperty(c => c.LastReportedAt, now), ct).ConfigureAwait(false);
+                    .SetProperty(c => c.LastReportedAt, now), ct);
             if (won == 0) continue;
 
             // The row is ours now: read it whatever happens to the request, so a
             // gateway that hung up a moment ago does not leave a half-built answer.
             // If the answer still never arrives, the gateway never lists the command
             // and the sweep fails it after SilenceLimit; it is never handed out twice.
-            var message = await LoadMessageAsync(id, now, CancellationToken.None).ConfigureAwait(false);
+            var message = await LoadMessageAsync(id, now, CancellationToken.None);
             _logger.LogInformation("Gateway {GatewayId} claimed command {CommandId} ({Verb}).",
                 gatewayId, id, GatewayVerbs.ToWire(message.Verb));
             return new(GatewayClaimOutcome.Claimed, message);
@@ -452,11 +451,11 @@ public sealed class GatewayCommandService
             // Taken before the read, so a command queued between the read and the
             // wait still wakes this poll.
             var wake = _signal.WaitHandle(gatewayId);
-            var result = await ClaimNextAsync(gatewayId, ct).ConfigureAwait(false);
+            var result = await ClaimNextAsync(gatewayId, ct);
             if (result.Outcome != GatewayClaimOutcome.Nothing) return result;
             try
             {
-                await wake.WaitAsync(linked.Token).ConfigureAwait(false);
+                await wake.WaitAsync(linked.Token);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
@@ -481,7 +480,7 @@ public sealed class GatewayCommandService
                     .Select(f => new GatewayCommandFileMessage { Id = f.Id, Name = f.FileName, Sha256 = f.Sha256, Size = f.Size })
                     .ToList(),
             })
-            .FirstAsync(ct).ConfigureAwait(false);
+            .FirstAsync(ct);
         return new GatewayCommandMessage
         {
             Id = row.Id,
@@ -502,7 +501,7 @@ public sealed class GatewayCommandService
     /// the gateway should stop reporting on it.
     /// </summary>
     public async Task<bool> AppendProgressAsync(int gatewayId, long commandId, IReadOnlyList<string> lines, CancellationToken ct = default) =>
-        await AppendProgressAsync(gatewayId, commandId, lines, sequence: 0, ct).ConfigureAwait(false);
+        await AppendProgressAsync(gatewayId, commandId, lines, sequence: 0, ct);
 
     /// <summary>
     /// As <see cref="AppendProgressAsync(int, long, IReadOnlyList{string}, CancellationToken)"/>,
@@ -557,8 +556,7 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.Log, c =>
                     (sequence > 0 && sequence <= c.LastProgressSequence) || c.Log.Length >= MaxLogLength ? c.Log
                     : c.Log.Length + append.Length < MaxLogLength ? c.Log + append
-                    : (c.Log + append).Substring(0, MaxLogLength) + LogTruncatedMarker), ct)
-            .ConfigureAwait(false);
+                    : (c.Log + append).Substring(0, MaxLogLength) + LogTruncatedMarker), ct);
         return updated == 1;
     }
 
@@ -597,8 +595,7 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.FinishedAt, now)
                 .SetProperty(c => c.LastReportedAt, now)
                 .SetProperty(c => c.ResultJson, resultJson)
-                .SetProperty(c => c.FailureMessage, message), ct)
-            .ConfigureAwait(false);
+                .SetProperty(c => c.FailureMessage, message), ct);
         if (updated == 1)
         {
             _logger.LogInformation("Gateway {GatewayId} finished command {CommandId}: {Status}.", gatewayId, commandId, status);
@@ -637,8 +634,7 @@ public sealed class GatewayCommandService
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                     .SetProperty(c => c.FinishedAt, now)
-                    .SetProperty(c => c.FailureMessage, InterruptedMessage), ct)
-                .ConfigureAwait(false);
+                    .SetProperty(c => c.FailureMessage, InterruptedMessage), ct);
             if (failed > 0)
             {
                 _logger.LogWarning("Gateway {GatewayId} restarted in the middle of {Count} command(s); marked them failed.", gatewayId, failed);
@@ -650,8 +646,7 @@ public sealed class GatewayCommandService
             await _db.GatewayCommands
                 .Where(c => ids.Contains(c.Id) && c.GatewayId == gatewayId && c.Gateway!.State == GatewayState.Approved
                             && (c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running))
-                .ExecuteUpdateAsync(s => s.SetProperty(c => c.LastReportedAt, now), ct)
-                .ConfigureAwait(false);
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.LastReportedAt, now), ct);
         }
         return failed;
     }
@@ -668,7 +663,7 @@ public sealed class GatewayCommandService
         var command = await _db.GatewayCommands.AsNoTracking()
             .Where(c => c.Id == commandId && c.GatewayId == gatewayId)
             .Select(c => new { c.Status })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (command is null) return (GatewayFileOutcome.NotFound, null);
         if (command.Status is not (GatewayCommandStatus.Claimed or GatewayCommandStatus.Running))
         {
@@ -678,7 +673,7 @@ public sealed class GatewayCommandService
         var file = await _db.GatewayCommandFiles.AsNoTracking()
             .Where(f => f.Id == fileId && f.CommandId == commandId)
             .Select(f => new GatewayCommandFileDownload(f.Id, f.FileName, f.Sha256, f.Size))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         return file is null ? (GatewayFileOutcome.NotFound, null) : (GatewayFileOutcome.Found, file);
     }
 
@@ -695,7 +690,7 @@ public sealed class GatewayCommandService
         ArgumentNullException.ThrowIfNull(destination);
         var orgId = RequireOrganizationId();
         var connection = _db.Database.GetDbConnection();
-        await _db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await _db.Database.OpenConnectionAsync(ct);
         try
         {
             await using var command = connection.CreateCommand();
@@ -713,18 +708,18 @@ public sealed class GatewayCommandService
             org.ParameterName = "org";
             org.Value = orgId;
             command.Parameters.Add(org);
-            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, ct).ConfigureAwait(false);
-            if (!await reader.ReadAsync(ct).ConfigureAwait(false) || await reader.IsDBNullAsync(0, ct).ConfigureAwait(false))
+            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, ct);
+            if (!await reader.ReadAsync(ct) || await reader.IsDBNullAsync(0, ct))
             {
                 return false;
             }
             await using var content = reader.GetStream(0);
-            await content.CopyToAsync(destination, ct).ConfigureAwait(false);
+            await content.CopyToAsync(destination, ct);
             return true;
         }
         finally
         {
-            await _db.Database.CloseConnectionAsync().ConfigureAwait(false);
+            await _db.Database.CloseConnectionAsync();
         }
     }
 
@@ -737,7 +732,7 @@ public sealed class GatewayCommandService
     private async Task<(string Sha256, long Size)?> ArtifactHashAsync(int orgId, int artifactId, CancellationToken ct)
     {
         var connection = _db.Database.GetDbConnection();
-        await _db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await _db.Database.OpenConnectionAsync(ct);
         try
         {
             await using var command = connection.CreateCommand();
@@ -751,8 +746,8 @@ public sealed class GatewayCommandService
             org.ParameterName = "org";
             org.Value = orgId;
             command.Parameters.Add(org);
-            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            if (!await reader.ReadAsync(ct).ConfigureAwait(false) || await reader.IsDBNullAsync(0, ct).ConfigureAwait(false))
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct) || await reader.IsDBNullAsync(0, ct))
             {
                 return null;
             }
@@ -760,7 +755,7 @@ public sealed class GatewayCommandService
         }
         finally
         {
-            await _db.Database.CloseConnectionAsync().ConfigureAwait(false);
+            await _db.Database.CloseConnectionAsync();
         }
     }
 
@@ -800,8 +795,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Expired)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, OfflineMessage), ct)
-            .ConfigureAwait(false);
+                .SetProperty(c => c.FailureMessage, OfflineMessage), ct);
 
         // A gateway re-keyed by a rotation code is pending again, and whatever its old
         // key was working on cannot be collected or reported until an Admin approves
@@ -817,8 +811,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, RekeyedMessage), ct)
-            .ConfigureAwait(false);
+                .SetProperty(c => c.FailureMessage, RekeyedMessage), ct);
 
         var quietSince = now - SilenceLimit;
         // The gateway itself went quiet: the likelier reason, and the clearer message.
@@ -829,8 +822,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, GatewaySilentMessage), ct)
-            .ConfigureAwait(false);
+                .SetProperty(c => c.FailureMessage, GatewaySilentMessage), ct);
         // The gateway is alive but has stopped listing this one: it never received it
         // (the answer to the claim was lost), or lost track of it.
         var commandSilent = await _db.GatewayCommands
@@ -839,8 +831,7 @@ public sealed class GatewayCommandService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
                 .SetProperty(c => c.FinishedAt, now)
-                .SetProperty(c => c.FailureMessage, CommandSilentMessage), ct)
-            .ConfigureAwait(false);
+                .SetProperty(c => c.FailureMessage, CommandSilentMessage), ct);
 
         // A final command is never downloaded again; keep the record, drop the bytes.
         await _db.GatewayCommandFiles
@@ -848,12 +839,11 @@ public sealed class GatewayCommandService
                         && (f.Command!.Status == GatewayCommandStatus.Succeeded
                             || f.Command.Status == GatewayCommandStatus.Failed
                             || f.Command.Status == GatewayCommandStatus.Expired))
-            .ExecuteUpdateAsync(s => s.SetProperty(f => f.Content, (byte[]?)null), ct)
-            .ConfigureAwait(false);
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.Content, (byte[]?)null), ct);
 
         var tokens = await _db.GatewaySeenTokens
             .Where(t => t.ExpiresAt < now)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            .ExecuteDeleteAsync(ct);
 
         if (expired + rekeyed + gatewaySilent + commandSilent > 0)
         {

@@ -77,6 +77,7 @@ public static class SingleTenantSeeder
             }
             // Domains are globally unique. On a fresh database nothing is
             // claimed yet, but stay defensive in case the seed list overlaps.
+            // Fence category 3 (startup seeder): existence-only, pinned to d.Domain == domain.
             var taken = await db.OrganizationEmailDomains.IgnoreQueryFilters()
                 .AnyAsync(d => d.Domain == domain, ct);
             if (taken)
@@ -99,6 +100,7 @@ public static class SingleTenantSeeder
         // doesn't have to. (Verified/SMTP path only — see the entity doc.)
         if (seededAnyDomain)
         {
+            // Fence category 3 (startup seeder): pinned to s.OrganizationId == org.Id.
             var settings = await db.OrganizationSettings.IgnoreQueryFilters()
                 .FirstOrDefaultAsync(s => s.OrganizationId == org.Id, ct);
             if (settings is null)

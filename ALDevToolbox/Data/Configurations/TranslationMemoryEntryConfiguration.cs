@@ -62,10 +62,13 @@ internal sealed class TranslationMemoryEntryConfiguration : IEntityTypeConfigura
             .HasOperators("gin_trgm_ops")
             .HasDatabaseName("ix_translation_memory_target_trgm");
 
-        // Supports the default browse ordering (score, then hit_count) inside an
-        // organisation, so a page of results doesn't sort the whole match set.
-        entity.HasIndex(e => new { e.OrganizationId, e.Score, e.HitCount })
-            .IsDescending(false, true, true)
+        // The whole browse ordering (score, hit_count, last_seen_at, then id)
+        // inside an organisation, so a page is read straight off the index. With
+        // only score and hit_count in it, Postgres still sorted every row of the
+        // largest tie group (most of the memory: score 0, seen once) to find
+        // the first 50.
+        entity.HasIndex(e => new { e.OrganizationId, e.Score, e.HitCount, e.LastSeenAt, e.Id })
+            .IsDescending(false, true, true, true, true)
             .HasDatabaseName("ix_translation_memory_rank");
     }
 }

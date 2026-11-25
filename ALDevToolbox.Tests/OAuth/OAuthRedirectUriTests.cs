@@ -15,9 +15,15 @@ namespace ALDevToolbox.Tests.OAuth;
 /// a client metadata document (URL-shaped <c>client_id</c>), and the
 /// authorize request itself for a row stored before the rule existed. Also
 /// pins that the <c>form_post</c> response mode is switched off.
+///
+/// <para>The cases share one host (#1536). Registration and metadata fetches are
+/// rate limited per caller address, ten in ten minutes, so each test calls from an
+/// address of its own (<see cref="Host"/> stands in for the connection address the
+/// test server leaves empty); the limits themselves are untouched. The one test
+/// that asserts the metadata client was never stored boots a host of its own,
+/// because another test stores it.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class OAuthRedirectUriTests : IDisposable
+public sealed class OAuthRedirectUriTests : IClassFixture<OAuthRedirectUriTests.Host>
 {
     private const string CimdClientId = "https://client.cronus.example/oauth/metadata.json";
     private const string CimdGoodRedirect = "https://client.cronus.example/oauth/callback";
@@ -25,20 +31,35 @@ public sealed class OAuthRedirectUriTests : IDisposable
     // RFC 7636 appendix B test vector - any well-formed S256 challenge will do.
     private const string CodeChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
-    private readonly TestDb _db = new();
     private readonly EndpointFactory _factory;
 
-    public OAuthRedirectUriTests()
+    /// <summary>This test's own caller address (<see cref="TestCallerAddress"/>).</summary>
+    private readonly string _address = TestCallerAddress.Next();
+
+    public OAuthRedirectUriTests(Host host)
     {
-        _factory = new EndpointFactory(_db, services =>
-            services.AddHttpClient(nameof(CimdClientResolver))
-                .ConfigurePrimaryHttpMessageHandler(() => new MetadataDocumentHandler()));
+        _factory = host.Factory;
     }
 
-    public void Dispose()
+    /// <summary>A client whose requests arrive from this test's address.</summary>
+    private HttpClient NewClient() => NewClient(_factory, _address);
+
+    private static HttpClient NewClient(EndpointFactory factory, string address) =>
+        factory.CreateClient().From(address);
+
+    /// <summary>
+    /// The shared host: metadata documents come from <see cref="MetadataDocumentHandler"/>.
+    /// </summary>
+    public sealed class Host : SharedEndpointHost
     {
-        _factory.Dispose();
-        _db.Dispose();
+        public Host()
+            : base(services =>
+            {
+                services.AddHttpClient(nameof(CimdClientResolver))
+                    .ConfigurePrimaryHttpMessageHandler(() => new MetadataDocumentHandler());
+            })
+        {
+        }
     }
 
     [Theory]
@@ -54,7 +75,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [InlineData("myapp:/callback")]
     public async Task Registration_refuses_redirect_uris_outside_the_policy(string redirectUri)
     {
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
 
         using var response = await RegisterAsync(client, redirectUri);
 
@@ -66,7 +87,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [Fact]
     public async Task Registration_refuses_the_whole_request_when_one_redirect_uri_is_refused()
     {
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
 
         using var response = await RegisterAsync(client, "https://cronus.example/callback", "javascript:alert(1)");
 
@@ -81,7 +102,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [InlineData("com.cronus.workbench:/oauth/callback")]
     public async Task Registration_accepts_https_loopback_and_reverse_domain_schemes(string redirectUri)
     {
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
 
         using var response = await RegisterAsync(client, redirectUri);
 
@@ -91,7 +112,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [Fact]
     public async Task Client_metadata_document_keeps_only_allowed_redirect_uris()
     {
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
 
         // Any authorize request naming the URL-shaped client_id makes the
         // server fetch the document and store (or refresh) the client.
@@ -139,7 +160,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
             await applications.CreateAsync(descriptor, CancellationToken.None);
         }
 
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
         var url = sendRedirectUri
             ? AuthorizeUrl(clientId, legacyRedirect)
             : AuthorizeUrl(clientId, redirectUri: null);
@@ -152,12 +173,13 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [Fact]
     public async Task Authorize_with_a_refused_redirect_uri_does_not_store_a_metadata_client()
     {
-        using var client = _factory.CreateClient();
+        using var host = new Host();
+        using var client = NewClient(host.Factory, _address);
 
         using var response = await client.GetAsync(AuthorizeUrl(CimdClientId, "javascript:alert(1)"));
 
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        using var scope = _factory.Services.CreateScope();
+        using var scope = host.Factory.Services.CreateScope();
         var applications = scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>();
         (await applications.FindByClientIdAsync(CimdClientId, CancellationToken.None)).Should().BeNull(
             "the request is refused before the metadata document is fetched and stored.");
@@ -166,7 +188,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [Fact]
     public async Task Authorize_refuses_the_form_post_response_mode()
     {
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
         using var registration = await RegisterAsync(client, Loopback);
         registration.StatusCode.Should().Be(HttpStatusCode.Created);
         using var registered = JsonDocument.Parse(await registration.Content.ReadAsStringAsync());
@@ -184,7 +206,7 @@ public sealed class OAuthRedirectUriTests : IDisposable
     [Fact]
     public async Task Discovery_does_not_advertise_form_post()
     {
-        using var client = _factory.CreateClient();
+        using var client = NewClient();
         using var response = await client.GetAsync("/.well-known/oauth-authorization-server");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());

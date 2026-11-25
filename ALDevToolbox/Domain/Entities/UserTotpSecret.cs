@@ -28,4 +28,11 @@ public class UserTotpSecret
 
     public DateTime CreatedAt { get; set; }
     public DateTime? LastUsedAt { get; set; }
+
+    /// <summary>
+    /// The 30-second time step of the last code accepted. A code is refused
+    /// unless its step is later, so a code someone else saw or relayed cannot
+    /// be used a second time inside its validity window (#1336).
+    /// </summary>
+    public long? LastUsedTimeStep { get; set; }
 }

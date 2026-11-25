@@ -155,6 +155,20 @@ public sealed class ProjectBuildServiceTests
         File.ReadAllText(entry.FullName).Should().Be("/");
     }
 
+    [Fact]
+    public void Build_git_calls_never_start_background_maintenance_in_the_clone()
+    {
+        // A background repack could still be running while the build reads the clone,
+        // and a build once read no commit at all (#1453).
+        if (!GitAvailable()) return;
+        using var temp = new TempDir();
+        Git(temp.Path, null, "init", "--quiet");
+        var env = ProjectBuildService.GitAuthEnv(RepositoryProvider.GitHub, "tok");
+
+        Git(temp.Path, env, "config", "--get", "maintenance.auto").Trim().Should().Be("false");
+        Git(temp.Path, env, "config", "--get", "gc.auto").Trim().Should().Be("0");
+    }
+
     private static bool GitAvailable()
     {
         try
@@ -173,7 +187,7 @@ public sealed class ProjectBuildServiceTests
         }
     }
 
-    private static void Git(string workDir, IReadOnlyDictionary<string, string>? env, params string[] args)
+    private static string Git(string workDir, IReadOnlyDictionary<string, string>? env, params string[] args)
     {
         var info = new System.Diagnostics.ProcessStartInfo("git")
         {
@@ -184,9 +198,11 @@ public sealed class ProjectBuildServiceTests
         foreach (var a in args) info.ArgumentList.Add(a);
         if (env is not null) foreach (var (k, v) in env) info.Environment[k] = v;
         using var p = System.Diagnostics.Process.Start(info)!;
+        var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
         p.ExitCode.Should().Be(0, stderr);
+        return stdout.Result;
     }
 
     [Theory]
@@ -458,6 +474,24 @@ public sealed class ProjectBuildServiceTests
         entries[0].CommittedAt.Should().Be(new DateTime(2026, 6, 20, 9, 30, 0, DateTimeKind.Utc));
         // The +02:00 commit is normalised to UTC.
         entries[1].CommittedAt.Should().Be(new DateTime(2026, 6, 19, 15, 5, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void ParseChangelog_keeps_the_author_email_when_git_gave_one()
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            $"a1b2c3d{Us}Ada Lovelace{Us}2026-06-20T09:30:00+00:00{Us}Fix the posting routine{Us}ada@cronus.example",
+            $"e4f5061{Us}Alan Turing{Us}2026-06-19T17:05:00+02:00{Us}Add a setup field",
+            $"9a8b7c6{Us}Grace Hopper{Us}2026-06-18T08:00:00+00:00{Us}Tidy the setup page{Us}",
+        });
+
+        var (entries, _) = ProjectBuildService.ParseChangelog(stdout, cap: 100);
+
+        entries[0].AuthorEmail.Should().Be("ada@cronus.example");
+        entries[0].Subject.Should().Be("Fix the posting routine");
+        entries[1].AuthorEmail.Should().BeNull();
+        entries[2].AuthorEmail.Should().BeNull("git gives an empty address when the commit has none");
     }
 
     [Fact]

@@ -15,10 +15,15 @@ namespace ALDevToolbox.Domain.Tools;
 /// the same as it 404s the tool's pages. For a writing tool it is also the tool whose step-up
 /// rule governs it; read-only tools are never gated by step-up, because a recent second factor
 /// guards the actions that spend a stored credential, not the lookups around them. Null only
-/// for a tool that serves several tools at once (<c>list_repositories</c>) or none of them
+/// for a tool that serves several tools at once (<c>list_repositories</c>, see <paramref name="AnyOf"/>) or none of them
 /// (the quality guidance), which only the MCP switch itself turns off.
 /// <c>McpToolCatalogTests</c> requires every writing tool to name one.</param>
-public sealed record McpToolDescriptor(string Name, string Group, string Blurb, bool Writes, ToolKey? Tool = null);
+/// <param name="AnyOf">For a tool with no single <paramref name="Tool"/> that only helps
+/// the tools listed here (<c>list_repositories</c>): it is offered while any of them is on,
+/// and dropped once all of them are off, since nothing left could use its answer.</param>
+public sealed record McpToolDescriptor(
+    string Name, string Group, string Blurb, bool Writes, ToolKey? Tool = null,
+    IReadOnlyList<ToolKey>? AnyOf = null);
 
 /// <summary>
 /// The user-facing description of every tool an AI assistant can call, for
@@ -79,9 +84,11 @@ public static class McpToolCatalog
 
         // ---- Object Explorer ----
         new McpToolDescriptor("list_releases", ObjectExplorer,
-            "Lists the Business Central releases that have been imported.", false, ToolKey.ObjectExplorer),
+            "Lists the Business Central releases you can browse, the same ones the Releases page shows, "
+            + "including the newest build of each solution pipeline. It can search by customer, publisher or version.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("list_release_modules", ObjectExplorer,
-            "Lists the apps and modules inside one release.", false, ToolKey.ObjectExplorer),
+            "Lists the apps and modules inside one release, up to 200 at a time. "
+            + "It can narrow the list by name.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_releases", ObjectExplorer,
             "Reports what changed between two releases.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_release_files", ObjectExplorer,
@@ -94,7 +101,7 @@ public static class McpToolCatalog
         new McpToolDescriptor("search_content", ObjectExplorer,
             "Searches the AL source itself, for when you remember the code but not the object.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("find_references", ObjectExplorer,
-            "Finds every place that touches a table, field or procedure.", false, ToolKey.ObjectExplorer),
+            "Finds every place that touches a table, field or procedure, or only the places that set a field.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("find_system_references", ObjectExplorer,
             "Finds uses of platform types that the base application does not declare.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("get_object_outline", ObjectExplorer,
@@ -135,17 +142,18 @@ public static class McpToolCatalog
         new McpToolDescriptor("vote_translation", Translator,
             "Votes a suggested translation up or down.", true, ToolKey.Translator),
         new McpToolDescriptor("remove_translation", Translator,
-            "Withdraws a translation the assistant suggested.", true, ToolKey.Translator),
+            "Removes a translation from your organisation's memory so it is no longer suggested. Needs the "
+            + "Editor role. It can be restored from the Translation memory page.", true, ToolKey.Translator),
 
         // ---- Solutions and pipelines ----
         new McpToolDescriptor("list_solutions", Projects,
             "Lists the customer solutions you can see.", false, ToolKey.Projects),
         new McpToolDescriptor("list_solution_builds", Projects,
-            "Lists the builds recorded against one solution.", false, ToolKey.Projects),
+            "Lists the builds recorded against one solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("get_solution_build", Projects,
-            "Returns one build with its apps and their versions.", false, ToolKey.Projects),
+            "Returns one build with its apps and their versions.", false, ToolKey.Pipelines),
         new McpToolDescriptor("compare_solution_builds", Projects,
-            "Reports what changed between two builds of the same solution.", false, ToolKey.Projects),
+            "Reports what changed between two builds of the same solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("list_pipelines", Projects,
             "Lists the build pipelines set up for a solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("list_pipeline_builds", Projects,
@@ -172,14 +180,14 @@ public static class McpToolCatalog
         new McpToolDescriptor("list_environment_history", Operations,
             "Lists what was done to an environment from the workbench, and by whom.", false, ToolKey.Projects),
         new McpToolDescriptor("list_upgrades", Operations,
-            "Lists the platform updates coming to each environment, and when. Needs permission to "
-            + "manage environment updates.", false, ToolKey.Projects),
+            "Lists the platform updates coming to each environment, and when. Needs the "
+            + "Can schedule upgrades permission.", false, ToolKey.Projects),
         new McpToolDescriptor("list_planned_upgrades", Operations,
             "Lists the planned upgrades, open and done, with how far each one has got. Needs "
-            + "permission to manage environment updates.", false, ToolKey.Projects),
+            + "the Can schedule upgrades permission.", false, ToolKey.Projects),
         new McpToolDescriptor("get_upgrade", Operations,
             "Shows one planned upgrade: each environment on it, where its update has got, and who "
-            + "checked it. Needs permission to manage environment updates.", false, ToolKey.Projects),
+            + "checked it. Needs the Can schedule upgrades permission.", false, ToolKey.Projects),
         new McpToolDescriptor("list_recent_deployments", Operations,
             "Lists recent deployments across all your customers, and why any of them failed.", false, ToolKey.Releases),
         new McpToolDescriptor("list_customer_contacts", Operations,
@@ -194,7 +202,9 @@ public static class McpToolCatalog
         // ---- GitHub repositories ----
         new McpToolDescriptor("list_repositories", Repositories,
             "Lists the GitHub repositories you can work on, and says what to connect when there "
-            + "are none yet.", false),
+            + "are none yet.", false,
+            // Only the Templates, Cookbook and Translator tools take a repository.
+            AnyOf: [ToolKey.Templates, ToolKey.Cookbook, ToolKey.Translator]),
         new McpToolDescriptor("create_repository", Repositories,
             "Creates a repository in your GitHub organisation with a new workspace in it.", true, ToolKey.Templates),
         new McpToolDescriptor("add_extension_to_repository", Repositories,

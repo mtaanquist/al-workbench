@@ -493,3 +493,12 @@
     /* The ribbon's four named counts are the first thing to go. */
     .tprog__keys { display: none; }
 }
+
+/* ── Generated-file notice ──────────────────────────────────────────────── */
+
+/* The frame's grid has one row each for head, bar, body and foot, so the
+   notice rides in the bar (which wraps) and takes a whole line of it. The
+   frame, tint and icon slot are <Alert>'s; ::deep because that component
+   renders the box. */
+.pw__bar ::deep .tr-gennote { flex: 1 0 100%; align-items: center; }
+.pw__bar .tr-gennote__text { flex: 1; min-width: 0; }

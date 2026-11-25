@@ -121,10 +121,18 @@ public sealed class ProjectConnectionServiceTests : IDisposable
                 new BcTimeZone("Romance Standard Time", "(UTC+01:00) Brussels, Copenhagen, Madrid, Paris", "+01:00"),
             });
 
+        /// <summary>An exception to throw for one environment's cadence write, so a batch can lose a row.</summary>
+        public Func<string, Exception?>? CadenceThrowsFor;
+
+        /// <summary>Every environment a cadence write reached, in order.</summary>
+        public List<string> CadenceWrites { get; } = new();
+
         public Task SetAppUpdateCadenceAsync(string accessToken, string? applicationFamily, string environmentName, string cadence, CancellationToken ct = default)
         {
             if (WriteThrows is not null) throw WriteThrows;
+            if (CadenceThrowsFor?.Invoke(environmentName) is { } thrown) throw thrown;
             Cadence = cadence;
+            CadenceWrites.Add(environmentName);
             return Task.CompletedTask;
         }
 
@@ -286,8 +294,14 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             string.Empty, "1.0.0.0", null, string.Empty, string.Empty, string.Empty,
             false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow);
 
+        /// <summary>The token each poll of an install was sent with, in order.</summary>
+        public List<string> PolledWith { get; } = [];
+
         public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
-            => Task.FromResult(OnOperation(operationId));
+        {
+            PolledWith.Add(accessToken);
+            return Task.FromResult(OnOperation(operationId));
+        }
     }
 
     private sealed class StubHandler : HttpMessageHandler
@@ -333,7 +347,17 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         public TestClock(DateTimeOffset start) => _now = start;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+        public void Set(DateTimeOffset at) => _now = at;
     }
+
+    /// <summary>
+    /// Puts the clock on tomorrow at 12:00 UTC, for the window tests: 13:00 or 14:00 in
+    /// Copenhagen and 07:00 or 08:00 in New York, outside every night window they book
+    /// against and hours from a change of summer time, whatever time of day the suite
+    /// runs (#1439). Tomorrow rather than a fixed date, so it never falls into the past.
+    /// </summary>
+    private void AtNoonUtcTomorrow() =>
+        _clock.Set(new DateTimeOffset(DateTime.UtcNow.Date.AddDays(1).AddHours(12), TimeSpan.Zero));
 
     private async Task<int> SeedProjectAsync(string name = "CRONUS A/S")
     {
@@ -352,7 +376,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     private BcConnectionInput ValidConnection(string secret = "s3cr3t") =>
-        new(Guid.NewGuid(), "client-abc", secret, DateTime.UtcNow.AddYears(1), "Europe/Copenhagen");
+        new(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", secret, DateTime.UtcNow.AddYears(1), "Europe/Copenhagen");
 
     // ── Secret handling ───────────────────────────────────────────────────
 
@@ -401,7 +425,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         // Re-save with a blank secret but a changed timezone.
         await using (var ctx = _db.NewContext())
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
-                new BcConnectionInput(Guid.NewGuid(), "client-abc", ClientSecret: "", SecretExpiresAt: null, TimeZone: "UTC"));
+                new BcConnectionInput(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", ClientSecret: "", SecretExpiresAt: null, TimeZone: "UTC"));
 
         await using (var verify = _db.NewContext())
         {
@@ -434,7 +458,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
 
         var act = () => Svc(ctx, TokenOk()).SaveConnectionAsync(id,
-            new BcConnectionInput(Guid.NewGuid(), "client-abc", "secret", SecretExpiresAt: null, TimeZone: null));
+            new BcConnectionInput(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", "secret", SecretExpiresAt: null, TimeZone: null));
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("BcClientSecretExpiresAt");
@@ -749,7 +773,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         // Somebody clears it on the environment page, then the default itself changes.
         await using (var ctx = _db.NewContext())
-            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(id, envId, null, null);
+            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(id, envId, null, null, DeliveryDays.Every);
         await SetDefaultWindowsAsync(new DefaultDeliveryWindows(new TimeOnly(1, 0), new TimeOnly(3, 0), null, null));
         await using (var ctx = _db.NewContext())
             await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsAsync(id);
@@ -2224,6 +2248,170 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             .Which.Errors.Values.Should().Contain("Business Central refused: no admin access.");
     }
 
+    // ── Naming who started an operation ──────────────────────────────────
+
+    private const string SolutionClientId = "11111111-2222-3333-4444-555555555555";
+
+    private static BcEnvironmentOperation StartedOp(string type, string createdBy, DateTimeOffset at, Guid? id = null) => new(
+        (id ?? Guid.NewGuid()).ToString(), type, "succeeded", at, at, at.AddMinutes(1),
+        createdBy, string.Empty, new Dictionary<string, string>());
+
+    private async Task<(int ProjectId, OeProjectEnvironment Env)> SeedConnectedEnvironmentAsync()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        var admin = new FakeAdminClient { OnList = () => new[] { new BcEnvironment("Production", "Production") } };
+        return (id, await RefreshAndReadRowAsync(id, admin));
+    }
+
+    private async Task SeedActionAsync(
+        int projectId, int envId, UpgradeActionKind kind, string requestedBy, DateTime sentAt, Guid? operationId = null)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            EnvironmentId = envId,
+            Kind = kind,
+            Status = UpgradeActionStatus.Sent,
+            RequestedBy = requestedBy,
+            RequestedAt = sentAt,
+            ExecuteAfter = sentAt,
+            SentAt = sentAt,
+            BcOperationId = operationId,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task An_operation_started_by_our_app_registration_reads_as_AL_Workbench_with_who_asked()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        var installId = Guid.NewGuid();
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.UploadApp, "Ada Lovelace <ada@cronus.example>", at.UtcDateTime, installId);
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime.AddHours(2).AddSeconds(20));
+
+        var install = StartedOp("environmentAppInstall", SolutionClientId.ToUpperInvariant(), at.AddMinutes(10), installId);
+        var dateMove = StartedOp("modify", SolutionClientId, at.AddHours(2));
+        var restart = StartedOp("restart", SolutionClientId, at.AddHours(5));
+        var someoneElse = StartedOp("modify", "ops@cronus.example", at.AddHours(2));
+
+        await using var read = _db.NewContext();
+        var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(
+            id, env.Id, [install, dateMove, restart, someoneElse]);
+
+        labels.Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            [install.Id] = "AL Workbench (Ada Lovelace)",
+            [dateMove.Id] = "AL Workbench (Grace Hopper)",
+            [restart.Id] = "AL Workbench",
+        });
+    }
+
+    [Fact]
+    public async Task An_install_from_a_pipeline_deployment_names_whoever_started_the_deployment()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var operationId = Guid.NewGuid();
+        await SeedDeliveredAppAsync(id, env.Name, Guid.NewGuid(), operationId, OwnerUserId);
+        string owner;
+        await using (var ctx = _db.NewContext())
+            owner = await ctx.Users.AsNoTracking().Where(u => u.Id == OwnerUserId).Select(u => u.DisplayName).SingleAsync();
+
+        var install = StartedOp("environmentAppInstall", SolutionClientId, new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero), operationId);
+
+        await using var read = _db.NewContext();
+        (await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [install]))
+            .Should().ContainKey(install.Id).WhoseValue.Should().Be($"AL Workbench ({owner})");
+    }
+
+    [Fact]
+    public async Task An_action_sent_well_apart_from_the_operation_does_not_name_its_starter()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime.AddMinutes(10));
+
+        var dateMove = StartedOp("modify", SolutionClientId, at);
+
+        await using var read = _db.NewContext();
+        (await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [dateMove]))
+            .Should().ContainKey(dateMove.Id).WhoseValue.Should().Be("AL Workbench");
+    }
+
+    [Fact]
+    public async Task One_action_names_one_operation_and_never_one_on_another_environment()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        var at = new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero);
+        int otherEnvId;
+        await using (var ctx = _db.NewContext())
+        {
+            var other = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, Name = "Sandbox", Type = "Sandbox",
+            };
+            ctx.OeProjectEnvironments.Add(other);
+            await ctx.SaveChangesAsync();
+            otherEnvId = other.Id;
+        }
+        await SeedActionAsync(id, env.Id, UpgradeActionKind.PushDateToLatest, "Grace Hopper <grace@cronus.example>", at.UtcDateTime);
+        await SeedActionAsync(id, otherEnvId, UpgradeActionKind.PushDateToLatest, "Ada Lovelace <ada@cronus.example>", at.UtcDateTime.AddSeconds(30));
+
+        var first = StartedOp("modify", SolutionClientId, at.AddSeconds(5));
+        var second = StartedOp("modify", SolutionClientId, at.AddSeconds(30));
+        var notAGuid = StartedOp("modify", "SYSTEM", at);
+
+        await using var read = _db.NewContext();
+        var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [first, second, notAGuid]);
+
+        labels.Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            [first.Id] = "AL Workbench (Grace Hopper)",
+            [second.Id] = "AL Workbench",
+        });
+    }
+
+    [Fact]
+    public async Task The_organisations_app_registration_is_recognised_as_well_as_the_solutions_own()
+    {
+        var (id, env) = await SeedConnectedEnvironmentAsync();
+        const string orgClient = "103da8d4-b842-46aa-9b1a-e8317721130e";
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.OrganizationSettings.SingleOrDefaultAsync(o => o.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                ctx.OrganizationSettings.Add(settings);
+            }
+            settings.BcClientId = orgClient;
+            await ctx.SaveChangesAsync();
+        }
+
+        try
+        {
+            var op = StartedOp("restart", orgClient, new DateTimeOffset(2026, 9, 3, 8, 0, 0, TimeSpan.Zero));
+            var stranger = StartedOp("restart", Guid.NewGuid().ToString(), new DateTimeOffset(2026, 9, 3, 9, 0, 0, TimeSpan.Zero));
+
+            await using var read = _db.NewContext();
+            var labels = await Svc(read, TokenOk()).DescribeOperationStartersAsync(id, env.Id, [op, stranger]);
+
+            labels.Should().ContainKey(op.Id).WhoseValue.Should().Be("AL Workbench");
+            labels.Should().NotContainKey(stranger.Id);
+        }
+        finally
+        {
+            // The rest of the class expects an organisation without a registration of its own.
+            await using var reset = _db.NewContext();
+            await reset.OrganizationSettings.Where(o => o.OrganizationId == TestDb.DefaultOrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.BcClientId, (string?)null));
+        }
+    }
+
     private static BcEnvironmentOperation Operation(string type, int day) => new(
         Guid.NewGuid().ToString(), type, "succeeded",
         new DateTimeOffset(2026, 9, day, 8, 0, 0, TimeSpan.Zero), null, null,
@@ -2309,6 +2497,65 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var verified = await verify.OeProjects.AsNoTracking().Where(p => p.Id == id)
             .Select(p => p.BcConnectionVerifiedAt).SingleAsync();
         verified.Should().BeNull("a sweep nobody asked for is not the consultant's own connection test");
+    }
+
+    /// <summary>
+    /// Being told to slow down is neither a rejection nor a generic failure: the result
+    /// says so, in words, and carries the wait so the scheduled refresh can honour it.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_environment_list_reports_the_wait_it_was_given()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(10),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.Result.Should().Be(BcConnectionResult.Throttled);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(10));
+        result.Message.Should().Contain("slow down").And.Contain("10 minutes");
+    }
+
+    /// <summary>
+    /// Once Business Central has said slow down part-way through the detail reads, the
+    /// rest of that tenant's reads would only be refused too, so they are not sent. The
+    /// environment list itself was read, so the refresh still counts as a success.
+    /// </summary>
+    [Fact]
+    public async Task A_throttled_detail_read_stops_the_remaining_reads_and_reports_the_wait()
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production"), new BcEnvironment("Sandbox", "Sandbox") },
+            OnUpdateSettings = _ => throw new BcApiException(HttpStatusCode.TooManyRequests, "slow down")
+            {
+                RetryAfter = TimeSpan.FromMinutes(3),
+            },
+        };
+
+        BcConnectionTestResult result;
+        await using (var ctx = _db.NewContext())
+            result = await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsUnattendedAsync(id);
+
+        result.IsSuccess.Should().BeTrue("the environment list was read and saved");
+        result.EnvironmentCount.Should().Be(2);
+        result.RetryAfter.Should().Be(TimeSpan.FromMinutes(3));
+        admin.UpdateSettingsRequested.Should().ContainSingle("nothing more is asked of a tenant that said slow down");
     }
 
     // ── The environment panel (live reads, never cached) ──────────────────
@@ -2506,9 +2753,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         // Outside the window, so both bookings wait for its next 22:00 rather than running now.
-        var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
-        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(8));
+        AtNoonUtcTomorrow();
         var apps = AppsWithWaiting();
 
         await using var ctx = _db.NewContext();
@@ -2636,6 +2881,112 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             .Should().Contain("Continia Core").And.Contain("Cancel that booking");
     }
 
+    // Several updates booked together (the operations team's "these tonight").
+
+    private static FakeAppManagementClient AppsWithThreeWaiting(Guid systemApp, Guid banking) => new()
+    {
+        OnAvailable = () => new[]
+        {
+            new BcAvailableAppUpdate(WaitingAppId, "Continia Core", "Continia Software", "28.5.0.1",
+                new[] { new BcAppUpdateRequirement(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", "update") }),
+            new BcAvailableAppUpdate(banking, "Continia Banking", "Continia Software", "28.5.0.2", Array.Empty<BcAppUpdateRequirement>()),
+            new BcAvailableAppUpdate(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", Array.Empty<BcAppUpdateRequirement>()),
+        },
+    };
+
+    [Fact]
+    public async Task Several_app_updates_are_booked_as_one_batch_with_the_app_another_waits_for_first()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+        var slot = _clock.GetUtcNow().AddHours(8);
+
+        await using var ctx = _db.NewContext();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps).BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(WaitingAppId, "28.5.0.1", new[] { systemApp }),
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(systemApp, "28.5.0.0", Array.Empty<Guid>()),
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+        }, UploadAppTiming.AtTime, slot);
+
+        outcome.Count.Should().Be(3, "an app picked twice is booked once");
+        outcome.RunsAtUtc.Should().Be(slot.UtcDateTime);
+        apps.Updated.Should().BeNull("the worker sends them, never the page request");
+
+        await using var read = _db.NewContext();
+        var rows = await read.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == envId).OrderBy(a => a.BatchOrder).ToListAsync();
+        rows.Select(r => r.BcAppId).Should().Equal(new Guid?[] { systemApp, WaitingAppId, banking },
+            "Core waits for System Application, so that goes first; the others keep the order they were picked in");
+        rows.Select(r => r.BatchOrder).Should().Equal(0, 1, 2);
+        rows.Select(r => r.BatchId).Distinct().Should().ContainSingle().Which.Should().NotBeNull();
+        rows.Should().OnlyContain(r => r.Kind == UpgradeActionKind.UpdateApp && r.Status == UpgradeActionStatus.Pending);
+        rows.Select(r => r.ExecuteAfter).Distinct().Should().ContainSingle()
+            .Which.Should().BeCloseTo(slot.UtcDateTime, TimeSpan.FromMilliseconds(1), "all three wait for the one slot");
+        rows[1].PrerequisiteAppIds.Should().Equal(systemApp);
+    }
+
+    [Fact]
+    public async Task One_app_of_several_that_cannot_be_booked_books_none_of_them()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+
+        var gone = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(Guid.NewGuid(), "1.0.0.0", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await gone.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("one of the apps you picked");
+
+        var unagreed = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(WaitingAppId, "28.5.0.1", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await unagreed.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("Continia System Application");
+
+        var none = () => svc.BookAppUpdatesAsync(projectId, envId, Array.Empty<AppUpdatePick>(), UploadAppTiming.Now);
+        (await none.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("App");
+
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId))
+            .Should().BeFalse("nothing is booked when any app is refused");
+    }
+
+    [Fact]
+    public async Task Several_app_updates_are_refused_when_one_is_already_booked()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var banking = Guid.NewGuid();
+        var apps = AppsWithThreeWaiting(systemApp, banking);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        await svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime,
+            _clock.GetUtcNow().AddHours(8), new[] { systemApp });
+
+        var again = () => svc.BookAppUpdatesAsync(projectId, envId, new[]
+        {
+            new AppUpdatePick(banking, "28.5.0.2", Array.Empty<Guid>()),
+            new AppUpdatePick(systemApp, "28.5.0.0", Array.Empty<Guid>()),
+        }, UploadAppTiming.Now);
+        (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
+            .Should().Contain("Continia Core").And.Contain("one of these apps");
+
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().CountAsync(a => a.EnvironmentId == envId)).Should().Be(1);
+    }
+
     [Fact]
     public async Task Sending_a_booked_update_runs_it_now_brings_the_agreed_apps_and_waits_for_it()
     {
@@ -2650,6 +3001,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
         svc.UploadPollDelay = TimeSpan.Zero;
+        svc.UploadPollTimeout = UpgradeActionTestFixture.TestUploadPollTimeout;
         await svc.GetEnvironmentPanelAsync(projectId, envId);
         BcAppOperation? accepted = null;
         var result = await svc.SendBookedUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", new[] { prerequisite },
@@ -2807,8 +3159,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         // Outside the window, so the booking waits for its next 22:00.
-        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(8));
+        AtNoonUtcTomorrow();
 
         await using var ctx = _db.NewContext();
         var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
@@ -2828,6 +3179,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     public async Task An_upload_while_the_delivery_window_is_open_is_booked_for_now()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
+        // An hour either side of now never wraps midnight or meets a change of summer time.
+        AtNoonUtcTomorrow();
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         var local = TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(_clock.GetUtcNow().UtcDateTime, copenhagen));
         await SetWindowsAsync(envId, deliveryStart: local.AddHours(-1), deliveryEnd: local.AddHours(1));
@@ -2846,8 +3199,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, bcStart: new TimeOnly(1, 0), bcEnd: new TimeOnly(5, 0), bcZone: "America/New_York");
         var newYork = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-        if (UpdateWindow.IsWithin(new TimeOnly(1, 0), new TimeOnly(5, 0), newYork, _clock.GetUtcNow().UtcDateTime))
-            _clock.Advance(TimeSpan.FromHours(6));
+        // Outside Microsoft's window, so the booking waits for its next 01:00.
+        AtNoonUtcTomorrow();
         var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
@@ -2919,6 +3272,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
         svc.UploadPollDelay = TimeSpan.Zero;
+        svc.UploadPollTimeout = UpgradeActionTestFixture.TestUploadPollTimeout;
         BcAppOperation? accepted = null;
         var result = await svc.SendBookedUploadAsync(projectId, envId, new byte[] { 1 }, "Partner.app",
             (op, _) => { accepted = op; return Task.CompletedTask; }, CancellationToken.None);
@@ -2928,6 +3282,43 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         apps.Installed!.Value.Schedule.Should().Be(BcDeploymentSchedule.Immediate);
         result.Completed.Should().BeFalse();
         result.Message.Should().Contain("Continia Core");
+    }
+
+    /// <summary>
+    /// A booked install can be polled for longer than a cached token has left. A 401 mid-wait
+    /// fetches a new token and asks again, rather than giving the install up as unconfirmed.
+    /// </summary>
+    [Fact]
+    public async Task Checking_a_booked_install_again_signs_in_again_when_the_token_runs_out_mid_wait()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var apps = new FakeAppManagementClient();
+        apps.OnOperation = id => apps.PolledWith.Count == 1
+            ? throw new BcApiException(HttpStatusCode.Unauthorized, "The access token has expired.")
+            : new BcAppOperation(id, Guid.NewGuid(), "install", BcAppOperationStatus.Succeeded, "succeeded",
+                string.Empty, "1.0.0.0", null, string.Empty, string.Empty, string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow);
+        var tokens = new BcTokenService(new StubFactory(new SequenceTokenHandler()), NullLogger<BcTokenService>.Instance);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, tokens, new FakeAdminClient(), apps);
+        svc.UploadPollDelay = TimeSpan.Zero;
+        svc.UploadPollTimeout = UpgradeActionTestFixture.TestUploadPollTimeout;
+        var result = await svc.ConfirmBookedInstallAsync(projectId, envId, Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None);
+
+        result.Completed.Should().BeTrue();
+        apps.PolledWith.Should().Equal("tok1", "tok2");
+    }
+
+    /// <summary>A sign-in that hands out a new token each time: tok1, tok2, ...</summary>
+    private sealed class SequenceTokenHandler : HttpMessageHandler
+    {
+        private int _issued;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{{\"access_token\":\"tok{Interlocked.Increment(ref _issued)}\",\"expires_in\":3600}}"),
+            });
     }
 
     [Fact]
@@ -3100,7 +3491,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     /// <summary>Records a delivery that put <paramref name="appId"/> onto the environment.</summary>
-    private async Task SeedDeliveredAppAsync(int projectId, string environmentName, Guid appId)
+    private async Task SeedDeliveredAppAsync(
+        int projectId, string environmentName, Guid appId, Guid? operationId = null, int? triggeredByUserId = null)
     {
         await using var ctx = _db.NewContext();
         var pipeline = new OePipeline
@@ -3132,13 +3524,14 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId,
             ReleasePipelineId = releasePipeline.Id, ProjectBuildId = build.Id,
-            EnvironmentName = environmentName, ScheduledFor = DateTime.UtcNow,
+            EnvironmentName = environmentName, ScheduledFor = DateTime.UtcNow, TriggeredByUserId = triggeredByUserId,
             Status = ProjectDeliveryStatus.HandedOff, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         };
         delivery.Results.Add(new OeProjectDeliveryResult
         {
             OrganizationId = TestDb.DefaultOrgId, Ordering = 0, AppName = "CRONUS Workbench",
             AppVersion = "2.0.0.0", AppId = appId.ToString(), Status = ProjectDeliveryResultStatus.Scheduled,
+            OperationId = operationId,
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         ctx.OeProjectDeliveries.Add(delivery);
@@ -3326,8 +3719,12 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     private const int PlainTeamUserId = 9601;
     private const int OrgAdminUserId = 9602;
 
-    private static readonly DateTimeOffset ScheduledDate = new(2026, 10, 1, 2, 0, 0, TimeSpan.Zero);
-    private static readonly DateTimeOffset Latest = new(2026, 10, 29, 2, 0, 0, TimeSpan.Zero);
+    // Relative to the day the suite runs, never fixed dates: the version-change tests reach
+    // DateForVersionChange, which compares Latest against the clock and refuses once it has
+    // passed, so a fixed Latest turned these tests red on a date with no code change.
+    private static readonly DateTimeOffset Today = new(DateTime.UtcNow.Date, TimeSpan.Zero);
+    private static readonly DateTimeOffset ScheduledDate = Today.AddDays(5).AddHours(2);
+    private static readonly DateTimeOffset Latest = Today.AddDays(33).AddHours(2);
 
     private static BcEnvironmentUpdate Update(
         DateTimeOffset? selectedDateTime, DateTimeOffset? latestSelectable, bool selected = true, bool ignoresWindow = false) =>
@@ -3435,6 +3832,68 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var row = await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId);
         row.BcNextUpdateIgnoresWindow.Should().BeTrue();
         row.BcNextUpdateFetchedAt.Should().NotBeNull();
+    }
+
+    private static BcEnvironmentUpdate VersionUpdate(string version, bool selected, DateTimeOffset? date = null, bool ignoresWindow = false) =>
+        new(version, true, selected, "scheduled", "GA", date ?? ScheduledDate, Latest, ignoresWindow, "Active", null, null);
+
+    [Fact]
+    public async Task Starting_an_upgrades_release_selects_it_when_another_update_is_next()
+    {
+        // The environment has 28.3 lined up and 28.5 on offer; the upgrade is to 28.5.
+        // Starting it must send 28.5, not the 28.3 that happened to be selected.
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SeedUpdateOpsTeamAsync(projectId);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        var admin = new FakeAdminClient();
+        admin.OnEnvironmentUpdates = _ => admin.SelectWrites == 0
+            ? new[] { VersionUpdate("28.3", selected: true), VersionUpdate("28.5", selected: false) }
+            : new[] { VersionUpdate("28.3", selected: false), VersionUpdate("28.5", selected: true, DateTimeOffset.UtcNow, ignoresWindow: true) };
+
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk(), admin).RunUpdateNowAsync(projectId, envId, upgradeVersion: "28.5");
+
+        admin.SelectWrites.Should().Be(1, "selecting the release and starting it is one write");
+        admin.SelectedVersion.Should().Be("28.5");
+        admin.SelectedIgnoreUpdateWindow.Should().BeTrue();
+        admin.SelectedDateTime!.Value.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromMinutes(1));
+
+        await using var verify = _db.NewContext();
+        var row = await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId);
+        row.BcNextUpdateVersion.Should().Be("28.5");
+    }
+
+    [Fact]
+    public async Task Starting_an_upgrades_release_is_refused_when_it_is_not_offered()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SeedUpdateOpsTeamAsync(projectId);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        var admin = new FakeAdminClient();
+        admin.OnEnvironmentUpdates = _ => new[] { VersionUpdate("28.3", selected: true) };
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), admin).RunUpdateNowAsync(projectId, envId, upgradeVersion: "28.5");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Update"]
+            .Should().Contain("doesn't offer 28.5");
+        admin.SelectWrites.Should().Be(0, "starting 28.3 for an upgrade to 28.5 is the bug this guards against");
+    }
+
+    [Fact]
+    public async Task Starting_an_upgrades_release_fails_when_Business_Central_keeps_another_version()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SeedUpdateOpsTeamAsync(projectId);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        var admin = new FakeAdminClient();
+        admin.OnEnvironmentUpdates = _ => new[] { VersionUpdate("28.3", selected: true), VersionUpdate("28.5", selected: false) };
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), admin).RunUpdateNowAsync(projectId, envId, upgradeVersion: "28.5");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Update"]
+            .Should().Contain("Its next update is still 28.3");
     }
 
     [Fact]
@@ -3571,11 +4030,11 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
     // ── The exclusive latest-selectable bound (issue #804) ────────────────
 
-    /// <summary>Microsoft's bound as the reporter saw it: midnight UTC, meaning "before 1 March".</summary>
-    private static readonly DateTimeOffset MidnightBound = new(2027, 3, 1, 0, 0, 0, TimeSpan.Zero);
+    /// <summary>Microsoft's bound as the reporter saw it: midnight UTC, meaning "before that day". Relative, so ScheduledDate stays before it.</summary>
+    private static readonly DateTimeOffset MidnightBound = Today.AddDays(120);
 
     /// <summary>The last moment inside that bound, and what the PATCH must carry.</summary>
-    private static readonly DateTimeOffset LastAllowedDay = new(2027, 2, 28, 0, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset LastAllowedDay = MidnightBound.AddDays(-1);
 
     [Fact]
     public async Task Pushing_the_date_sends_the_day_before_an_exclusive_midnight_bound()
@@ -3585,7 +4044,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // Business Central stores the date inside the customer's update window, so the day
         // it reads back carries a time of day the PATCH never named.
-        var landed = new DateTimeOffset(2027, 2, 28, 21, 0, 0, TimeSpan.Zero);
+        var landed = LastAllowedDay.AddHours(21);
         var admin = AdminWithUpdates(Update(ScheduledDate, MidnightBound), Update(landed, MidnightBound));
 
         await using (var ctx = _db.NewContext())
@@ -3608,7 +4067,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // The same day as the effective latest, at a different time of day: an exact-tick
         // guard misses this and re-PATCHes the customer's tenant on every sweep.
-        var onTheDay = new DateTimeOffset(2027, 2, 28, 21, 0, 0, TimeSpan.Zero);
+        var onTheDay = LastAllowedDay.AddHours(21);
         var admin = new FakeAdminClient { OnEnvironmentUpdates = _ => new[] { Update(onTheDay, MidnightBound) } };
 
         await using var ctx = _db.NewContext();
@@ -3628,7 +4087,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         // The customer's update window opens at 02:00 in Copenhagen, which is 01:00 UTC on
         // the following day. The date moved, so the action is done - checking that it
         // landed on the exact day we sent would fail a write that worked.
-        var landed = new DateTimeOffset(2027, 3, 1, 1, 0, 0, TimeSpan.Zero);
+        var landed = MidnightBound.AddHours(1);
         var admin = AdminWithUpdates(Update(ScheduledDate, MidnightBound), Update(landed, MidnightBound));
 
         await using (var ctx = _db.NewContext())
@@ -3650,7 +4109,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = FlagUserId;
         // Where the window put it a day beyond the bound: as late as it goes, and
         // re-sending would fail loudly on every sweep.
-        var pastTheBound = new DateTimeOffset(2027, 3, 1, 1, 0, 0, TimeSpan.Zero);
+        var pastTheBound = MidnightBound.AddHours(1);
         var admin = new FakeAdminClient { OnEnvironmentUpdates = _ => new[] { Update(pastTheBound, MidnightBound) } };
 
         await using var ctx = _db.NewContext();
@@ -3975,7 +4434,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var act = () => Svc(ctx, TokenOk()).SelectTargetVersionAsync(projectId, envId, "27.6");
 
         (await act.Should().ThrowAsync<ProjectAccessDeniedException>())
-            .Which.Message.Should().Contain("environment updates");
+            .Which.Message.Should().Contain("schedule its upgrades");
     }
 
     // ── The audit scope (fence-adjacent: see AuditInterceptor) ────────────
@@ -4077,7 +4536,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             await using var ctx = _db.NewContext();
             var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
 
-            await ((Func<Task>)(() => svc.SetUpdateWindowAsync(projectId, envId, Ten, Six)))
+            await ((Func<Task>)(() => svc.SetUpdateWindowAsync(projectId, envId, Ten, Six, DeliveryDays.Every)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
             await ((Func<Task>)(() => svc.CancelScheduledInstallAsync(
                     projectId, envId, Guid.NewGuid(), "2.0.0.0", BcDeploymentSchedule.UpdateWindow)))
@@ -4104,10 +4563,39 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var act = () => Svc(ctx, TokenOk())
-            .SetUpdateWindowAsync(projectId, envId, onlyStart ? Ten : null, onlyStart ? null : Six);
+            .SetUpdateWindowAsync(projectId, envId, onlyStart ? Ten : null, onlyStart ? null : Six, DeliveryDays.Every);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UpdateWindow"]
             .Should().Contain("both a start and an end");
+    }
+
+    [Fact]
+    public async Task A_delivery_window_keeps_the_days_it_opens_on_and_clearing_it_resets_them()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(projectId, envId, Ten, Six, DeliveryDays.Wednesday | DeliveryDays.Friday);
+        (await EnvironmentsAsync(projectId)).Single().UpdateWindowDays
+            .Should().Be(DeliveryDays.Wednesday | DeliveryDays.Friday);
+
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SetUpdateWindowAsync(projectId, envId, null, null, DeliveryDays.Wednesday);
+        var cleared = (await EnvironmentsAsync(projectId)).Single();
+        cleared.UpdateWindowStart.Should().BeNull();
+        cleared.UpdateWindowDays.Should().Be(DeliveryDays.Every, "no window means any time, on any day");
+    }
+
+    [Fact]
+    public async Task A_delivery_window_with_no_days_is_refused()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk()).SetUpdateWindowAsync(projectId, envId, Ten, Six, DeliveryDays.None);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UpdateWindowDays"]
+            .Should().Contain("at least one day");
     }
 
     // ── The organisation's own app registration ───────────────────────────
@@ -4139,6 +4627,67 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         }
     }
 
+    // ── An expired client secret, on the service's own clock (#1439) ─────
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(-1, true)]
+    public async Task A_solutions_own_secret_is_refused_for_deployments_from_the_second_it_expires(int expiresInSeconds, bool refused)
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        // To the whole second, so "expires now" survives the database's microseconds.
+        var now = _clock.GetUtcNow();
+        _clock.Set(now.AddTicks(-(now.UtcTicks % TimeSpan.TicksPerSecond)));
+        var expiry = _clock.GetUtcNow().UtcDateTime.AddSeconds(expiresInSeconds);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcClientSecretExpiresAt, expiry));
+        }
+
+        await using var read = _db.NewContext();
+        var acquire = () => Svc(read, TokenOk()).AcquireDeliveryContextAsync(id);
+
+        if (refused)
+        {
+            (await acquire.Should().ThrowAsync<BcApiException>()).Which.Message
+                .Should().StartWith("This solution's own Business Central client secret has expired.");
+        }
+        else
+        {
+            (await acquire()).AccessToken.Should().Be("tok");
+        }
+    }
+
+    [Fact]
+    public async Task The_organisations_secret_is_refused_for_deployments_the_second_it_expires_and_says_whose_it_is()
+    {
+        var id = await SeedProjectAsync();
+        await SaveOrgRegistrationAsAdminAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+                new BcConnectionInput(Guid.NewGuid(), null, null, null, null, UseOrganizationRegistration: true));
+        }
+        var now = _clock.GetUtcNow();
+        _clock.Set(now.AddTicks(-(now.UtcTicks % TimeSpan.TicksPerSecond)));
+        var expiry = _clock.GetUtcNow().UtcDateTime;
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OrganizationSettings.Where(o => o.OrganizationId == TestDb.DefaultOrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.BcClientSecretExpiresAt, expiry));
+        }
+
+        await using var read = _db.NewContext();
+        var acquire = () => Svc(read, TokenOk()).AcquireDeliveryContextAsync(id);
+
+        (await acquire.Should().ThrowAsync<BcApiException>()).Which.Message
+            .Should().StartWith("Your organisation's Business Central client secret has expired.");
+    }
+
     [Fact]
     public async Task A_cached_token_is_never_handed_out_for_a_different_tenant_or_client()
     {
@@ -4150,9 +4699,9 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var oldTenant = Guid.NewGuid();
         var newTenant = Guid.NewGuid();
 
-        (await tokens.GetTokenAsync(7, oldTenant, "client-abc", "s")).Should().Be($"tok-{oldTenant}");
-        (await tokens.GetTokenAsync(7, oldTenant, "client-abc", "s")).Should().Be($"tok-{oldTenant}", "the same credentials reuse the cache");
-        (await tokens.GetTokenAsync(7, newTenant, "client-abc", "s")).Should().Be($"tok-{newTenant}");
+        (await tokens.GetTokenAsync(7, oldTenant, "11111111-2222-3333-4444-555555555555", "s")).Should().Be($"tok-{oldTenant}");
+        (await tokens.GetTokenAsync(7, oldTenant, "11111111-2222-3333-4444-555555555555", "s")).Should().Be($"tok-{oldTenant}", "the same credentials reuse the cache");
+        (await tokens.GetTokenAsync(7, newTenant, "11111111-2222-3333-4444-555555555555", "s")).Should().Be($"tok-{newTenant}");
         (await tokens.GetTokenAsync(7, newTenant, "client-xyz", "s")).Should().Be($"tok-{newTenant}");
 
         handler.Tenants.Should().HaveCount(3, "a tenant or client change is a cache miss");
@@ -4170,7 +4719,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await Svc(ctx, tokens).SaveConnectionAsync(id,
-                new BcConnectionInput(oldTenant, "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+                new BcConnectionInput(oldTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
         }
         await using (var ctx = _db.NewContext())
             (await Svc(ctx, tokens).AcquireDeliveryContextAsync(id)).AccessToken.Should().Be($"tok-{oldTenant}");
@@ -4178,12 +4727,75 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await Svc(ctx, tokens).SaveConnectionAsync(id,
-                new BcConnectionInput(newTenant, "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+                new BcConnectionInput(newTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
         }
         await using (var ctx = _db.NewContext())
             (await Svc(ctx, tokens).AcquireDeliveryContextAsync(id)).AccessToken.Should().Be($"tok-{newTenant}");
 
         handler.Tenants.Should().Equal(oldTenant.ToString(), newTenant.ToString());
+    }
+
+    [Fact]
+    public async Task Test_connection_on_a_long_lived_context_uses_the_tenant_a_colleague_saved_since()
+    {
+        var id = await SeedProjectAsync();
+        var handler = new PerTenantTokenHandler();
+        var tokens = new BcTokenService(new StubFactory(handler), NullLogger<BcTokenService>.Instance);
+        var oldTenant = Guid.NewGuid();
+        var newTenant = Guid.NewGuid();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, tokens).SaveConnectionAsync(id,
+                new BcConnectionInput(oldTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+
+        // The page's context: it has already loaded (and so tracks) the solution.
+        await using var page = _db.NewContext();
+        await Svc(page, tokens).TestConnectionAsync(id);
+
+        await using (var colleague = _db.NewContext())
+        {
+            await Svc(colleague, tokens).SaveConnectionAsync(id,
+                new BcConnectionInput(newTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+
+        await Svc(page, tokens).RefreshEnvironmentsAsync(id);
+
+        handler.Tenants.Should().Equal([oldTenant.ToString(), newTenant.ToString()],
+            "a page open since before the colleague's save must not keep using the tenant it first loaded");
+    }
+
+    [Theory]
+    [InlineData("{11111111-2222-3333-4444-555555555555}")]
+    [InlineData("11111111222233334444555555555555")]
+    [InlineData("11111111-2222-3333-4444-5555555555AA")]
+    public async Task SaveConnection_stores_the_client_id_in_one_spelling(string typed)
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+                new BcConnectionInput(Guid.NewGuid(), typed, "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+
+        await using var read = _db.NewContext();
+        var stored = await read.OeProjects.AsNoTracking().Where(p => p.Id == id).Select(p => p.BcClientId).SingleAsync();
+        stored.Should().Be(Guid.Parse(typed).ToString());
+        stored.Should().MatchRegex("^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$");
+    }
+
+    [Fact]
+    public async Task SaveConnection_rejects_a_client_id_that_is_not_a_guid()
+    {
+        var id = await SeedProjectAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+            new BcConnectionInput(Guid.NewGuid(), "CRONUS Business Central app", "secret", DateTime.UtcNow.AddYears(1), null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("BcClientId")
+            .WhoseValue.Should().Contain("Application (client) ID");
     }
 
     private const string OrgClientId = "22222222-2222-2222-2222-222222222222";
@@ -4250,7 +4862,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var tokens = new BcTokenService(new StubFactory(handler), NullLogger<BcTokenService>.Instance);
         await using (var ctx = _db.NewContext())
             await Svc(ctx, tokens).TestConnectionAsync(id);
-        handler.ClientIds.Should().Equal("client-abc");
+        handler.ClientIds.Should().Equal("11111111-2222-3333-4444-555555555555");
 
         await using (var ctx = _db.NewContext())
         {
@@ -4285,7 +4897,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
-                new BcConnectionInput(Guid.NewGuid(), "client-abc", "own-secret", DateTime.UtcNow.AddDays(-1), null));
+                new BcConnectionInput(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", "own-secret", DateTime.UtcNow.AddDays(-1), null));
         }
 
         var handler = new CapturingTokenHandler();
@@ -4421,7 +5033,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync(
-            [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six);
+            [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six, DeliveryDays.Every);
 
         preview.Select(p => (p.EnvironmentId, p.Group)).Should().Equal(
             (fleet.Changes, DeliveryWindowChangeGroup.WillChange),
@@ -4434,6 +5046,25 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         changing.ProjectName.Should().Be("CRONUS A/S");
         changing.CurrentStart.Should().BeNull("it has no window yet, which the dialog words as Any time");
         preview[4].EnvironmentName.Should().BeNull("an id nobody can read has no name to give");
+    }
+
+    [Fact]
+    public async Task The_bulk_window_counts_other_days_as_a_change_and_writes_them()
+    {
+        var fleet = await SeedWindowFleetAsync();
+
+        await using (var ctx = _db.NewContext())
+        {
+            var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync([fleet.AlreadySet], Ten, Six, DeliveryDays.Wednesday);
+            preview.Single().Group.Should().Be(DeliveryWindowChangeGroup.WillChange, "the hours match but the days don't");
+            preview.Single().CurrentDays.Should().Be(DeliveryDays.Every);
+        }
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.AlreadySet], Ten, Six, DeliveryDays.Wednesday);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == fleet.AlreadySet)).UpdateWindowDays
+            .Should().Be(DeliveryDays.Wednesday);
     }
 
     [Fact]
@@ -4475,7 +5106,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         }
 
         await using var ctx = _db.NewContext();
-        var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], Ten, Six);
+        var preview = await Svc(ctx, TokenOk()).PreviewUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], Ten, Six, DeliveryDays.Every);
 
         preview.Single(p => p.EnvironmentId == fleet.Changes).HasDeploymentWaitingForWindow.Should().BeTrue();
         preview.Single(p => p.EnvironmentId == fleet.AlreadySet).HasDeploymentWaitingForWindow.Should().BeFalse();
@@ -4491,7 +5122,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             results = await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync(
-                [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six);
+                [fleet.Changes, fleet.AlreadySet, fleet.Deleted, fleet.Foreign, neverExisted], Ten, Six, DeliveryDays.Every);
         }
 
         results.Select(r => (r.Row.EnvironmentId, r.Outcome)).Should().Equal(
@@ -4518,7 +5149,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var results = await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], null, null);
+            var results = await Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes, fleet.AlreadySet], null, null, DeliveryDays.Every);
             results.Select(r => r.Outcome).Should().Equal(DeliveryWindowChangeOutcome.Skipped, DeliveryWindowChangeOutcome.Changed);
         }
 
@@ -4535,13 +5166,227 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var act = () => Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes], Ten, null);
+            var act = () => Svc(ctx, TokenOk()).SetUpdateWindowForManyAsync([fleet.Changes], Ten, null, DeliveryDays.Every);
             (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UpdateWindow");
         }
 
         await using var verify = _db.NewContext();
         (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == fleet.Changes))
             .UpdateWindowStart.Should().BeNull();
+    }
+
+    // ── AppSource cadence on many environments at once ────────────────────
+
+    /// <summary>
+    /// A connected solution with one of each: a row that changes, a row already on the
+    /// target cadence, one never read, a deleted one, and - on a Read-only solution
+    /// someone else owns - one the caller has no update grant on. The bulk cadence is an
+    /// Upgrades page action, so it asks for the environment-updates grant: the calls that
+    /// follow run as the team member who holds it on the first solution.
+    /// </summary>
+    private async Task<(int Changes, int AlreadySet, int NeverRead, int Deleted, int Foreign)> SeedCadenceFleetAsync()
+    {
+        var (mine, changes) = await SeedEnvironmentAsync("Production");
+        await SeedUserAsync(9802, "another-one@example.com", UserRole.Editor);
+        var theirs = await SeedProjectAsync("Fabrikam");
+        await using var ctx = _db.NewContext();
+        (await ctx.OeProjects.SingleAsync(p => p.Id == theirs)).CreatedByUserId = 9802;
+        (await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == changes)).AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default;
+        await ctx.SaveChangesAsync();
+        await NarrowAsync(theirs);
+
+        OeProjectEnvironment Env(int projectId, string name, string? cadence) => new()
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name, Type = "Sandbox",
+            ApplicationFamily = "BusinessCentral", FetchedAt = DateTime.UtcNow,
+            AppSourceAppsUpdateCadence = cadence,
+        };
+        var already = Env(mine, "Test", BcAppUpdateCadence.DuringMajorUpgrade);
+        var neverRead = Env(mine, "Training", null);
+        var deleted = Env(mine, "Old", BcAppUpdateCadence.Default);
+        deleted.SoftDeletedOn = DateTime.UtcNow.AddDays(-1);
+        var foreign = Env(theirs, "Production", BcAppUpdateCadence.Default);
+        ctx.OeProjectEnvironments.AddRange(already, neverRead, deleted, foreign);
+        await ctx.SaveChangesAsync();
+        await SeedUpdateOpsTeamAsync(mine);
+        _db.OrgContext.CurrentUserId = FlagUserId;
+        return (changes, already.Id, neverRead.Id, deleted.Id, foreign.Id);
+    }
+
+    [Fact]
+    public async Task The_bulk_cadence_preview_groups_each_selected_environment()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        const int neverExisted = 987656;
+
+        await using var ctx = _db.NewContext();
+        var preview = await Svc(ctx, TokenOk()).PreviewAppUpdateCadenceForManyAsync(
+            [fleet.Changes, fleet.AlreadySet, fleet.NeverRead, fleet.Deleted, fleet.Foreign, neverExisted],
+            "duringmajorupgrade");
+
+        preview.Select(p => (p.EnvironmentId, p.Group)).Should().Equal(
+            (fleet.Changes, AppCadenceChangeGroup.WillChange),
+            (fleet.AlreadySet, AppCadenceChangeGroup.AlreadySet),
+            (fleet.NeverRead, AppCadenceChangeGroup.WillChange),
+            (fleet.Deleted, AppCadenceChangeGroup.Missing),
+            (fleet.Foreign, AppCadenceChangeGroup.NoAccess),
+            (neverExisted, AppCadenceChangeGroup.Missing));
+        preview[0].CurrentCadence.Should().Be(BcAppUpdateCadence.Default);
+        preview[0].ProjectName.Should().Be("CRONUS A/S");
+        preview[2].CurrentCadence.Should().BeNull("a cadence never read is a change, not a match");
+        preview[5].EnvironmentName.Should().BeNull("an id nobody can read has no name to give");
+    }
+
+    [Fact]
+    public async Task Setting_a_cadence_on_many_writes_only_the_rows_that_change_and_reports_each()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var admin = new FakeAdminClient();
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [fleet.Changes, fleet.AlreadySet, fleet.NeverRead, fleet.Deleted, fleet.Foreign],
+                BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results.Select(r => (r.Row.EnvironmentId, r.Outcome)).Should().Equal(
+            (fleet.Changes, AppCadenceChangeOutcome.Changed),
+            (fleet.AlreadySet, AppCadenceChangeOutcome.Skipped),
+            (fleet.NeverRead, AppCadenceChangeOutcome.Changed),
+            (fleet.Deleted, AppCadenceChangeOutcome.Skipped),
+            (fleet.Foreign, AppCadenceChangeOutcome.Skipped));
+        admin.CadenceWrites.Should().Equal(new[] { "Production", "Training" },
+            "Business Central is only asked about the rows that change");
+
+        await using var verify = _db.NewContext();
+        var rows = await verify.OeProjectEnvironments.AsNoTracking().ToDictionaryAsync(e => e.Id);
+        rows[fleet.Changes].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.DuringMajorUpgrade);
+        rows[fleet.NeverRead].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.DuringMajorUpgrade);
+        rows[fleet.Deleted].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default, "a deleted environment is skipped");
+        rows[fleet.Foreign].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default,
+            "the owner cannot manage somebody else's read-only solution");
+    }
+
+    [Fact]
+    public async Task One_refused_cadence_write_does_not_stop_the_rest_of_the_batch()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var admin = new FakeAdminClient
+        {
+            CadenceThrowsFor = name => name switch
+            {
+                "Production" => new BcApiException(HttpStatusCode.Forbidden, "Business Central refused the change."),
+                "Training" => new HttpRequestException("connection reset"),
+                _ => null,
+            },
+        };
+        var third = await SeedExtraCadenceRowAsync(fleet.Changes, "UAT");
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [fleet.Changes, fleet.NeverRead, third], BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results.Select(r => r.Outcome).Should().Equal(
+            AppCadenceChangeOutcome.Failed, AppCadenceChangeOutcome.Failed, AppCadenceChangeOutcome.Changed);
+        results[0].Error.Should().Be("Business Central refused the change.");
+        results[1].Error.Should().NotContain("connection reset", "raw exception text never reaches the page");
+        admin.CadenceWrites.Should().Equal("UAT");
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == fleet.Changes))
+            .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default, "a refused write leaves our copy as it was");
+    }
+
+    private async Task<int> SeedExtraCadenceRowAsync(int besideEnvironmentId, string name)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = (await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == besideEnvironmentId)).ProjectId;
+        var env = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name, Type = "Sandbox",
+            ApplicationFamily = "BusinessCentral", FetchedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjectEnvironments.Add(env);
+        await ctx.SaveChangesAsync();
+        return env.Id;
+    }
+
+    [Fact]
+    public async Task A_private_solution_the_caller_cannot_see_reads_as_missing_and_is_never_written()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var hidden = await SeedProjectAsync("Northwind");
+        int hiddenEnv;
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.OeProjects.SingleAsync(p => p.Id == hidden)).CreatedByUserId = 9802;
+            var env = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = hidden, Name = "Secret", Type = "Production",
+                ApplicationFamily = "BusinessCentral", FetchedAt = DateTime.UtcNow,
+                AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default,
+            };
+            seed.OeProjectEnvironments.Add(env);
+            await seed.SaveChangesAsync();
+            hiddenEnv = env.Id;
+        }
+        await NarrowAsync(hidden, ProjectVisibility.Private);
+        var admin = new FakeAdminClient();
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [hiddenEnv, fleet.Changes], BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results[0].Row.Group.Should().Be(AppCadenceChangeGroup.Missing);
+        results[0].Row.EnvironmentName.Should().BeNull("nothing about a hidden solution reaches the caller");
+        results[0].Outcome.Should().Be(AppCadenceChangeOutcome.Skipped);
+        admin.CadenceWrites.Should().Equal("Production");
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == hiddenEnv))
+            .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default);
+    }
+
+    [Fact]
+    public async Task Managing_a_solution_is_not_enough_for_the_bulk_cadence()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        // The owner manages the solution and can change its cadence from the environment
+        // page, but holds no update grant, which is what the Upgrades page asks for.
+        _db.OrgContext.CurrentUserId = OwnerUserId;
+        var admin = new FakeAdminClient();
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [fleet.Changes], BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results.Single().Row.Group.Should().Be(AppCadenceChangeGroup.NoAccess);
+        results.Single().Outcome.Should().Be(AppCadenceChangeOutcome.Skipped);
+        admin.CadenceWrites.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_unknown_bulk_cadence_is_refused_before_anything_is_written()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var admin = new FakeAdminClient();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync([fleet.Changes], "Whenever");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Cadence");
+        admin.CadenceWrites.Should().BeEmpty();
     }
 
     [Fact]

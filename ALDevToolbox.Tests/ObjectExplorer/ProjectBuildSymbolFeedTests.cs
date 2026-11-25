@@ -203,6 +203,24 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Clones.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A build that finds no compiler says so in words the person who pressed Build can
+    /// act on: no feed name, nothing only the operator could change (#1580).
+    /// </summary>
+    [Fact]
+    public async Task A_build_with_no_compiler_tells_the_user_who_to_ask_without_naming_the_feed()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var missing = new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
+            new AlCompilerOptions { ExplicitAlcPath = Path.Combine(_root, "no-such-alc") });
+
+        var act = () => BuildAsync(projectId, releaseId, compiler: missing);
+
+        var thrown = await act.Should().ThrowAsync<InvalidOperationException>();
+        thrown.Which.Message.Should().Be(ProjectBuildService.CompilerMissingMessage);
+        thrown.Which.Message.Should().NotContain("NuGet").And.NotContain("outbound");
+    }
+
     // ── Repositories nobody has confirmed they can read ─────────────────
 
     /// <summary>Adds a repository to the seeded solution that nobody has confirmed they can read.</summary>
@@ -726,16 +744,116 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
-    public async Task An_extension_built_on_a_changed_one_is_published_again()
+    public async Task An_unchanged_extension_built_on_a_changed_one_is_compiled_as_a_check_and_keeps_its_earlier_app()
     {
-        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
         _tools.Diffs["base-ext"] = "base-ext/app.json\n";
 
         await BuildAsync(projectId, releaseId);
 
-        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
-        (await LogAsync(buildId, "Changes")).Should().Contain("CRONUS Sales Extension: rebuilt, because CRONUS Base Extension changed.");
-        _tools.DiffedFolders.Should().Equal(["base-ext"], "a dependent of a changed app needs no diff");
+        var artifacts = await ArtifactsAsync(buildId);
+        artifacts.Single(a => a.AppId == BaseId).CarriedFromBuildId.Should().BeNull();
+        var sales = artifacts.Single(a => a.AppId == SalesId);
+        sales.CarriedFromBuildId.Should().Be(priorId, "nothing in it changed and it still builds against the new base");
+        sales.AppVersion.Should().Be("1.0.500.0");
+        sales.Content.Should().Equal(await PriorContentAsync(priorId, SalesId), "the very same .app is delivered again");
+        _tools.SeenVersions["CRONUS Sales Extension"][BaseId].Should().Be($"1.0.{buildId}.0",
+            "the check compiles it against the base this build delivers");
+        _tools.DiffedFolders.Should().Equal(["base-ext", "sales-ext"]);
+        (await LogAsync(buildId, "Changes")).Should().Contain(
+            $"CRONUS Sales Extension: unchanged since build #{priorId}, but CRONUS Base Extension changed. It is compiled to check it still builds");
+        (await LogAsync(buildId, "Compile: CRONUS Sales Extension")).Should().Contain("to check it still builds, and it does");
+    }
+
+    [Fact]
+    public async Task An_unchanged_extension_that_no_longer_builds_against_a_changed_one_fails_the_build()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.Diffs["base-ext"] = "base-ext/src/Base.Codeunit.al\n";
+        _tools.FailingCompiles.Add("CRONUS Sales Extension");
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        Status(outcome, "CRONUS Sales Extension").Should().Be(ProjectBuildResultStatus.Failed);
+        (await ArtifactsAsync(buildId)).Should().ContainSingle(a => a.AppId == BaseId, "a failed check carries nothing");
+    }
+
+    [Fact]
+    public async Task A_dependent_of_an_extension_under_check_is_checked_too()
+    {
+        // Third depends only on Sales, which depends on Base. A change to Base can reach
+        // Third through Sales, so Third is compiled as a check as well.
+        const string ThirdId = "55555555-0000-0000-0000-000000000005";
+        FakeExtension third = new("third-ext", ThirdId, "CRONUS Third Extension", [(SalesId, "CRONUS Sales Extension", "1.0.0.0")]);
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true, apps: [.. Pair, third]);
+        _tools.Diffs["base-ext"] = "base-ext/app.json\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.SeenVersions.Should().ContainKey("CRONUS Third Extension");
+        (await ArtifactsAsync(buildId)).Single(a => a.AppId == ThirdId).CarriedFromBuildId.Should().Be(priorId);
+        (await LogAsync(buildId, "Changes")).Should().Contain("CRONUS Third Extension: unchanged since build").And.Contain("CRONUS Sales Extension depends on a changed extension");
+    }
+
+    [Fact]
+    public async Task A_change_hidden_behind_a_checked_sibling_still_gets_the_dependent_checked()
+    {
+        // The older build compiled all three. The newer one compiled Base, carried Sales
+        // after checking it, and delivered no Third (its check failed). Sales still has
+        // its old origin, so only the walk through Sales to Base shows that Third was
+        // never compiled against the Base this build delivers.
+        const string ThirdId = "55555555-0000-0000-0000-000000000005";
+        FakeExtension third = new("third-ext", ThirdId, "CRONUS Third Extension", [(SalesId, "CRONUS Sales Extension", "1.0.0.0")]);
+        var (projectId, releaseId, buildId, olderId) = await SeedChangedOnlyAsync(changedAppsOnly: true, apps: [.. Pair, third]);
+        int newerId = await SeedCheckedSalesBuildAsync(projectId, olderId);
+
+        await BuildAsync(projectId, releaseId);
+
+        var artifacts = await ArtifactsAsync(buildId);
+        artifacts.Single(a => a.AppId == BaseId).CarriedFromBuildId.Should().Be(newerId);
+        artifacts.Single(a => a.AppId == SalesId).CarriedFromBuildId.Should().Be(olderId);
+        artifacts.Single(a => a.AppId == ThirdId).CarriedFromBuildId.Should().Be(olderId);
+        _tools.SeenVersions.Should().ContainKey("CRONUS Third Extension").And.NotContainKey("CRONUS Sales Extension");
+    }
+
+    /// <summary>
+    /// A build after <paramref name="olderId"/> that compiled Base again and carried Sales
+    /// from the older build, as a passed check does. Returns its id.
+    /// </summary>
+    private async Task<int> SeedCheckedSalesBuildAsync(int projectId, int olderId)
+    {
+        await using var seed = _db.NewContext();
+        var older = await seed.OeProjectBuilds.SingleAsync(b => b.Id == olderId);
+        var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+        var newer = PriorBuild(projectId, older.PipelineId!.Value, DateTime.UtcNow.AddMinutes(-30), [Pair[0]], "1.0.600.0");
+        var salesContent = await seed.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == olderId && a.AppId == SalesId).Select(a => a.Content).SingleAsync();
+        newer.Artifacts.Add(new OeProjectBuildArtifact
+        {
+            OrganizationId = TestDb.DefaultOrgId, AppId = SalesId, FileName = "CRONUS_CRONUSSalesExtension_1.0.500.0.app",
+            AppName = "CRONUS Sales Extension", AppVersion = "1.0.500.0", SizeBytes = salesContent.LongLength,
+            Content = salesContent, CreatedAt = newer.StartedAt, CarriedFromBuildId = olderId,
+        });
+        seed.OeProjectBuilds.Add(newer);
+        await seed.SaveChangesAsync();
+        seed.OeProjectBuildRepoCommits.Add(Commit(newer.Id, repoId, PriorSha));
+        await seed.SaveChangesAsync();
+        return newer.Id;
+    }
+
+    [Fact]
+    public async Task After_a_passed_check_the_next_build_carries_the_dependent_without_compiling_it()
+    {
+        // The newer build compiled Base and carried Sales from the older one after checking
+        // it. A build with no change carries both without compiling either.
+        var (projectId, releaseId, buildId, olderId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        int newerId = await SeedCheckedSalesBuildAsync(projectId, olderId);
+
+        await BuildAsync(projectId, releaseId);
+
+        var artifacts = await ArtifactsAsync(buildId);
+        artifacts.Single(a => a.AppId == BaseId).CarriedFromBuildId.Should().Be(newerId);
+        artifacts.Single(a => a.AppId == SalesId).CarriedFromBuildId.Should().Be(olderId);
+        _tools.SeenVersions.Should().BeEmpty("nothing changed, and Sales was already checked against this Base");
     }
 
     [Fact]
@@ -829,10 +947,10 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
-    public async Task An_app_compiled_before_the_sibling_it_depends_on_was_last_rebuilt_is_built_again()
+    public async Task An_app_compiled_before_the_sibling_it_depends_on_was_last_rebuilt_is_checked_again()
     {
         // Sales was last built in the older build; Base alone in the newer one. Sales's
-        // .app was compiled against the older Base, so it does not travel with the new one.
+        // .app was compiled against the older Base, so it is checked against the new one.
         var (projectId, releaseId, buildId, olderId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
         int newerId;
         await using (var seed = _db.NewContext())
@@ -851,8 +969,9 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
         var artifacts = await ArtifactsAsync(buildId);
         artifacts.Single(a => a.AppId == BaseId).CarriedFromBuildId.Should().Be(newerId);
-        artifacts.Single(a => a.AppId == SalesId).CarriedFromBuildId.Should().BeNull();
-        (await LogAsync(buildId, "Changes")).Should().Contain("CRONUS Sales Extension: rebuilt, because CRONUS Base Extension changed.");
+        artifacts.Single(a => a.AppId == SalesId).CarriedFromBuildId.Should().Be(olderId);
+        _tools.SeenVersions["CRONUS Sales Extension"][BaseId].Should().Be("1.0.600.0");
+        (await LogAsync(buildId, "Changes")).Should().Contain($"CRONUS Base Extension was built again after build #{olderId}");
     }
 
     [Fact]
@@ -1013,6 +1132,88 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().StartWith("First build of this repository");
     }
 
+    [Fact]
+    public async Task A_newer_build_that_recorded_no_commit_does_not_reset_the_changelog()
+    {
+        // A build whose git could not name its commit recorded an empty one; the next
+        // build read as the repository's first and published every extension (#1453).
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, sha: string.Empty);
+        _tools.Ancestors.Add(PriorSha);
+        _tools.LogOutput = "2222222\u001fCRONUS Developer\u001f2026-10-01T00:00:00+00:00\u001fAdd the sales report\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{PriorSha}..HEAD"]);
+        (await ChangelogAsync(buildId)).Should().Equal(["Add the sales report"]);
+    }
+
+    [Fact]
+    public async Task The_changelog_baseline_is_the_newest_build_that_recorded_a_commit()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, OtherSha, minutesAgo: 30);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, sha: string.Empty, minutesAgo: 10);
+        _tools.Ancestors.Add(OtherSha);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{OtherSha}..HEAD"]);
+    }
+
+    [Fact]
+    public async Task A_commit_git_show_cannot_read_is_read_another_way()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.ShowFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        (await PinnedCommitsAsync(buildId)).Should().Equal([HeadSha]);
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == priorId,
+            "with its commit known the build can tell nothing changed");
+    }
+
+    [Fact]
+    public async Task A_rerun_whose_git_cannot_name_its_commit_records_the_one_it_checked_out()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        await using (var seed = _db.NewContext())
+        {
+            var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            seed.OeProjectBuildRepoCommits.Add(Commit(buildId, repoId, HeadSha));
+            await seed.SaveChangesAsync();
+        }
+        _tools.ShowFails = true;
+        _tools.RevParseFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Checkouts.Should().Equal(HeadSha);
+        (await PinnedCommitsAsync(buildId)).Should().Equal([HeadSha]);
+    }
+
+    [Fact]
+    public async Task A_build_git_cannot_name_the_commit_of_records_none_and_publishes_everything()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.ShowFails = true;
+        _tools.RevParseFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        (await PinnedCommitsAsync(buildId)).Should().Equal([string.Empty]);
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+        (await LogAsync(buildId, "Changes")).Should().Contain("this build could not tell which commit it built");
+    }
+
+    private async Task<List<string>> PinnedCommitsAsync(int buildId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeProjectBuildRepoCommits.AsNoTracking()
+            .Where(c => c.ProjectBuildId == buildId).OrderBy(c => c.Id).Select(c => c.CommitHash).ToListAsync();
+    }
+
     private const string OtherSha = "3333333333333333333333333333333333333333";
 
     /// <summary>
@@ -1020,7 +1221,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     /// pipeline called <paramref name="pipelineName"/>, or of the seeded pipeline when null.
     /// </summary>
     private async Task SeedOtherBuildAsync(int projectId, string? pipelineName, string sha,
-        string target = ProjectBuildTarget.Current, string trigger = ProjectBuildTrigger.Manual)
+        string target = ProjectBuildTarget.Current, string trigger = ProjectBuildTrigger.Manual, int minutesAgo = 30)
     {
         await using var seed = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1036,7 +1237,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             await seed.SaveChangesAsync();
             pipelineId = other.Id;
         }
-        var build = PriorBuild(projectId, pipelineId, now.AddMinutes(-30), [], "1.0.600.0");
+        var build = PriorBuild(projectId, pipelineId, now.AddMinutes(-minutesAgo), [], "1.0.600.0");
         build.BcTarget = target;
         build.Trigger = trigger;
         seed.OeProjectBuilds.Add(build);
@@ -1059,10 +1260,12 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     /// <see cref="HeadSha"/>.
     /// </summary>
     private async Task<(int ProjectId, int ReleaseId, int BuildId, int PriorBuildId)> SeedChangedOnlyAsync(
-        bool changedAppsOnly, bool publishesToGitHub = false, string? priorReleaseTag = null, string priorBcVersion = "29.0")
+        bool changedAppsOnly, bool publishesToGitHub = false, string? priorReleaseTag = null, string priorBcVersion = "29.0",
+        FakeExtension[]? apps = null)
     {
         var (projectId, releaseId, buildId) = await SeedAsync();
-        _tools.Extensions = Pair;
+        apps ??= Pair;
+        _tools.Extensions = apps;
         _tools.HeadSha = HeadSha;
         await using var seed = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1081,7 +1284,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         seed.OePipelines.Add(pipeline);
         await seed.SaveChangesAsync();
 
-        var prior = PriorBuild(projectId, pipeline.Id, now.AddHours(-1), Pair, "1.0.500.0", priorBcVersion);
+        var prior = PriorBuild(projectId, pipeline.Id, now.AddHours(-1), apps, "1.0.500.0", priorBcVersion);
         prior.GithubReleaseTag = priorReleaseTag;
         seed.OeProjectBuilds.Add(prior);
         await seed.SaveChangesAsync();
@@ -1370,19 +1573,25 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.1.3.4/dk");
     }
 
-    [Fact]
-    public async Task A_next_version_build_leaves_refreshing_a_stale_preview_parent_to_the_daily_sweep()
+    [Theory]
+    // Either side of the sweep's refresh age, with a newer insider build on offer.
+    [InlineData(-24)]
+    [InlineData(24)]
+    public async Task A_next_version_build_links_the_preview_parent_whatever_its_age_and_leaves_refreshing_it_to_the_daily_sweep(
+        int hoursPastRefreshAge)
     {
         // It indexes nothing of its own (#1140), so importing 2 GB of preview to parent
-        // onto would buy it nothing; it links what is there.
+        // onto would buy it nothing; it links what is there, fresh or stale.
         var (projectId, releaseId, _) = await SeedAsync();
-        var staleId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-20));
+        var importedAt = DateTime.UtcNow - ArtifactReleaseImporter.PreviewRefreshAge - TimeSpan.FromHours(hoursPastRefreshAge);
+        var previewId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", importedAt);
 
         var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
-        outcome.ParentReleaseId.Should().Be(staleId);
+        outcome.ParentReleaseId.Should().Be(previewId);
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-insider:30.0:dk"))
+            .Id.Should().Be(previewId, "nothing was imported beside it or in its place");
     }
 
     [Fact]
@@ -1397,17 +1606,6 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         await using var read = _db.NewContext();
         (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().BeNull();
         (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
-    }
-
-    [Fact]
-    public async Task A_recent_preview_parent_is_kept_even_when_a_newer_insider_build_exists()
-    {
-        var (projectId, releaseId, _) = await SeedAsync();
-        var recentId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-2));
-
-        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
-
-        outcome.ParentReleaseId.Should().Be(recentId);
     }
 
     // ── A parent import nobody finishes (#1180) ────────────────────────
@@ -1513,10 +1711,10 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         var translations = new TranslationImportService(ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
         var importer = new ReleaseImportService(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance, ingests: _ingests);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), ingests: _ingests);
         return new ProjectBuildService(
             ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
@@ -1671,11 +1869,20 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The commit every clone lands on; null makes <c>git show</c> fail, as before.</summary>
         public string? HeadSha { get; set; }
 
+        /// <summary>Makes <c>git show</c> fail even with a <see cref="HeadSha"/>, as it now and then does in production (#1453).</summary>
+        public bool ShowFails { get; set; }
+
+        /// <summary>Makes <c>git rev-parse</c> fail even with a <see cref="HeadSha"/>.</summary>
+        public bool RevParseFails { get; set; }
+
         /// <summary>What <c>git diff --name-only</c> prints per extension folder; a folder not named prints nothing.</summary>
         public Dictionary<string, string> Diffs { get; } = new(StringComparer.Ordinal);
 
         /// <summary>Makes every <c>git diff</c> fail, as it does when the earlier commit is not in the clone.</summary>
         public bool DiffFails { get; set; }
+
+        /// <summary>Extensions, by name, whose compile fails whatever is in the cache.</summary>
+        public HashSet<string> FailingCompiles { get; } = new(StringComparer.Ordinal);
 
         /// <summary>The folder of every <c>git diff</c> run.</summary>
         public List<string> DiffedFolders { get; } = new();
@@ -1734,9 +1941,13 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 Checkouts.Add(request.Arguments[^1]);
                 return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
             }
-            if (request.Arguments.Contains("show") && HeadSha is not null)
+            if (request.Arguments.Contains("show") && HeadSha is not null && !ShowFails)
             {
                 return Task.FromResult(new ProcessRunResult(0, $"{HeadSha}\t2026-10-01T00:00:00+00:00\n", string.Empty));
+            }
+            if (request.Arguments.Contains("rev-parse") && HeadSha is not null && !RevParseFails)
+            {
+                return Task.FromResult(new ProcessRunResult(0, $"{HeadSha}\n", string.Empty));
             }
             if (request.Arguments.Contains("diff"))
             {
@@ -1779,6 +1990,10 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 .Select(AppPackageReader.TryReadManifest)
                 .Where(m => m is not null)
                 .ToDictionary(m => m!.AppId.ToString(), m => m!.Version, StringComparer.OrdinalIgnoreCase);
+            if (FailingCompiles.Contains(manifest.Name))
+            {
+                return new ProcessRunResult(1, "error AL0118: The name 'BaseProcedure' does not exist in the current context.", string.Empty);
+            }
             var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var dep in manifest.Dependencies)
             {

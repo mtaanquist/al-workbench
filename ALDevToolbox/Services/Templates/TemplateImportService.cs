@@ -146,9 +146,14 @@ public sealed class TemplateImportService
         // (including the untracked folder rows shoved into them) against the
         // source. CLAUDE.md: AsNoTracking on every read-only EF query.
         var source = await _db.RuntimeTemplates
+            // Fence category 5 (system-org fork read): pinned to t.OrganizationId == systemOrgId.
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value)
+            // Live, non-deprecated only, like ListSystemTemplatesAsync: a stale
+            // Import click on a template the catalogue has since retired is
+            // refused rather than forking a live copy of it.
+            .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value
+                && t.DeletedAt == null && !t.Deprecated)
             .Include(t => t.WorkspaceExtensions.OrderBy(e => e.Ordering))
                 .ThenInclude(e => e.Dependencies.OrderBy(d => d.Ordering))
             .Include(t => t.DefaultModules.OrderBy(d => d.Ordering))
@@ -195,16 +200,34 @@ public sealed class TemplateImportService
         // ignoreOrgFilter: the source is the system org, not the acting one.
         await _folderTree.HydrateExtensionFolderTreeAsync(new[] { source }, ct, ignoreOrgFilter: true);
 
+        // A module retired in the system org is not a default any more, even
+        // while the template still links it there; cloning it would hand the
+        // importing org a live copy of something the catalogue retired (#1327).
+        var sourceDefaults = source.DefaultModules
+            .Where(dm => (dm.Module ?? throw new InvalidOperationException("Default-module row has no module loaded.")).DeletedAt == null)
+            .OrderBy(dm => dm.Ordering)
+            .ToList();
+
         var localModulesByKey = new Dictionary<string, Module>(StringComparer.Ordinal);
-        var sourceModules = source.DefaultModules
-            .Select(dm => dm.Module ?? throw new InvalidOperationException("Default-module row has no module loaded."))
+        var sourceModules = sourceDefaults
+            .Select(dm => dm.Module!)
             .GroupBy(m => m.Key)
             .Select(g => g.First())
             .ToList();
         await _folderTree.HydrateModuleExtensionFolderTreeAsync(sourceModules, ct, ignoreOrgFilter: true);
         foreach (var sourceModule in sourceModules)
         {
-            localModulesByKey[sourceModule.Key] = await EnsureModuleAsync(sourceModule, actingOrgId, now, ct);
+            var localModule = await EnsureModuleAsync(sourceModule, actingOrgId, now, ct);
+            if (localModule is not null)
+            {
+                localModulesByKey[sourceModule.Key] = localModule;
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Importing template '{TemplateKey}' into org {OrgId}: left default module '{ModuleKey}' out because the organisation deleted its copy.",
+                    source.Key, actingOrgId, sourceModule.Key);
+            }
         }
 
         var includedFileIds = await MapIncludedFilesAsync(source, actingOrgId, ct);
@@ -255,7 +278,7 @@ public sealed class TemplateImportService
         };
 
         var ordering = 0;
-        foreach (var defaultModule in source.DefaultModules)
+        foreach (var defaultModule in sourceDefaults)
         {
             var key = defaultModule.Module!.Key;
             if (!localModulesByKey.TryGetValue(key, out var localModule)) continue;
@@ -425,7 +448,14 @@ public sealed class TemplateImportService
         return p;
     }
 
-    private async Task<ApplicationVersion> EnsureApplicationVersionAsync(
+    /// <summary>
+    /// The acting org's application version for <paramref name="sourceVersion"/>'s
+    /// key, cloning it in when the org has none. Null when the org has one but
+    /// deleted it: the imported template then has no default version, rather
+    /// than one the end-user picker hides, the way a deleted module is left out
+    /// of its defaults (#1327, #1545).
+    /// </summary>
+    private async Task<ApplicationVersion?> EnsureApplicationVersionAsync(
         ApplicationVersion sourceVersion, int actingOrgId, DateTime now, CancellationToken ct)
     {
         var existing = await _db.ApplicationVersions
@@ -433,7 +463,14 @@ public sealed class TemplateImportService
             // OrganizationId == actingOrgId; the clone is written into the acting org only.
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(v => v.OrganizationId == actingOrgId && v.Key == sourceVersion.Key, ct);
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            if (existing.DeletedAt == null) return existing;
+            _logger.LogInformation(
+                "Importing into org {OrgId}: left the default application version '{VersionKey}' out because the organisation deleted its copy.",
+                actingOrgId, sourceVersion.Key);
+            return null;
+        }
 
         var maxOrdering = await _db.ApplicationVersions
             // Same category 4 read, pinned to v.OrganizationId == actingOrgId.
@@ -458,7 +495,14 @@ public sealed class TemplateImportService
         return clone;
     }
 
-    private async Task<Module> EnsureModuleAsync(
+    /// <summary>
+    /// The acting org's module for <paramref name="sourceModule"/>'s key,
+    /// cloning it in when the org has none. Null when the org has one but
+    /// deleted it: the org retired that module, so the imported template
+    /// leaves it out of its defaults rather than linking a deleted module or
+    /// quietly restoring it (#1327).
+    /// </summary>
+    private async Task<Module?> EnsureModuleAsync(
         Module sourceModule, int actingOrgId, DateTime now, CancellationToken ct)
     {
         var existing = await _db.Modules
@@ -466,7 +510,7 @@ public sealed class TemplateImportService
             // OrganizationId == actingOrgId.
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(m => m.OrganizationId == actingOrgId && m.Key == sourceModule.Key, ct);
-        if (existing is not null) return existing;
+        if (existing is not null) return existing.DeletedAt == null ? existing : null;
 
         var clone = new Module
         {
@@ -478,6 +522,19 @@ public sealed class TemplateImportService
             Deprecated = false,
             CreatedAt = now,
             UpdatedAt = now,
+            // A module copied from a repository keeps its source, so the copy
+            // goes on following it. The importing organisation reads it with its
+            // own installation: a private repository it cannot see keeps the
+            // copied files and shows the error on the module page (#1415).
+            SourceRepository = sourceModule.SourceRepository,
+            SourceRef = sourceModule.SourceRef,
+            SourcePath = sourceModule.SourcePath,
+            SourceCommitSha = sourceModule.SourceCommitSha,
+            SourceFetchedAt = sourceModule.SourceFetchedAt,
+            SourceCheckedAt = sourceModule.SourceCheckedAt,
+            SourceSkippedJson = sourceModule.SourceSkippedJson,
+            SourceDependenciesJson = sourceModule.SourceDependenciesJson,
+            SourceIdRangeSize = sourceModule.SourceIdRangeSize,
             Dependencies = sourceModule.Dependencies.Select((d, i) => new ModuleDependency
             {
                 OrganizationId = actingOrgId,

@@ -144,8 +144,16 @@ Build **trigger** (the **New build** action with its extension picker) is a Pipe
 - **Pipelines are disabled, not deleted** (#1131). Anyone who manages the solution can disable or
   enable a build pipeline or a deployment pipeline (`disabled_at`); only an org Admin or a
   SiteAdmin can delete one. A disabled build pipeline refuses a Build and is skipped by building on
-  push and the nightly preview check, and a push or preview build that was already waiting fails
-  with the reason when the worker reaches it; a manual build already queued still runs. A disabled
+  push and the nightly preview check. Whether the pipeline is disabled or deleted is checked again
+  every time the worker picks a build up - a first run, a Retry or Recover symbols waiting in the
+  queue, and a build put back in the queue after a server restart - and such a build fails with
+  the reason before it clones (#1335). A build by hand, a Retry or Recover symbols is also refused
+  at pickup when the person it runs as is no longer active or can no longer manage the solution,
+  as an automatic build is, since it clones with their access (#1551). Retry and Recover symbols also refuse up front. A build that
+  had already started compiling is left to finish and stays ready, but it is checked once more at
+  the end: it publishes no GitHub release (the reason is recorded on the build as its release
+  outcome) and is neither deployed without approval nor prepared for approval: a stopped pipeline
+  means stop, so no deployment pipeline offers that build (the skip is logged). A disabled
   deployment pipeline refuses Deploy and the agent's deploy tool, prepares nothing from new builds,
   and disabling it cancels its scheduled deployments and dismisses its prepared ones, as a delete
   does. Enabling puts it back as it was; nothing that was cancelled comes back.
@@ -278,11 +286,17 @@ app). The **New build** action lets the user pick which to build:
   release browser, the org-wide A/B compare picker, and any other org-wide release dropdown or
   search scope. Audit `ObjectExplorerService` listings, the global compare picker, and any
   `WHERE kind …` enumeration, and exclude project releases from the global ones.
-  **One deliberate exception:** the `/object-explorer` Third-party tab surfaces each pipeline's
-  *latest ready* build release (`ObjectExplorerService.ListLatestPipelineBuildReleasesAsync` — one
-  row per pipeline, grouped under the project's name next to the manual third-party publishers) so
-  a pipeline's current objects are findable without opening its project first. Older builds remain
-  Artifacts-only, and MCP `list_releases` still excludes all project releases.
+  **One deliberate exception:** the `/object-explorer` Solutions tab (between Microsoft and
+  Third-party) surfaces each pipeline's *latest ready* build release
+  (`ObjectExplorerService.ListLatestPipelineBuildReleasesAsync` — one table row per pipeline,
+  sorted by solution then pipeline) so a pipeline's current objects are findable without opening
+  its project first. It is a table, not cards, because it grows with the number of customers, and
+  like C/AL it is hidden while there is nothing to list. The page's search box looks across every
+  tab at once and groups the matches by tab; clicking a tab narrows the same search to it. Older
+  builds remain Artifacts-only. MCP `list_releases` lists the same latest-per-pipeline builds, as
+  kind `solution` with the solution and pipeline named, so an agent asked about a customer finds
+  that customer's code in the Object Explorer rather than going to GitHub for it; older builds are
+  reached through `list_solution_builds`.
 - **Comparing two builds of the same project is kept** — it's genuinely useful — but scoped to that
   project. Artifacts offers a "Compare builds" picker listing only *this project's* builds;
   selecting two reuses `ReleaseComparisonService.CompareReleases` on the underlying Release ids and
@@ -292,6 +306,8 @@ app). The **New build** action lets the user pick which to build:
   ready builds of that project, its own pipeline's first, newest first, each named "Build #N of
   {pipeline}" because every build of a project shares one release label (#1075). Builds of a
   deleted pipeline are left out, and the list stops at the 50 most recent.
+  The "Compare with release..." picker on a file in a build offers the same list, narrowed to the
+  builds that still carry the file (#1570).
 - The only path into a build's objects is: open the artifact → deep-link to
   `/object-explorer/release/{ReleaseId}` (or the project-scoped compare view). `OeReleaseDetail`
   stays reachable by id and gains a "back to artifact" affordance so a deep-linked user isn't

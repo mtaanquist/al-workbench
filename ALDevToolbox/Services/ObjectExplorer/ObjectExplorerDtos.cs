@@ -10,7 +10,7 @@ namespace ALDevToolbox.Services.ObjectExplorer;
 /// run, which is fine for a "how much room is this taking" overview.
 /// <see cref="PipelineName"/> is filled only by
 /// <see cref="ObjectExplorerService.ListLatestPipelineBuildReleasesAsync"/> —
-/// the pipeline-build rows surfaced on the Third-party tab.
+/// the pipeline-build rows surfaced on the Object Explorer's Solutions tab.
 /// </summary>
 public sealed record ReleaseListItem(
     int Id,
@@ -285,16 +285,23 @@ public sealed record FindReferencesQuery(
     string? TargetMemberKind = null);
 
 /// <summary>
+/// One built-in method called on a Find built-in calls target and how many
+/// calls it has, counted over every match, not just the rows a cut list keeps.
+/// </summary>
+public sealed record SystemMethodCount(string Name, int Count);
+
+/// <summary>
 /// Query envelope for <c>FindSystemReferencesAsync</c> — the receiver object
 /// triplet (same matching as <see cref="FindReferencesQuery"/>), optionally
-/// narrowed to a single built-in method (<c>Insert</c>, <c>Modify</c>, …).
+/// narrowed to some built-in methods (<c>Insert</c>, <c>Modify</c>, …),
+/// matched without regard to case since C/AL writes them in capitals.
 /// </summary>
 public sealed record FindSystemReferencesQuery(
     Guid TargetAppId,
     string TargetObjectKind,
     int? TargetObjectId,
     string TargetObjectName,
-    string? SystemMethodName = null);
+    IReadOnlyList<string>? SystemMethodNames = null);
 
 /// <summary>
 /// One reference matched by <c>FindReferencesAsync</c>. Carries enough
@@ -315,6 +322,12 @@ public sealed record FindSystemReferencesQuery(
 /// trigger the reference sits inside (resolved from the reference's
 /// <c>source_symbol_id</c>) — null for declarations and object-scope
 /// references that aren't inside a member body.
+///
+/// <see cref="Usage"/> says whether a field or variable reference reads the
+/// value or sets it (one of the <see cref="Explore.ReferenceUsage"/> values),
+/// and <see cref="IsTemporary"/> whether a field is reached through a temporary
+/// record. Both are worked out from the source line when the snippet is cut
+/// (null for every other kind of reference and for rows without source).
 /// </summary>
 public sealed record ReferenceMatch(
     long Id,
@@ -334,7 +347,10 @@ public sealed record ReferenceMatch(
     string? MemberSignature = null,
     string? SourceMemberName = null,
     string? SourceMemberKind = null,
-    string? SourceMemberSignature = null);
+    string? SourceMemberSignature = null,
+    int? ColumnNumber = null,
+    string? Usage = null,
+    bool? IsTemporary = null);
 
 /// <summary>
 /// Read-only projection of an <c>oe_module_files</c> row for the source viewer.
@@ -394,7 +410,9 @@ public sealed record SourceFileHeader(
 
 /// <summary>
 /// One procedure-search hit on the Release search page. Carries the source
-/// file pointer so the row can deep-link straight to the declaration line.
+/// file pointer so the row can deep-link straight to the declaration line:
+/// <c>LineNumber</c> is the procedure's own line, or the owning object's when
+/// the procedure has none (an app imported from symbols only).
 /// </summary>
 public sealed record ReleaseProcedureMatch(
     long Id,
@@ -407,7 +425,7 @@ public sealed record ReleaseProcedureMatch(
     string? Signature,
     string? ReturnType,
     long? SourceFileId,
-    int ObjectLineNumber);
+    int LineNumber);
 
 /// <summary>
 /// One content-search hit on the Release search page. The snippet is the
@@ -537,7 +555,19 @@ public sealed record ReferenceSession(
     // "BlockCustomer"), where TargetLabel is the whole sentence fragment
     // ("references to table 36 Sales Header"). The panel heading wants the
     // short form; the log line and the close button's tooltip want the long one.
-    string TargetName = "");
+    string TargetName = "",
+    // "references", or "built_in_calls" for a Find built-in calls search: the
+    // panel heads and filters the two differently.
+    string Kind = "references",
+    // Built-in calls only, once the list is too long to hold whole: the
+    // methods to offer in the picker, which then asks the server for one
+    // method's calls rather than filtering the rows in hand.
+    IReadOnlyList<string>? MethodNames = null,
+    // The method this list was narrowed to on the server, null for all.
+    string? Method = null,
+    // How many calls each of MethodNames has, in the same order, counted over
+    // every match rather than the rows kept (#1543). Null when unknown.
+    IReadOnlyList<int>? MethodCounts = null);
 
 /// <summary>
 /// One row in the source-viewer outline's "Using" or "Used by" sections (#148).
@@ -626,6 +656,8 @@ public sealed record TranslationMatch(
 /// do (we only emit folders that have descendants); modules always do.</param>
 /// <param name="Badge">The right-aligned mono label: a module's version, or
 /// an object's AL id.</param>
+/// <param name="IsHidden">Drawn hidden: a row under a section that starts
+/// folded. It is in the list so the section opens without a fetch.</param>
 public sealed record OeTreeNode(
     string Kind,
     string Name,
@@ -638,7 +670,8 @@ public sealed record OeTreeNode(
     long? FileId = null,
     string? ObjectKind = null,
     string? FileName = null,
-    string? Badge = null);
+    string? Badge = null,
+    bool IsHidden = false);
 
 /// <summary>
 /// One declaration the viewer should make clickable. Coordinates are 1-based

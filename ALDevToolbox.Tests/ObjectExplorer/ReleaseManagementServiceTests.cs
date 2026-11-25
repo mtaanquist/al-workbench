@@ -19,29 +19,63 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class ReleaseManagementServiceTests : IDisposable
 {
-    private readonly TestDb _db = new();
-    public void Dispose() => _db.Dispose();
+    // Created on first use, so a test that starts by seeding a release gets a
+    // clone of a seeded template instead of importing the app itself (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
+    public void Dispose() => _database?.Dispose();
 
     private static readonly string FixtureRoot =
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
 
     private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), NullLogger<TranslationImportService>.Instance),
+            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext));
 
     private ReleaseManagementService NewManagement(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseManagementService>.Instance);
 
-    private async Task<int> SeedReleaseAsync(string label = "Test Release", int? parentId = null, string kind = "first_party")
+    /// <summary>
+    /// Imports DK Core as a release. The first release of a test comes from a
+    /// template seeded once per kind and symbol choice, then renamed: the label
+    /// lives only on the release row, so the clone matches a fresh import. Later
+    /// releases in the same test, and children, import for real.
+    /// </summary>
+    private async Task<int> SeedReleaseAsync(
+        string label = "Test Release", int? parentId = null, string kind = "first_party", bool storeSymbolReference = false)
+    {
+        if (_database is null && parentId is null)
+        {
+            _database = TestDb.FromSeed(
+                $"release-management:{kind}:{storeSymbolReference}",
+                db => new ReleaseManagementServiceTests(db).ImportAsync("Seeded", null, kind, storeSymbolReference),
+                out var seededId);
+            await using var rename = _database.NewContext();
+            await rename.OeReleases.Where(r => r.Id == seededId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Label, label));
+            return seededId;
+        }
+        return await ImportAsync(label, parentId, kind, storeSymbolReference);
+    }
+
+    public ReleaseManagementServiceTests()
+    {
+    }
+
+    /// <summary>An instance over the template being seeded, so the seed runs the same importer.</summary>
+    private ReleaseManagementServiceTests(TestDb database) => _database = database;
+
+    private async Task<int> ImportAsync(string label, int? parentId, string kind, bool storeSymbolReference)
     {
         await using var ctx = _db.NewContext();
         var svc = NewImporter(ctx);
         await using var s = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
         var summary = await svc.ImportReleaseAsync(new ReleaseImportRequest(
             Label: label, Kind: kind, ParentReleaseId: parentId, ApplicationVersionId: null,
-            Uploads: new[] { new AppFileUpload($"{label}.app", s, null) }));
+            Uploads: new[] { new AppFileUpload($"{label}.app", s, null) },
+            StoreSymbolReference: storeSymbolReference));
         return summary.ReleaseId;
     }
 
@@ -194,7 +228,9 @@ public sealed class ReleaseManagementServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "Cascade Test");
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(id);
+            await svc.HardDeleteAsync(id, confirmLabel: "Cascade Test");
         }
 
         await using var read = _db.NewContext();
@@ -208,13 +244,243 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     public async Task HardDeleteAsync_refuses_when_another_release_has_this_one_as_parent()
     {
         var parentId = await SeedReleaseAsync(label: "Parent");
-        await SeedReleaseAsync(label: "Customer X", parentId: parentId, kind: "project");
+        var childId = await SeedReleaseAsync(label: "Customer X", parentId: parentId, kind: "project");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(parentId);
+            var act = async () => await svc.HardDeleteAsync(parentId, confirmLabel: "Parent");
+
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("parent")
+                .And.Contain("\"Customer X\"", "the person needs to know which release to delete first (#1549)")
+                .And.Contain("soft-deleted");
+        }
+
+        // The refusal happens before anything is removed: both rows, and the parent's modules, survive.
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.Id == parentId || r.Id == childId)).Should().Be(2);
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == parentId)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// #1616: a vendor symbols release that solution builds link as a third-party
+    /// dependency is not deleted from under them; the link would cascade away and
+    /// their references into the vendor objects would stop resolving.
+    /// </summary>
+    [Fact]
+    public async Task HardDeleteAsync_refuses_while_a_solution_build_links_the_release_as_a_dependency()
+    {
+        var vendorId = await SeedReleaseAsync(label: "CRONUS Vendor 24.0 (symbols)", kind: "third_party");
+        var buildId = await SeedReleaseAsync(label: "CRONUS build 1", kind: "project");
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeReleaseDependencies.Add(new OeReleaseDependency
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = buildId, DependencyReleaseId = vendorId, CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(vendorId);
+            var act = async () => await svc.HardDeleteAsync(vendorId, confirmLabel: "CRONUS Vendor 24.0 (symbols)");
+
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("third-party symbols").And.Contain("\"CRONUS build 1\"");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Id == vendorId)).Should().BeTrue();
+        (await read.OeReleaseDependencies.AsNoTracking().AnyAsync(d => d.DependencyReleaseId == vendorId)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// #1616: the refusal names only linking builds the person can see. A build on a
+    /// Private solution outside their teams is left out, so the message does not
+    /// confirm it exists.
+    /// </summary>
+    [Fact]
+    public async Task HardDeleteAsync_refusal_does_not_name_a_build_on_a_private_solution_the_viewer_cannot_see()
+    {
+        var vendorId = await SeedReleaseAsync(label: "CRONUS Vendor 25.0 (symbols)", kind: "third_party");
+        var openBuildId = await SeedReleaseAsync(label: "CRONUS open build", kind: "project");
+        var secretBuildId = await SeedReleaseAsync(label: "CRONUS secret build", kind: "project");
+        const int outsiderId = 9616;
+        await using (var seed = _db.NewContext())
+        {
+            var now = DateTime.UtcNow;
+            seed.Users.Add(new ALDevToolbox.Domain.Entities.User
+            {
+                Id = outsiderId, OrganizationId = TestDb.DefaultOrgId, Email = "nils@example.com", PasswordHash = "x",
+                DisplayName = "Nils", Role = ALDevToolbox.Domain.Entities.UserRole.Editor,
+                Status = ALDevToolbox.Domain.Entities.UserStatus.Active, CreatedAt = now,
+            });
+            var secret = new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Secret", Visibility = ProjectVisibility.Private,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            seed.OeProjects.Add(secret);
+            seed.OeReleaseDependencies.AddRange(
+                new OeReleaseDependency { OrganizationId = TestDb.DefaultOrgId, ReleaseId = openBuildId, DependencyReleaseId = vendorId, CreatedAt = now },
+                new OeReleaseDependency { OrganizationId = TestDb.DefaultOrgId, ReleaseId = secretBuildId, DependencyReleaseId = vendorId, CreatedAt = now });
+            await seed.SaveChangesAsync();
+            // The secret build belongs to the Private solution through its import job.
+            await new PersistedImportJobs(seed, TimeProvider.System).CreateAsync(secretBuildId,
+                new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, false),
+                new ReleaseImportSource.ProjectBuild(secret.Id), storeSymbolReference: false);
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = outsiderId;
 
         await using var ctx = _db.NewContext();
-        var act = async () => await NewManagement(ctx).HardDeleteAsync(parentId, confirmLabel: "Parent");
+        var svc = NewManagement(ctx);
+        await svc.SoftDeleteAsync(vendorId);
+        var act = async () => await svc.HardDeleteAsync(vendorId, confirmLabel: "CRONUS Vendor 25.0 (symbols)");
 
-        (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors.Should().ContainKey("Release");
+        var message = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Release"];
+        message.Should().Contain("\"CRONUS open build\"").And.NotContain("CRONUS secret build");
+    }
+
+    /// <summary>#1616: a release still importing is not deleted from under the running import.</summary>
+    [Fact]
+    public async Task HardDeleteAsync_refuses_a_release_that_is_still_importing()
+    {
+        int id;
+        await using (var seed = _db.NewContext())
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 25.0 (DK)", Kind = "first_party", Status = "ingesting",
+                DeletedAt = DateTime.UtcNow, ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            seed.OeReleases.Add(release);
+            await seed.SaveChangesAsync();
+            id = release.Id;
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "CRONUS 25.0 (DK)");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("Release")
+                .WhoseValue.Should().Contain("still importing");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Id == id)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// #1616: a stored SymbolReference.json blob is reclaimed with the release,
+    /// not left in the shared content table for good.
+    /// </summary>
+    [Fact]
+    public async Task HardDeleteAsync_reclaims_the_stored_symbol_reference_blobs()
+    {
+        var id = await SeedReleaseAsync(label: "With symbols", storeSymbolReference: true);
+        List<string> symbolHashes;
+        await using (var read = _db.NewContext())
+        {
+            symbolHashes = await read.OeModules.AsNoTracking()
+                .Where(m => m.ReleaseId == id && m.SymbolReferenceContentHash != null)
+                .Select(m => m.SymbolReferenceContentHash!)
+                .ToListAsync();
+        }
+        symbolHashes.Should().NotBeEmpty("the import was asked to keep each module's SymbolReference.json");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(id);
+            await svc.HardDeleteAsync(id, confirmLabel: "With symbols");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OeFileContents.AsNoTracking().AnyAsync(c => symbolHashes.Contains(c.ContentHash)))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_keeps_a_symbol_reference_blob_another_release_still_uses()
+    {
+        var keepId = await SeedReleaseAsync(label: "Keeps symbols", storeSymbolReference: true);
+        var dropId = await SeedReleaseAsync(label: "Drops symbols", storeSymbolReference: true);
+        List<string> shared;
+        await using (var read = _db.NewContext())
+        {
+            shared = await read.OeModules.AsNoTracking()
+                .Where(m => m.ReleaseId == keepId && m.SymbolReferenceContentHash != null)
+                .Select(m => m.SymbolReferenceContentHash!)
+                .ToListAsync();
+        }
+        shared.Should().NotBeEmpty("both imports stored the same .app's SymbolReference.json");
+        await using (var read = _db.NewContext())
+        {
+            (await read.OeModules.AsNoTracking()
+                .Where(m => m.ReleaseId == dropId && m.SymbolReferenceContentHash != null)
+                .Select(m => m.SymbolReferenceContentHash!)
+                .ToListAsync())
+                .Should().BeEquivalentTo(shared, "the deleted release offers the same symbol blobs for reclaim");
+        }
+
+        // A file only the deleted release uses, so its blob must go. It is offered in
+        // the same reclaim as the shared symbol blobs: without the reclaim's check on
+        // stored symbol references, the foreign key refuses that whole batch and this
+        // blob would be left too.
+        var onlyHere = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        await using (var seed = _db.NewContext())
+        {
+            var moduleId = await seed.OeModules.Where(m => m.ReleaseId == dropId).Select(m => m.Id).FirstAsync();
+            seed.OeFileContents.Add(new OeFileContent { ContentHash = onlyHere, Content = "// x", ContentLength = 4, LineCount = 1 });
+            seed.OeModuleFiles.Add(new OeModuleFile
+            {
+                OrganizationId = TestDb.DefaultOrgId, ModuleId = moduleId, Path = "src/OnlyHere.al", ContentHash = onlyHere, LineCount = 1,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewManagement(ctx);
+            await svc.SoftDeleteAsync(dropId);
+            await svc.HardDeleteAsync(dropId, confirmLabel: "Drops symbols");
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OeFileContents.AsNoTracking().CountAsync(c => shared.Contains(c.ContentHash)))
+            .Should().Be(shared.Distinct().Count());
+        (await after.OeFileContents.AsNoTracking().AnyAsync(c => c.ContentHash == onlyHere))
+            .Should().BeFalse("a blob only the deleted release used is reclaimed alongside the kept ones");
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_refuses_a_release_that_is_not_soft_deleted()
+    {
+        // The manage page only offers a permanent delete after a soft delete; the
+        // service holds the same order for a POST that skips the page.
+        var id = await SeedReleaseAsync(label: "Still Live");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "Still Live");
+            (await act.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().Equal(new Dictionary<string, string>
+                {
+                    ["Release"] = "Soft delete this release first. You can permanently delete it once it is soft-deleted.",
+                });
+        }
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == id);
+        release.DeletedAt.Should().BeNull("a refused hard delete leaves the release live");
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == id)).Should().BeTrue();
     }
 
     [Fact]
@@ -222,7 +488,9 @@ public sealed class ReleaseManagementServiceTests : IDisposable
     {
         var id = await SeedReleaseAsync(label: "Exactly This");
         await using var ctx = _db.NewContext();
-        var act = async () => await NewManagement(ctx).HardDeleteAsync(id, confirmLabel: "wrong");
+        var svc = NewManagement(ctx);
+        await svc.SoftDeleteAsync(id);
+        var act = async () => await svc.HardDeleteAsync(id, confirmLabel: "wrong");
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("ConfirmLabel");
 

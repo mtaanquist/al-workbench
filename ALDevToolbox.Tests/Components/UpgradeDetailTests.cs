@@ -72,20 +72,34 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
     {
         await _f.SeedCustomerAsync();
         var id = await UpgradeAsync();
+        // The upgrade's own read is held, so the page is still loading for as long as the
+        // assertion needs rather than for as long as the database takes (#1495).
+        var hold = new HoldFirstCommand(sql => sql.Contains("FROM oe_environment_upgrades AS", StringComparison.Ordinal));
+        _ctx.Services.ConfigureDbContext<ALDevToolbox.Data.AppDbContext>(opts => opts.AddInterceptors(hold));
 
-        var cut = Render(id);
-
-        // Straight after the first render the page is still reading the upgrade: the frame's
-        // skeleton head, the page's skeleton rows, no heading yet.
-        cut.WaitForAssertion(() =>
+        try
         {
-            cut.Markup.Should().Contain("Loading the upgrade and each environment...");
-            cut.Markup.Should().NotContain("from Business Central", "the page reads the mirror, not Business Central");
-            cut.FindAll("h1").Should().BeEmpty();
-            cut.FindAll(".detail-head .skeleton").Should().NotBeEmpty();
-            cut.Find(".page-head__crumbs a").GetAttribute("href").Should().Be("/upgrades");
-        });
-        cut.WaitForAssertion(() => cut.Find("h1.detail-head__title").TextContent.Should().Be("28.5 in November 2026"));
+            var cut = Render(id);
+            await hold.Held.WaitAsync(TimeSpan.FromSeconds(30));
+
+            // While the page reads the upgrade: the frame's skeleton head, the page's
+            // skeleton rows, no heading yet.
+            cut.WaitForAssertion(() =>
+            {
+                cut.Markup.Should().Contain("Loading the upgrade and each environment...");
+                cut.Markup.Should().NotContain("from Business Central", "the page reads the mirror, not Business Central");
+                cut.FindAll("h1").Should().BeEmpty();
+                cut.FindAll(".detail-head .skeleton").Should().NotBeEmpty();
+                cut.Find(".page-head__crumbs a").GetAttribute("href").Should().Be("/upgrades");
+            });
+
+            hold.Release();
+            cut.WaitForAssertion(() => cut.Find("h1.detail-head__title").TextContent.Should().Be("28.5 in November 2026"));
+        }
+        finally
+        {
+            hold.Release();
+        }
     }
 
     [Fact]
@@ -549,6 +563,105 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
     // ── The watch and the page's writes ─────────────────────────────────
 
+    /// <summary>
+    /// A start sent before the page was opened (another browser, or an earlier visit) left
+    /// the mirror on the old version, so nothing showed the update under way and the line
+    /// read Booked until the nightly refresh. Opening the page now follows it.
+    /// </summary>
+    [Fact]
+    public async Task A_start_sent_before_the_page_opened_is_followed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddMinutes(-17);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent,
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Updating... started"));
+    }
+
+    /// <summary>
+    /// A start Business Central never began (an outage at Microsoft) used to be watched
+    /// afresh on every visit, reading "Updating... started 16 hours ago" for as long as it
+    /// stayed unanswered. Past the watch's span it now says it is waiting, and offers to
+    /// stop waiting, which turns the line not updated so it can be ticked.
+    /// </summary>
+    [Fact]
+    public async Task An_old_start_that_never_began_says_it_is_waiting_and_can_be_stopped()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddHours(-16);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent, TargetVersion = "28.5",
+                RequestedByUserId = UpgradeActionTestFixture.FlagUserId,
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("No sign yet that Business Central has begun the update")
+                .And.NotContain("Updating..."));
+
+        var stop = Row(cut, "CRONUS Danmark").QuerySelectorAll("button.menu__item")
+            .Single(b => b.TextContent.Contains("Stop waiting for the update"));
+        stop.HasAttribute("disabled").Should().BeFalse("the upgrade being in progress must not hold it back");
+        stop.Click();
+        cut.WaitForAssertion(() =>
+            cut.Find(".confirm-dialog__title").TextContent.Should().Be("Stop waiting for the update on CRONUS Danmark Production?"));
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn").Last().Click());
+
+        cut.WaitForAssertion(() =>
+            Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Failed").And.NotContain("No sign yet"));
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.SingleAsync(a => a.UpgradeId == id)).UpdateResult
+            .Should().Be(PlatformUpdateResult.Dismissed);
+    }
+
+    [Fact]
+    public async Task A_fresh_start_offers_no_way_to_stop_waiting_while_it_is_watched()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var sent = DateTime.UtcNow.AddMinutes(-5);
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Sent, TargetVersion = "28.5",
+                RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = sent,
+                ExecuteAfter = sent, SentAt = sent, UpgradeId = id,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() => Row(cut, "CRONUS Danmark").TextContent.Should().Contain("Updating... started"));
+        Row(cut, "CRONUS Danmark").TextContent.Should().NotContain("No sign yet").And.NotContain("Stop waiting");
+    }
+
     [Fact]
     public async Task A_watch_tick_skips_while_the_page_holds_its_gate_and_reads_once_it_is_free()
     {
@@ -600,7 +713,9 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".upk-table tbody tr").Should().HaveCount(4);
+            // CRONUS Norge is on 28.5 already, so the default view leaves it out.
+            cut.FindAll(".upk-table tbody tr").Should().HaveCount(3);
+            cut.FindAll(".upk-sol").Select(e => e.TextContent.Trim()).Should().NotContain("CRONUS Norge");
             var mine = PickerBox(cut, "CRONUS Danmark");
             mine.HasAttribute("checked").Should().BeTrue();
             mine.HasAttribute("disabled").Should().BeTrue();
@@ -621,10 +736,14 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         {
             // Only the one that is free and still behind 28.5.
             PickerBox(cut, "CRONUS Sverige").HasAttribute("checked").Should().BeTrue();
-            PickerBox(cut, "CRONUS Norge").HasAttribute("checked").Should().BeFalse("it is on 28.5 already");
             cut.Find(".upk-foot__selected").TextContent.Should().Be("1 selected");
             cut.FindAll(".upk-foot .btn--primary").Single().TextContent.Trim().Should().Be("Add 1 environment");
         });
+
+        // The fill skips it in the whole fleet too, not only because it is hidden.
+        cut.Find(".upk-dialog select[aria-label=View]").Change("active");
+        cut.WaitForAssertion(() =>
+            PickerBox(cut, "CRONUS Norge").HasAttribute("checked").Should().BeFalse("it is on 28.5 already"));
 
         cut.WaitForAssertion(() => cut.FindAll(".upk-foot .btn--primary").Single().Click());
 
@@ -650,7 +769,7 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
         {
             PickerBox(cut, "CRONUS Norge").HasAttribute("disabled").Should().BeTrue();
-            PickerRow(cut, "CRONUS Norge").QuerySelector(".upk-why")!.TextContent.Should().Be("You can't manage this solution's updates");
+            PickerRow(cut, "CRONUS Norge").QuerySelector(".upk-why")!.TextContent.Should().Be("You can't schedule upgrades for this solution");
         });
 
         cut.WaitForAssertion(() => cut.FindAll(".upk-fill .btn").First(b => b.TextContent.StartsWith("Production")).Click());
@@ -765,6 +884,36 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
     private static AngleSharp.Dom.IElement RowMenuItem(IRenderedComponent<UpgradeDetail> cut, string solution, string label) =>
         Row(cut, solution).QuerySelectorAll(".ra__menu .menu__item").Single(i => i.TextContent.Trim() == label);
+
+    [Fact]
+    public void A_batch_notice_counts_lines_already_gone_in_one_sentence_and_keeps_the_named_refusals()
+    {
+        var result = new UpgradeLinesChangeResult([1], new Dictionary<string, string>
+        {
+            ["2"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
+            ["3"] = "You can't schedule upgrades for CRONUS Sverige, so Production was left as it was.",
+            ["4"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
+        });
+
+        var notice = UpgradeDetail.LinesNotice(result, "Took 1 environment off the upgrade.");
+
+        notice.Tone.Should().Be("warn");
+        notice.Text.Should().Be("Took 1 environment off the upgrade. "
+            + "You can't schedule upgrades for CRONUS Sverige, so Production was left as it was. "
+            + "2 of the environments you picked were already taken off the upgrade. Reload to see it as it is now.");
+    }
+
+    [Fact]
+    public void A_batch_notice_with_one_line_already_gone_keeps_the_single_sentence()
+    {
+        var result = new UpgradeLinesChangeResult([], new Dictionary<string, string>
+        {
+            ["2"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
+        });
+
+        UpgradeDetail.LinesNotice(result, "No environments were taken off the upgrade.").Text
+            .Should().Be("No environments were taken off the upgrade. " + EnvironmentUpgradeService.NoLongerOnUpgrade);
+    }
 
     private static AngleSharp.Dom.IElement HeadPrimary(IRenderedComponent<UpgradeDetail> cut) =>
         cut.FindAll(".page-head__actions > .btn--primary").Single();

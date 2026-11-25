@@ -79,7 +79,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
         await using var ctx = _db.NewContext();
         await ConfigureOffsiteAsync(ctx);
 
-        var act = () => NewService(ctx).DownloadAsync("../../etc/passwd", progress: null, default);
+        var act = () => NewService(ctx).DownloadAsync("../../etc/passwd", progress: null, recoverFromAnotherInstallation: false, default);
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .WithMessage("*suspicious leaf name*");
@@ -91,7 +91,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
         await using var ctx = _db.NewContext();
         await ConfigureOffsiteAsync(ctx);
 
-        var act = () => NewService(ctx).DownloadAsync("not-a-dump.txt", progress: null, default);
+        var act = () => NewService(ctx).DownloadAsync("not-a-dump.txt", progress: null, recoverFromAnotherInstallation: false, default);
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .WithMessage("*non-dump object*");
@@ -173,7 +173,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
             NullLogger<BackupService>.Instance, TimeProvider.System);
         var perTenant = new PerTenantBackupService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
-            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System);
+            NullLogger<PerTenantBackupService>.Instance, TimeProvider.System, new MaintenanceModeState());
         var systemSettings = new SystemSettingsService(
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, TimeProvider.System);
         // A throwaway persistent identity in a scratch dir — the refusals never

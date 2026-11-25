@@ -1,4 +1,5 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.SingleTenant;
 using ALDevToolbox.Services.Workers;
 using Microsoft.EntityFrameworkCore;
@@ -53,7 +54,10 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         TimeProvider clock,
         ILogger<ReleaseAutoImportScheduler> logger,
         WorkerHeartbeatRegistry heartbeats,
-        ISingleTenantMode singleTenant)
+        ISingleTenantMode singleTenant,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // Poll every minute; the sweep resolves + enqueues quickly (downloads run
         // on ReleaseImportWorker, not here), so a 30-minute active ceiling is
         // ample even for many opted-in orgs.
@@ -61,7 +65,8 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(30),
             maxIdleSilence: TimeSpan.FromMinutes(5),
-            disableEnvVar: "DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER")
+            disableEnvVar: "DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;
@@ -154,6 +159,9 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         var failed = 0;
         var previewsQueued = 0;
         var previewsRetired = 0;
+        // Orgs already reported over quota this sweep, so a list of countries
+        // logs the refusal once rather than once per country and step.
+        var overQuota = new HashSet<int>();
 
         foreach (var (orgId, countries, isSystem, includePreviews) in targets)
         {
@@ -196,6 +204,11 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
                 {
                     throw;
                 }
+                catch (PlanValidationException ex) when (IsQuotaRefusal(ex))
+                {
+                    // Expected for an org at its quota, not a fault: no stack trace.
+                    LogOverQuotaOnce(overQuota, orgId);
+                }
                 catch (Exception ex)
                 {
                     failed++;
@@ -235,6 +248,10 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
                 {
                     throw;
                 }
+                catch (PlanValidationException ex) when (IsQuotaRefusal(ex))
+                {
+                    LogOverQuotaOnce(overQuota, orgId);
+                }
                 catch (Exception ex)
                 {
                     failed++;
@@ -248,6 +265,15 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         _logger.LogInformation(
             "ReleaseAutoImportScheduler sweep complete: {Queued} queued, {Already} already imported, {NotFound} not found, {Failed} failed, {PreviewsQueued} preview(s) queued, {PreviewsRetired} preview(s) retired across {Orgs} org(s).",
             queued, alreadyImported, notFound, failed, previewsQueued, previewsRetired, targets.Count);
+    }
+
+    /// <summary>The storage guard's refusal, keyed <c>storage</c> by <c>StorageQuotaGuard</c>.</summary>
+    private static bool IsQuotaRefusal(PlanValidationException ex) => ex.Errors.ContainsKey("storage");
+
+    private void LogOverQuotaOnce(HashSet<int> reported, int orgId)
+    {
+        if (!reported.Add(orgId)) return;
+        _logger.LogWarning("Auto-import skipped for org {OrgId}: organisation over storage quota.", orgId);
     }
 
     /// <summary>

@@ -33,6 +33,13 @@ public class OeProjectBuildCommit
     /// <summary>The commit author's name. Empty for a summary note.</summary>
     public string Author { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The commit author's email, as Git recorded it. Null for a summary note and for
+    /// builds from before it was kept. Matched to people so a build that starts failing
+    /// tells whoever's commits are in it (#1464).
+    /// </summary>
+    public string? AuthorEmail { get; set; }
+
     /// <summary>The commit's committer date (UTC). Null for a summary note.</summary>
     public DateTime? CommittedAt { get; set; }
 

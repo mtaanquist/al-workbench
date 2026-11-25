@@ -11,10 +11,12 @@ namespace ALDevToolbox.Services.ObjectExplorer.Bc;
 /// <para>
 /// Reads only. A write is never re-sent on our own initiative: a request that may have
 /// been half-applied is for a person to look at, and its body has already been consumed.
-/// One retry, a bounded wait - a customer who is still throttled after that keeps their
-/// previous mirror until the next night, which is what any other failed read does.
-/// Microsoft documents no limits for the admin center API, so there is nothing to pace
-/// against in advance; this is how we find out.
+/// One retry, and only when the wait asked for is short (<see cref="MaxWait"/>): a longer
+/// one is not shortened to suit us but handed back unanswered, and the caller carries
+/// the wait onward (<see cref="BcApiException.RetryAfter"/>) so the environment sweep
+/// leaves that customer alone until it has passed. Microsoft documents no limits for the
+/// admin center API, so there is nothing to pace against in advance; this is how we
+/// find out.
 /// </para>
 /// </summary>
 public sealed class BcThrottleHandler : DelegatingHandler
@@ -38,6 +40,15 @@ public sealed class BcThrottleHandler : DelegatingHandler
     {
         var response = await base.SendAsync(request, ct).ConfigureAwait(false);
         if (request.Method != HttpMethod.Get || WaitFor(response) is not { } wait) return response;
+        if (wait > MaxWait)
+        {
+            // Retrying sooner than asked would be ignoring the answer, and sitting out a
+            // long wait here would hold a person's page or the whole sweep. Hand it back.
+            _logger.LogWarning(
+                "Business Central answered {Status} for {Host}{Path} and asked for {Seconds:N0}s; not trying again before then.",
+                (int)response.StatusCode, request.RequestUri?.Host, request.RequestUri?.AbsolutePath, wait.TotalSeconds);
+            return response;
+        }
 
         _logger.LogWarning(
             "Business Central answered {Status} for {Host}{Path}; waiting {Seconds:N0}s before one more try.",
@@ -52,8 +63,17 @@ public sealed class BcThrottleHandler : DelegatingHandler
         return await base.SendAsync(again, ct).ConfigureAwait(false);
     }
 
-    /// <summary>How long to wait before retrying, or null when the answer is not a request to slow down.</summary>
-    internal TimeSpan? WaitFor(HttpResponseMessage response)
+    /// <summary>How long Business Central asked us to wait, or null when the answer is not a request to slow down.</summary>
+    internal TimeSpan? WaitFor(HttpResponseMessage response) => RequestedWait(response, _clock.GetUtcNow());
+
+    /// <summary>
+    /// How long a response asked us to wait before asking again: its <c>Retry-After</c>,
+    /// as seconds or as a date, at least a second; <see cref="DefaultWait"/> for a 429 that
+    /// names none. Null when the response is not a request to slow down at all - a 503
+    /// without a wait is just down. Shared with the clients, which carry it on the
+    /// <see cref="BcApiException"/> they throw.
+    /// </summary>
+    internal static TimeSpan? RequestedWait(HttpResponseMessage response, DateTimeOffset now)
     {
         var retryAfter = response.Headers.RetryAfter;
         var throttled = response.StatusCode == HttpStatusCode.TooManyRequests
@@ -61,9 +81,8 @@ public sealed class BcThrottleHandler : DelegatingHandler
         if (!throttled) return null;
 
         var asked = retryAfter?.Delta
-            ?? (retryAfter?.Date is { } until ? until - _clock.GetUtcNow() : (TimeSpan?)null)
+            ?? (retryAfter?.Date is { } until ? until - now : (TimeSpan?)null)
             ?? DefaultWait;
-        if (asked < TimeSpan.FromSeconds(1)) asked = TimeSpan.FromSeconds(1);
-        return asked > MaxWait ? MaxWait : asked;
+        return asked < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : asked;
     }
 }

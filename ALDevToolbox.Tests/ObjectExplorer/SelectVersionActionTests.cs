@@ -40,22 +40,48 @@ public sealed class SelectVersionActionTests : IDisposable
 
     // ── The version rule ─────────────────────────────────────────────────
 
-    [Fact]
-    public async Task A_version_change_without_a_version_is_refused_and_writes_nothing()
+    [Theory]
+    [InlineData("  ", "Choose the version to update to.")]
+    // 33 characters: one past the longest version the column holds.
+    [InlineData("28.0.123456789012345678901234.567", "That isn't a Business Central version.")]
+    public async Task A_version_change_without_a_usable_version_is_refused_and_writes_nothing(string version, string message)
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
 
         await using (var ctx = _f.Db.NewContext())
         {
             var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
-                projectId, envId, UpgradeActionKind.SelectVersion, executeAt: null, targetVersion: "  ");
+                projectId, envId, UpgradeActionKind.SelectVersion, executeAt: null, targetVersion: version);
             (await act.Should().ThrowAsync<PlanValidationException>())
-                .Which.Errors.Should().ContainKey("TargetVersion");
+                .Which.Errors["TargetVersion"].Should().Be(message);
         }
 
         _f.Admin.Writes.Should().Be(0);
         await using var verify = _f.Db.NewContext();
         (await verify.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(0);
+    }
+
+    /// <summary>
+    /// The other side of the length rule: 32 characters is the longest version the column
+    /// holds, and it is taken. Booked for later, so Business Central is not asked whether
+    /// it offers it and only the rule decides.
+    /// </summary>
+    [Fact]
+    public async Task A_version_of_exactly_32_characters_is_taken()
+    {
+        const string version = "28.0.123456789012345678901234.56";
+        version.Length.Should().Be(32);
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            actionId = (await _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, envId, UpgradeActionKind.SelectVersion,
+                _f.Clock.GetUtcNow().AddHours(4), targetVersion: version)).Id;
+        }
+
+        (await _f.ReadActionAsync(actionId)).TargetVersion.Should().Be(version);
     }
 
     [Theory]
@@ -233,6 +259,49 @@ public sealed class SelectVersionActionTests : IDisposable
         stored.Status.Should().Be(UpgradeActionStatus.Failed);
         stored.Outcome.Should().StartWith("The next version wasn't changed to 27.7.");
         _f.Admin.Writes.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_booked_version_change_does_not_fire_once_the_booker_is_off_the_update_team()
+    {
+        // The solution's owner is also on the update team, so they pass both gates when booking.
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        int teamId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            teamId = await ctx.OeProjectTeams.Where(t => t.ProjectId == projectId).Select(t => t.TeamId).SingleAsync();
+            ctx.TeamMembers.Add(new ALDevToolbox.Domain.Entities.TeamMember
+            {
+                OrganizationId = TestDb.DefaultOrgId, TeamId = teamId, UserId = UpgradeActionTestFixture.OwnerUserId,
+                ManagesUpdates = true, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var row = await _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, envId, UpgradeActionKind.SelectVersion,
+                _f.Clock.GetUtcNow().AddHours(4), targetVersion: "27.7");
+            actionId = row.Id;
+        }
+
+        // That afternoon they are taken off the update team, but still manage the solution.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.TeamMembers
+                .Where(m => m.TeamId == teamId && m.UserId == UpgradeActionTestFixture.OwnerUserId)
+                .ExecuteUpdateAsync(u => u.SetProperty(m => m.ManagesUpdates, false));
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(5));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(0, "the booking was made on the update-team grant, which is gone");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("no longer had permission");
     }
 
     [Fact]

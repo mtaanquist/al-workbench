@@ -151,10 +151,13 @@ public static class NavDestinations
         new("Translator", "/translator", "languages", "Work with text", Tool: ToolKey.Translator),
         new("Diff", "/diff", "git-compare", "Work with text", Tool: ToolKey.Compare),
         new("Piper", "/piper", "git-merge", "Work with text", Tool: ToolKey.Piper),
+        new("Sealed", "/sealed", "lock", "Work with text", Tool: ToolKey.Sealed),
 
         // ---- Deliver ----
         new("Solutions", "/solutions", "folder-git-2", "Deliver", Tool: ToolKey.Projects),
         new("Environments", "/environments", "server", "Deliver",
+            Tool: ToolKey.Projects, Parent: "Solutions"),
+        new("Repositories", "/repositories", "git-branch", "Deliver",
             Tool: ToolKey.Projects, Parent: "Solutions"),
         // Upgrades is its own grant and its own route: the sidebar shows it
         // under Solutions when that tool is on and on its own when it is off,
@@ -199,6 +202,7 @@ public static class NavDestinations
         new("Connections", "/site-admin/connections", "plug", "Site administration", Gate: NavGate.SiteAdmin),
         new("Email delivery", "/site-admin/email", "mail", "Site administration", Gate: NavGate.SiteAdmin),
         new("Workers", "/site-admin/workers", "monitor", "Site administration", Gate: NavGate.SiteAdmin),
+        new("Logs", "/site-admin/logs", "scroll-text", "Site administration", Gate: NavGate.SiteAdmin),
         new("Settings", "/site-admin/settings", "server-cog", "Site administration", Gate: NavGate.SiteAdmin),
 
         // ---- Reachable from the shell, but not from the sidebar ----

@@ -91,7 +91,9 @@ public static class IdRangeAllocator
 
         foreach (var module in modules)
         {
-            var size = module.IdRangeSize ?? template.ModuleIdRangeSize;
+            // A typed size wins; a blank one follows the copied repository's
+            // app.json, then the template (#1631).
+            var size = module.IdRangeSize ?? module.SourceIdRangeSize ?? template.ModuleIdRangeSize;
             var from = cursor;
             var to = from + size - 1;
             cursor = to + 1;

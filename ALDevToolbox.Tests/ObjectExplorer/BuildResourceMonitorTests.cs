@@ -3,6 +3,7 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.Workers;
 using ALDevToolbox.Tests.Auth;
+using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -18,7 +19,7 @@ public sealed class BuildResourceMonitorTests : IDisposable
 {
     private static readonly DateTime T0 = new(2026, 10, 7, 12, 0, 0, DateTimeKind.Utc);
     private static readonly AmbientOrganizationScope.OrganizationIdentity Identity =
-        new(OrganizationId: 1, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
+        new(OrganizationId: TestDb.DefaultOrgId, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "aldt-resources-" + Guid.NewGuid().ToString("N"));
     private readonly string _cgroup;

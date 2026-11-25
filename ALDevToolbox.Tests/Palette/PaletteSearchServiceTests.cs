@@ -337,7 +337,12 @@ public sealed class PaletteSearchServiceTests
             new PaletteCandidate("recipe", "Contoso posting routine", null, "/cookbook/1"));
         using var cts = new CancellationTokenSource();
 
-        var search = Service(stalled, recipes).SearchAsync(Caller, "contoso", cts.Token);
+        // A budget nothing reaches, so only the request's own token can fire: with the
+        // default slice a stall before the cancel would drop the source first (#1439).
+        var service = new PaletteSearchService(
+            [stalled, recipes], NullLogger<PaletteSearchService>.Instance, sourceBudget: TimeSpan.FromMinutes(1));
+
+        var search = service.SearchAsync(Caller, "contoso", cts.Token);
         await cts.CancelAsync();
 
         await FluentActions.Awaiting(() => search).Should().ThrowAsync<OperationCanceledException>();

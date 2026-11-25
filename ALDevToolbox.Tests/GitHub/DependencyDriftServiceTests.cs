@@ -95,7 +95,13 @@ public sealed class DependencyDriftServiceTests : IDisposable
          "version":"2.0.0.0","application":"28.2.0.0","platform":"28.0.0.0"}
         """;
 
+    /// <summary>An organisation id no other test class uses; see <see cref="ActAsAnOrganisationOfItsOwnAsync"/>.</summary>
+    private const int GateOrgId = 6301;
+
     private readonly TestDb _db = new();
+
+    /// <summary>The organisation the seeding helpers write for: the acting one.</summary>
+    private int _orgId = TestDb.DefaultOrgId;
 
     public DependencyDriftServiceTests()
     {
@@ -140,7 +146,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         var found = await service.ScanForReleaseAsync(releaseId);
 
-        found.Should().Be(3, "application, platform, and the dependency once");
+        found.Should().Be(4, "application, platform, the dependency once, and the offer to number the app after BC");
         await using var read = _db.NewContext();
         var rows = await read.GitHubRepositoryDrift.AsNoTracking().ToListAsync();
         rows.Select(r => r.Field).Should().OnlyHaveUniqueItems();
@@ -158,11 +164,11 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         var found = await service.ScanForReleaseAsync(releaseId);
 
-        found.Should().Be(3);
+        found.Should().Be(4);
         await using var read = _db.NewContext();
         var rows = await read.GitHubRepositoryDrift.OrderBy(d => d.Field).ToListAsync();
         rows.Select(r => r.Field).Should().Equal(
-            "application", "dependency:" + SystemAppId, "platform");
+            "application", "dependency:" + SystemAppId, "platform", "version-adopt");
         rows.Should().OnlyContain(r => r.Repository == RepoA && r.Path == "app.json" && r.ReleaseId == releaseId);
         // The application is a minimum, so the release's four-part build number
         // is not what a person would have typed.
@@ -174,6 +180,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     [Fact]
     public async Task A_scan_waits_while_another_scan_of_the_same_organisation_is_replacing_its_findings()
     {
+        await ActAsAnOrganisationOfItsOwnAsync();
         await ReadyAsync();
         await SeedCatalogueAsync("28.2.0.0");
         await SeedSolutionAsync(RepoA);
@@ -184,15 +191,16 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         Task<int> scanning;
         // Another import finishing at the same time (#1137): each replaces the whole set.
-        using (await DependencyDriftService.ScanGate.EnterAsync(TestDb.DefaultOrgId, TestContext.Current.CancellationToken))
+        using (await DependencyDriftService.ScanGate.EnterAsync(GateOrgId, TestContext.Current.CancellationToken))
         {
             scanning = service.ScanForReleaseAsync(releaseId, TestContext.Current.CancellationToken);
-            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            SpinWait.SpinUntil(() => DependencyDriftService.ScanGate.WaitingCount(GateOrgId) == 1,
+                TimeSpan.FromSeconds(30)).Should().BeTrue("the scan has to reach the gate and wait there");
             scanning.IsCompleted.Should().BeFalse("the organisation's findings are being replaced");
             api.Calls.Should().BeEmpty("nothing is read until the other scan is done");
         }
 
-        (await scanning.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Should().Be(3);
+        (await scanning.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Should().Be(4);
     }
 
     [Fact]
@@ -222,6 +230,215 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var _ = ctx;
 
         (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+    }
+
+    /// <summary>A manifest a wave behind whose own version follows the Business Central it was built for.</summary>
+    private const string FollowingManifest = """
+        {
+          "id": "1c0ffee0-0000-4000-8000-000000000004",
+          "name": "Payment Import",
+          "publisher": "CRONUS",
+          "dependencies": [
+            {
+              "id": "63ca2fa4-4f03-4f2b-a480-172fef340d3f",
+              "name": "System Application",
+              "publisher": "Microsoft",
+              "version": "28.2.0.0"
+            }
+          ],
+          "version": "27.0.3.0",
+          "application": "27.0.0.0",
+          "platform": "27.0.0.0"
+        }
+        """;
+
+    [Fact]
+    public async Task An_app_versioned_after_its_business_central_moves_with_the_application()
+    {
+        // The house convention: an app's Major.Minor say which Business Central it was
+        // built for. Pipeline numbering only adds to Build, so if the update did not
+        // move the version, an app on 28.2 would carry on calling itself 27.0.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var scanApi = BaseApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", FollowingManifest));
+        var (scanner, scanCtx) = NewService(scanApi);
+        await using (scanCtx) (await scanner.ScanForReleaseAsync(releaseId)).Should().Be(3);
+
+        await using (var read = _db.NewContext())
+        {
+            var version = await read.GitHubRepositoryDrift.SingleAsync(r => r.Field == "version");
+            version.Current.Should().Be("27.0.3.0");
+            version.Proposed.Should().Be("28.2.0.0", "a new Major.Minor starts its own Build and Revision");
+        }
+
+        var api = WritableApi(RepoA, manifest: FollowingManifest);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var file = (await service.GetSummaryAsync()).Repositories.Single().Files.Single();
+        file.Changes.Should().ContainSingle(c => c.Field == "version").Which.Label.Should().Be("App version");
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
+        CommittedBlob(api).Should().Be(FollowingManifest
+            .Replace("\"version\": \"27.0.3.0\"", "\"version\": \"28.2.0.0\"")
+            .Replace("\"application\": \"27.0.0.0\"", "\"application\": \"28.2.0.0\"")
+            .Replace("\"platform\": \"27.0.0.0\"", "\"platform\": \"28.0.0.0\""));
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
+            .Should().Contain("App version");
+    }
+
+    [Fact]
+    public async Task An_app_version_moved_on_by_hand_since_the_scan_is_left_alone()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        await using (var seed = _db.NewContext())
+        {
+            seed.GitHubRepositoryDrift.Add(new GitHubRepositoryDrift
+            {
+                OrganizationId = _orgId, Repository = RepoA, Path = "app.json", Field = "version",
+                Current = "27.0.3.0", Proposed = "28.2.0.0", ReleaseId = releaseId, DetectedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var movedOn = FollowingManifest.Replace("\"version\": \"27.0.3.0\"", "\"version\": \"28.3.0.0\"");
+        var api = WritableApi(RepoA, manifest: movedOn);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = (await service.OpenUpdatePullRequestsAsync([RepoA])).Single();
+
+        result.Refusal.Should().Contain("already up to date", "a version is never lowered");
+        api.Calls.Should().NotContain(c => c.Contains("/git/blobs"));
+    }
+
+    [Fact]
+    public async Task An_app_that_numbers_itself_is_only_offered_the_switch_and_keeps_its_version_unless_asked()
+    {
+        // BehindManifest is version 1.0.0.0 on BC 27: not the convention. The scan records
+        // what the switch would be, but nothing lists it as behind and a pull request
+        // leaves the version alone unless the person opening it says so.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
+        await using (scanCtx) await scanner.ScanForReleaseAsync(releaseId);
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.GitHubRepositoryDrift.AnyAsync(r => r.Field == "version")).Should().BeFalse();
+            var offer = await read.GitHubRepositoryDrift.SingleAsync(r => r.Field == "version-adopt");
+            offer.Current.Should().Be("1.0.0.0");
+            offer.Proposed.Should().Be("28.2.0.0");
+        }
+
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        (await service.GetSummaryAsync()).Repositories.Single().Files.Single().Changes
+            .Should().NotContain(c => c.Field == "version-adopt");
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
+        CommittedBlob(api).Should().Contain("\"version\": \"1.0.0.0\"");
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
+            .Should().NotContain("App version");
+    }
+
+    [Fact]
+    public async Task An_app_that_numbers_itself_switches_when_the_person_asks()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
+        await using (scanCtx) await scanner.ScanForReleaseAsync(releaseId);
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA], adoptVersions: true)).Single().Refusal.Should().BeNull();
+
+        CommittedBlob(api).Should().Be(BehindManifest
+            .Replace("\"version\": \"1.0.0.0\"", "\"version\": \"28.2.0.0\"")
+            .Replace("\"application\": \"27.0.0.0\"", "\"application\": \"28.2.0.0\"")
+            .Replace("\"platform\": \"27.0.0.0\"", "\"platform\": \"28.0.0.0\"")
+            .Replace("\"version\": \"27.0.0.0\"", "\"version\": \"28.2.0.0\""));
+        api.Bodies.Single(b => b.Call.StartsWith("POST") && b.Call.EndsWith("/pulls")).Body
+            .Should().Contain("App version: \\u00601.0.0.0\\u0060", "the body is JSON, so the backticks arrive escaped");
+    }
+
+    [Theory]
+    [InlineData("1.3.0.0", "27.0.0.0", "28.2", "28.2.0.0")]
+    [InlineData("2.1", "27.0.0.0", "28.2", "28.2")]
+    public void An_app_that_numbers_itself_is_offered_the_targets_major_minor(
+        string version, string application, string target, string expected) =>
+        DependencyDriftService.ProposedAdoptedVersion(version, application, target).Should().Be(expected);
+
+    [Theory]
+    [InlineData("28.0.0.0", "28.2.0.0", "28.5")]
+    [InlineData("30.0.0.0", "28.2.0.0", "28.5")]
+    [InlineData("", "28.2.0.0", "28.5")]
+    public void Following_apps_and_apps_ahead_of_the_target_are_not_offered_the_switch(
+        string version, string application, string target) =>
+        DependencyDriftService.ProposedAdoptedVersion(version, application, target).Should().BeNull();
+
+    [Theory]
+    [InlineData("28.2.0.0", "28.2.0.0", "28.5", "28.5.0.0")]
+    [InlineData("28.2.17.3", "28.2.0.0", "28.5.12345.0", "28.5.0.0")]
+    [InlineData("28.0.0.0", "28.2.0.0", "28.5", "28.5.0.0")]
+    [InlineData("27.5.0.0", "27.0.0.0", "28.0", "28.0.0.0")]
+    [InlineData("28.2", "28.2.0.0", "28.5", "28.5")]
+    public void The_proposed_app_version_takes_the_targets_major_minor(
+        string version, string application, string target, string expected) =>
+        DependencyDriftService.ProposedAppVersion(version, application, target).Should().Be(expected);
+
+    [Theory]
+    [InlineData("1.3.0.0", "27.0.0.0", "28.2")]
+    [InlineData("28.5.0.0", "28.2.0.0", "28.5")]
+    [InlineData("28.6.0.0", "28.2.0.0", "28.5")]
+    [InlineData("", "28.2.0.0", "28.5")]
+    [InlineData("not-a-version", "28.2.0.0", "28.5")]
+    public void An_app_version_that_does_not_follow_or_is_already_there_is_not_proposed(
+        string version, string application, string target) =>
+        DependencyDriftService.ProposedAppVersion(version, application, target).Should().BeNull();
+
+    [Fact]
+    public async Task A_dependency_written_with_fewer_parts_than_the_catalogue_is_not_behind()
+    {
+        // "27.0" and "27.0.0.0" are the same version; a missing part counts as zero.
+        // Comparing it as lower would offer a pull request that changes nothing.
+        const string shortDependency = """
+            {"id":"1c0ffee0-0000-4000-8000-000000000004","name":"Payment Import","publisher":"CRONUS",
+             "version":"1.0.0.0","application":"28.2.0.0","platform":"28.0.0.0",
+             "dependencies":[{"id":"63ca2fa4-4f03-4f2b-a480-172fef340d3f","name":"System Application",
+               "publisher":"Microsoft","version":"27.0"}]}
+            """;
+        await ReadyAsync();
+        await SeedCatalogueAsync("27.0.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var api = BaseApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", shortDependency));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+        api.Calls.Should().Contain(c => c.Contains($"/repos/{RepoA}/contents/app.json"), "the manifest was read");
     }
 
     [Fact]
@@ -313,7 +530,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         var releaseId = await SeedReleaseAsync();
 
         var (first, ctx1) = NewService(ScannableApi(RepoA));
-        await using (ctx1) (await first.ScanForReleaseAsync(releaseId)).Should().Be(3);
+        await using (ctx1) (await first.ScanForReleaseAsync(releaseId)).Should().Be(4);
 
         // Somebody bumped it by hand; the same manifest path now reads current.
         var fixedApi = BaseApi()
@@ -800,6 +1017,25 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_automatic_run_never_switches_an_app_to_business_centrals_numbering()
+    {
+        // Nobody is there to ask, and switching is a choice a person makes once.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
+        await using (scanCtx) await scanner.ScanForReleaseAsync(await SeedReleaseAsync());
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(1, null));
+
+        CommittedBlob(api).Should().Contain("\"version\": \"1.0.0.0\"");
+    }
+
+    [Fact]
     public async Task The_automatic_run_does_nothing_for_a_solution_that_has_it_off()
     {
         await ReadyAsync();
@@ -1210,6 +1446,124 @@ public sealed class DependencyDriftServiceTests : IDisposable
             .Should().Be(DependencyDriftService.AutomaticNoAccessMessage);
     }
 
+    // ── What each repository is on (#1719) ───────────────────────────────
+
+    [Fact]
+    public async Task A_scan_records_what_every_repository_is_on_including_the_ones_that_are_not_behind()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        await SeedSolutionAsync(RepoB, name: "CRONUS A/S warehouse");
+        var releaseId = await SeedReleaseAsync();
+        var (service, ctx) = NewService(ScannableApi(RepoA, RepoB));
+        await using var _ = ctx;
+
+        await service.ScanForReleaseAsync(releaseId);
+
+        await using var read = _db.NewContext();
+        var checks = await read.GitHubRepositoryChecks.AsNoTracking().OrderBy(c => c.Repository).ToListAsync();
+        checks.Select(c => (c.Repository, c.Application)).Should().Equal(
+            (RepoA, "27.0"), (RepoB, "28.2"));
+    }
+
+    [Fact]
+    public async Task Checking_one_repository_again_replaces_only_what_was_stored_about_it()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectA = await SeedSolutionAsync(RepoA);
+        var projectB = await SeedSolutionAsync(RepoB, name: "CRONUS A/S warehouse");
+        var releaseId = await SeedReleaseAsync();
+        await SeedDriftAsync(RepoA, releaseId, await EnvironmentOfAsync(projectA));
+        await SeedDriftAsync(RepoB, releaseId, await EnvironmentOfAsync(projectB));
+
+        // RepoA has been bumped by hand since the last scan.
+        var api = BaseApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", CurrentManifest))
+            .On(HttpMethod.Get, $"/repos/{RepoA}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(RepoA));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.Checked);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubRepositoryDrift.Where(d => d.Repository == RepoA).CountAsync()).Should().Be(0);
+        (await read.GitHubRepositoryDrift.Where(d => d.Repository == RepoB).CountAsync())
+            .Should().Be(3, "the other repository keeps what the last scan said about it");
+        (await read.GitHubRepositoryChecks.SingleAsync()).Application.Should().Be("28.2");
+    }
+
+    [Fact]
+    public async Task Checking_again_stops_calling_a_pull_request_open_once_it_was_closed_on_GitHub()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        await SeedReleaseAsync();
+        await using (var seed = _db.NewContext())
+        {
+            seed.GitHubUpdatePullRequests.AddRange(
+                new GitHubUpdatePullRequest
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Repository = RepoA, Version = "28.2",
+                    PullRequestNumber = 7, HtmlUrl = $"https://github.com/{RepoA}/pull/7", OpenedAt = DateTime.UtcNow,
+                },
+                new GitHubUpdatePullRequest
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Repository = RepoA, Version = "28.1",
+                    PullRequestNumber = 5, HtmlUrl = $"https://github.com/{RepoA}/pull/5", OpenedAt = DateTime.UtcNow,
+                });
+            await seed.SaveChangesAsync();
+        }
+        var api = BaseApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("app.json", CurrentManifest))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/7", HttpStatusCode.OK, """{"number":7,"state":"closed"}""")
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/5", HttpStatusCode.OK, """{"number":5,"state":"open"}""")
+            .On(HttpMethod.Get, $"/repos/{RepoA}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(RepoA));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.Checked);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubUpdatePullRequests.Where(p => p.SupersededAt == null).Select(p => p.PullRequestNumber).ToListAsync())
+            .Should().Equal(5);
+    }
+
+    [Fact]
+    public async Task A_repository_of_a_solution_the_viewer_cannot_see_is_not_checked_for_them()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync(RepoA, visibility: ProjectVisibility.Private);
+        await SeedReleaseAsync();
+        var api = BaseApi();
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.NotTracked);
+        api.Calls.Should().NotContain(c => c.Contains($"/repos/{RepoA}"));
+    }
+
+    [Fact]
+    public async Task Checking_a_repository_whose_solution_has_no_environment_clears_what_it_used_to_say()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync(RepoA, withProduction: false);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var (service, ctx) = NewService(BaseApi());
+        await using var _ = ctx;
+
+        (await service.CheckRepositoryAsync(RepoA)).Should().Be(RepositoryCheckOutcome.NoEnvironment);
+
+        await using var read = _db.NewContext();
+        (await read.GitHubRepositoryDrift.CountAsync()).Should().Be(0);
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private (DependencyDriftService Service, AppDbContext Context) NewService(FakeGitHubApi api, TimeProvider? clock = null)
@@ -1314,7 +1668,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var release = new OeRelease
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Label = prerelease ? $"Business Central {bcVersion[..4]} (DK) Preview" : "Business Central 28.2 (DK)",
             Kind = kind,
             Status = "ready",
@@ -1330,7 +1684,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         ctx.OeModules.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeModule
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             ReleaseId = release.Id,
             AppId = Guid.NewGuid(),
             Name = "System",
@@ -1354,7 +1708,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         var now = DateTime.UtcNow;
         var project = new OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Name = name ?? "CRONUS A/S payments",
             DefaultArtifactCountry = "dk",
             Visibility = visibility,
@@ -1365,7 +1719,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
             [
                 new OeProjectRepository
                 {
-                    OrganizationId = TestDb.DefaultOrgId,
+                    OrganizationId = _orgId,
                     Provider = RepositoryProvider.GitHub,
                     Url = $"https://github.com/{fullName}",
                     DisplayName = fullName.Split('/')[^1],
@@ -1386,7 +1740,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var environment = new OeProjectEnvironment
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             ProjectId = projectId,
             Name = name,
             Type = type,
@@ -1425,7 +1779,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         {
             ctx.GitHubRepositoryDrift.Add(new GitHubRepositoryDrift
             {
-                OrganizationId = TestDb.DefaultOrgId,
+                OrganizationId = _orgId,
                 Repository = fullName,
                 Path = "app.json",
                 Field = field,
@@ -1452,7 +1806,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.GitHubUpdatePullRequests.Add(new GitHubUpdatePullRequest
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             Repository = fullName.ToLowerInvariant(),
             Version = version,
             PullRequestNumber = number,
@@ -1468,7 +1822,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.WellKnownDependencies.Add(new WellKnownDependency
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             DepId = SystemAppId,
             DepName = "System Application",
             DepPublisher = "Microsoft",
@@ -1481,11 +1835,10 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()
@@ -1493,7 +1846,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new OrganizationSettings
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = _orgId,
             GitHubInstallationId = InstallationId,
             GitHubOrgLogin = OrgLogin,
             GitHubConnectedAt = DateTime.UtcNow,
@@ -1510,6 +1863,29 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var access = _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, api));
         await access.LinkAsync("the-code");
+    }
+
+    /// <summary>
+    /// Moves the test, and its user, to an organisation whose id no other test class
+    /// uses. The scan gate is process-wide and keyed by organisation, and every test
+    /// database has a <see cref="TestDb.DefaultOrgId"/>, so a scan in a class running
+    /// alongside would otherwise count as this one reaching the gate.
+    /// </summary>
+    private async Task ActAsAnOrganisationOfItsOwnAsync()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.Organizations.Add(new Organization
+        {
+            Id = GateOrgId,
+            Name = "CRONUS Gate",
+            Slug = "cronus-gate",
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+        await ctx.Users.IgnoreQueryFilters().Where(u => u.Id == UserId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.OrganizationId, GateOrgId));
+        _orgId = GateOrgId;
+        _db.OrgContext.CurrentOrganizationId = GateOrgId;
     }
 
     /// <summary>Deployment configured, organisation connected, user linked.</summary>

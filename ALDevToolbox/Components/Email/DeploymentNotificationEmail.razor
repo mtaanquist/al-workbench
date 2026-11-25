@@ -64,8 +64,8 @@
     };
 
     private string Reason => Outcome == DeploymentOutcome.WaitingForApproval
-        ? "You received this because you own this solution or created the deployment pipeline."
-        : "You received this because you started or approved this deployment.";
+        ? "You received this because you own or follow this solution."
+        : "You received this because you started, approved or rescheduled this deployment, or own or follow this solution.";
 
     public static string SubjectFor(DeploymentOutcome outcome, string solutionName, string environmentName) => outcome switch
     {

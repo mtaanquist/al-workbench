@@ -11,6 +11,7 @@ internal static class RouteConstants
     public const string Account = "/account";
     public const string AccountSecurity = "/account/security";
     public const string EmailChangeCancel = "/account/email-change/cancel";
+    public const string EmailChangeConfirm = "/account/email-change/confirm";
     public const string AdminUsers = "/admin/administration/users";
     public const string AdminUsersNew = "/admin/administration/users/new";
     public const string AdminTemplates = "/admin/templates";
@@ -24,4 +25,10 @@ internal static class RouteConstants
     public const string OkQuery = "ok";
     public const string ErrQuery = "err";
     public const string MsgQuery = "msg";
+
+    /// <summary>
+    /// A code the page turns into its own sentence (<c>FormErrorReasons</c>),
+    /// used where a link must not be able to put text on the page (#1544).
+    /// </summary>
+    public const string ReasonQuery = "reason";
 }
