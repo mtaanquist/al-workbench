@@ -1614,7 +1614,10 @@ beside it. It is not checked when: the environment is no longer linked; the cust
 connected (offline, revoked, waiting for approval); AL Workbench no longer sees the tier or its tenant
 (tenant ids compared trimmed and in any case, as the inventory compares them); the licence was never
 read; it was last read more than an hour ago (`OnPremisesTierFacts.StaleAfter`, four missed rounds);
-its text was cut to size by the gateway; it has no ranges the parser could read; **only part of its
+its text was cut to size by the gateway; it has no ranges the parser could read, or **lists none**
+(a `.bclicense` on BC 25 prints modules and quantities and no object ranges at all, found on a real
+server 2026-11-25; the parser recognises the module table by its dashed rule, records no problem, and
+the reason says the licence lists no ranges); **only part of its
 ranges could be read** (a line too long or too slow to match was skipped, or ranges past
 `GatewayLicenceParser.MaxRanges` were dropped: the missing range may be the one that covers an object,
 so flagging it would be a false refusal); the tier's version is unknown (the BC 14 rule needs it); or

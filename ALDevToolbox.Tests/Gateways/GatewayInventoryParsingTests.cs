@@ -141,6 +141,56 @@ public sealed class GatewayInventoryParsingTests
         inventory.State.Should().BeNull();
     }
 
+    /// <summary>
+    /// What a real BC 25 server with a Danish culture printed for a partner development
+    /// licence (2026-11-25; names and numbers changed, layout kept): Danish labels, an
+    /// "ø" the cmdlet itself turned into "›", and modules instead of object ranges.
+    /// </summary>
+    private const string Bc25DanishLicence =
+        "Microsoft Software License Information\r\nCopyright (C) 2007-2026 Microsoft Corporation. All rights reserved\r\n" +
+        "****************************************************************************\r\n" +
+        "VOICE Kontonummer       : 1234567\r\n" +
+        "Licensed to             : CRONUS IT ApS\r\n" +
+        "                          Cronusvej 30\r\n" +
+        "                          Denmark\r\n\r\n" +
+        "Produktlinie            : Microsoft Dynamics 365 Business Central on premises\r\n" +
+        "Produktversion\t        : 25\r\n" +
+        "Land                    : Denmark\r\n" +
+        "Oprettet Dato           : 29-10-2026 12:41:19 (+00:00)\r\n" +
+        "Udl\u203aber                 : 27-01-2027\r\n" +
+        "Konfiguration           : BC 25 DEV\r\n" +
+        "F\u00f8rste registreringsdato : \r\n" +
+        "****************************************************************************\r\n" +
+        "Navn                                                                   Antal\r\n" +
+        "----------------------------------------------------------------- ----------\r\n" +
+        "All Application Module                                                     1\r\n" +
+        "Country Code: Denmark                                                      1\r\n" +
+        "Demo/Dev Named User                                                      150\r\n" +
+        "Solution Developer                                                         1\r\n\r\n" +
+        "****************************************************************************\r\n";
+
+    [Fact]
+    public void A_danish_bc25_licence_reads_its_serial_and_expiry_and_lists_no_ranges_without_a_problem()
+    {
+        var licence = GatewayLicenceParser.Parse(Bc25DanishLicence);
+
+        licence.Licensee.Should().Be("CRONUS IT ApS");
+        licence.SerialNumber.Should().Be("1234567");
+        licence.ExpiresOn.Should().Be(new DateOnly(2027, 1, 27));
+        licence.Ranges.Should().BeEmpty();
+        licence.ListsNoRanges.Should().BeTrue();
+        licence.Problems.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_licence_with_neither_ranges_nor_a_module_table_still_says_no_ranges_were_found()
+    {
+        var licence = GatewayLicenceParser.Parse("Licensed to : CRONUS A/S\nExpires : 2027-01-27\n");
+
+        licence.ListsNoRanges.Should().BeFalse();
+        licence.Problems.Should().ContainSingle().Which.Should().Contain("No licensed object ranges");
+    }
+
     [Fact]
     public void Session_user_names_are_kept_only_where_the_policy_allows_session_users()
     {
