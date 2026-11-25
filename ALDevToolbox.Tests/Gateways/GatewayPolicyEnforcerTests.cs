@@ -266,6 +266,31 @@ public sealed class GatewayPolicyEnforcerTests
     }
 
     [Fact]
+    public void Import_licence_needs_restart_only_when_it_restarts()
+    {
+        var policy = GatewayPolicyParser.Parse("""
+            [[instance]]
+            machine = "CRONUS-BC01"
+            name = "BC140"
+            allow = ["inventory", "licence"]
+
+            [[database]]
+            name = "CRONUS-SQL/BC140"
+            publish_on = { machine = "CRONUS-BC01", instance = "BC140" }
+            licence_target = "NavDatabase"
+            """, "CRONUS-BC01").Policy!;
+
+        Check(Command(GatewayVerb.ImportLicence, "CRONUS-BC01", "BC140", more: p => p[GatewayImportLicenceParameters.RestartParameter] = false), policy: policy)
+            .Allowed.Should().BeTrue("Business Central picks up the licence without a restart");
+        Check(Command(GatewayVerb.ImportLicence, "CRONUS-BC01", "BC140", more: p => p[GatewayImportLicenceParameters.RestartParameter] = true), policy: policy)
+            .Reason.Should().Contain("does not allow 'restart'");
+        Check(Command(GatewayVerb.ImportLicence, "CRONUS-BC01", "BC140"), policy: policy)
+            .Reason.Should().Contain("does not allow 'restart'", "an older AL Workbench that does not say restarts, as it always did");
+        Check(Command(GatewayVerb.ImportLicence, "CRONUS-BC01", "BC140", more: p => p[GatewayImportLicenceParameters.RestartParameter] = "yes"), policy: policy)
+            .Reason.Should().Contain("whether to restart");
+    }
+
+    [Fact]
     public void A_deployment_needs_restart_on_every_tier_of_the_restart_group()
     {
         var policy = GatewayPolicyParser.Parse(Policy.Replace("""

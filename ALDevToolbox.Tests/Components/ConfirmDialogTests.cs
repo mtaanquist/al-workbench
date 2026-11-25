@@ -2,6 +2,7 @@ using ALDevToolbox.Components.Shared;
 using ALDevToolbox.Services;
 using Bunit;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -111,6 +112,25 @@ public sealed class ConfirmDialogTests : IDisposable
 
         cut.Find(".confirm-dialog__actions .btn:last-of-type")
             .HasAttribute("disabled").Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, "Book it")]
+    [InlineData(true, "Cancel")]
+    public void Focus_lands_on_a_button_that_can_take_it(bool confirmDisabled, string focused)
+    {
+        // A disabled button cannot take focus, and focusing one does nothing, so a dialog
+        // opened with its confirm held (the licence import, before a file is chosen) left
+        // focus on the page behind it and Escape never reached the layer.
+        var cut = _ctx.Render<ConfirmDialog>(p => p
+            .Add(c => c.ConfirmLabel, "Book it")
+            .Add(c => c.ConfirmDisabled, confirmDisabled));
+
+        cut.InvokeAsync(() => cut.Instance.OpenAsync());
+
+        var target = (ElementReference)_ctx.JSInterop.VerifyFocusAsyncInvoke().Arguments[0]!;
+        var button = cut.FindAll(".confirm-dialog__actions button").Single(b => b.TextContent.Trim() == focused);
+        button.GetAttribute("blazor:elementReference").Should().Be(target.Id);
     }
 
     [Fact]

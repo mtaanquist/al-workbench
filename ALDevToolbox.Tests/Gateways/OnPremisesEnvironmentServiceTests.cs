@@ -821,7 +821,7 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         entry.Action.Should().Be("RestartServiceTier");
         entry.ServiceTier.Should().Be("CRONUS-BC01 / BC250");
         entry.Status.Should().Be("Sent");
-        entry.Outcome.Should().Be("CRONUS-BC01 / BC250 restarted and is running.");
+        entry.Outcome.Should().BeNull("the headline already says it restarted");
     }
 
     private DeliverTools Tools(AppDbContext ctx)

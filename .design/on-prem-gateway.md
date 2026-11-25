@@ -1410,10 +1410,12 @@ check accepts the default rights on `C:\Program Files\AL Workbench Gateway\scrip
 
 **Upload and import (#1369).** On an on-premises environment a person who manages the Solution
 uploads the licence file, sees where it goes (database or tenant, as the policy sets it), and
-confirms that the listed tiers will restart. The `import-licence` verb runs `Import-NAVServerLicense` on the publishing
+chooses whether the service tiers restart afterwards (off by default). The `import-licence` verb runs `Import-NAVServerLicense` on the publishing
 tier with `-Database` set as the policy's `licence_target` says (`NavDatabase`, `Master`, `Default`,
-or `Tenant` with `-Tenant`), then the restart group (tiers only read a new licence on restart), then
-a fresh inventory. A database-level import on a shared server reaches every tenant and follows the
+or `Tenant` with `-Tenant`), then, only when asked, the restart group, then a fresh inventory.
+Business Central picks up a licence imported this way without a restart (Mads, 2026-11-25), and a
+restart signs everyone out, so it is an option rather than a step. The command carries `restart`
+(a bool); a command without it restarts, as every command did before the option existed. A database-level import on a shared server reaches every tenant and follows the
 shared-tier rule above. Format: `.flf` before BC 22, `.bclicense` from BC 22. Whether BC 22 and later
 still accept an `.flf` has not been checked against a real server yet ("Licences, as built", To verify);
 until it is, a file the target's version cannot import is refused with a message naming both, and
@@ -1471,10 +1473,12 @@ the person was shown (`licenceTarget`), and the gateway refuses it if its settin
 else, so what runs is what was confirmed. A database with no `licence_target` refuses the upload.
 
 **The dialog** (`UploadLicenceDialog`) reads `OnPremisesLicenceService.GetImportPlanAsync`: target,
-importing tier, version and format, and the `RestartGroupPlan`. It warns, as the Deploy dialog does
-and in the same shape, that Business Central reads a new licence only when it starts, lists the tiers
-that restart (and any tier on the same database left out of the group), and that everyone signed in
-is signed out. The file input takes `accept=".flf,.bclicense"`; the file's format and size are
+importing tier, version and format, and the `RestartGroupPlan`. A **Restart the service tiers
+afterwards** checkbox, off by default, asks for the restart; ticked, it shows, as the Deploy dialog
+does and in the same shape, the tiers that restart (and any tier on the same database left out of
+the group), and that everyone signed in is signed out. When the restart cannot be asked for
+(`LicenceImportPlan.RestartRefusal`: a group tier without `restart`, or the `shared_restart` rule)
+the checkbox is disabled and its hint says why; the import alone still goes. The file input takes `accept=".flf,.bclicense"`; the file's format and size are
 checked as soon as it is chosen, by the same rule the service applies. Anything that would refuse the
 import is shown as an error and holds **Import licence** disabled.
 
@@ -1484,12 +1488,12 @@ then the file, keyed `file` (a name, not empty, at most 1 MB, a `.flf` or `.bcli
 format the importing tier's version takes, naming both); then the environment, keyed `environment`:
 linked, the tier and tenant still reported, the gateway online, settings reported and valid, the
 publishing tier listed with `licence`, a `licence_target` set, the tenant allowed for a `Tenant`
-target, `restart` on every group tier, the publishing tier running, its version known, and finally
-`RestartGroupPlan.RefusalFor("import", ...)`. The upload row and the command are written in one
+target, the publishing tier running, its version known, and, only when the restart was asked for,
+`restart` on every group tier and `RestartGroupPlan.RefusalFor("import", ...)`. The upload row and the command are written in one
 transaction, then the gateway is woken, so a crash in between leaves neither.
 
-**`shared_restart` applies to every target, `Tenant` included.** A `Tenant` import changes the
-licence of one tenant only, but the restart that follows restarts the service tiers, and a restarted
+**`shared_restart` applies to every target, `Tenant` included, when the import restarts.** A `Tenant` import changes the
+licence of one tenant only, but a restart that follows restarts the service tiers, and a restarted
 tier signs out every tenant on it. So a Tenant import whose restart group reaches another Solution's
 environment is refused exactly as a deployment is, by the same `RestartGroupPlan` rule, before any
 command is sent; the gateway never sees it, because only AL Workbench knows which Solutions share a
@@ -1500,8 +1504,9 @@ settings file, since AL Workbench has no screen for it; a deployment's says the 
 
 **The `import-licence` verb** (`Core/Licence/ImportLicenceVerb.cs`) checks the command against the
 settings again (the publishing tier, `licence`, the tenant for a Tenant target, `restart` on every
-group tier, the confirmed target), the file (one, present, at most 1 MB, its SHA-256, and the
-format for the tier's version), then runs **import, restart, refresh** in that order:
+group tier when the command restarts, the confirmed target), the file (one, present, at most 1 MB, its SHA-256, and the
+format for the tier's version), then runs **import, restart, refresh** in that order (without a
+restart: import, then the same refresh, and the result carries no `restart`):
 `Import-NAVServerLicense -ServerInstance -LicenseFile -Database <target>` (with `-Tenant` for a
 Tenant target, refusing rather than importing server-wide when the cmdlet has no `-Tenant`, and
 `-Force` when the cmdlet has it, so a non-interactive session is never asked to confirm) on the

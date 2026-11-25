@@ -32,3 +32,4 @@
     .lic-dialog__facts dd { margin-bottom: var(--space-1); }
 }
 .lic-dialog ::deep .field-error.lic-dialog__hint { display: flex; margin: var(--space-1) 0 var(--space-3); }
+.lic-dialog__restart-option { margin: 0; }

@@ -5,8 +5,10 @@
     nothing about the gateway.
 
     The dialog says, before anything is sent, where the licence goes, which tier imports
-    it and in which format, and which tiers restart - the restart is the part with a cost,
-    so it is the warning. Where the licence goes is the customer's IT's setting, so it is
+    it and in which format. Business Central picks up a licence imported this way without
+    a restart, so restarting the service tiers is an option, off by default; ticking it
+    shows which tiers restart, since that is the part with a cost. Where the licence goes
+    is the customer's IT's setting, so it is
     shown, not asked. Anything that would refuse the import is said here and holds the
     button; the file's own problems (wrong format, too large) are said beside the file.
 
@@ -76,14 +78,24 @@
                 </p>
             }
 
-            @if (_plan.Restart is { } restart)
+            <div class="field lic-dialog__restart-option">
+                <label class="@(_restart ? "check is-checked" : "check")">
+                    <input id="upload-licence-restart" type="checkbox" checked="@_restart" disabled="@(_plan.RestartRefusal is not null)"
+                           @onchange="e => _restart = (bool)(e.Value ?? false)" />
+                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                    <span>Restart the service tiers afterwards</span>
+                </label>
+                <small class="field__hint">@(_plan.RestartRefusal ?? "Not needed for Business Central to use the new licence. Restarting signs everyone out.")</small>
+            </div>
+
+            @if (_restart && _plan.RestartRefusal is null && _plan.Restart is { } restart)
             {
                 <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="lic-dialog__alert">
                     <div class="lic-dialog__restart">
                         <p>
                             @(restart.Known
-                                ? (restart.Tiers.Count == 1 ? "Business Central reads a new licence only when it starts, so after the import this service tier restarts:" : $"Business Central reads a new licence only when it starts, so after the import these {restart.Tiers.Count} service tiers restart:")
-                                : "Business Central reads a new licence only when it starts. After the import at least this service tier restarts. The gateway has not reported the others yet.")
+                                ? (restart.Tiers.Count == 1 ? "After the import this service tier restarts:" : $"After the import these {restart.Tiers.Count} service tiers restart:")
+                                : "After the import at least this service tier restarts. The gateway has not reported the others yet.")
                         </p>
                         <ul class="lic-dialog__tiers">
                             @foreach (var tier in restart.Tiers)
@@ -100,8 +112,8 @@
                         {
                             <p>
                                 @(restart.MissingFromGroup.Count == 1
-                                    ? "The tier marked not restarted uses the same database, so it keeps the old licence until it next starts. Ask the customer's IT to add it to the tiers that restart."
-                                    : "The tiers marked not restarted use the same database, so they keep the old licence until they next start. Ask the customer's IT to add them to the tiers that restart.")
+                                    ? "The tier marked not restarted uses the same database. Ask the customer's IT to add it to the tiers that restart."
+                                    : "The tiers marked not restarted use the same database. Ask the customer's IT to add them to the tiers that restart.")
                             </p>
                         }
                     </div>
@@ -113,8 +125,8 @@
 </ConfirmDialog>
 
 @code {
-    /// <summary>The file the person chose.</summary>
-    public sealed record ChosenLicence(string FileName, byte[] Bytes);
+    /// <summary>The file the person chose, and whether to restart the service tiers after importing it.</summary>
+    public sealed record ChosenLicence(string FileName, byte[] Bytes, bool Restart);
 
     private ConfirmDialog? _confirm;
     private LicenceImportPlan? _plan;
@@ -122,6 +134,7 @@
     private ChosenLicence? _file;
     private string? _error;
     private bool _reading;
+    private bool _restart;
 
     /// <summary>
     /// Asks for the licence file for <paramref name="environmentId"/>, after saying what
@@ -134,13 +147,14 @@
         _planError = null;
         _file = null;
         _error = null;
+        _restart = false;
         StateHasChanged();
 
         var opening = _confirm.OpenAsync(
             $"Import a new licence into {environmentName}",
             "For a new Business Central licence from the customer, for example after they bought more objects. "
-            + "AL Workbench's gateway on the customer's server imports it, then restarts the service tiers so they use it.",
-            "Import licence", "btn--danger");
+            + "AL Workbench's gateway on the customer's server imports it, and Business Central starts using it without a restart.",
+            "Import licence", "btn--primary");
         try
         {
             _plan = await Licences.GetImportPlanAsync(environmentId);
@@ -156,7 +170,7 @@
         var confirmed = await opening;
         var file = _file;
         _file = null;
-        return confirmed ? file : null;
+        return confirmed && file is not null ? file with { Restart = _restart && _plan?.RestartRefusal is null } : null;
     }
 
     private async Task OnChosenAsync(InputFileChangeEventArgs e)
@@ -192,7 +206,7 @@
             await using var stream = chosen.OpenReadStream(GatewayLicenceFormats.MaxBytes);
             using var buffer = new MemoryStream();
             await stream.CopyToAsync(buffer);
-            _file = new ChosenLicence(chosen.Name, buffer.ToArray());
+            _file = new ChosenLicence(chosen.Name, buffer.ToArray(), Restart: false);
         }
         catch (IOException ex)
         {

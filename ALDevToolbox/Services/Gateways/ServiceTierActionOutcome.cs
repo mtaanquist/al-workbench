@@ -124,29 +124,27 @@ public static class ServiceTierActionOutcome
         };
     }
 
-    private static string Done(UpgradeActionKind kind, string? tier, string? resultJson)
+    /// <summary>
+    /// What the result adds to the headline ("Restarted X"), or null when it adds nothing:
+    /// the tiers a group restart reached, or a tier that was already as asked.
+    /// </summary>
+    private static string? Done(UpgradeActionKind kind, string? tier, string? resultJson)
     {
         var name = tier ?? "The service tier";
         if (kind == UpgradeActionKind.RestartServiceTiers)
         {
             var group = GatewayRestartGroupResult.FromJson(Parse(resultJson));
             return group is { Tiers.Count: > 0 }
-                ? $"Restarted {Count(group.Tiers.Count)}: {string.Join(", ", group.Tiers.Select(t => $"{t.Machine} / {t.Instance}"))}. They are all running."
-                : "Restarted every service tier on the database. They are all running.";
+                ? $"Restarted {Count(group.Tiers.Count)}: {string.Join(", ", group.Tiers.Select(t => $"{t.Machine} / {t.Instance}"))}."
+                : null;
         }
         var result = GatewayServiceTierResult.FromJson(Parse(resultJson));
         var before = result?.Before;
         return kind switch
         {
-            UpgradeActionKind.StopServiceTier => Same(before, "Stopped")
-                ? $"{name} was already stopped."
-                : $"{name} is stopped. Nobody can sign in through it until someone starts it again.",
-            UpgradeActionKind.StartServiceTier => Same(before, "Running")
-                ? $"{name} was already running."
-                : $"{name} is running.",
-            _ => Same(before, "Stopped")
-                ? $"{name} was stopped; the gateway started it, and it is running."
-                : $"{name} restarted and is running.",
+            UpgradeActionKind.StopServiceTier => Same(before, "Stopped") ? $"{name} was already stopped." : null,
+            UpgradeActionKind.StartServiceTier => Same(before, "Running") ? $"{name} was already running." : null,
+            _ => Same(before, "Stopped") ? $"{name} was stopped, so the gateway started it." : null,
         };
     }
 

@@ -9,9 +9,10 @@ namespace ALWorkbench.Gateway.Core.Licence;
 
 /// <summary>
 /// The <c>import-licence</c> verb (#1369): imports the command's one licence file on the
-/// database's publishing tier, restarts the database's restart group (a tier reads its
-/// licence only when it starts), then reads the group's tiers again and sends them to
-/// AL Workbench, so the new expiry and object ranges show at once. In that order, and each
+/// database's publishing tier, restarts the database's restart group when the command asks
+/// for it (off by default: Business Central picks up a licence imported with
+/// <c>Import-NAVServerLicense</c> without one), then reads the group's tiers again and sends
+/// them to AL Workbench, so the new expiry and object ranges show at once. In that order, and each
 /// step only after the one before went through: a failed import restarts nothing. See
 /// <c>.design/on-prem-gateway.md</c>, "Licences".
 ///
@@ -160,7 +161,15 @@ public sealed class ImportLicenceVerb : ICommandExecutor
                 ? "the import did not finish in time and was stopped"
                 : "PowerShell ended before it said how the import went (" + (ran.Error ?? "no reason given").TrimEnd('.') + ")");
         }
-        context.Progress($"Imported the licence into {Where(target, tenant)}. Restarting the service tiers, which read a new licence only when they start.");
+        if (!request.RestartAfterImport)
+        {
+            // Business Central picks up a licence imported this way without a restart; the
+            // person chose not to sign everyone out.
+            context.Progress($"Imported the licence into {Where(target, tenant)}. The service tiers were not restarted, as asked.");
+            var notRestartedRefresh = await RefreshAsync(context, _policy.InForce, tier.Tier, ct).ConfigureAwait(false);
+            return GatewayCommandOutcome.Success(Result(target, imported: true, restart: null, notRestartedRefresh));
+        }
+        context.Progress($"Imported the licence into {Where(target, tenant)}. Restarting the service tiers, as asked.");
 
         // 2. Restart, under the settings as they are now: the whole check again, so a
         // file changed during the import (change hours, a tier taken out, read-only)

@@ -33,6 +33,18 @@ public sealed record GatewayImportLicenceParameters
     /// </summary>
     public string LicenceTarget { get; init; } = string.Empty;
 
+    /// <summary>The name of <see cref="Restart"/> in the parameters.</summary>
+    public const string RestartParameter = "restart";
+
+    /// <summary>
+    /// Whether to restart the database's restart group after the import. Off unless the
+    /// person asks: Business Central picks up a licence imported with
+    /// <c>Import-NAVServerLicense</c> without a restart (Mads, 2026-11-25), and a restart
+    /// signs everyone out. A command without the parameter (an older AL Workbench)
+    /// restarts, as every import did before.
+    /// </summary>
+    public bool Restart { get; init; }
+
     /// <summary>The command's parameters object.</summary>
     public JsonObject ToParameters()
     {
@@ -41,6 +53,7 @@ public sealed record GatewayImportLicenceParameters
             [GatewayCommandParameters.Machine] = Machine,
             [GatewayCommandParameters.Instance] = Instance,
             [LicenceTargetParameter] = LicenceTarget,
+            [RestartParameter] = Restart,
         };
         if (Tenant is not null) parameters[GatewayCommandParameters.Tenant] = Tenant;
         return parameters;
