@@ -65,6 +65,8 @@ public sealed class DateFormattingBaselineTests
         ["ALDevToolbox/Components/Pages/Admin/Administration/AdminAdministrationBusinessCentral.razor"] = (2, "The client secret's expiry is a calendar date the admin typed from Entra, not an instant."),
         ["ALDevToolbox/Components/Pages/Environments/EnvironmentDetail.razor"] = (5,
             "The delivery window and Business Central's update window are times of day in the customer's zone, and the scheduled update is repeated as a labelled wall clock in that zone beside them so the three can be compared."),
+        ["ALDevToolbox/Components/Pages/Environments/ServiceTierActionDialog.razor"] = (1,
+            "The bounds of the time field, in the machine format the browser's date-time input requires, not a time shown on screen."),
         ["ALDevToolbox/Components/Pages/Error.razor"] = (1, "The error time is copied for someone matching it against server logs, which are in UTC, and it is labelled UTC; the page also has to render when the database is down."),
         ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelineDetail.razor"] = (2,
             "The delivery window is a time of day agreed in the customer's zone."),
