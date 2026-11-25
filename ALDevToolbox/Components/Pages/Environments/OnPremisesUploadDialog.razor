@@ -19,7 +19,9 @@
 @inject ILogger<OnPremisesUploadDialog> Log
 @inject TimeProvider Clock
 
-<ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="upload" ConfirmDisabled="@(!CanConfirm)">
+<ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="upload" ConfirmDisabled="@(!CanConfirm)"
+               Title="@_title" Message="For apps another company built and sent you as .app files. Apps you build yourself go through Deployments instead."
+               ConfirmLabel="@(_later ? "Book install" : "Upload and install now")">
     <div class="onprem-upload">
         @if (_plan is null && _planError is null)
         {
@@ -82,13 +84,10 @@
             <fieldset class="onprem-upload__when">
                 <legend class="onprem-upload__legend">When should it install?</legend>
                 <label class="onprem-upload__opt">
-                    <input type="radio" name="onprem-upload-when" checked="@(!_later)" @onchange="() => _later = false" />
-                    <span>Now</span>
+                    <input type="radio" name="onprem-upload-when" checked="@(!_later)" disabled="@(_plan is { InsideChangeHoursNow: false })"
+                           @onchange="() => _later = false" />
+                    <span>Now@(_plan is { InsideChangeHoursNow: false } ? $" - not now: the customer allows changes only from {ChangeHoursText}" : "")</span>
                 </label>
-                @if (!_later && _plan is { InsideChangeHoursNow: false })
-                {
-                    <FieldError Message="@($"The customer allows changes only from {ChangeHoursText}. Pick a time in that window.")" />
-                }
                 <label class="onprem-upload__opt">
                     <input type="radio" name="onprem-upload-when" checked="@_later" @onchange="() => _later = true" />
                     <span>At a time I pick</span>
@@ -129,6 +128,7 @@
     public sealed record Upload(IReadOnlyList<OnPremisesUploadFile> Files, DateTime? RunAtUtc, int Count);
 
     private ConfirmDialog? _confirm;
+    private string _title = "Upload apps";
     private int _environmentId;
     private OnPremisesUploadPlan? _plan;
     private string? _planError;
@@ -148,8 +148,15 @@
 
     private string WhenHint => _zone == TimeZoneInfo.Utc
         // An older gateway does not say its time zone, so its hours cannot be put in UTC here.
-        ? (_plan?.ChangeHours is not null ? $"The customer allows changes from {ChangeHoursText} on their server's clock, which may not be UTC. " : "") + "Time in UTC."
-        : (_plan?.ChangeHours is not null ? $"The customer allows changes from {ChangeHoursText}. " : "") + $"Time on the customer's server ({_zone.StandardName}).";
+        ? "Enter the time in UTC." + (_plan?.ChangeHours is not null ? $" The customer allows changes from {ChangeHoursText} on their server's clock, whose time zone the gateway hasn't reported; check the difference with the customer if unsure." : "")
+        : (_plan?.ChangeHours is not null ? $"The customer allows changes from {ChangeHoursText}. " : "") + $"Time on the customer's server ({OffsetText(_zone)}).";
+
+    /// <summary>The zone's offset now, "UTC+02:00": a standard name such as "W. Europe Standard Time" names the wrong offset in summer.</summary>
+    private string OffsetText(TimeZoneInfo zone)
+    {
+        var offset = zone.GetUtcOffset(Clock.GetUtcNow());
+        return "UTC" + (offset < TimeSpan.Zero ? "-" : "+") + offset.Duration().ToString(@"hh\:mm", System.Globalization.CultureInfo.InvariantCulture);
+    }
 
     /// <summary>The server's rules for the time, mirrored so the person sees them by the field; the server checks them again.</summary>
     private string? WhenError
@@ -158,7 +165,10 @@
         {
             var utc = ToUtc(_runAtLocal);
             var now = Clock.GetUtcNow().UtcDateTime;
-            if (utc < now + OnPremisesAppUploadService.MinBookingAhead) return "Pick a time at least a few minutes from now, or install now.";
+            if (utc < now + OnPremisesAppUploadService.MinBookingAhead)
+            {
+                return _plan is { InsideChangeHoursNow: false } ? "Pick a time at least a few minutes from now." : "Pick a time at least a few minutes from now, or install now.";
+            }
             if (utc > now + OnPremisesAppUploadService.MaxBookingAhead) return "Pick a time within the next 30 days.";
             if (_zone != TimeZoneInfo.Utc && OnPremisesTierActionService.ChangeHours.Parse(_plan?.ChangeHours) is { } hours
                 && !hours.Contains(TimeOnly.FromDateTime(_runAtLocal)))
@@ -184,9 +194,9 @@
         _later = false;
         _ack = false;
         StateHasChanged();
-        var opening = _confirm.OpenAsync($"Upload apps to {environmentName}",
-            "For apps another company built and sent you as .app files. Apps you build yourself go through Deployments instead.",
-            "Upload and install", "btn--danger");
+        _title = $"Upload apps to {environmentName}";
+        StateHasChanged();
+        var opening = _confirm.OpenAsync();
         await LoadPlanAsync(setTime: true);
         var confirmed = await opening;
         var files = _files;

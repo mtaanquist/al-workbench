@@ -2007,8 +2007,9 @@ environment. There is no MCP write tool for tier actions, so none for bookings e
 
 ### Uploading apps by hand, as built (#1786)
 
-For an app another company sent, which no pipeline here builds: the Apps tab's **Scheduled
-installs** card has **Upload apps** for whoever manages the Solution, as online. The dialog reads
+For an app another company sent, which no pipeline here builds: the Apps tab's **Installed apps**
+card has **Upload apps** for whoever manages the Solution, and a **Scheduled installs** card lists
+what is booked, shown only while something is. The dialog reads
 the chosen `.app` files at once (at most ten, 50 MB each, as online) and asks
 `OnPremisesAppUploadService.PlanAsync` what would happen before anything is stored: the apps in
 dependency order, read from each manifest with `DependencyOrder`, and any refusal, said in the
@@ -2023,7 +2024,8 @@ everything). Signers are left to the gateway, which can check a signature; the w
 A production environment asks for the same tick as a restart, since the install restarts its tiers.
 
 **When.** Now, or a time on the gateway's clock (its reported zone, else UTC, as a booked restart),
-two minutes to 30 days ahead, inside every restarted tier's `change_hours`. The form starts on the
+two minutes to 30 days ahead, inside the `change_hours` of every tier the install touches (the
+publishing tier and the restart group, as the gateway counts them). The form starts on the
 change hours' next opening, and on "later" when it is outside them now, since an install now would be
 refused. On-premises has no "at the next update": a booking is a time.
 
@@ -2036,8 +2038,10 @@ installing while it runs, then installed, already installed, refused (a settings
 the restart's is) or failed with the gateway's reason.
 
 **Booked** rows are Pending with the file on the row and no command, so the Scheduled installs
-list, **Install now** and **Cancel install** are the online ones unchanged (`UpgradeActionService`;
-Install now moves the batch's time to now). `ServiceTierBookingWorker` sends due uploads too, one
+list and **Cancel install** are the online ones unchanged (`UpgradeActionService`). **Install now**
+goes through `OnPremisesAppUploadService.InstallBookingNowAsync`: it moves the batch's time to now,
+but is refused, and the booking left as it is, outside the change hours, where sending could only
+fail. `ServiceTierBookingWorker` sends due uploads too, one
 batch at a time, as the person who booked it, through `RunBookingAsync`: everything is checked again
 from the stored files; a disabled booker, one who no longer manages the Solution, a refusal, a time
 outside the change hours or more than two hours late fail the batch's waiting rows with the reason

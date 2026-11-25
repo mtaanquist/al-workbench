@@ -291,8 +291,9 @@
                                                    TierActions="_tierActions" TierActionBusy="_tierActionBusy" OnTierAction="TierActionAsync"
                                                    OnBookRestart="BookRestartAsync" OnRunBooking="RunBookingAsync" OnCancelBooking="CancelBookingAsync"
                                                    BookingBusy="_bookingBusy"
+                                                   OnUploadApps="UploadOnPremisesAsync" UploadingApps="@(_settingBusy == "upload")"
                                                    HistoryHref="@TabHref(Section.History)" />
-                    @if (_tab == Section.Apps)
+                    @if (_tab == Section.Apps && BookedInstalls.Count > 0)
                     {
                         @* Apps uploaded by hand for later (#1786): ours until their time, so they
                            can be started early or called off, as online. *@
@@ -302,32 +303,8 @@
                                     <h2 class="card__title">Scheduled installs</h2>
                                     <p class="card__sub">Apps booked to install on this environment later.</p>
                                 </div>
-                                @if (_canManage && BookedInstalls.Count > 0)
-                                {
-                                    <button type="button" class="btn btn--sm" disabled="@_settingSaving" @onclick="UploadOnPremisesAsync">
-                                        <Icon Name="upload" Width="14" Height="14" />
-                                        <span>Upload apps</span>
-                                    </button>
-                                }
                             </div>
-                            @if (BookedInstalls.Count == 0)
-                            {
-                                <EmptyState Icon="calendar" Title="Nothing waiting to install" Quiet="true">
-                                    <Text>An app another company sent you can be installed now or booked for tonight. Apps you build yourself go through Deployments.</Text>
-                                    <Action>
-                                        @if (_canManage)
-                                        {
-                                            <button type="button" class="btn btn--sm" disabled="@_settingSaving" @onclick="UploadOnPremisesAsync">
-                                                <Icon Name="upload" Width="14" Height="14" />
-                                                <span>Upload apps</span>
-                                            </button>
-                                        }
-                                    </Action>
-                                </EmptyState>
-                            }
-                            else
-                            {
-                                <table class="data-table">
+                            <table class="data-table">
                                     <thead>
                                         <tr>
                                             <th scope="col">App</th>
@@ -371,7 +348,6 @@
                                         }
                                     </tbody>
                                 </table>
-                            }
                         </div>
                     }
                 }
@@ -2669,7 +2645,7 @@
         }
         catch (Exception ex)
         {
-            Log.LogError(ex, "Changing a booked restart for environment {EnvId} failed.", Id);
+            Log.LogError(ex, "A gateway write (booked restart or app upload) for environment {EnvId} failed.", Id);
             _settingError = "Couldn't do that. Try again; if it keeps failing, check the gateway under Administration → Gateways.";
         }
         finally
@@ -2702,7 +2678,7 @@
     /// <summary>Uploads apps by hand to an on-premises environment, now or booked (#1786).</summary>
     private async Task UploadOnPremisesAsync()
     {
-        if (_onPremisesUploadDialog is null) return;
+        if (_onPremisesUploadDialog is null || _settingSaving) return;
         var upload = await _onPremisesUploadDialog.OpenAsync(Id, Row.EnvironmentName);
         if (upload is null) return;
         var what = upload.Count == 1 ? "The app" : $"The {upload.Count} apps";
@@ -2858,7 +2834,7 @@
         if (!confirmed) return;
 
         await RunSettingWriteAsync("install-now",
-            () => UpgradeActions.RunBookedInstallNowAsync(booked.Id),
+            () => Row.IsOnPremises ? OnPremisesUploads.InstallBookingNowAsync(booked.Id) : UpgradeActions.RunBookedInstallNowAsync(booked.Id),
             update ? $"Couldn't start the update of {name}." : $"Couldn't start the install of {name}.",
             () => update
                 ? batch

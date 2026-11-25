@@ -115,7 +115,7 @@ public sealed class OnPremisesAppUploadServiceTests : IDisposable
         (await Refusal(null, AddOn())).Should().Contain("needs CRONUS Base 1.0.0.0 or later");
 
         var act = () => InstallAsync(null, new OnPremisesUploadFile([1, 2, 3, 4], "Vendor.app"));
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("can't be read as an app file");
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("is protected or isn't an app file");
 
         await using var ctx = _db.NewContext();
         (await ctx.GatewayCommands.CountAsync()).Should().Be(0);
@@ -242,6 +242,29 @@ public sealed class OnPremisesAppUploadServiceTests : IDisposable
             (await Service(ctx).RunBookingAsync(late)).Should().Be(ServiceTierBookingRun.Failed);
             (await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.Id == late)).Outcome.Should().Contain("two hours of the booked time");
             (await ctx.GatewayCommands.CountAsync()).Should().Be(1);
+        }
+    }
+
+    [Fact]
+    public async Task Install_now_on_a_booking_is_refused_outside_change_hours_and_leaves_it_booked()
+    {
+        await SetPolicyAsync(changeHours: "20:00-06:00", timeZone: "UTC");
+        var runAt = Start.UtcDateTime.AddHours(12);
+        await InstallAsync(runAt, Base());
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            id = (await ctx.OeEnvironmentUpgradeActions.SingleAsync()).Id;
+            var now = () => Service(ctx).InstallBookingNowAsync(id);
+            (await now.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Action"].Should().Contain("stays booked");
+        }
+
+        _clock.Advance(TimeSpan.FromHours(11));
+        await using (var ctx = _db.NewContext())
+        {
+            await Service(ctx).InstallBookingNowAsync(id);
+            var row = await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync();
+            (row.Status, row.ExecuteAfter).Should().Be((UpgradeActionStatus.Pending, _clock.GetUtcNow().UtcDateTime));
         }
     }
 

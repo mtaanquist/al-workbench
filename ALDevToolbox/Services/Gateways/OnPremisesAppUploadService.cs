@@ -129,7 +129,7 @@ public sealed class OnPremisesAppUploadService
     private async Task<OnPremisesUploadPlan> PlanAsync(EnvironmentRow env, OnPremisesDeployFacts facts, IReadOnlyList<OnPremisesUploadFile> files, CancellationToken ct)
     {
         var group = facts.EnvironmentUnlinked ? null : await RestartGroupPlan.LoadAsync(_db, facts, ct);
-        var tiers = group?.Tiers is { Count: > 0 } t ? t : [facts.TierName];
+        var tiers = TouchedTiers(facts, group);
         var zone = OnPremisesTierActionService.GatewayZone(facts);
         var hours = OnPremisesTierActionService.AllChangeHours(facts, tiers).ToList();
         var insideNow = zone is null || hours.All(h => h.Contains(TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(Now, zone))));
@@ -186,8 +186,7 @@ public sealed class OnPremisesAppUploadService
         var when = runAtUtc ?? now;
         if (zone is not null && plan.ChangeHours is not null)
         {
-            var group = await RestartGroupPlan.LoadAsync(_db, facts, ct);
-            var tiers = group?.Tiers is { Count: > 0 } t ? t : [facts.TierName];
+            var tiers = TouchedTiers(facts, await RestartGroupPlan.LoadAsync(_db, facts, ct));
             var local = TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(when, zone));
             if (OnPremisesTierActionService.AllChangeHours(facts, tiers).FirstOrDefault(h => !h.Contains(local)) is { } hours)
             {
@@ -257,10 +256,11 @@ public sealed class OnPremisesAppUploadService
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
             }
-            catch
+            finally
             {
+                // The command holds up to ten packages; the page's context must not keep
+                // them for the life of the circuit (#1265), nor half a rolled-back save.
                 _db.ChangeTracker.Clear();
-                throw;
             }
         }
         _commands.Wake(facts.GatewayId!.Value);
@@ -268,6 +268,40 @@ public sealed class OnPremisesAppUploadService
             "User {UserId} sent {Count} app(s) ({Files}) to on-premises environment {EnvironmentId} ({Tier}).",
             userId, rows.Count, string.Join(", ", plan.Apps.Select(a => a.FileName)), environmentId, facts.TierName);
         return new OnPremisesUploadOutcome(rows.Count, null);
+    }
+
+    /// <summary>
+    /// Moves a booked upload's batch to now - Install now on the Scheduled installs list -
+    /// for the worker's next sweep, as online. Refused, and left booked, when the customer's
+    /// change hours would refuse it now, since sending it then could only fail.
+    /// </summary>
+    /// <exception cref="PlanValidationException">Keyed <c>Action</c>: gone, or outside the change hours.</exception>
+    public async Task InstallBookingNowAsync(int actionId, CancellationToken ct = default)
+    {
+        var booking = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Id == actionId && a.Kind == UpgradeActionKind.UploadApp
+                        && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+            .Select(a => new { a.EnvironmentId, a.BatchId, a.ExecuteAfter })
+            .FirstOrDefaultAsync(ct)
+            ?? throw Refused("Action", "That booked install has already run or been cancelled.");
+        var env = await EnvironmentAsync(booking.EnvironmentId, ct)
+            ?? throw Refused("Action", "That environment is no longer an on-premises one.");
+        await _access.EnsureCanManageAsync(env.ProjectId, env.CreatedBy, ct);
+        var facts = await OnPremisesDeployFacts.LoadAsync(_db, booking.EnvironmentId, ct)
+            ?? throw Refused("Action", "That environment no longer exists.");
+        var plan = await PlanAsync(env, facts, [], ct);
+        if (!plan.InsideChangeHoursNow)
+        {
+            throw Refused("Action", $"The customer's gateway allows changes only from {plan.ChangeHours?.Replace("-", " to ")}, its local time, so it stays booked for its time.");
+        }
+        var now = Now;
+        var moved = await _db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null && a.Kind == UpgradeActionKind.UploadApp)
+            .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
+            .Where(a => a.ExecuteAfter > now)
+            .ExecuteUpdateAsync(u => u.SetProperty(a => a.ExecuteAfter, now), ct);
+        _logger.LogInformation("User {UserId} asked for booked upload {ActionId} now; {Moved} row(s) moved to the next sweep.",
+            _orgContext.CurrentUserId, actionId, moved);
     }
 
     /// <summary>
@@ -396,6 +430,8 @@ public sealed class OnPremisesAppUploadService
                         // Booked, not sent at once: the person who pressed Install now sees how it goes.
                         && a.ExecuteAfter > a.RequestedAt
                         && a.GatewayCommandId != null
+                        // Settled already: an app the gateway installed in a batch that failed keeps Sent with its outcome.
+                        && a.Outcome == null
                         && a.Environment!.Kind == OeEnvironmentKind.OnPremises)
             .Join(_db.GatewayCommands.AsNoTracking()
                     .Where(c => c.Status == GatewayCommandStatus.Failed || c.Status == GatewayCommandStatus.Expired),
@@ -443,6 +479,21 @@ public sealed class OnPremisesAppUploadService
 
     // ── Checks ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The tiers an install touches, as the gateway counts them for change hours: the
+    /// publishing tier and every tier of the restart group.
+    /// </summary>
+    private static List<string> TouchedTiers(OnPremisesDeployFacts facts, RestartGroupPlan? group)
+    {
+        var (machine, instance) = facts.PublishingTier;
+        var tiers = new List<string> { $"{machine} / {instance}" };
+        foreach (var t in group?.Tiers ?? [facts.TierName])
+        {
+            if (!tiers.Contains(t, StringComparer.OrdinalIgnoreCase)) tiers.Add(t);
+        }
+        return tiers;
+    }
+
     /// <summary>Why nothing can be published on this environment's tier at all, whatever the files; null when it can.</summary>
     private static string? ServerRefusal(OnPremisesDeployFacts facts, RestartGroupPlan? group)
     {
@@ -472,7 +523,7 @@ public sealed class OnPremisesAppUploadService
                 return ([], $"{(name.Length == 0 ? "One of the files" : name)} isn't an extension package - choose files ending in .app.");
             }
             if (!names.Add(name)) return ([], $"Two of the files are called {name}. Rename one and choose them again.");
-            if (file.Bytes.Length == 0) return ([], $"{name} is empty.");
+            if (file.Bytes.Length == 0) return ([], $"{name} is empty. Ask the sender for the file again.");
             if (file.Bytes.Length > MaxAppBytes) return ([], $"{name} is over {MaxAppBytes / (1024 * 1024)} MB, the largest app AL Workbench takes.");
             AppManifest? manifest;
             using (var stream = new MemoryStream(file.Bytes, writable: false))
@@ -481,7 +532,7 @@ public sealed class OnPremisesAppUploadService
             }
             if (manifest is null)
             {
-                return ([], $"{name} can't be read as an app file (it may be protected), so the customer's gateway can't check it. Ask whoever sent it for an unprotected copy.");
+                return ([], $"{name} is protected or isn't an app file, so AL Workbench can't read which app it is, and the customer's gateway checks that before installing. Ask the sender for a copy that isn't protected.");
             }
             read.Add(new ReadApp(new OnPremisesUploadApp(name, manifest.AppId, manifest.Name, manifest.Publisher, manifest.Version,
                 GatewayDeliveryTarget.CarriesSignature(file.Bytes), file.Bytes.Length), manifest));

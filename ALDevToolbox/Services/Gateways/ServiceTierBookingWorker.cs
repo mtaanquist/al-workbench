@@ -58,25 +58,46 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
 
     private async Task SweepOrganizationAsync(int orgId, bool isSystem, CancellationToken ct)
     {
-        List<(int Id, int? RequestedBy)> restarts;
-        List<(int Id, int? RequestedBy)> uploads;
-        using (AmbientOrganizationScope.Enter(AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
-        await using (var scope = _services.CreateAsyncScope())
+        var restarts = await SettleAsync(orgId, isSystem, "restarts", async services =>
         {
-            var tiers = scope.ServiceProvider.GetRequiredService<OnPremisesTierActionService>();
-            var apps = scope.ServiceProvider.GetRequiredService<OnPremisesAppUploadService>();
-            restarts = await tiers.DueBookingsAsync(ct).ConfigureAwait(false);
-            uploads = await apps.DueBookingsAsync(ct).ConfigureAwait(false);
-            var failedLater = await tiers.SettleFailedBookingsAsync(ct).ConfigureAwait(false);
-            failedLater.AddRange(await apps.SettleFailedBookingsAsync(ct).ConfigureAwait(false));
-            var notifier = scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>();
-            foreach (var id in failedLater) await notifier.NotifyAsync(id, ct: ct).ConfigureAwait(false);
-        }
+            var tiers = services.GetRequiredService<OnPremisesTierActionService>();
+            return (await tiers.DueBookingsAsync(ct).ConfigureAwait(false), await tiers.SettleFailedBookingsAsync(ct).ConfigureAwait(false));
+        }, ct).ConfigureAwait(false);
+        // Apart from the restarts, so one failing cannot cost the other its sends or its notices.
+        var uploads = await SettleAsync(orgId, isSystem, "uploads", async services =>
+        {
+            var apps = services.GetRequiredService<OnPremisesAppUploadService>();
+            return (await apps.DueBookingsAsync(ct).ConfigureAwait(false), await apps.SettleFailedBookingsAsync(ct).ConfigureAwait(false));
+        }, ct).ConfigureAwait(false);
 
         await RunEachAsync(orgId, isSystem, restarts, "Booked restart",
             (services, id, token) => services.GetRequiredService<OnPremisesTierActionService>().RunBookingAsync(id, byWorker: true, token), ct).ConfigureAwait(false);
         await RunEachAsync(orgId, isSystem, uploads, "Booked upload",
             (services, id, token) => services.GetRequiredService<OnPremisesAppUploadService>().RunBookingAsync(id, token), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads one kind's due bookings and settles its failed ones, telling each booker straight
+    /// after the settle that marked their row, so a notice is never lost to a later failure.
+    /// Returns the due bookings; none when the read failed (it is tried on the next sweep).
+    /// </summary>
+    private async Task<List<(int Id, int? RequestedBy)>> SettleAsync(int orgId, bool isSystem, string what,
+        Func<IServiceProvider, Task<(List<(int Id, int? RequestedBy)> Due, List<int> Failed)>> read, CancellationToken ct)
+    {
+        try
+        {
+            using var ambient = AmbientOrganizationScope.Enter(AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
+            await using var scope = _services.CreateAsyncScope();
+            var (due, failed) = await read(scope.ServiceProvider).ConfigureAwait(false);
+            var notifier = scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>();
+            foreach (var id in failed) await notifier.NotifyAsync(id, ct: ct).ConfigureAwait(false);
+            return due;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Reading the booked {What} failed for organisation {OrganizationId}; tried again on the next sweep.", what, orgId);
+            return [];
+        }
     }
 
     private async Task RunEachAsync(int orgId, bool isSystem, List<(int Id, int? RequestedBy)> due, string what,
