@@ -207,6 +207,12 @@ else
             var asked = entry.TierProgress is not null;
             var failed = entry.Status == UpgradeActionStatus.Failed;
             var database = entry.TierDatabase is { } db ? $"database {db}" : $"{tier}'s database";
+            // A restart booked for later (#1788) has no command until it is due.
+            if (entry.GatewayCommandId is null && entry.SentAt is null && entry.Status is UpgradeActionStatus.Pending or UpgradeActionStatus.Cancelled)
+            {
+                var what = entry.Kind == UpgradeActionKind.RestartServiceTiers ? "restart every service tier on its database" : "restart the service tier";
+                return entry.Status == UpgradeActionStatus.Pending ? $"Will {what}" : $"Was to {what}";
+            }
             return entry.Kind switch
             {
                 UpgradeActionKind.RestartServiceTiers => asked ? $"Asked to restart every service tier on {database}"

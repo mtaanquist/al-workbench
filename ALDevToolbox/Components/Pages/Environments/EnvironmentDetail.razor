@@ -288,6 +288,8 @@
                                                    CanManage="_canManage" Licence="_licence" LicenceError="@_licenceError"
                                                    UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync"
                                                    TierActions="_tierActions" TierActionBusy="_tierActionBusy" OnTierAction="TierActionAsync"
+                                                   OnBookRestart="BookRestartAsync" OnRunBooking="RunBookingAsync" OnCancelBooking="CancelBookingAsync"
+                                                   BookingBusy="_bookingBusy"
                                                    HistoryHref="@TabHref(Section.History)" />
                 }
                 else if (_tab == Section.Overview)
@@ -2514,6 +2516,71 @@
         finally
         {
             _tierActionBusy = null;
+        }
+        _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+        await LoadTierActionsAsync();
+    }
+
+    // ── Booking a restart for later (#1788) ──────────────────────────────
+
+    private int? _bookingBusy;
+
+    private async Task BookRestartAsync()
+    {
+        if (_tierActionDialog is null || _tierActions is null || _tierActionBusy is not null) return;
+        var booking = await _tierActionDialog.OpenBookingAsync(Id, _tierActions.TierName, _tierActions.GroupTierCount);
+        if (booking is not { } chosen) return;
+        await TierBookingWriteAsync(
+            () => TierActions.BookAsync(Id, chosen.Action, chosen.RunAtUtc),
+            "The restart is booked. It's listed on the Service tier card until it runs, and you'll be told if it doesn't go through.");
+    }
+
+    private Task RunBookingAsync(int actionId) => TierBookingWriteAsync(
+        async () =>
+        {
+            _bookingBusy = actionId;
+            await TierActions.RunBookingAsync(actionId, byWorker: false);
+        },
+        "The booked restart was sent to the gateway. The Service tier card shows how it goes.");
+
+    private Task CancelBookingAsync(int actionId) => TierBookingWriteAsync(
+        async () =>
+        {
+            _bookingBusy = actionId;
+            await TierActions.CancelBookingAsync(Id, actionId);
+        },
+        "The booked restart is cancelled.");
+
+    private async Task TierBookingWriteAsync(Func<Task> write, string done)
+    {
+        _settingError = null;
+        _settingDone = null;
+        _settingDoneLink = null;
+        try
+        {
+            await Write(write);
+            _settingDone = done;
+        }
+        catch (PlanValidationException ex)
+        {
+            _settingError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't do that.";
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _settingError = ex.Message;
+        }
+        catch (OperationCanceledException) when (_calls.IsGone)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Changing a booked restart for environment {EnvId} failed.", Id);
+            _settingError = "Couldn't do that. Try again; if it keeps failing, check the gateway under Administration → Gateways.";
+        }
+        finally
+        {
+            _bookingBusy = null;
         }
         _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
         await LoadTierActionsAsync();

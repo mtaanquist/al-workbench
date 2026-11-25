@@ -55,6 +55,14 @@ public sealed record GatewayPolicyReport
     /// </summary>
     [JsonPropertyName("tooLarge")]
     public bool TooLarge { get; init; }
+
+    /// <summary>
+    /// The gateway computer's time zone (its Windows id, e.g. <c>Romance Standard Time</c>),
+    /// which <c>change_hours</c> are read in. AL Workbench uses it to refuse a restart booked
+    /// outside them when it is booked rather than when it runs. Null from an older gateway.
+    /// </summary>
+    [JsonPropertyName("timeZone")]
+    public string? TimeZone { get; init; }
 }
 
 /// <summary>The values of <see cref="GatewayPolicyReport.State"/>.</summary>

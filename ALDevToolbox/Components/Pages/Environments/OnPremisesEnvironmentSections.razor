@@ -324,6 +324,26 @@ else if (!ShowApps)
                         <p class="onprem__upload-detail onprem__upload-note">@done</p>
                     }
                 }
+                @foreach (var booking in view.Booked ?? [])
+                {
+                    <div class="onprem__upload-line">
+                        <StatusPill Tone="queued">Booked</StatusPill>
+                        <span>
+                            @(booking.Action == ServiceTierAction.RestartAll ? "Restart of every service tier on the database" : $"Restart of {view.TierName}")
+                            at <Timestamp Value="@booking.RunAt" />
+                            <span class="u-muted">by @booking.BookedBy</span>
+                        </span>
+                        @if (view.CanManage)
+                        {
+                            <span class="onprem__booking-actions">
+                                <button type="button" class="btn btn--sm @(BookingBusy == booking.Id ? "btn--loading" : "")"
+                                        disabled="@(BookingBusy is not null || view.InFlight)" @onclick="() => OnRunBooking.InvokeAsync(booking.Id)">Run now</button>
+                                <button type="button" class="btn btn--sm" disabled="@(BookingBusy is not null)"
+                                        @onclick="() => OnCancelBooking.InvokeAsync(booking.Id)">Cancel booking</button>
+                            </span>
+                        }
+                    </div>
+                }
                 @if (view.CanManage)
                 {
                     // Every action on one row: restart (or start) first, the one a consultant
@@ -338,6 +358,15 @@ else if (!ShowApps)
                             @foreach (var choice in rest)
                             {
                                 @TierButton(choice, view)
+                            }
+                            @if (view.Booked is not { Count: > 0 })
+                            {
+                                <button type="button" class="btn btn--sm"
+                                        disabled="@(view.BookingUnavailable is not null || TierActionBusy is not null)"
+                                        @onclick="() => OnBookRestart.InvokeAsync()">
+                                    <Icon Name="clock" Width="14" Height="14" />
+                                    <span class="btn__label">Restart later...</span>
+                                </button>
                             }
                             @* Stop last and set apart: it is the one that leaves people unable
                                to work until someone acts again. *@
@@ -595,6 +624,18 @@ else
 
     /// <summary>Opens the confirmation for an action.</summary>
     [Parameter] public EventCallback<ServiceTierAction> OnTierAction { get; set; }
+
+    /// <summary>Opens the form that books a restart for later (#1788).</summary>
+    [Parameter] public EventCallback OnBookRestart { get; set; }
+
+    /// <summary>Sends a booked restart now.</summary>
+    [Parameter] public EventCallback<int> OnRunBooking { get; set; }
+
+    /// <summary>Cancels a booked restart.</summary>
+    [Parameter] public EventCallback<int> OnCancelBooking { get; set; }
+
+    /// <summary>The booked restart being run or cancelled; null when none is.</summary>
+    [Parameter] public int? BookingBusy { get; set; }
 
     /// <summary>The Workbench history tab's address.</summary>
     [Parameter] public string? HistoryHref { get; set; }

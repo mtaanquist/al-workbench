@@ -25,3 +25,4 @@
 .onprem__counted { display: flex; align-items: center; gap: var(--space-2); }
 .onprem__filter { width: 220px; }
 .onprem__setting-value { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-xs); }
+.onprem__booking-actions { display: inline-flex; gap: var(--space-2); margin-left: auto; }

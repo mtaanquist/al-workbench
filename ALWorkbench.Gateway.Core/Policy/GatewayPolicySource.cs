@@ -125,7 +125,7 @@ public sealed class GatewayPolicySource : IGatewayPolicy
             _inForce = inForce;
 
             // Changes are noticed on the whole report; what is sent is cut down to size.
-            var full = inForce.ToReport(state, problems);
+            var full = inForce.ToReport(state, problems) with { TimeZone = _zone.Id };
             var json = JsonSerializer.Serialize(full, ReportJson);
             if (json != _reportJson)
             {
@@ -172,6 +172,7 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         {
             State = report.State,
             TooLarge = true,
+            TimeZone = report.TimeZone,
             Problems =
             [
                 $"The gateway's settings are too large to show in AL Workbench ({bytes / 1024} KB). The gateway enforces them as written; run its check command on its computer to see them.",

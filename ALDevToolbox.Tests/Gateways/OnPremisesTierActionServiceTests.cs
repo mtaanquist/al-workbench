@@ -555,6 +555,182 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         (await LatestAsync()).TierDatabase.Should().Be("CRONUS-SQL01 / CRONUS");
     }
 
+    // ---------------------------------------------------------------- booked for later (#1788)
+
+    private async Task<int> BookAsync(ServiceTierAction action, DateTime runAtUtc)
+    {
+        await using var ctx = _db.NewContext();
+        return await Service(ctx).BookAsync(_environmentId, action, runAtUtc);
+    }
+
+    /// <summary>Moves the clock to <paramref name="hours"/> after the start, with the gateway still checking in.</summary>
+    private async Task AtAsync(int hours)
+    {
+        _clock.Advance(Start.AddHours(hours) - _clock.GetUtcNow());
+        await using var ctx = _db.NewContext();
+        var now = _clock.GetUtcNow().UtcDateTime;
+        await ctx.Gateways.Where(g => g.Id == _gatewayId).ExecuteUpdateAsync(s => s.SetProperty(g => g.LastSeenAt, now));
+    }
+
+    private async Task<ServiceTierBookingRun> RunBookingAsync(int id)
+    {
+        await using var ctx = _db.NewContext();
+        return await Service(ctx).RunBookingAsync(id, byWorker: true);
+    }
+
+    [Fact]
+    public async Task A_booked_restart_waits_with_no_command_and_is_listed_until_it_runs()
+    {
+        await SetPolicyAsync();
+        var runAt = Start.UtcDateTime.AddHours(12);
+
+        var id = await BookAsync(ServiceTierAction.Restart, runAt);
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.GatewayCommands.CountAsync()).Should().Be(0, "nothing reaches the gateway before its time");
+            var row = await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync();
+            (row.Id, row.Status, row.ExecuteAfter, row.SentAt, row.Kind).Should().Be(
+                (id, UpgradeActionStatus.Pending, runAt, (DateTime?)null, UpgradeActionKind.RestartServiceTier));
+            var audit = await ctx.AuditLog.AsNoTracking().SingleAsync(a => a.EntityType == AuditEntityType.ProjectEnvironment);
+            JsonNode.Parse(audit.SnapshotJson!)!["Action"]!.GetValue<string>().Should().Be("Book: Restart service tier");
+
+            var view = (await Service(ctx).GetViewAsync(_environmentId))!;
+            view.Booked.Should().ContainSingle().Which.Should().Be(new ServiceTierBooking(id, ServiceTierAction.Restart, runAt, row.RequestedBy, Start.UtcDateTime));
+            view.Latest.Should().BeNull("a booking is not an action that has happened");
+        }
+
+        await AtAsync(12);
+        (await RunBookingAsync(id)).Should().Be(ServiceTierBookingRun.Sent);
+        await using (var ctx = _db.NewContext())
+        {
+            var command = await ctx.GatewayCommands.AsNoTracking().SingleAsync();
+            command.Verb.Should().Be(GatewayVerb.RestartInstance);
+            command.RequestedByUserId.Should().Be(_owner.Id);
+            var row = await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync();
+            (row.Status, row.GatewayCommandId).Should().Be((UpgradeActionStatus.Sent, (long?)command.Id));
+            var view = (await Service(ctx).GetViewAsync(_environmentId))!;
+            view.Booked.Should().BeEmpty();
+            view.Latest!.Id.Should().Be(id);
+        }
+        (await RunBookingAsync(id)).Should().Be(ServiceTierBookingRun.Gone, "it runs once");
+    }
+
+    [Fact]
+    public async Task A_booking_too_soon_too_far_ahead_or_twice_is_refused()
+    {
+        await SetPolicyAsync();
+
+        var soon = () => BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddMinutes(1));
+        var far = () => BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddDays(31));
+        var stop = () => BookAsync(ServiceTierAction.Stop, Start.UtcDateTime.AddHours(2));
+        (await soon.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("runAt");
+        (await far.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("runAt");
+        (await stop.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("action");
+
+        await BookAsync(ServiceTierAction.RestartAll, Start.UtcDateTime.AddHours(2));
+        var again = () => BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(3));
+        (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors["environment"].Should().Contain("already booked");
+    }
+
+    [Fact]
+    public async Task A_booking_outside_the_customers_change_hours_is_refused_when_booked()
+    {
+        await SetPolicyAsync(changeHours: "20:00-06:00", timeZone: "UTC");
+
+        var noon = () => BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(3));
+        (await noon.Should().ThrowAsync<PlanValidationException>()).Which.Errors["runAt"].Should().Contain("20:00 to 06:00");
+
+        await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(13));
+
+        await using var ctx = _db.NewContext();
+        var plan = (await Service(ctx).GetBookingPlanAsync(_environmentId, ServiceTierAction.Restart))!;
+        (plan.ChangeHours, plan.TimeZone).Should().Be(("20:00-06:00", "UTC"));
+        plan.DefaultRunAt.Should().Be(new DateTime(2026, 10, 15, 20, 0, 0, DateTimeKind.Utc), "the form starts at the window's next opening");
+    }
+
+    [Fact]
+    public async Task A_cancelled_booking_never_runs_and_cannot_be_cancelled_twice()
+    {
+        await SetPolicyAsync();
+        var id = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(2));
+
+        await using (var ctx = _db.NewContext())
+        {
+            await Service(ctx).CancelBookingAsync(_environmentId, id);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var again = () => Service(ctx).CancelBookingAsync(_environmentId, id);
+            await again.Should().ThrowAsync<PlanValidationException>();
+            (await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync()).Status.Should().Be(UpgradeActionStatus.Cancelled);
+        }
+        await AtAsync(3);
+        (await RunBookingAsync(id)).Should().Be(ServiceTierBookingRun.Gone);
+        await using var check = _db.NewContext();
+        (await check.GatewayCommands.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_due_booking_waits_for_a_busy_tier_then_gives_up_and_one_now_refused_is_failed()
+    {
+        await SetPolicyAsync();
+        var id = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(1));
+        await AddCommandAsync(GatewayVerb.PublishInstall, GatewayCommandStatus.Running, "CRONUS-BC01", "BC250");
+
+        await AtAsync(1);
+        (await RunBookingAsync(id)).Should().Be(ServiceTierBookingRun.Waiting, "a deployment still running is waited for");
+        await AtAsync(4);
+        (await RunBookingAsync(id)).Should().Be(ServiceTierBookingRun.Failed);
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync();
+            row.Status.Should().Be(UpgradeActionStatus.Failed);
+            row.Outcome.Should().Contain("two hours past the booked time");
+        }
+
+        // The customer's settings changed since it was booked: refused, and said so.
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.GatewayCommands.ExecuteDeleteAsync();
+        }
+        var second = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(5));
+        await SetPolicyAsync(bc01Allow: ["inventory"]);
+        await AtAsync(5);
+        (await RunBookingAsync(second)).Should().Be(ServiceTierBookingRun.Failed);
+        await using var check = _db.NewContext();
+        (await check.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.Id == second)).Outcome
+            .Should().StartWith(OnPremisesDeployFacts.NotAllowed).And.EndWith("The restart wasn't sent.");
+    }
+
+    [Fact]
+    public async Task A_booked_restart_the_gateway_failed_is_settled_once_and_a_pressed_one_is_not()
+    {
+        await SetPolicyAsync();
+        var id = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(1));
+        await AtAsync(1);
+        await RunBookingAsync(id);
+        await FinishCommandAsync(GatewayCommandStatus.Failed, "The service did not stop in time.", null);
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await Service(ctx).SettleFailedBookingsAsync()).Should().Equal(id);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync();
+            row.Status.Should().Be(UpgradeActionStatus.Failed);
+            row.Outcome.Should().NotBeNullOrEmpty();
+            (await Service(ctx).SettleFailedBookingsAsync()).Should().BeEmpty("the person is told once");
+        }
+
+        // An immediate restart that failed is read off its command and never settled here.
+        await RequestAsync(ServiceTierAction.Restart);
+        await FinishCommandAsync(GatewayCommandStatus.Failed, "Nope.", null);
+        await using var check = _db.NewContext();
+        (await Service(check).SettleFailedBookingsAsync()).Should().BeEmpty();
+    }
+
     // ---------------------------------------------------------------- building blocks
 
     private async Task AddCommandAsync(GatewayVerb verb, GatewayCommandStatus status, string machine, string instance)
@@ -652,17 +828,19 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
 
     /// <summary>The customer's settings: one database published on BC01 that restarts BC01 and BC02.</summary>
     private async Task SetPolicyAsync(string[]? bc01Allow = null, string[]? bc02Allow = null, bool shared = false,
-        string bc01Environment = "production", string bc02Environment = "production")
+        string bc01Environment = "production", string bc02Environment = "production", string? changeHours = null, string? timeZone = null)
     {
         var policy = new GatewayPolicyReport
         {
             State = GatewayPolicyStates.Valid,
+            TimeZone = timeZone,
             Instances =
             [
                 new GatewayPolicyInstance
                 {
                     Machine = "CRONUS-BC01", Name = "BC250", Environment = bc01Environment,
                     Allow = bc01Allow ?? ["inventory", "publish", "restart", "service_control"], Tenants = ["default"],
+                    ChangeHours = changeHours,
                 },
                 new GatewayPolicyInstance
                 {
