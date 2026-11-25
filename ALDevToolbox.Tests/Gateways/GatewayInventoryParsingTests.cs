@@ -247,8 +247,37 @@ public sealed class GatewayInventoryParsingTests
     [InlineData("DatabaseServer", false)]
     [InlineData("ClientServicesPort", false)]
     [InlineData("KeyVaultUri", false)]
+    [InlineData("ProtectedDatabasePassword", true)]
+    [InlineData("ProtectedSomething", true)]
+    [InlineData("ApplicationInsightsConnectionString", true)]
+    [InlineData("ApplicationInsightsInstrumentationKey", true)]
+    [InlineData("AzureActiveDirectoryClientSecret", true)]
+    [InlineData("SASToken", true)]
+    [InlineData("StoragePrivateKeyPath", true)]
+    [InlineData("ClientServicesCredentialType", false)]
+    [InlineData("ExtendedSecurityTokenLifetime", false)]
+    [InlineData("DisableTokenSigningCertificateValidation", false)]
+    [InlineData("AzureKeyVaultAppSecretsPublisherValidationEnabled", false)]
+    [InlineData("SaaSMode", false)]
+    [InlineData("ServicesCertificateThumbprint", false)]
     public void A_setting_naming_a_secret_is_withheld(string key, bool secret) =>
         InventoryNormaliser.IsSecret(key).Should().Be(secret);
+
+    [Theory]
+    [InlineData("Server=sql01;Database=BC;User Id=bc;Password=hunter2", true)]
+    [InlineData("https://cronus.blob.core.windows.net/c?sv=2024&sig=abc", true)]
+    [InlineData("DefaultEndpointsProtocol=https;AccountName=cronus;AccountKey=abc", true)]
+    [InlineData("https://bc.cronus.example/BC250", false)]
+    [InlineData("7046", false)]
+    public void A_harmless_key_whose_value_carries_a_credential_is_withheld(string value, bool secret) =>
+        InventoryNormaliser.IsSecret("ExternalStorageAddress", value).Should().Be(secret);
+
+    [Fact]
+    public void A_tier_that_could_not_be_read_says_whether_it_still_shares_its_settings()
+    {
+        InventoryNormaliser.Failed(Tier("BC250"), "Timed out.").Unavailable.Should().ContainKey(GatewayInventorySections.Settings);
+        InventoryNormaliser.Failed(Tier("BC140"), "Timed out.").Unavailable.Should().BeEmpty();
+    }
 
     [Fact]
     public void The_script_is_asked_for_server_settings_only_where_the_policy_allows_them()

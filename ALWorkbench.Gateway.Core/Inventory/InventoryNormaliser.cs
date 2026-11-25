@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core.Policy;
 
@@ -53,6 +54,11 @@ public static class InventoryNormaliser
             Environment = PolicyWords.Environments[tier.Environment],
             PowerShell = powerShell,
             Error = Cut(error) ?? "The service tier could not be read.",
+            // Still shared, just not read this time: AL Workbench keeps the last copy. Without
+            // this it clears them, which is right once the customer stops sharing them.
+            Unavailable = tier.Allows(PolicyPermission.ServerSettings)
+                ? new Dictionary<string, string> { [GatewayInventorySections.Settings] = "The service tier could not be read." }
+                : new Dictionary<string, string>(),
         };
     }
 
@@ -138,18 +144,46 @@ public static class InventoryNormaliser
     }
 
     /// <summary>
-    /// A setting whose value is a secret, by its key: passwords, keys, tokens, connection
-    /// strings. Business Central's own names say so (<c>ApplicationInsightsConnectionString</c>,
-    /// <c>AzureKeyVaultClientSecret</c>), and a setting a later version adds follows the same
-    /// words. A thumbprint names a certificate and is not a secret.
+    /// A setting whose value is a secret. Judged by the words of its key, which Business
+    /// Central spells in PascalCase (<c>ApplicationInsightsConnectionString</c>,
+    /// <c>AzureKeyVaultClientSecret</c>, <c>ProtectedDatabasePassword</c>), so a setting a later
+    /// version adds follows the same words; and, for a key that looks harmless, by a value that
+    /// carries a credential the way a connection string or a signed URL does. Whole words, so
+    /// <c>ClientServicesCredentialType</c> and <c>ExtendedSecurityTokenLifetime</c> stay
+    /// readable. A thumbprint names a certificate and is not a secret. Errs towards hiding.
     /// </summary>
-    public static bool IsSecret(string key)
+    public static bool IsSecret(string key, string? value = null)
     {
         ArgumentNullException.ThrowIfNull(key);
-        string[] words = ["password", "secret", "token", "credential", "connectionstring", "sas"];
-        return words.Any(w => key.Contains(w, StringComparison.OrdinalIgnoreCase))
-            || key.EndsWith("key", StringComparison.OrdinalIgnoreCase);
+        var words = Words(key);
+        if (words.Length == 0) return false;
+        static bool Is(string word, params string[] names) => names.Any(n => string.Equals(word, n, StringComparison.OrdinalIgnoreCase));
+
+        // Anywhere in the key: these words only ever name a secret.
+        if (words.Any(w => Is(w, "Password", "Passwords", "Pwd", "Passphrase", "Sas"))) return true;
+        // Business Central's prefix for what it stores encrypted.
+        if (Is(words[0], "Protected")) return true;
+        for (var i = 0; i + 1 < words.Length; i++)
+        {
+            if (Is(words[i], "Connection") && Is(words[i + 1], "String", "Strings")) return true;
+            if (Is(words[i], "Private", "Access", "Account", "Shared", "Encryption") && Is(words[i + 1], "Key", "Keys")) return true;
+        }
+        // At the end (or before "Value"): "ClientSecret", "InstrumentationKey", "AuthToken".
+        var last = Is(words[^1], "Value", "Values") && words.Length > 1 ? words[^2] : words[^1];
+        if (Is(last, "Secret", "Secrets", "Key", "Keys", "Token", "Tokens", "Credential", "Credentials", "Signature")) return true;
+
+        return value is not null && SecretInValue.IsMatch(value);
     }
+
+    /// <summary>The PascalCase words of a key: <c>SASToken</c> is <c>SAS</c>, <c>Token</c>.</summary>
+    private static string[] Words(string key) =>
+        WordBreak.Split(key).SelectMany(p => p.Split(['_', '-', '.', ' '], StringSplitOptions.RemoveEmptyEntries)).ToArray();
+
+    private static readonly Regex WordBreak = new(@"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", RegexOptions.CultureInvariant);
+
+    private static readonly Regex SecretInValue = new(
+        @"(?:^|[;&?\s])(?:password|pwd|accountkey|sharedaccesskey|sharedaccesssignature|sig|instrumentationkey)\s*=",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static IReadOnlyList<GatewayServerSetting>? Settings(JsonNode? node)
     {
@@ -160,9 +194,10 @@ public static class InventoryNormaliser
         {
             if (settings.Count >= GatewayInventoryLimits.MaxServerSettings) break;
             if (item is not JsonObject entry || Cut(Text(entry["key"])) is not { } key || !seen.Add(key)) continue;
-            settings.Add(IsSecret(key)
+            var value = Text(entry["value"]);
+            settings.Add(IsSecret(key, value)
                 ? new GatewayServerSetting { Key = key, Withheld = true }
-                : new GatewayServerSetting { Key = key, Value = Cut(Text(entry["value"])) });
+                : new GatewayServerSetting { Key = key, Value = Cut(value) });
         }
         return settings.OrderBy(s => s.Key, StringComparer.OrdinalIgnoreCase).ToList();
     }

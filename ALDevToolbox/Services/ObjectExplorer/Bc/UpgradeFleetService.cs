@@ -305,10 +305,11 @@ public sealed class UpgradeFleetService
             .Where(e => e.Id == environmentId && e.MissingSince == null && e.GatewayInstanceId != null)
             .Where(e => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
-            .Select(e => new { e.GatewayInstance!.ServerSettingsJson, e.GatewayInstance.ReadAt })
+            .Select(e => new { e.GatewayInstance!.ServerSettingsJson, e.GatewayInstance.ReadAt, e.GatewayInstance.MissingSince })
             .FirstOrDefaultAsync(ct);
         if (tier is null) return null;
-        if (tier.ServerSettingsJson is not { } json) return new ServerSettingsView(false, [], tier.ReadAt);
+        // A tier the gateway's settings file no longer lists is no longer shared either.
+        if (tier.ServerSettingsJson is not { } json || tier.MissingSince is not null) return new ServerSettingsView(false, [], tier.ReadAt);
         List<ALWorkbench.Gateway.Contracts.GatewayServerSetting> settings;
         try
         {
@@ -899,10 +900,6 @@ public sealed record EnvironmentDetailRow(
     DateTime? BcUpdateWindowFetchedAt,
     string? AppSourceAppsUpdateCadence);
 
-/// <summary>
-/// One app from the installed-apps mirror. <paramref name="DeliveredFromWorkbench"/> is true
-/// when a delivery from this workbench has carried the app to the environment.
-/// </summary>
 /// <summary>An on-premises tier's server settings, as the gateway last read them.</summary>
 /// <param name="Shared">False when the customer's gateway settings do not share them.</param>
 /// <param name="Settings">By key; empty when not shared or not read yet.</param>
@@ -912,5 +909,9 @@ public sealed record ServerSettingsView(bool Shared, IReadOnlyList<ServerSetting
 /// <summary>One server setting. <paramref name="Withheld"/>: it holds a secret, so the gateway did not send its value.</summary>
 public sealed record ServerSettingRow(string Key, string? Value, bool Withheld);
 
+/// <summary>
+/// One app from the installed-apps mirror. <paramref name="DeliveredFromWorkbench"/> is true
+/// when a delivery from this workbench has carried the app to the environment.
+/// </summary>
 public sealed record InstalledAppRow(
     Guid AppId, string Name, string Publisher, string Version, DateTime FetchedAt, bool DeliveredFromWorkbench);

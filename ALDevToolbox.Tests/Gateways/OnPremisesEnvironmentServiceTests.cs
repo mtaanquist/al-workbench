@@ -623,6 +623,62 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Get_environment_gives_server_settings_only_when_asked_and_shared()
+    {
+        await ReportAsync(
+            Tier("BC250", "test", Tenant("default")) with { Settings = [new() { Key = "DatabaseServer", Value = "CRONUS-SQL" }] },
+            Tier("BC140", "test", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var shared = await LinkAsync(solution, "BC250", "Test");
+        var unshared = await LinkAsync(solution, "BC140", "Old test");
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var tools = Tools(ctx);
+        var plain = await tools.GetEnvironmentAsync(shared);
+        (plain.ServerSettingsShared, plain.ServerSettings).Should().Be(((bool?)null, (IReadOnlyList<ServerSetting>?)null), "they are a few hundred lines, so only on request");
+
+        var asked = await tools.GetEnvironmentAsync(shared, includeServerSettings: true);
+        asked.ServerSettingsShared.Should().BeTrue();
+        asked.ServerSettings.Should().Equal(new ServerSetting("DatabaseServer", "CRONUS-SQL", false));
+        asked.ServerSettingsReadAt.Should().NotBeNull();
+
+        var other = await tools.GetEnvironmentAsync(unshared, includeServerSettings: true);
+        (other.ServerSettingsShared, other.ServerSettings, other.ServerSettingsReadAt).Should().Be(((bool?)false, (IReadOnlyList<ServerSetting>?)null, (DateTime?)null));
+    }
+
+    [Fact]
+    public async Task A_tier_that_could_not_be_read_keeps_shared_settings_and_says_not_read_yet_before_the_first_read()
+    {
+        var solution = await SolutionAsync("CRONUS Danmark");
+        await ReportAsync(Tier("BC250", "test", Tenant("default")) with { Settings = [new() { Key = "DatabaseServer", Value = "CRONUS-SQL" }] });
+        var id = await LinkAsync(solution, "BC250", "Test");
+        var stillShared = new Dictionary<string, string> { [GatewayInventorySections.Settings] = "The service tier could not be read." };
+
+        // A failed read of a tier that still shares them keeps the last copy.
+        await ReportAsync(Tier("BC250", "test") with { Error = "Timed out.", Unavailable = stillShared });
+        await using (var ctx = _db.NewContext())
+        {
+            (await Fleet(ctx).GetServerSettingsAsync(id))!.Settings.Should().ContainSingle();
+        }
+
+        // A failed read of a tier that no longer shares them clears it.
+        await ReportAsync(Tier("BC250", "test") with { Error = "Timed out." });
+        await using (var ctx = _db.NewContext())
+        {
+            (await Fleet(ctx).GetServerSettingsAsync(id))!.Shared.Should().BeFalse();
+        }
+
+        // Shared again but not read yet: an empty list, not "not shared".
+        await ReportAsync(Tier("BC250", "test") with { Unavailable = stillShared });
+        await using (var ctx = _db.NewContext())
+        {
+            var view = (await Fleet(ctx).GetServerSettingsAsync(id))!;
+            (view.Shared, view.Settings.Count).Should().Be((true, 0));
+        }
+    }
+
+    [Fact]
     public async Task On_premises_tiers_are_absent_from_upgrades()
     {
         await ReportAsync(Tier("BC250", "production", Tenant("default")));

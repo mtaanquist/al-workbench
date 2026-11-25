@@ -209,6 +209,7 @@ public sealed class GatewayInventoryService
             // Nothing could be read: keep the last known facts and say why.
             row.ReadError = Text(reported.Error);
             row.UnavailableJson = "{}";
+            KeepOrClearServerSettings(row, reported);
             return;
         }
 
@@ -237,9 +238,6 @@ public sealed class GatewayInventoryService
             ? null
             : JsonSerializer.Serialize(reported.SessionUsers.Where(u => !Blank(u)).Select(Text), Json);
 
-        // Every setting: only where the tier allows server_settings. Kept when the gateway
-        // tried and could not read them (it says so under "settings"); cleared when it did
-        // not try, which means the customer's settings no longer allow it.
         if (reported.Settings is { } settings)
         {
             row.ServerSettingsJson = JsonSerializer.Serialize(
@@ -251,9 +249,9 @@ public sealed class GatewayInventoryService
                 }),
                 Json);
         }
-        else if (reported.Unavailable?.ContainsKey(GatewayInventorySections.Settings) != true)
+        else
         {
-            row.ServerSettingsJson = null;
+            KeepOrClearServerSettings(row, reported);
         }
 
         // What changes slowly: kept when this report could not read it.
@@ -278,6 +276,24 @@ public sealed class GatewayInventoryService
         if (reported.Licence is { } licence)
         {
             await ApplyLicenceAsync(orgId, row, licence, now, ct);
+        }
+    }
+
+    /// <summary>
+    /// A report that carries no settings. The gateway says so under "settings" when the tier
+    /// still shares them but they could not be read: the last copy is kept, or an empty list
+    /// stands in so the page says "not read yet" rather than "not shared". No such word
+    /// means the customer's settings no longer share them, and the copy goes.
+    /// </summary>
+    private static void KeepOrClearServerSettings(GatewayInstance row, GatewayInstanceInventory reported)
+    {
+        if (reported.Unavailable?.ContainsKey(GatewayInventorySections.Settings) == true)
+        {
+            row.ServerSettingsJson ??= "[]";
+        }
+        else
+        {
+            row.ServerSettingsJson = null;
         }
     }
 

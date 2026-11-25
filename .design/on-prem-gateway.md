@@ -536,11 +536,17 @@ back: the instance's state and version (`Get-NAVServerInstance`); its Windows se
 mode and account (`Win32_Service`); ten whitelisted configuration keys (database server, instance
 and name, multitenant, the five ports, the public web base URL), and the whole configuration only
 where the tier allows `server_settings` (#1795): every key and value, except that a key naming a
-secret (`InventoryNormaliser.IsSecret`: password, secret, token, credential, connection string,
-SAS, or ending in "key") is sent as withheld with no value, decided by the gateway before it sends
-anything. AL Workbench keeps the list on `gateway_instances.server_settings`, keeps it when a report
-says it could not read it (`unavailable["settings"]`), clears it when a report no longer carries it,
-and shows it read only on the environment page's Server settings tab and through
+secret is sent as withheld with no value, decided by the gateway before it sends anything
+(`InventoryNormaliser.IsSecret`, by whole PascalCase words: password, passphrase, SAS, a
+`Protected` prefix, connection string, private/access/account/shared/encryption key, or ending in
+secret, key, token, credential or signature; plus a harmless-looking key whose value carries
+`Password=`, `AccountKey=`, `sig=` and the like). The gateway is the trust boundary here: the app
+cannot re-check a key it never saw the value of, so it only drops any value a withheld entry
+carries. AL Workbench keeps the list on `gateway_instances.server_settings`. A report that says
+it could not read them (`unavailable["settings"]`, which a tier that failed outright also carries
+where it shares them) keeps the last copy, or stores an empty list so the page says "not read yet"
+rather than "not shared"; a report without that word clears it, and so does the tier leaving the
+settings file. It shows read only on the environment page's Server settings tab and through
 `get_environment(includeServerSettings)`. Changing settings stays out of scope (#1796);
 its tenants (`Get-NAVTenant`; a single-tenant tier gets one tenant, `default`, with no cmdlet
 needed); each tenant's apps (`Get-NAVAppInfo -Tenant`, with `-TenantSpecificProperties` where the
