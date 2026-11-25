@@ -1031,7 +1031,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId);
         cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Workbench history");
-        cut.Markup.Should().Contain("On-premises service tier in CRONUS Denmark");
+        cut.FindAll(".tag").Select(t => t.TextContent).Should().Contain("On-premises");
         cut.FindAll("button").Should().NotContain(b => b.TextContent.Contains("Copy"), "a service tier cannot be copied from here");
         // No gateway reports this tier, so its last state is not vouched for in green.
         var pill = cut.Find(".status-pill");

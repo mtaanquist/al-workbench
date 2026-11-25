@@ -57,7 +57,7 @@ public static class ServiceTierActionOutcome
                 .Where(c => ids.Contains(c.Id))
                 .Select(c => new CommandFacts(c.Id, c.Status, c.FailureMessage, c.ResultJson, c.ParametersJson, c.FinishedAt, c.GatewayId))
                 .ToDictionaryAsync(c => c.Id, ct)
-                .ConfigureAwait(false);
+                ;
 
         // The database each command's tier serves, as its gateway last read it, so a restart
         // of every tier on it can say which database that was.
@@ -68,7 +68,7 @@ public static class ServiceTierActionOutcome
                 .Where(i => gatewayIds.Contains(i.GatewayId))
                 .Select(i => new TierDatabaseFacts(i.GatewayId, i.Machine, i.Name, i.DatabaseServer, i.DatabaseInstance, i.DatabaseName))
                 .ToListAsync(ct)
-                .ConfigureAwait(false);
+                ;
 
         return rows.Select(r =>
             {

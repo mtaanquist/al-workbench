@@ -398,13 +398,14 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
         var buildId = await SeedBuildPipelineAsync(ctx, projectId);
-        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox",
+            windowStart: new TimeOnly(22, 0), windowEnd: new TimeOnly(4, 0));
         await LinkOnPremisesAsync(ctx, envId);
 
         var on = await NewService(ctx).CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, "On", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+            new ReleasePipelineInput(projectId, "On", buildId, envId, BcDeploymentSchedule.OurDeliveryWindow, BcSyncMode.Add));
         var off = await NewService(ctx).CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, "Off", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add, UnpublishPrevious: false));
+            new ReleasePipelineInput(projectId, "Off", buildId, envId, BcDeploymentSchedule.OurDeliveryWindow, BcSyncMode.Add, UnpublishPrevious: false));
 
         await using var read = _db.NewContext();
         (await read.OeReleasePipelines.SingleAsync(r => r.Id == on)).UnpublishPrevious.Should().BeTrue("removing the previous version is the default");
@@ -437,11 +438,12 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
         var buildId = await SeedBuildPipelineAsync(ctx, projectId);
-        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "CRONUS Test", type: "Sandbox",
+            windowStart: new TimeOnly(22, 0), windowEnd: new TimeOnly(4, 0));
         await LinkOnPremisesAsync(ctx, envId, allowForceSync: allowed);
 
         var act = () => NewService(ctx).CreateReleasePipelineAsync(
-            new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.ForceSync));
+            new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.OurDeliveryWindow, BcSyncMode.ForceSync));
 
         if (refused)
         {

@@ -2093,7 +2093,7 @@
     private string? Took(DeliveryHistoryRow d) =>
         d.FinishedAt is { } end && (StartOf(d) ?? (d.Status is ProjectDeliveryStatus.Cancelled or ProjectDeliveryStatus.Dismissed ? null : d.CreatedAt)) is { } start
             ? Duration(end - start)
-            : d.IsActive && StartOf(d) is { } running ? Duration(Time.GetUtcNow().UtcDateTime - running) : null;
+            : d.IsActive && StartOf(d) is { } running ? $"Running for {Duration(Time.GetUtcNow().UtcDateTime - running)}" : null;
 
     private static string AppsSummary(DeliveryHistoryRow d)
     {

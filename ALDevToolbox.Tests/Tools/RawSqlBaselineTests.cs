@@ -73,6 +73,15 @@ public sealed class RawSqlBaselineTests
         ["ALDevToolbox/Services/Backups/PerTenantBackupService.cs"] = new(
             "Run by a SiteAdmin (RequireSiteAdmin first) or by the scheduler for a pinned org id; the export and delete statements name the organization_id being snapshotted, and a restore re-inserts that snapshot's rows.",
             new() { ["CreateAsync"] = 1, ["RestoreAsync"] = 4, ["WriteFileContentsAsJsonAsync"] = 1, ["WriteTableAsJsonAsync"] = 1 }),
+        ["ALDevToolbox/Services/Gateways/GatewayCommandService.cs"] = new(
+            "Reads a file's or a build artifact's content (or its hash) by id, with organization_id = the signed-in organisation (or the calling gateway's claim) named in the statement.",
+            new() { ["ArtifactHashAsync"] = 1, ["CopyFileContentAsync"] = 1 }),
+        ["ALDevToolbox/Services/Gateways/GatewayService.cs"] = new(
+            "Inserts a seen token id stamped with the organisation and gateway of a credential already resolved from its signed token; reads no rows.",
+            new() { ["TryRecordTokenAsync"] = 1 }),
+        ["ALDevToolbox/Services/Gateways/OnPremisesTierActionService.cs"] = new(
+            "An advisory lock keyed on the id of a gateway already read through the filter; reads and writes no rows.",
+            new() { ["RequestAsync"] = 1 }),
         ["ALDevToolbox/Services/GitHub/GitHubAccessService.cs"] = new(
             "An advisory lock keyed on the user id of a token row already read through the filter; reads and writes no rows.",
             new() { ["ResolveTokenForAsync"] = 1 }),

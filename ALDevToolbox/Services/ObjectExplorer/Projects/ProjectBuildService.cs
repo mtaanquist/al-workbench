@@ -1191,11 +1191,11 @@ public sealed class ProjectBuildService
     {
         try
         {
-            var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+            var build = await _db.OeProjectBuilds.FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct);
             if (build is null || build.Status != ProjectBuildStatus.Ready) return;
-            var checks = await LicenceRangeCheck.ForBuildAsync(_db, build.Id, _clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
+            var checks = await LicenceRangeCheck.ForBuildAsync(_db, build.Id, _clock.GetUtcNow().UtcDateTime, ct);
             build.LicenceCheckJson = LicenceRangeCheck.Serialize(checks);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             foreach (var check in checks)
             {
                 if (check.IsOutside)

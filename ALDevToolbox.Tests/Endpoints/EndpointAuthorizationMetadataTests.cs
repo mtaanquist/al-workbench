@@ -72,6 +72,7 @@ public sealed class EndpointAuthorizationMetadataTests : IDisposable
             ["GET /oauth/authorize"] = "OAuth consent; the handler challenges the cookie itself when nobody is signed in",
             ["POST /oauth/authorize"] = "OAuth consent; the handler challenges the cookie itself when nobody is signed in",
             ["POST /github/webhook"] = "GitHub calls it; authenticated by the HMAC signature, not a user",
+            ["POST /gateway/register"] = "an on-premises gateway registering with a one-time code from an admin; no credential exists yet; rate-limited",
             ["POST /api/sealed/{token}/reveal"] = "a Sealed link's recipient has no account; pinned to the link's token (.design/sealed.md)",
             ["POST /api/compare/diff"] = "diff for the in-browser compare utility; stateless and reads no data; rate-limited",
 

@@ -281,7 +281,7 @@ public static partial class LicenceRangeCheck
         var build = await db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == buildId)
             .Select(b => new { b.ProjectId, b.PipelineId, b.ReleaseId, b.BcTarget, Hosting = b.Project!.HostingType })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (build is null || ProjectBuildTarget.IsPreview(build.BcTarget) || build.Hosting == ProjectHostingType.MicrosoftCloud) return [];
 
         var pipelineId = build.PipelineId;
@@ -293,14 +293,14 @@ public static partial class LicenceRangeCheck
                                 r.ProjectEnvironmentId == e.Id && r.DeletedAt == null && r.BuildPipelineId == pipelineId))))
             .OrderBy(e => e.Name)
             .Select(e => e.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (environments.Count == 0) return [];
 
         var objects = new BuildObjects(db, buildId, build.ReleaseId);
         var checks = new List<LicenceCheck>();
         foreach (var id in environments)
         {
-            if (await CheckAsync(db, id, objects, now, ct).ConfigureAwait(false) is { } check)
+            if (await CheckAsync(db, id, objects, now, ct) is { } check)
                 checks.Add(check);
         }
         return checks;
@@ -315,8 +315,8 @@ public static partial class LicenceRangeCheck
         var releaseId = await db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == buildId)
             .Select(b => b.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return await CheckAsync(db, environmentId, new BuildObjects(db, buildId, releaseId), now, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return await CheckAsync(db, environmentId, new BuildObjects(db, buildId, releaseId), now, ct);
     }
 
     private static async Task<LicenceCheck?> CheckAsync(
@@ -343,7 +343,7 @@ public static partial class LicenceRangeCheck
                 LastSeenAt = e.GatewayInstance == null ? null : e.GatewayInstance.Gateway!.LastSeenAt,
                 RevokedAt = e.GatewayInstance == null ? null : e.GatewayInstance.Gateway!.RevokedAt,
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (env is null || env.Hosting == ProjectHostingType.MicrosoftCloud) return null;
 
         DateTime? readAt = null;
@@ -364,7 +364,7 @@ public static partial class LicenceRangeCheck
                 Text = l.ParseProblems == null ? null : l.Text,
                 Ranges = l.Ranges.Select(r => new LicenceRange(r.ObjectType, r.FromId, r.ToId, r.Permissions)).ToList(),
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         readAt = licence?.ReadAt;
 
         var status = GatewayService.StatusOf(env.GatewayState ?? Domain.Entities.GatewayState.Pending, env.LastSeenAt, env.RevokedAt, now);
@@ -387,7 +387,7 @@ public static partial class LicenceRangeCheck
         if (OnPremisesLicenceService.ParseVersion(env.Version) is not { } version)
             return NotChecked($"AL Workbench does not know the version of {tier} yet. It reads the version every 15 minutes while the customer's server is connected; check the environment page if this does not change.");
 
-        var read = await objects.GetAsync(withEnums: IsBc14(version), ct).ConfigureAwait(false);
+        var read = await objects.GetAsync(withEnums: IsBc14(version), ct);
         if (read.Problem is { } problem) return NotChecked(problem);
 
         var (outside, checkedCount) = Evaluate(read.Objects, licence.Ranges, version);
@@ -420,7 +420,7 @@ public static partial class LicenceRangeCheck
         {
             if (_read is { } done && (done.WithEnums || !withEnums))
                 return withEnums || !done.WithEnums ? done : done.WithoutEnums();
-            _read = await ReadAsync(withEnums, ct).ConfigureAwait(false);
+            _read = await ReadAsync(withEnums, ct);
             return _read;
         }
 
@@ -428,12 +428,12 @@ public static partial class LicenceRangeCheck
         {
             var kinds = withEnums ? KindsOrder : FullKinds;
             if (_releaseId is { } release
-                && await _db.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == release, ct).ConfigureAwait(false))
+                && await _db.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == release, ct))
             {
                 var indexed = await _db.OeModuleObjects.AsNoTracking()
                     .Where(o => o.Module!.ReleaseId == release && o.ObjectId != null && kinds.Contains(o.Kind))
                     .Select(o => new LicensedObject(o.Kind, o.ObjectId!.Value, o.Name))
-                    .ToListAsync(ct).ConfigureAwait(false);
+                    .ToListAsync(ct);
                 return new ObjectsRead(indexed, null, withEnums);
             }
 
@@ -441,7 +441,7 @@ public static partial class LicenceRangeCheck
                 .Where(a => a.ProjectBuildId == _buildId)
                 .OrderBy(a => a.Id)
                 .Select(a => new { a.Id, a.FileName })
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
             if (files.Count == 0)
                 return new ObjectsRead([], "This build has no app files to compare with the licence.", withEnums);
 
@@ -452,12 +452,12 @@ public static partial class LicenceRangeCheck
                 var content = await _db.OeProjectBuildArtifacts.AsNoTracking()
                     .Where(a => a.Id == file.Id)
                     .Select(a => a.Content)
-                    .FirstAsync(ct).ConfigureAwait(false);
+                    .FirstAsync(ct);
                 AppPackage package;
                 try
                 {
                     await using var stream = new MemoryStream(content, writable: false);
-                    package = await AppPackageReader.ReadAsync(stream, ct: ct).ConfigureAwait(false);
+                    package = await AppPackageReader.ReadAsync(stream, ct: ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

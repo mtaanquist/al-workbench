@@ -655,8 +655,9 @@
 
     /// <summary>
     /// When installs may run on the chosen target. An on-premises service tier holds no
-    /// install for a later Business Central update, so it has right away and the delivery
-    /// window only; the service refuses the rest whatever is sent.
+    /// install for a later Business Central update, so a new pipeline has the delivery
+    /// window only (right away is chosen per deployment, #1471); the service refuses the
+    /// rest whatever is sent.
     /// </summary>
     private IReadOnlyList<string> ScheduleChoices => ChosenIsOnPremises
         ? BcDeploymentSchedule.Pickable.Where(m => !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(m) ?? m)).ToList()

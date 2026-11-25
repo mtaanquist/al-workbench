@@ -132,7 +132,7 @@ public sealed class GatewayService
     /// </summary>
     public async Task<List<GatewaySummary>> ListAsync(CancellationToken ct = default)
     {
-        await EnsureAdminAsync(ct).ConfigureAwait(false);
+        await EnsureAdminAsync(ct);
         var now = Now;
         var rows = await _db.Gateways.AsNoTracking()
             .OrderBy(g => g.RevokedAt != null)
@@ -144,7 +144,7 @@ public sealed class GatewayService
                 g.LastSeenAt, g.ReportedVersion, g.ApprovedAt, g.RevokedAt,
                 ApprovedBy = g.ApprovedByUser == null ? null : g.ApprovedByUser.DisplayName,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         return rows.Select(g => new GatewaySummary(
                 g.Id, g.Name, g.MachineName, StatusOf(g.State, g.LastSeenAt, g.RevokedAt, now), g.KeyFingerprint,
                 g.RegisteredAt, g.KeyRegisteredAt, g.LastSeenAt, g.ReportedVersion, g.ApprovedAt, g.ApprovedBy, g.RevokedAt))
@@ -168,8 +168,8 @@ public sealed class GatewayService
     /// </summary>
     public async Task<IssuedGatewayCode> CreateRegistrationCodeAsync(CancellationToken ct = default)
     {
-        await EnsureAdminAsync(ct).ConfigureAwait(false);
-        return await IssueCodeAsync(gatewayId: null, ct).ConfigureAwait(false);
+        await EnsureAdminAsync(ct);
+        return await IssueCodeAsync(gatewayId: null, ct);
     }
 
     /// <summary>
@@ -180,11 +180,11 @@ public sealed class GatewayService
     /// </summary>
     public async Task<IssuedGatewayCode> CreateRotationCodeAsync(int gatewayId, CancellationToken ct = default)
     {
-        await EnsureAdminAsync(ct).ConfigureAwait(false);
+        await EnsureAdminAsync(ct);
         var gateway = await _db.Gateways.AsNoTracking()
             .Where(g => g.Id == gatewayId)
             .Select(g => new { g.RevokedAt })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (gateway is null)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["gateway"] = "That gateway no longer exists." });
@@ -196,7 +196,7 @@ public sealed class GatewayService
                 ["gateway"] = "This gateway has been revoked. Add a new gateway instead.",
             });
         }
-        return await IssueCodeAsync(gatewayId, ct).ConfigureAwait(false);
+        return await IssueCodeAsync(gatewayId, ct);
     }
 
     private async Task<IssuedGatewayCode> IssueCodeAsync(int? gatewayId, CancellationToken ct)
@@ -214,7 +214,7 @@ public sealed class GatewayService
             GatewayId = gatewayId,
         };
         _db.GatewayRegistrationCodes.Add(row);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "Issued gateway registration code {CodeId} for organisation {OrganizationId} (rotation of gateway {GatewayId}), expires {ExpiresAt}.",
             row.Id, orgId, gatewayId, row.ExpiresAt);
@@ -278,7 +278,7 @@ public sealed class GatewayService
             .Where(c => c.CodeHash == hash && c.UsedAt == null && c.ExpiresAt > now)
             .Where(c => c.GatewayId == null
                 || !_db.GatewayRegistrationCodes.Any(newer => newer.GatewayId == c.GatewayId && newer.Id > c.Id))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (code is null || (code.GatewayId is not null && (code.Gateway is null || code.Gateway.RevokedAt is not null)))
         {
             _logger.LogWarning("Refused a gateway registration from {MachineName}: the code was unknown, used, expired or for a revoked gateway.", machineName);
@@ -319,7 +319,7 @@ public sealed class GatewayService
 
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateConcurrencyException)
         {
@@ -354,8 +354,8 @@ public sealed class GatewayService
     /// <exception cref="PlanValidationException">Keyed <c>gateway</c> when the key changed or the gateway is gone.</exception>
     public async Task ApproveAsync(int gatewayId, string keyFingerprint, CancellationToken ct = default)
     {
-        await EnsureAdminAsync(ct).ConfigureAwait(false);
-        var gateway = await LoadLiveAsync(gatewayId, ct).ConfigureAwait(false);
+        await EnsureAdminAsync(ct);
+        var gateway = await LoadLiveAsync(gatewayId, ct);
         if (!string.Equals(gateway.KeyFingerprint, keyFingerprint?.Trim(), StringComparison.Ordinal))
         {
             _logger.LogWarning("Refused to approve gateway {GatewayId}: the Admin compared {Seen}, the gateway now holds {Current}.",
@@ -368,7 +368,7 @@ public sealed class GatewayService
         gateway.ApprovedByUserId = _orgContext.CurrentUserId;
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateConcurrencyException)
         {
@@ -388,29 +388,29 @@ public sealed class GatewayService
     /// <summary>Revokes the gateway: its next request is refused. There is no undo.</summary>
     public async Task RevokeAsync(int gatewayId, CancellationToken ct = default)
     {
-        await EnsureAdminAsync(ct).ConfigureAwait(false);
-        var gateway = await _db.Gateways.FirstOrDefaultAsync(g => g.Id == gatewayId, ct).ConfigureAwait(false)
+        await EnsureAdminAsync(ct);
+        var gateway = await _db.Gateways.FirstOrDefaultAsync(g => g.Id == gatewayId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string> { ["gateway"] = "That gateway no longer exists." });
         if (gateway.RevokedAt is not null) return;
         gateway.RevokedAt = Now;
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateConcurrencyException)
         {
             // The gateway registered a new key between the read and the save (the
             // fingerprint is the concurrency token). Revoking does not depend on
             // which key it holds, so take the current row and revoke that.
-            await _db.Entry(gateway).ReloadAsync(ct).ConfigureAwait(false);
+            await _db.Entry(gateway).ReloadAsync(ct);
             if (gateway.RevokedAt is not null) return;
             gateway.RevokedAt = Now;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         // Its unfinished work fails now rather than waiting out a claim deadline that
         // may be days away; a revoked gateway can neither collect nor report it.
         var failed = await GatewayCommandService.FailOpenCommandsAsync(
-            _db, gatewayId, GatewayCommandService.RevokedMessage, Now, ct).ConfigureAwait(false);
+            _db, gatewayId, GatewayCommandService.RevokedMessage, Now, ct);
         _logger.LogInformation("Gateway {GatewayId} revoked by user {UserId}; {Failed} unfinished command(s) failed.",
             gatewayId, _orgContext.CurrentUserId, failed);
     }
@@ -418,7 +418,7 @@ public sealed class GatewayService
     /// <summary>Renames the gateway on the Gateways page. The machine name is the gateway's to report.</summary>
     public async Task RenameAsync(int gatewayId, string name, CancellationToken ct = default)
     {
-        await EnsureAdminAsync(ct).ConfigureAwait(false);
+        await EnsureAdminAsync(ct);
         var trimmed = (name ?? string.Empty).Trim();
         if (trimmed.Length == 0)
         {
@@ -428,27 +428,27 @@ public sealed class GatewayService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["name"] = $"Keep the name to {MaxNameLength} characters or fewer." });
         }
-        var gateway = await LoadLiveAsync(gatewayId, ct).ConfigureAwait(false);
+        var gateway = await LoadLiveAsync(gatewayId, ct);
         if (gateway.Name == trimmed) return;
         gateway.Name = trimmed;
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateConcurrencyException)
         {
             // A new key arrived between the read and the save; the name is
             // independent of it, so apply the rename to the current row.
-            await _db.Entry(gateway).ReloadAsync(ct).ConfigureAwait(false);
+            await _db.Entry(gateway).ReloadAsync(ct);
             gateway.Name = trimmed;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         _logger.LogInformation("Gateway {GatewayId} renamed to {Name}.", gatewayId, trimmed);
     }
 
     private async Task<Gateway> LoadLiveAsync(int gatewayId, CancellationToken ct)
     {
-        var gateway = await _db.Gateways.FirstOrDefaultAsync(g => g.Id == gatewayId, ct).ConfigureAwait(false)
+        var gateway = await _db.Gateways.FirstOrDefaultAsync(g => g.Id == gatewayId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string> { ["gateway"] = "That gateway no longer exists." });
         if (gateway.RevokedAt is not null)
         {
@@ -469,7 +469,7 @@ public sealed class GatewayService
         return await _db.Gateways.IgnoreQueryFilters().AsNoTracking()
             .Where(g => g.Id == gatewayId && g.RevokedAt == null)
             .Select(g => new GatewayCredential(g.Id, g.OrganizationId, g.Name, g.PublicKey, g.State))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>
@@ -486,7 +486,7 @@ public sealed class GatewayService
             INSERT INTO gateway_seen_tokens (organization_id, gateway_id, token_id, expires_at)
             VALUES ({gateway.OrganizationId}, {gateway.GatewayId}, {tokenId}, {keepUntil})
             ON CONFLICT (gateway_id, token_id) DO NOTHING
-            """, ct).ConfigureAwait(false);
+            """, ct);
         return inserted == 1;
     }
 
@@ -550,11 +550,11 @@ public sealed class GatewayService
             {
                 s.SetProperty(g => g.PolicyStale, true);
             }
-        }, ct).ConfigureAwait(false);
+        }, ct);
         if (updated == 0) return null;
 
         // Revoked between the update and this read: answer as if the update had missed.
-        var state = await live.AsNoTracking().Select(g => (GatewayState?)g.State).FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var state = await live.AsNoTracking().Select(g => (GatewayState?)g.State).FirstOrDefaultAsync(ct);
         if (state is null) return null;
 
         // The replay table only needs a row until its token could no longer be
@@ -562,7 +562,7 @@ public sealed class GatewayService
         // GatewayCommandSweep clears those of gateways that stopped calling.
         await _db.GatewaySeenTokens
             .Where(t => t.GatewayId == gatewayId && t.ExpiresAt < now)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            .ExecuteDeleteAsync(ct);
 
         return new GatewayHeartbeatResponse { Approved = state == GatewayState.Approved };
     }
@@ -583,7 +583,7 @@ public sealed class GatewayService
         var isAdmin = userId is not null && await db.Users.AsNoTracking()
             .Where(u => u.Id == userId.Value)
             .Select(u => u.Role)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false) == UserRole.Admin;
+            .FirstOrDefaultAsync(ct) == UserRole.Admin;
         if (!isAdmin)
         {
             throw new UnauthorizedAccessException("Only an organisation admin can manage gateways.");

@@ -140,7 +140,7 @@ public sealed class GatewayInventoryService
         Validate(report);
 
         var live = await _db.Gateways.AsNoTracking()
-            .AnyAsync(g => g.Id == gatewayId && g.RevokedAt == null, ct).ConfigureAwait(false);
+            .AnyAsync(g => g.Id == gatewayId && g.RevokedAt == null, ct);
         if (!live) return false;
 
         var now = Now;
@@ -148,7 +148,7 @@ public sealed class GatewayInventoryService
             .Where(i => i.GatewayId == gatewayId)
             .Include(i => i.Tenants)
             .Include(i => i.Licence)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var applied = new List<GatewayInstance>();
         foreach (var reported in report.Instances)
@@ -165,10 +165,10 @@ public sealed class GatewayInventoryService
                 _db.GatewayInstances.Add(row);
                 instances.Add(row);
             }
-            await ApplyInstanceAsync(orgId, row, reported.Machine.Trim(), reported.Name.Trim(), reported, now, ct).ConfigureAwait(false);
+            await ApplyInstanceAsync(orgId, row, reported.Machine.Trim(), reported.Name.Trim(), reported, now, ct);
             applied.Add(row);
         }
-        await SyncLinkedEnvironmentsAsync(applied, now, ct).ConfigureAwait(false);
+        await SyncLinkedEnvironmentsAsync(applied, now, ct);
 
         if (report.Roster is { } roster)
         {
@@ -180,7 +180,7 @@ public sealed class GatewayInventoryService
 
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
@@ -249,11 +249,11 @@ public sealed class GatewayInventoryService
         if (reported.Tenants is { } tenants)
         {
             row.TenantsTruncated = reported.TenantsTruncated;
-            await ApplyTenantsAsync(orgId, row, tenants, reported.TenantsTruncated, now, ct).ConfigureAwait(false);
+            await ApplyTenantsAsync(orgId, row, tenants, reported.TenantsTruncated, now, ct);
         }
         if (reported.Licence is { } licence)
         {
-            await ApplyLicenceAsync(orgId, row, licence, now, ct).ConfigureAwait(false);
+            await ApplyLicenceAsync(orgId, row, licence, now, ct);
         }
     }
 
@@ -279,7 +279,7 @@ public sealed class GatewayInventoryService
             {
                 tenant.AppsTruncated = reported.AppsTruncated;
                 tenant.AppsReadAt = now;
-                await ApplyAppsAsync(orgId, tenant, apps, reported.AppsTruncated, now, ct).ConfigureAwait(false);
+                await ApplyAppsAsync(orgId, tenant, apps, reported.AppsTruncated, now, ct);
             }
         }
         if (truncated) return;
@@ -294,7 +294,7 @@ public sealed class GatewayInventoryService
     {
         if (tenant.Id != 0)
         {
-            await _db.Entry(tenant).Collection(t => t.Apps).LoadAsync(ct).ConfigureAwait(false);
+            await _db.Entry(tenant).Collection(t => t.Apps).LoadAsync(ct);
         }
         var seen = new List<GatewayInstanceApp>();
         foreach (var reported in apps)
@@ -347,7 +347,7 @@ public sealed class GatewayInventoryService
         {
             // A new licence: its ranges replace the old ones whole (a range has no
             // identity anything else points at); the cleared ones are deleted as orphans.
-            await _db.Entry(licence).Collection(l => l.Ranges).LoadAsync(ct).ConfigureAwait(false);
+            await _db.Entry(licence).Collection(l => l.Ranges).LoadAsync(ct);
             licence.Ranges.Clear();
         }
         var parsed = GatewayLicenceParser.Parse(reported.Text);
@@ -386,13 +386,13 @@ public sealed class GatewayInventoryService
         var linked = await _db.OeProjectEnvironments
             .Where(e => e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null
                         && e.GatewayInstanceId != null && ids.Contains(e.GatewayInstanceId.Value))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (linked.Count == 0) return;
 
         var linkedIds = linked.Select(e => e.Id).ToList();
         var mirrors = (await _db.OeEnvironmentApps
                 .Where(a => linkedIds.Contains(a.EnvironmentId))
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .ToLookup(a => a.EnvironmentId);
         foreach (var environment in linked)
         {
@@ -405,7 +405,7 @@ public sealed class GatewayInventoryService
             OnPremisesEnvironmentService.Apply(environment, instance, now);
             if (tenant is null) continue;
             var apps = _db.Entry(tenant).Collection(t => t.Apps);
-            if (tenant.Id != 0 && !apps.IsLoaded) await apps.LoadAsync(ct).ConfigureAwait(false);
+            if (tenant.Id != 0 && !apps.IsLoaded) await apps.LoadAsync(ct);
             OnPremisesEnvironmentService.SyncApps(_db, environment, tenant, mirrors[environment.Id].ToList(), now);
         }
     }
@@ -495,7 +495,7 @@ public sealed class GatewayInventoryService
     /// <summary>A gateway's page. Null when there is no such gateway in the organisation. Admin only.</summary>
     public async Task<GatewayInventoryView?> GetViewAsync(int gatewayId, CancellationToken ct = default)
     {
-        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct).ConfigureAwait(false);
+        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct);
         var now = Now;
         var gateway = await _db.Gateways.AsNoTracking()
             .Where(g => g.Id == gatewayId)
@@ -505,7 +505,7 @@ public sealed class GatewayInventoryService
                 g.LastSeenAt, g.ReportedVersion, g.ApprovedAt, g.RevokedAt,
                 ApprovedBy = g.ApprovedByUser == null ? null : g.ApprovedByUser.DisplayName,
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (gateway is null) return null;
         var summary = new GatewaySummary(
             gateway.Id, gateway.Name, gateway.MachineName,
@@ -531,7 +531,7 @@ public sealed class GatewayInventoryService
                 Licensee = i.Licence == null ? null : i.Licence.Licensee,
                 ExpiresOn = i.Licence == null ? null : i.Licence.ExpiresOn,
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var refresh = await _db.GatewayCommands.AsNoTracking()
             .Where(c => c.GatewayId == gatewayId && c.Verb == GatewayVerb.RefreshInventory
@@ -539,7 +539,7 @@ public sealed class GatewayInventoryService
                             || c.Status == GatewayCommandStatus.Running))
             .OrderByDescending(c => c.CreatedAt)
             .Select(c => (DateTime?)c.CreatedAt)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
 
         return new GatewayInventoryView(
             summary,
@@ -559,16 +559,16 @@ public sealed class GatewayInventoryService
     /// <exception cref="PlanValidationException">Keyed <c>gateway</c> when the gateway is gone, revoked or not approved.</exception>
     public async Task<long> RequestRefreshAsync(int gatewayId, CancellationToken ct = default)
     {
-        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct).ConfigureAwait(false);
+        await GatewayService.EnsureAdminAsync(_db, _orgContext, ct);
         var open = await _db.GatewayCommands.AsNoTracking()
             .Where(c => c.GatewayId == gatewayId && c.Verb == GatewayVerb.RefreshInventory
                         && (c.Status == GatewayCommandStatus.Queued || c.Status == GatewayCommandStatus.Claimed
                             || c.Status == GatewayCommandStatus.Running))
             .Select(c => (long?)c.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (open is { } existing) return existing;
         var id = await _commands.EnqueueAsync(new GatewayCommandRequest(
-            gatewayId, GatewayVerb.RefreshInventory, RequestedByUserId: _orgContext.CurrentUserId), ct).ConfigureAwait(false);
+            gatewayId, GatewayVerb.RefreshInventory, RequestedByUserId: _orgContext.CurrentUserId), ct);
         _logger.LogInformation("User {UserId} asked gateway {GatewayId} for a fresh inventory (command {CommandId}).",
             _orgContext.CurrentUserId, gatewayId, id);
         return id;
