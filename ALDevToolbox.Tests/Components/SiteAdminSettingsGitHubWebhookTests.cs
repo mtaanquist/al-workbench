@@ -127,9 +127,10 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
         UsePublicOrigin(null);
 
         var cut = _ctx.Render<SiteAdminSettingsGitHub>();
+        // The form first: the loading render has no fields at all.
+        cut.WaitForElement("input[name=GitHubWebhookSecret]");
 
-        cut.WaitForAssertion(() =>
-            cut.FindAll("input[name=ClearGitHubWebhookSecret]").Should().BeEmpty());
+        cut.FindAll("input[name=ClearGitHubWebhookSecret]").Should().BeEmpty();
     }
 
     [Fact]
@@ -216,11 +217,10 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
 
     private async Task StoreWebhookSecretAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: null,
             ClientSecret: null, ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false,
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false,
             WebhookSecret: "swordfish", ClearWebhookSecret: false));
     }
 }

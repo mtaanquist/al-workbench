@@ -173,6 +173,8 @@ public sealed class NewExtensionTests : IDisposable
         }
 
         var cut = _ctx.Render<NewExtension>();
+        // The form first: the loading render has no fields at all.
+        cut.WaitForElement("input[name='ExtensionName']");
 
         cut.WaitForAssertion(() =>
         {

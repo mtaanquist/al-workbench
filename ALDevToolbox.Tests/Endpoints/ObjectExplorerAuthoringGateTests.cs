@@ -22,7 +22,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// and it accepts the antiforgery 400, so it would stay green with the role
 /// requirement gone. These pin the role gate itself (#1273).
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class ObjectExplorerAuthoringGateTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
@@ -154,7 +153,7 @@ public sealed class ObjectExplorerAuthoringGateTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = email,
             DisplayName = email,
-            PasswordHash = new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            PasswordHash = TestPasswords.Hash(Password),
             Role = role,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),

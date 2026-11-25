@@ -20,7 +20,7 @@ namespace ALDevToolbox.Tests.Components;
 /// the named editor is the consultant who owns the customer. It reads first and edits
 /// second, which is why there is no input on screen until somebody asks for one.
 /// </summary>
-public sealed class ProjectDetailCustomerTests : IDisposable
+public sealed class ProjectDetailCustomerTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -53,10 +53,13 @@ public sealed class ProjectDetailCustomerTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -268,6 +271,19 @@ public sealed class ProjectDetailCustomerTests : IDisposable
 
         cut.Markup.Should().Contain("Peter Saddow").And.Contain("At their hosting or IT partner");
         cut.FindAll("button").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_empty_list_tells_a_reader_who_can_fill_it_in_including_the_solutions_team()
+    {
+        // Managing is the owner, an admin, or the solution's team, so the copy must not
+        // send the reader to the owner alone (#1551).
+        var id = await SeedDescribedAsync();
+
+        var cut = Render(id, canManage: false);
+
+        cut.Markup.Should().Contain("The solution's owner, someone on its team, or an administrator can add");
+        cut.Markup.Should().NotContain("The solution's owner or an administrator can add");
     }
 
     // ── Modules ─────────────────────────────────────────────────────────

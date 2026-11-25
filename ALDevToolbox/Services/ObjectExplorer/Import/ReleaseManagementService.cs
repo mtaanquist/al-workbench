@@ -1,4 +1,5 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
@@ -14,28 +15,97 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// row via the FK relationships set up in PR 1; it's the path admins use
 /// when storage actually needs reclaiming.
 ///
-/// All operations require an Admin user in scope (gated at the endpoint
+/// All operations require an Admin or Editor in scope (gated at the endpoint
 /// layer) and are scoped to <see cref="IOrganizationContext.CurrentOrganizationId"/>
-/// via the query filter on <see cref="AppDbContext"/>.
+/// via the query filter on <see cref="AppDbContext"/>. The four admin writes also
+/// pass the release through <see cref="ProjectAccess.IsReleaseVisibleAsync"/>, so a
+/// Private solution's build releases answer "not found" to someone outside its
+/// teams, the same as the reads (<c>.design/teams-and-visibility.md</c>).
 /// </summary>
 public class ReleaseManagementService
 {
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
+    private readonly ProjectAccess _access;
     private readonly ILogger<ReleaseManagementService> _logger;
 
     public ReleaseManagementService(
         AppDbContext db,
         IOrganizationContext orgContext,
+        ProjectAccess access,
         ILogger<ReleaseManagementService> logger)
     {
         _db = db;
         _orgContext = orgContext;
+        _access = access;
         _logger = logger;
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; ReleaseManagementService called outside an authenticated request.");
+
+    /// <summary>
+    /// The tracked release behind an admin write, or the not-found error when the
+    /// org filter or the solution-visibility fence hides it. Hidden answers exactly
+    /// like absent, so the error confirms nothing about another team's release; the
+    /// visibility check runs first and always, so the two take the same queries too.
+    /// </summary>
+    private async Task<OeRelease> LoadVisibleAsync(int releaseId, CancellationToken ct) =>
+        await FindVisibleAsync(releaseId, tracked: true, ct) ?? throw NotFound(releaseId);
+
+    /// <summary>
+    /// The release behind <see cref="LoadVisibleAsync"/>, or null where that throws.
+    /// Tracked for the writes; a read-only caller passes <paramref name="tracked"/> false.
+    /// </summary>
+    private async Task<OeRelease?> FindVisibleAsync(int releaseId, bool tracked, CancellationToken ct)
+    {
+        RequireOrganizationId();
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct);
+        var releases = tracked ? _db.OeReleases : _db.OeReleases.AsNoTracking();
+        var release = await releases
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct);
+        return visible ? release : null;
+    }
+
+    /// <summary>
+    /// The pre-check behind the one-release system-reference backfill: false when
+    /// the release is absent or hidden by the solution-visibility fence (the
+    /// endpoint answers both with the same 404), and a field error when it exists
+    /// but has no stored source to re-scan. Only a ready, live release qualifies;
+    /// queueing another would add a job row the worker refuses, and that row would
+    /// then shadow the real source on the Retry card.
+    /// </summary>
+    public async Task<bool> EnsureBackfillableAsync(int releaseId, CancellationToken ct = default)
+    {
+        var release = await FindVisibleAsync(releaseId, tracked: false, ct);
+        if (release is null) return false;
+        if (release.Status != "ready" || release.DeletedAt is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Backfill"] = "Only a release that finished importing and isn't deleted can have its system references backfilled.",
+            });
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The releases the bulk "backfill every release" action queues: ready, live,
+    /// in this org, and visible to the caller. A Private solution's release the
+    /// caller cannot see is left out, so the count on the confirmation does not
+    /// include it either; an org Admin bypasses the fence and gets every one.
+    /// </summary>
+    public async Task<List<int>> ListBackfillableReleaseIdsAsync(CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        return await _db.OeReleases.AsNoTracking()
+            .Where(r => r.Status == "ready" && r.DeletedAt == null)
+            .Where(_access.VisibleReleasePredicate(snapshot))
+            .OrderBy(r => r.Id)
+            .Select(r => r.Id)
+            .ToListAsync(ct);
+    }
 
     /// <summary>
     /// Sets <c>deleted_at</c> to now. Reversible via <see cref="RestoreAsync"/>.
@@ -44,11 +114,28 @@ public class ReleaseManagementService
     /// </summary>
     public async Task SoftDeleteAsync(int releaseId, CancellationToken ct = default)
     {
+        var release = await LoadVisibleAsync(releaseId, ct);
+        await SoftDeleteCoreAsync(release, ct);
+    }
+
+    /// <summary>
+    /// The importer's soft-delete, for a Microsoft artifact release it is replacing
+    /// or retiring. Skips the solution-visibility fence on purpose: no solution owns
+    /// such a release, and import work, which also runs in schedulers with nobody
+    /// signed in, is never held back by a view gate (<c>.design/teams-and-visibility.md</c>,
+    /// "Not gated").
+    /// </summary>
+    public async Task SupersedeAsync(int releaseId, CancellationToken ct = default)
+    {
         RequireOrganizationId();
         var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
             ?? throw NotFound(releaseId);
+        await SoftDeleteCoreAsync(release, ct);
+    }
 
+    private async Task SoftDeleteCoreAsync(OeRelease release, CancellationToken ct)
+    {
         if (release.DeletedAt is not null)
         {
             // Idempotent: already soft-deleted is a no-op.
@@ -56,7 +143,7 @@ public class ReleaseManagementService
         }
         release.DeletedAt = DateTime.UtcNow;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Soft-deleted Release {ReleaseId} ({Label})", release.Id, release.Label);
     }
@@ -67,10 +154,7 @@ public class ReleaseManagementService
     /// </summary>
     public async Task RestoreAsync(int releaseId, CancellationToken ct = default)
     {
-        RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw NotFound(releaseId);
+        var release = await LoadVisibleAsync(releaseId, ct);
 
         if (release.DeletedAt is null) return;
 
@@ -83,7 +167,7 @@ public class ReleaseManagementService
             var successor = await _db.OeReleases.AsNoTracking()
                 .Where(r => r.Id != release.Id && r.DeletedAt == null && r.DedupKey == release.DedupKey)
                 .Select(r => r.Label)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             if (successor is not null)
             {
                 throw new PlanValidationException(new Dictionary<string, string>
@@ -95,7 +179,7 @@ public class ReleaseManagementService
 
         release.DeletedAt = null;
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Restored Release {ReleaseId} ({Label})", release.Id, release.Label);
     }
@@ -114,10 +198,7 @@ public class ReleaseManagementService
     public async Task UpdateMetadataAsync(
         int releaseId, string? publisher, string? projectName, CancellationToken ct = default)
     {
-        RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw NotFound(releaseId);
+        var release = await LoadVisibleAsync(releaseId, ct);
 
         release.Publisher = NullIfBlank(publisher);
         if (release.Kind == "project")
@@ -125,7 +206,7 @@ public class ReleaseManagementService
             release.ProjectName = NullIfBlank(projectName);
         }
         release.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
             "Updated Release {ReleaseId} ({Label}) metadata: Publisher={Publisher} ProjectName={ProjectName}",
@@ -139,7 +220,13 @@ public class ReleaseManagementService
     /// Removes the Release row plus every dependent <c>oe_*</c> row via FK
     /// cascade. Refuses when another Release still points at this one as its
     /// <c>parent_release_id</c> — pre-checked here so the failure message is
-    /// precise instead of a generic Postgres FK-violation.
+    /// precise instead of a generic Postgres FK-violation. Also refuses while a
+    /// solution build links it as a third-party dependency: that link cascades
+    /// away silently and the build's references into the vendor objects stop
+    /// resolving; and while it is still importing, which would pull the release
+    /// out from under the running import (#1616). The checks run before the delete,
+    /// not in one statement with it, so a build that links the release in between
+    /// loses that link to the cascade; its next rebuild writes it again.
     ///
     /// The supplied <paramref name="confirmLabel"/> must match the Release's
     /// actual label exactly. The UI requires admins to type the label before
@@ -147,10 +234,18 @@ public class ReleaseManagementService
     /// </summary>
     public async Task HardDeleteAsync(int releaseId, string confirmLabel, CancellationToken ct = default)
     {
-        RequireOrganizationId();
-        var release = await _db.OeReleases
-            .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
-            ?? throw NotFound(releaseId);
+        var release = await LoadVisibleAsync(releaseId, ct);
+
+        // Soft delete first, always: the manage page only offers this once the
+        // release is soft-deleted, and the service holds the same order so a
+        // direct POST can't purge a live release in one step.
+        if (release.DeletedAt is null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Release"] = "Soft delete this release first. You can permanently delete it once it is soft-deleted.",
+            });
+        }
 
         if (!string.Equals(confirmLabel?.Trim(), release.Label, StringComparison.Ordinal))
         {
@@ -160,13 +255,63 @@ public class ReleaseManagementService
             });
         }
 
-        var hasChildren = await _db.OeReleases.AsNoTracking()
-            .AnyAsync(r => r.ParentReleaseId == releaseId, ct).ConfigureAwait(false);
-        if (hasChildren)
+        if (release.Status == "ingesting")
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Release"] = "Another Release uses this one as its parent. Delete the dependent Release first.",
+                ["Release"] = "This release is still importing. Wait for the import to finish or fail, then delete it.",
+            });
+        }
+
+        var hasChildren = await _db.OeReleases.AsNoTracking()
+            .AnyAsync(r => r.ParentReleaseId == releaseId, ct);
+        if (hasChildren)
+        {
+            // Names up to three children this person can see, so they know what to
+            // delete first; no count, since some may be on solutions hidden from them.
+            // Soft-deleted children count, and are hidden from the normal list, so
+            // the message says so (#1549).
+            var snapshot = await _access.GetSnapshotAsync(ct);
+            var childLabels = await _db.OeReleases.AsNoTracking()
+                .Where(r => r.ParentReleaseId == releaseId)
+                .Where(_access.VisibleReleasePredicate(snapshot))
+                .OrderByDescending(r => r.Id)
+                .Select(r => r.Label)
+                .Take(3)
+                .ToListAsync(ct);
+            var named = childLabels.Count == 0
+                ? string.Empty
+                : ", such as " + string.Join(", ", childLabels.Select(l => $"\"{l}\""));
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Release"] = $"Other releases use this one as their parent{named}. Delete them first; soft-deleted ones count too.",
+            });
+        }
+
+        var linkedByBuilds = await _db.OeReleaseDependencies.AsNoTracking()
+            .AnyAsync(d => d.DependencyReleaseId == releaseId, ct);
+        if (linkedByBuilds)
+        {
+            // Names only builds this person can see, and no count: some of them may
+            // be on solutions hidden from them. Soft-deleted builds count too, and
+            // are named, because restoring one would bring back the broken link.
+            var snapshot = await _access.GetSnapshotAsync(ct);
+            var linkingIds = _db.OeReleaseDependencies
+                .Where(d => d.DependencyReleaseId == releaseId)
+                .Select(d => d.ReleaseId);
+            var visibleLabels = await _db.OeReleases.AsNoTracking()
+                .Where(r => linkingIds.Contains(r.Id))
+                .Where(_access.VisibleReleasePredicate(snapshot))
+                .OrderByDescending(r => r.Id)
+                .Select(r => r.Label)
+                .Take(3)
+                .ToListAsync(ct);
+            var named = visibleLabels.Count == 0
+                ? string.Empty
+                : ", such as " + string.Join(", ", visibleLabels.Select(l => $"\"{l}\""));
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Release"] = $"Solution builds use this release for their third-party symbols{named}. Delete those builds first (soft-deleted ones count too), or keep this release.",
             });
         }
 
@@ -176,11 +321,7 @@ public class ReleaseManagementService
         // they may be shared with other releases/orgs), so we reclaim the ones
         // that become orphaned afterwards. Org-scoped read here is fine — we
         // only need this org's referenced hashes as GC candidates.
-        var candidateHashes = await _db.OeModuleFiles.AsNoTracking()
-            .Where(f => f.Module!.ReleaseId == releaseId)
-            .Select(f => f.ContentHash)
-            .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false);
+        var candidateHashes = await CandidateHashesAsync(releaseId, ct);
 
         // The single cascading DELETE fans out through every dependent oe_*
         // table; for a large first-party release (tens of thousands of objects)
@@ -190,9 +331,9 @@ public class ReleaseManagementService
         _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
 
         _db.OeReleases.Remove(release);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
-        var reclaimed = await ReclaimOrphanedBlobsAsync(candidateHashes, ct).ConfigureAwait(false);
+        var reclaimed = await ReclaimOrphanedBlobsAsync(_db, _logger, candidateHashes, ct);
 
         _logger.LogWarning(
             "Hard-deleted Release {ReleaseId} ({Label}). Dependent oe_* rows cascade-removed; reclaimed {Reclaimed} orphaned shared content blob(s) of {Candidates} candidate(s).",
@@ -219,11 +360,7 @@ public class ReleaseManagementService
         // Capture the file content hashes before the cascade drops the
         // oe_module_files rows, same as HardDeleteAsync, so we can GC blobs that
         // no longer have any referrer afterwards.
-        var candidateHashes = await _db.OeModuleFiles.AsNoTracking()
-            .Where(f => f.Module!.ReleaseId == releaseId)
-            .Select(f => f.ContentHash)
-            .Distinct()
-            .ToListAsync(ct).ConfigureAwait(false);
+        var candidateHashes = await CandidateHashesAsync(releaseId, ct);
 
         // Same cascade exposure as HardDeleteAsync — the module-wide DELETE can
         // run long on a large release, so lift the command timeout off the 30 s
@@ -232,9 +369,9 @@ public class ReleaseManagementService
 
         var removedModules = await _db.Database.ExecuteSqlRawAsync(
             "DELETE FROM oe_modules WHERE release_id = {0}",
-            new object[] { releaseId }, ct).ConfigureAwait(false);
+            new object[] { releaseId }, ct);
 
-        var reclaimed = await ReclaimOrphanedBlobsAsync(candidateHashes, ct).ConfigureAwait(false);
+        var reclaimed = await ReclaimOrphanedBlobsAsync(_db, _logger, candidateHashes, ct);
 
         _logger.LogInformation(
             "Cleared ingested data for Release {ReleaseId}: removed {Modules} module(s), reclaimed {Reclaimed} orphaned blob(s) of {Candidates} candidate(s).",
@@ -242,11 +379,33 @@ public class ReleaseManagementService
     }
 
     /// <summary>
+    /// The shared blobs a release's modules reference: every file's content, plus
+    /// the raw <c>SymbolReference.json</c> a module kept when the import was asked
+    /// to store it, which on a full DVD runs to hundreds of MB (#1616).
+    /// </summary>
+    private async Task<List<string>> CandidateHashesAsync(int releaseId, CancellationToken ct)
+    {
+        var fileHashes = await _db.OeModuleFiles.AsNoTracking()
+            .Where(f => f.Module!.ReleaseId == releaseId)
+            .Select(f => f.ContentHash)
+            .Distinct()
+            .ToListAsync(ct);
+        var symbolReferenceHashes = await _db.OeModules.AsNoTracking()
+            .Where(m => m.ReleaseId == releaseId && m.SymbolReferenceContentHash != null)
+            .Select(m => m.SymbolReferenceContentHash!)
+            .Distinct()
+            .ToListAsync(ct);
+        return fileHashes.Union(symbolReferenceHashes, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
     /// Deletes the supplied content-hash blobs from <c>oe_file_contents</c> that
-    /// no <c>oe_module_files</c> row references any more. Raw SQL so the
+    /// no <c>oe_module_files</c> row, and no module's stored
+    /// <c>SymbolReference.json</c>, references any more. Raw SQL so the
     /// <c>NOT EXISTS</c> check sees ALL orgs (the EF query filter doesn't apply)
     /// — a blob still used by another tenant must survive. Returns the count
-    /// reclaimed. Shared by hard-delete and retry-clear.
+    /// reclaimed. Shared by hard-delete and retry-clear, and by an amend that rolled
+    /// back after its blobs had committed on their own connection (#1549).
     /// <para>
     /// A blob an import is saving at that moment is locked by it
     /// (<see cref="OeIngestHelpers.UpsertFileContentsAsync"/>) and is skipped, not
@@ -259,7 +418,7 @@ public class ReleaseManagementService
     /// stays, which costs only space (#1181).
     /// </para>
     /// </summary>
-    private async Task<int> ReclaimOrphanedBlobsAsync(IReadOnlyList<string> candidateHashes, CancellationToken ct)
+    internal static async Task<int> ReclaimOrphanedBlobsAsync(AppDbContext db, ILogger logger, IReadOnlyList<string> candidateHashes, CancellationToken ct)
     {
         var reclaimed = 0;
         foreach (var chunk in candidateHashes.Chunk(ReclaimChunkSize))
@@ -268,12 +427,13 @@ public class ReleaseManagementService
             {
                 try
                 {
-                    reclaimed += await _db.Database.ExecuteSqlRawAsync(
+                    reclaimed += await db.Database.ExecuteSqlRawAsync(
                         "DELETE FROM oe_file_contents c WHERE c.content_hash IN (" +
                         "SELECT o.content_hash FROM oe_file_contents o WHERE o.content_hash = ANY({0}) " +
                         "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = o.content_hash) " +
+                        "AND NOT EXISTS (SELECT 1 FROM oe_modules m WHERE m.symbol_reference_content_hash = o.content_hash) " +
                         "FOR UPDATE SKIP LOCKED)",
-                        new object[] { chunk }, ct).ConfigureAwait(false);
+                        new object[] { chunk }, ct);
                     break;
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation && attempt < ReclaimAttempts)
@@ -282,7 +442,7 @@ public class ReleaseManagementService
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
                 {
-                    _logger.LogWarning(
+                    logger.LogWarning(
                         "Left up to {Candidates} shared content blob(s) in place after {Attempts} attempts: imports kept starting to use them.",
                         chunk.Length, attempt);
                     break;

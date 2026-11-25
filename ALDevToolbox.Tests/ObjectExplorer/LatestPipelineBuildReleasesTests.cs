@@ -2,9 +2,11 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.Mcp.Tools;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
 
@@ -12,7 +14,7 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// Pins the one sanctioned leak of project builds into the user-facing Object
 /// Explorer: <see cref="ObjectExplorerService.ListLatestPipelineBuildReleasesAsync"/>
 /// returns exactly one row per pipeline — its newest <c>ready</c> build's
-/// release — for the Third-party tab. Everything else about project builds
+/// release — for the Solutions tab. Everything else about project builds
 /// stays Artifacts-only (see the companion exclusion tests in
 /// <see cref="ObjectExplorerServiceTests"/>). Also pins that the plain release
 /// list carries the new <c>cal</c> kind.
@@ -119,6 +121,119 @@ public sealed class LatestPipelineBuildReleasesTests : IDisposable
         rows.Should().ContainSingle(r => r.Kind == "cal")
             .Which.Label.Should().Be("CRONUS objects 2016");
         rows.Should().NotContain(r => r.Kind == "project");
+    }
+
+    // ── The MCP list_releases twin ───────────────────────────────────────
+
+    private ObjectExplorerTools NewTools(AppDbContext ctx)
+    {
+        var access = new ProjectAccess(ctx, _db.OrgContext);
+        var references = new ReferenceQueryService(ctx, access, _db.OrgContext, NullLogger<ReferenceQueryService>.Instance);
+        return new ObjectExplorerTools(
+            NewQuery(ctx),
+            new ObjectSearchService(ctx, access),
+            references,
+            new TranslationQueryService(ctx),
+            new ReleaseComparisonService(ctx, access, NullLogger<ReleaseComparisonService>.Instance));
+    }
+
+    [Fact]
+    public async Task List_releases_finds_a_solutions_newest_build_by_the_customers_name()
+    {
+        // An agent asked about a customer's problem has only the customer's name.
+        // The Releases page lists each pipeline's newest build; the tool has to as
+        // well, or the agent goes looking for the code somewhere else.
+        int newestRelease;
+        await using (var seed = _db.NewContext())
+        {
+            await SeedFirstPartyAsync(seed, "BC 28.1");
+            var projectId = await SeedProjectAsync(seed, "CRONUS Denmark");
+            var pipeline = await SeedPipelineAsync(seed, projectId, "main");
+            var older = await SeedProjectReleaseAsync(seed, "CRONUS Denmark on BC 28.0");
+            await SeedBuildAsync(seed, projectId, pipeline, older, ProjectBuildStatus.Ready, DateTime.UtcNow.AddDays(-1));
+            newestRelease = await SeedProjectReleaseAsync(seed, "CRONUS Denmark on BC 28.0");
+            await SeedBuildAsync(seed, projectId, pipeline, newestRelease, ProjectBuildStatus.Ready, DateTime.UtcNow);
+        }
+
+        await using var read = _db.NewContext();
+        var result = await NewTools(read).ListReleasesAsync(search: "cronus denmark");
+
+        result.Truncated.Should().BeFalse();
+        var row = result.Rows.Should().ContainSingle().Subject;
+        row.Id.Should().Be(newestRelease);
+        row.Kind.Should().Be("solution");
+        row.SolutionName.Should().Be("CRONUS Denmark");
+        row.PipelineName.Should().Be("main");
+
+        // A name that matches nothing says where to look next, not just nothing.
+        var none = await NewTools(read).ListReleasesAsync(search: "CRN");
+        none.Rows.Should().BeEmpty();
+        none.Note.Should().Contain("list_solutions");
+    }
+
+    [Fact]
+    public async Task List_releases_filters_by_kind_and_refuses_an_unknown_one()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            await SeedFirstPartyAsync(seed, "BC 28.1");
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var pipeline = await SeedPipelineAsync(seed, projectId, "main");
+            var release = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.1");
+            await SeedBuildAsync(seed, projectId, pipeline, release, ProjectBuildStatus.Ready, DateTime.UtcNow);
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        (await tools.ListReleasesAsync(kind: "solution")).Rows.Should().ContainSingle()
+            .Which.Label.Should().Be("CRONUS on BC 28.1");
+        (await tools.ListReleasesAsync(kind: "First_Party")).Rows.Should().ContainSingle()
+            .Which.Label.Should().Be("BC 28.1");
+        (await tools.Invoking(t => t.ListReleasesAsync(kind: "project"))
+            .Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("first_party, third_party, cal, solution");
+    }
+
+    [Fact]
+    public async Task List_releases_stops_at_the_limit_and_says_what_it_left_out()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            for (var minor = 0; minor < 5; minor++)
+            {
+                await SeedFirstPartyAsync(seed, $"BC 28.{minor}", bcVersion: $"28.{minor}");
+            }
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var pipeline = await SeedPipelineAsync(seed, projectId, "main");
+            var release = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.4");
+            await SeedBuildAsync(seed, projectId, pipeline, release, ProjectBuildStatus.Ready, DateTime.UtcNow);
+        }
+
+        await using var read = _db.NewContext();
+        var result = await NewTools(read).ListReleasesAsync(limit: 3);
+
+        result.Rows.Should().HaveCount(3);
+        result.Truncated.Should().BeTrue();
+        result.Note.Should().Contain("Showing 3 of 6").And.Contain("1 solution").And.Contain("search");
+
+        (await NewTools(read).ListReleasesAsync()).Truncated.Should().BeFalse("six releases fit the default");
+    }
+
+    private static async Task SeedFirstPartyAsync(AppDbContext ctx, string label, string? bcVersion = null)
+    {
+        ctx.OeReleases.Add(new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = label,
+            Kind = "first_party",
+            Status = "ready",
+            BcVersion = bcVersion,
+            ImportedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     // ── Seed helpers ─────────────────────────────────────────────────────

@@ -92,6 +92,28 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task The_date_move_after_an_update_is_on_by_default_and_can_be_turned_off()
+    {
+        var id = await CreateAsync();
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.OeEnvironmentUpgrades.AsNoTracking().SingleAsync(u => u.Id == id)).MoveDateAfterUpdate
+                .Should().BeTrue();
+            await _f.Upgrades(ctx).UpdateDetailsAsync(id, "28.5 in December", "28.5", null, null, moveDateAfterUpdate: false);
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await _f.Upgrades(ctx).GetAsync(id))!.Upgrade.MoveDateAfterUpdate.Should().BeFalse();
+            // A caller that doesn't show the option leaves it alone.
+            await _f.Upgrades(ctx).UpdateDetailsAsync(id, "28.5 in January", "28.5", null, null);
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await _f.Upgrades(ctx).GetAsync(id))!.Upgrade.MoveDateAfterUpdate.Should().BeFalse();
+        }
+    }
+
     // ── Adding lines ────────────────────────────────────────────────────
 
     [Fact]
@@ -125,7 +147,7 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
 
         result.Added.Should().Equal(allowed);
         result.Refused.Should().ContainKey(notAllowed.ToString())
-            .WhoseValue.Should().Contain("can't manage updates");
+            .WhoseValue.Should().Contain("can't schedule upgrades");
     }
 
     [Fact]
@@ -588,6 +610,11 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var checkedEnv = await SeedEnvironmentAsync(projectId, "Test");
         var id = await CreateAsync("28.5 in November 2026", "28.5", note: "Ring first");
         await AddAsync(id, updated, failed, planned, checkedEnv);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).UpdateDetailsAsync(id, "28.5 in November 2026", "28.5", null, "Ring first",
+                moveDateAfterUpdate: false);
+        }
 
         await SetVersionAsync(updated, "28.5.40000.0");
         await AddActionAsync(id, projectId, failed, UpgradeActionKind.RunNow, UpgradeActionStatus.Failed);
@@ -607,6 +634,7 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var created = await verify.OeEnvironmentUpgrades.AsNoTracking().Include(u => u.Lines).SingleAsync(u => u.Id == next);
         created.TargetVersion.Should().Be("28.5");
         created.Note.Should().Be("Ring first");
+        created.MoveDateAfterUpdate.Should().BeFalse("the second pass is the same wave, so it keeps the team's choice");
         created.ClosedAt.Should().BeNull();
         created.Lines.Select(l => l.EnvironmentId).Should().BeEquivalentTo([failed, planned]);
         created.Lines.Should().OnlyContain(l => l.IsOpen);
@@ -842,12 +870,39 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Upgrade");
     }
 
+    /// <summary>
+    /// A closed upgrade is the record of a finished wave: its environment is still on it,
+    /// but a new action credited to it would rewrite that record.
+    /// </summary>
+    [Fact]
+    public async Task An_action_cannot_claim_an_upgrade_that_has_been_marked_done()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        await CloseAsync(id);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
+                projectId, envId, UpgradeActionKind.RunNow, _f.Clock.GetUtcNow().AddHours(4), upgradeId: id);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Upgrade"].Should().Be(
+                "This environment isn't on that upgrade any more, or the upgrade has been marked done. Reload the upgrade and try again.");
+        }
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeLines.AnyAsync(l => l.UpgradeId == id && l.EnvironmentId == envId))
+            .Should().BeTrue("the environment is still on the upgrade; only its being done refuses the booking");
+        (await verify.OeEnvironmentUpgradeActions.CountAsync()).Should().Be(0);
+    }
+
     [Fact]
     public async Task A_booked_action_keeps_its_upgrade_when_the_worker_fires_it()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var id = await CreateAsync();
         await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: "28.5");
         var actionId = await BookFromUpgradeAsync(projectId, envId, id);
 
         _f.Clock.Advance(TimeSpan.FromHours(13));
@@ -856,6 +911,109 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         var stored = await _f.ReadActionAsync(actionId);
         stored.Status.Should().Be(UpgradeActionStatus.Sent);
         stored.UpgradeId.Should().Be(id);
+    }
+
+    /// <summary>The 28.3 the environment has lined up, and the 28.5 Business Central also offers it.</summary>
+    private static IReadOnlyList<BcEnvironmentUpdate> OnOffer(string selected) =>
+    [
+        new("28.3", true, selected == "28.3", "scheduled", "GA",
+            UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate, false, "Active", null, null),
+        new("28.5", true, selected == "28.5", "scheduled", "GA",
+            UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate, false, "Active", null, null),
+    ];
+
+    /// <summary>
+    /// The reported bug: an upgrade to 28.5 started on an environment that had 28.3 lined
+    /// up sent 28.3. Start update from an upgrade starts the upgrade's release.
+    /// </summary>
+    [Fact]
+    public async Task Starting_from_an_upgrade_sends_the_upgrades_release_not_the_one_lined_up()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: _f.Admin.Writes == 0 ? "28.3" : "28.5");
+
+        await using var ctx = _f.Db.NewContext();
+        var row = await _f.Svc(ctx).ScheduleUpgradeActionAsync(
+            projectId, envId, UpgradeActionKind.RunNow, executeAt: null, upgradeId: id);
+
+        row.Status.Should().Be(UpgradeActionStatus.Sent);
+        row.TargetVersion.Should().Be("28.5");
+        _f.Admin.Writes.Should().Be(1);
+        _f.Admin.SelectedTargetVersion.Should().Be("28.5");
+        _f.Admin.SelectedIgnoreUpdateWindow.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_start_booked_from_an_upgrade_sends_the_upgrades_release_when_it_fires()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: _f.Admin.Writes == 0 ? "28.3" : "28.5");
+        var actionId = await BookFromUpgradeAsync(projectId, envId, id);
+        (await _f.ReadActionAsync(actionId)).TargetVersion.Should().Be("28.5");
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await _f.ReadActionAsync(actionId)).Status.Should().Be(UpgradeActionStatus.Sent);
+        _f.Admin.SelectedTargetVersion.Should().Be("28.5");
+    }
+
+    /// <summary>
+    /// A start booked from an upgrade before starts honoured the upgrade's release carries
+    /// the update that was next at the time (28.3). When someone has since lined up 28.5,
+    /// the slot must refuse as any booking does (#1234), not switch the environment back.
+    /// </summary>
+    [Fact]
+    public async Task An_older_booking_for_another_release_keeps_the_booked_version_rule()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => OnOffer(selected: "28.5");
+        int actionId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            var action = new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = envId, UpgradeId = id,
+                Kind = UpgradeActionKind.RunNow, Status = UpgradeActionStatus.Pending, TargetVersion = "28.3",
+                RequestedBy = "Anna Jensen", RequestedByUserId = UpgradeActionTestFixture.FlagUserId,
+                RequestedAt = now, ExecuteAfter = now.AddHours(1),
+            };
+            ctx.OeEnvironmentUpgradeActions.Add(action);
+            await ctx.SaveChangesAsync();
+            actionId = action.Id;
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("not the 28.3 that was booked");
+        _f.Admin.Writes.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Starting_from_an_upgrade_is_refused_when_its_release_is_not_offered()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        _f.Admin.OnUpdates = () => [OnOffer(selected: "28.3")[0]];
+
+        await using var ctx = _f.Db.NewContext();
+        var act = () => _f.Svc(ctx).ScheduleUpgradeActionAsync(
+            projectId, envId, UpgradeActionKind.RunNow, executeAt: null, upgradeId: id);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Update"]
+            .Should().Contain("doesn't offer 28.5");
+        _f.Admin.Writes.Should().Be(0);
     }
 
     /// <summary>
@@ -887,6 +1045,51 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         list.Single(u => u.Id == untouched).AnythingStarted.Should().BeFalse();
         (await _f.Upgrades(read).GetAsync(started))!.Upgrade.AnythingStarted.Should().BeTrue();
         (await _f.Upgrades(read).CountArchivedAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task An_add_refused_by_a_race_does_not_come_back_on_the_pages_next_write()
+    {
+        var (projectId, raced) = await _f.SeedCustomerAsync();
+        var other = await SeedEnvironmentAsync(projectId, "UAT");
+        var mine = await CreateAsync("Mine");
+        var theirs = await CreateAsync("Theirs");
+        await AddAsync(mine, other);
+        var otherLine = await LineIdAsync(mine, other);
+
+        // Ann's page keeps one context for the whole visit. Bob puts the environment on his
+        // upgrade between her check and her save, so the open-upgrade index refuses it.
+        await using var ann = _f.Db.NewContext();
+        var raceRun = false;
+        ann.SavingChanges += (_, _) =>
+        {
+            if (raceRun) return;
+            raceRun = true;
+            using var bob = _f.Db.NewContext();
+            bob.OeEnvironmentUpgradeLines.Add(new OeEnvironmentUpgradeLine
+            {
+                OrganizationId = TestDb.DefaultOrgId, UpgradeId = theirs, EnvironmentId = raced,
+                ProjectId = projectId, IsOpen = true, AddedAt = DateTime.UtcNow,
+            });
+            bob.SaveChanges();
+        };
+        var add = () => _f.Upgrades(ann).AddLinesAsync(mine, [raced]);
+        (await add.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Environments");
+
+        // An unrelated write straight after does not replay the refused insert.
+        await _f.Upgrades(ann).SetCheckedAsync(otherLine, true);
+
+        // Bob takes it off his upgrade; Ann's next write still must not add it to hers.
+        await using (var bob = _f.Db.NewContext())
+        {
+            await _f.Upgrades(bob).RemoveLineAsync(await LineIdAsync(theirs, raced));
+        }
+        await _f.Upgrades(ann).AssignAsync(otherLine, UpgradeActionTestFixture.PlainTeamUserId);
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeLines.AsNoTracking().Where(l => l.UpgradeId == mine)
+            .Select(l => l.EnvironmentId).ToListAsync())
+            .Should().Equal([other], "Ann was told the add was refused");
     }
 
     // ── Several lines at once (#1265) ───────────────────────────────────

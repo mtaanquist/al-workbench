@@ -359,6 +359,7 @@ public sealed class CommandPaletteTests : IDisposable
     {
         _auth.SetAuthorized("bootstrap@example.com");
         _auth.SetRoles("Admin", HttpOrganizationContext.SiteAdminRole);
+        _orgCtx.CurrentOrganizationId = TestDb.SystemOrgId;
         _orgCtx.IsSystemOrganization = true;
 
         var cut = _ctx.Render<CommandPalette>();

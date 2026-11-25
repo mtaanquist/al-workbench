@@ -1,5 +1,6 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Gateways;
@@ -72,10 +73,11 @@ public sealed class UpgradeFleetService
     /// platform updates are all it is about. See <c>.design/on-prem-gateway.md</c>,
     /// "Readers of OeProjectEnvironments".
     /// </param>
+    /// <param name="projectId">Only this solution's environments; null for the whole fleet.</param>
     public async Task<List<UpgradeFleetRow>> ListFleetAsync(
-        bool includeSoftDeleted = false, CancellationToken ct = default, bool includeOnPremises = false)
+        bool includeSoftDeleted = false, int? projectId = null, CancellationToken ct = default, bool includeOnPremises = false)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var actionable = ProjectAccess.UpdateOpsProjectPredicate(snapshot);
         var manageable = ProjectAccess.ManageProjectPredicate(snapshot);
@@ -87,6 +89,10 @@ public sealed class UpgradeFleetService
         {
             query = query.Where(EnvironmentQueries.NotSoftDeleted);
         }
+        if (projectId is { } pid)
+        {
+            query = query.Where(e => e.ProjectId == pid);
+        }
 
         if (!includeOnPremises)
         {
@@ -97,7 +103,7 @@ public sealed class UpgradeFleetService
             .Where(e => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
             .Select(ToRow(actionable, manageable))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Ordered in memory: "Production first" is a presentation rule, not something
         // worth a CASE expression in SQL, and the fleet is a page-sized list by design.
@@ -119,7 +125,7 @@ public sealed class UpgradeFleetService
     /// </summary>
     public async Task<EnvironmentDetailRow?> GetEnvironmentAsync(int environmentId, CancellationToken ct = default)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var actionable = ProjectAccess.UpdateOpsProjectPredicate(snapshot);
         var manageable = ProjectAccess.ManageProjectPredicate(snapshot);
@@ -129,7 +135,7 @@ public sealed class UpgradeFleetService
             .Where(e => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == e.ProjectId && p.DeletedAt == null));
 
-        var row = await found.Select(ToRow(actionable, manageable)).FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var row = await found.Select(ToRow(actionable, manageable)).FirstOrDefaultAsync(ct);
         if (row is null) return null;
 
         // The same filtered query, so visibility is decided once and not re-argued here.
@@ -141,13 +147,14 @@ public sealed class UpgradeFleetService
                 e.LocationName,
                 e.UpdateWindowStart,
                 e.UpdateWindowEnd,
+                e.UpdateWindowDays,
                 e.BcUpdateWindowStart,
                 e.BcUpdateWindowEnd,
                 e.BcUpdateWindowTimeZoneIana,
                 e.BcUpdateWindowFetchedAt,
                 e.AppSourceAppsUpdateCadence,
             })
-            .FirstAsync(ct).ConfigureAwait(false);
+            .FirstAsync(ct);
 
         return new EnvironmentDetailRow(
             row,
@@ -156,6 +163,7 @@ public sealed class UpgradeFleetService
             rest.LocationName,
             rest.UpdateWindowStart,
             rest.UpdateWindowEnd,
+            rest.UpdateWindowDays,
             rest.BcUpdateWindowStart,
             rest.BcUpdateWindowEnd,
             rest.BcUpdateWindowTimeZoneIana,
@@ -183,7 +191,7 @@ public sealed class UpgradeFleetService
                         && e.Name.ToLower() == name)
             .OrderBy(e => e.Id)
             .Select(e => (int?)e.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>
@@ -194,12 +202,12 @@ public sealed class UpgradeFleetService
     /// the two halves cannot disagree about which environments exist.
     /// </summary>
     public async Task<List<EnvironmentDetailRow>> ListFleetDetailsAsync(
-        bool includeSoftDeleted = false, CancellationToken ct = default, bool includeOnPremises = false)
+        bool includeSoftDeleted = false, int? projectId = null, CancellationToken ct = default, bool includeOnPremises = false)
     {
-        var fleet = await ListFleetAsync(includeSoftDeleted, ct, includeOnPremises).ConfigureAwait(false);
+        var fleet = await ListFleetAsync(includeSoftDeleted, projectId, ct, includeOnPremises);
         if (fleet.Count == 0) return [];
 
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var ids = fleet.Select(r => r.EnvironmentId).ToList();
         var rest = await _db.OeProjectEnvironments.AsNoTracking()
@@ -214,13 +222,14 @@ public sealed class UpgradeFleetService
                 e.LocationName,
                 e.UpdateWindowStart,
                 e.UpdateWindowEnd,
+                e.UpdateWindowDays,
                 e.BcUpdateWindowStart,
                 e.BcUpdateWindowEnd,
                 e.BcUpdateWindowTimeZoneIana,
                 e.BcUpdateWindowFetchedAt,
                 e.AppSourceAppsUpdateCadence,
             })
-            .ToDictionaryAsync(e => e.Id, ct).ConfigureAwait(false);
+            .ToDictionaryAsync(e => e.Id, ct);
 
         return fleet
             .Where(r => rest.ContainsKey(r.EnvironmentId))
@@ -229,7 +238,7 @@ public sealed class UpgradeFleetService
                 var x = rest[r.EnvironmentId];
                 return new EnvironmentDetailRow(
                     r, x.CreatedByUserId, x.CountryCode, x.LocationName,
-                    x.UpdateWindowStart, x.UpdateWindowEnd,
+                    x.UpdateWindowStart, x.UpdateWindowEnd, x.UpdateWindowDays,
                     x.BcUpdateWindowStart, x.BcUpdateWindowEnd,
                     x.BcUpdateWindowTimeZoneIana, x.BcUpdateWindowFetchedAt,
                     x.AppSourceAppsUpdateCadence);
@@ -248,20 +257,20 @@ public sealed class UpgradeFleetService
     /// </summary>
     public async Task<List<InstalledAppRow>?> ListInstalledAppsAsync(int environmentId, CancellationToken ct = default)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == environmentId && e.MissingSince == null)
             .Where(e => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
             .Select(e => new { e.ProjectId, e.Name })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (env is null) return null;
 
         var apps = await _db.OeEnvironmentApps.AsNoTracking()
             .Where(a => a.EnvironmentId == environmentId)
             .Select(a => new { a.AppId, a.Name, a.Publisher, a.Version, a.FetchedAt })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var delivered = (await _db.OeProjectDeliveryResults.AsNoTracking()
                 .Where(r => r.AppId != null
@@ -269,7 +278,7 @@ public sealed class UpgradeFleetService
                             && r.ProjectDelivery.EnvironmentName == env.Name)
                 .Select(r => r.AppId!)
                 .Distinct()
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .Select(id => Guid.TryParse(id, out var g) ? g : Guid.Empty)
             .ToHashSet();
 
@@ -479,6 +488,32 @@ public sealed class UpgradeFleetService
             row, back ? SelectVersionGroup.ChangeBack : SelectVersionGroup.ChangeForward, from, offerUnknown, detail);
     }
 
+    /// <summary>
+    /// Why "Start update" from a planned upgrade can't start <paramref name="target"/> (the
+    /// upgrade's release) on <paramref name="row"/>, or null when it can: the release is
+    /// already the next update, or it is on offer and the start will select it. A row whose
+    /// offer list has never been read is let through, because the start re-reads it live
+    /// and refuses there. From the mirror only, like the version preview.
+    /// </summary>
+    public static string? WhyNoUpgradeStart(UpgradeFleetRow row, string target)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        target = MajorMinor(target);
+        if (!string.IsNullOrWhiteSpace(row.Version)
+            && VersionOrder.Compare(MajorMinor(row.Version), target) is var compared and >= 0)
+        {
+            return compared == 0 ? $"already on {target}" : $"already on {MajorMinor(row.Version)}, past {target}";
+        }
+        if (row.HasUpdate && VersionOrder.Compare(MajorMinor(row.NextUpdateVersion!), target) == 0) return null;
+        if (row.OfferedVersions is null)
+        {
+            return row.HasUpdate ? null : "no update is waiting";
+        }
+        return row.OfferedVersions.Any(v => VersionOrder.Compare(MajorMinor(v), target) == 0)
+            ? null
+            : $"Business Central does not offer {target} to this environment yet";
+    }
+
     /// <summary>The mirror's own numeric-per-segment rule, so the preview and the selection rule agree.</summary>
     private static readonly IComparer<string> VersionOrder =
         Comparer<string>.Create(ProjectConnectionService.CompareVersions);
@@ -529,13 +564,13 @@ public sealed class UpgradeFleetService
         // One query for the whole selection, and the ops axis is the gate: the refresh
         // reads the customer's tenant with their credentials, so it is the same grant
         // the two write actions need rather than mere visibility.
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var actionable = ProjectAccess.UpdateOpsProjectPredicate(snapshot);
         var allowed = await _db.OeProjects.AsNoTracking()
             .Where(actionable)
             .Where(p => wanted.Contains(p.Id) && p.DeletedAt == null)
             .Select(p => new { p.Id, p.BcEnvironmentsFetchedAt })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var freshSince = DateTime.UtcNow - FreshFor;
         var fresh = force ? 0 : allowed.Count(p => p.BcEnvironmentsFetchedAt > freshSince);
@@ -550,7 +585,7 @@ public sealed class UpgradeFleetService
         var alreadyRunning = 0;
         foreach (var projectId in toAsk)
         {
-            if (await _refreshQueue.EnqueueAsync(new EnvironmentRefreshJob(projectId, identity), ct).ConfigureAwait(false))
+            if (await _refreshQueue.EnqueueAsync(new EnvironmentRefreshJob(projectId, identity), ct))
             {
                 queued++;
             }
@@ -821,6 +856,7 @@ public sealed record EnvironmentDetailRow(
     string? LocationName,
     TimeOnly? DeliveryWindowStart,
     TimeOnly? DeliveryWindowEnd,
+    DeliveryDays DeliveryWindowDays,
     TimeOnly? BcUpdateWindowStart,
     TimeOnly? BcUpdateWindowEnd,
     string? BcUpdateWindowTimeZoneIana,

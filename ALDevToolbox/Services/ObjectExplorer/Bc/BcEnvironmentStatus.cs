@@ -41,7 +41,10 @@ public static class BcEnvironmentStatus
     /// </summary>
     public const string SoftDeleted = "SoftDeleted";
 
-    private static readonly string[] BusyStatuses = ["Upgrading", "Preparing", "NotReady", "Recovering"];
+    // "Updating" is shown as an update in progress (StatusWord), so it must also hold
+    // deliveries back and read as running on the upgrade line: the screen and the gate
+    // read one list (#1429).
+    private static readonly string[] BusyStatuses = ["Upgrading", "Updating", "Preparing", "NotReady", "Recovering"];
     private static readonly string[] DeletingStatuses = ["Removing", "SoftDeleting", SoftDeleted];
 
     /// <summary>

@@ -28,7 +28,7 @@ namespace ALDevToolbox.Tests.Components;
 /// <para>Named user: a BC consultant opening the Builds list in the morning to see which
 /// customers need a build before today's deployments.</para>
 /// </summary>
-public sealed class PipelineFreshnessSurfacesTests : IDisposable
+public sealed class PipelineFreshnessSurfacesTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -49,6 +49,7 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<PipelineService>();
         _ctx.Services.AddScoped<BuildFreshnessService>();
@@ -93,10 +94,13 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -136,6 +140,30 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
         cut.WaitForAssertion(() =>
             cut.FindAll("tbody tr").Select(r => r.QuerySelector(".cell-stack__main")!.TextContent.Trim())
                 .Should().Equal("CRONUS Base"));
+    }
+
+    [Fact]
+    public async Task List_a_disabled_pipeline_ahead_of_its_build_is_not_ready_to_build()
+    {
+        // Build refuses a disabled pipeline, so the list must not count or mark it (#1551).
+        var s = await SeedPipelineAsync("CRONUS Base");
+        await AddBuildAsync(_db, s.ProjectId, s.PipelineId, s.RepositoryId);
+        await AddHeadAsync(_db, s.RepositoryId, "main", Newest, commits: [Built, Newer, Newest]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == s.PipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<PipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = Row(cut, "CRONUS Base");
+            row.TextContent.Should().Contain("Disabled");
+            row.ClassList.Should().NotContain("pl-ahead", "a disabled pipeline does not ask to be built");
+            cut.FindAll(".pill-tab").Should().NotContain(t => t.TextContent.Contains("Ready to build"));
+        });
     }
 
     [Fact]
@@ -429,7 +457,8 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
             card.QuerySelector(".branch-state")!.TextContent.Trim().Should().Be($"main was force-pushed since build #{build}");
             card.QuerySelectorAll(".pb-chg__list li").Select(li => li.TextContent.Trim()).Should().Equal(
                 "Fix VAT rounding on 3333333 3333333", "Fix VAT rounding on 2222222 2222222");
-            card.TextContent.Should().Contain("Latest commits").And.NotContain("Commits since");
+            // Not "New commits": after a force-push the list is not what changed since the build.
+            card.TextContent.Should().Contain("Latest commits").And.NotContain("New commits");
             card.QuerySelector($"a[href='https://github.com/cronus-dk/cronus-base/compare/{Built}...{Newest}']")!
                 .TextContent.Trim().Should().Be("See every change on GitHub");
         });

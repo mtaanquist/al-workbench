@@ -152,7 +152,11 @@ public sealed class PipelinesDashboardService
         var recentBuilds = pipelineIds.Count == 0
             ? []
             : await builds
-                .OrderByDescending(b => b.FinishedAt ?? b.StartedAt)
+                // A rerun keeps its last attempt's finish until it ends, so only a finished
+                // build sorts by its finish (#1551).
+                .OrderByDescending(b => (b.Status == ProjectBuildStatus.Ready || b.Status == ProjectBuildStatus.Failed) && b.FinishedAt != null
+                    ? b.FinishedAt.Value
+                    : b.StartedAt)
                 .ThenByDescending(b => b.Id)
                 .Take(ActivityRows)
                 .Select(b => new
@@ -178,7 +182,7 @@ public sealed class PipelinesDashboardService
             : new PipelinesLastBuild(newest.Id, newest.PipelineId, pipelineById[newest.PipelineId].Name, newest.Branch, newest.StartedAt);
 
         // ── Deployment side ────────────────────────────────────────────────────
-        var targets = await _releases.ListReleasePipelineOverviewAsync(ct);
+        var targets = await _releases.ListReleasePipelineOverviewAsync(ct: ct);
 
         var deploymentsToday = targets.Count == 0
             ? 0
@@ -218,7 +222,8 @@ public sealed class PipelinesDashboardService
         foreach (var f in pipelineIds.Count == 0 ? [] : await _freshness.ListAsync(ct))
         {
             var summary = PipelineFreshnessSummary.From(f);
-            if (!summary.IsAhead || inFlight.Contains(f.PipelineId) || !pipelineById.TryGetValue(f.PipelineId, out var p)) continue;
+            // A disabled pipeline refuses Build, so it is not asked for (#1551).
+            if (!summary.IsAhead || inFlight.Contains(f.PipelineId) || !pipelineById.TryGetValue(f.PipelineId, out var p) || p.Disabled) continue;
             readyToBuild++;
             attention.Add(new PipelinesAttentionItem(
                 PipelinesAttentionKind.BranchAhead, summary.PushedAt, p.ProjectId, p.ProjectName,
@@ -285,7 +290,7 @@ public sealed class PipelinesDashboardService
             // one never became a deployment, so it is not something that happened.
             var liveById = targets.Where(t => t.LiveDelivery is not null)
                 .ToDictionary(t => t.LiveDelivery!.DeliveryId, t => t.LiveDelivery!);
-            var deliveries = await _feed.ListRecentAsync(null, null, ActivityRows * 2, ct);
+            var deliveries = await _feed.ListRecentAsync(null, null, ActivityRows * 2, ct: ct);
             foreach (var d in deliveries.Where(d => d.Status != ProjectDeliveryStatus.Dismissed))
             {
                 var kind = d.Status switch

@@ -177,6 +177,7 @@ public static class AlBuiltinMethods
     public static readonly HashSet<string> FieldNameTakingMethods = new(StringComparer.OrdinalIgnoreCase)
     {
         "Validate", "ValidateAll",
+        "ModifyAll",
         "SetRange", "SetFilter",
         "FieldNo", "FieldName", "FieldCaption",
         "FieldExists", "FieldActive", "FieldError",

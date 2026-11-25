@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Workers;
@@ -28,7 +29,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Bc;
 /// <para>One row's failure never stops the sweep: a customer whose credentials expired
 /// lands as failed with the reason in the feed, and the next environment is tried.</para>
 /// </summary>
-public sealed class UpgradeActionWorker : BackgroundService
+public sealed partial class UpgradeActionWorker : BackgroundService
 {
     /// <summary>How often the table is swept for due rows. A slot is a time of day, not a stopwatch.</summary>
     internal static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
@@ -37,16 +38,21 @@ public sealed class UpgradeActionWorker : BackgroundService
     private readonly TimeProvider _clock;
     private readonly ILogger<UpgradeActionWorker> _logger;
     private readonly WorkerHeartbeat _heartbeat;
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     public UpgradeActionWorker(
         IServiceProvider services,
         TimeProvider clock,
         ILogger<UpgradeActionWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build the worker by hand keep compiling;
+        // production DI always supplies the singleton.
+        Operations.MaintenanceModeState? maintenance = null)
     {
         _services = services;
         _clock = clock;
         _logger = logger;
+        _maintenance = maintenance;
         // Polls every 30 seconds and is idle most of the time. A sweep sends at most one
         // booked app install (an upload or an AppSource update), or asks again about one
         // nobody saw finish, in all - not per organisation - and waits for it, so
@@ -70,6 +76,11 @@ public sealed class UpgradeActionWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Writes this worker audits itself name the requester; anything else it saves
+        // is attributed to the worker rather than to no one.
+        using var actor = AuditActor.EnterBackground(nameof(UpgradeActionWorker));
+        using var logScope = ALDevToolbox.Services.Logging.WorkerLogScope.Enter(nameof(UpgradeActionWorker));
+
         // Let startup migrations + seed finish before the first sweep.
         try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
         catch (OperationCanceledException) { return; }
@@ -82,40 +93,12 @@ public sealed class UpgradeActionWorker : BackgroundService
             _heartbeat.Tick();
             try
             {
-                _heartbeat.BeginActive();
-                try
+                if (!await RunSweepAsync(recovered, stoppingToken).ConfigureAwait(false))
                 {
-                    await ForEachOrgAsync(async (org, sys, ct) =>
-                    {
-                        if (recovered.Contains(org))
-                        {
-                            await SettleStaleClaimsAsync(org, sys, ct).ConfigureAwait(false);
-                            return;
-                        }
-                        // Nothing of ours is running yet, so anything found mid-send was
-                        // orphaned by a restart. Once per org, until it succeeds.
-                        await FailInterruptedAsync(org, sys, ct).ConfigureAwait(false);
-                        recovered.Add(org);
-                    }, stoppingToken).ConfigureAwait(false);
-                    // Two passes. Every organisation's platform-update moves first - a
-                    // date the customer agreed, seconds each - then one booked app install
-                    // in all (an upload or an AppSource update, or a second look at one
-                    // nobody saw finish), which waits for it to finish. So no organisation's agreed slot waits behind another's
-                    // ten-minute install, a sweep costs at most one install, and two
-                    // installs never run at once: that can deadlock on Business Central's
-                    // own bookkeeping table.
-                    await ForEachOrgAsync((org, sys, ct) => RunDueActionsAsync(org, sys, ct, SweepPass.PlatformUpdates), stoppingToken).ConfigureAwait(false);
-                    // Whoever checks an environment after its update hears when it is on
-                    // the target version (#1047). A read, cheap when nothing is new.
-                    await ForEachOrgAsync(NotifyReadyToCheckAsync, stoppingToken).ConfigureAwait(false);
-                    var uploadSent = false;
-                    await ForEachOrgAsync(async (org, sys, ct) =>
-                    {
-                        if (uploadSent) return;
-                        uploadSent = await RunDueActionsAsync(org, sys, ct, SweepPass.OneUpload).ConfigureAwait(false) > 0;
-                    }, stoppingToken).ConfigureAwait(false);
+                    try { await Task.Delay(PollInterval, stoppingToken); }
+                    catch (OperationCanceledException) { return; }
+                    continue;
                 }
-                finally { _heartbeat.EndActive(); }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -137,23 +120,29 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// it would in a request. The active-org enumeration is the one cross-org read; the
     /// organisations table carries no tenant filter, so it needs no bypass.
     /// </summary>
-    private async Task ForEachOrgAsync(Func<int, bool, CancellationToken, Task> perOrg, CancellationToken ct)
-    {
-        // IsSystem travels with the id so the per-org identity carries the org's real
-        // flag rather than a hard-coded false (issue #694).
-        List<(int Id, bool IsSystem)> orgs;
-        await using (var scope = _services.CreateAsyncScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            // The org enumeration; per-org work then runs inside that org's
-            // AmbientOrganizationScope.
-            var rows = await db.Organizations.AsNoTracking()
-                .Where(o => !o.IsPending)
-                .Select(o => new { o.Id, o.IsSystem })
-                .ToListAsync(ct).ConfigureAwait(false);
-            orgs = rows.Select(o => (o.Id, o.IsSystem)).ToList();
-        }
+    private async Task ForEachOrgAsync(Func<int, bool, CancellationToken, Task> perOrg, CancellationToken ct) =>
+        await RunForOrgsAsync(await ListOrgsAsync(ct).ConfigureAwait(false), perOrg, ct).ConfigureAwait(false);
 
+    /// <summary>
+    /// The active organisations. IsSystem travels with the id so the per-org identity
+    /// carries the org's real flag rather than a hard-coded false (issue #694).
+    /// </summary>
+    private async Task<List<(int Id, bool IsSystem)>> ListOrgsAsync(CancellationToken ct)
+    {
+        await using var scope = _services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        // The org enumeration; per-org work then runs inside that org's
+        // AmbientOrganizationScope.
+        var rows = await db.Organizations.AsNoTracking()
+            .Where(o => !o.IsPending)
+            .Select(o => new { o.Id, o.IsSystem })
+            .ToListAsync(ct).ConfigureAwait(false);
+        return rows.Select(o => (o.Id, o.IsSystem)).ToList();
+    }
+
+    /// <summary>Runs <paramref name="perOrg"/> for each of <paramref name="orgs"/> in the order given; one org's failure is logged and the rest go on.</summary>
+    private async Task RunForOrgsAsync(IEnumerable<(int Id, bool IsSystem)> orgs, Func<int, bool, CancellationToken, Task> perOrg, CancellationToken ct)
+    {
         foreach (var (orgId, isSystem) in orgs)
         {
             try
@@ -172,6 +161,133 @@ public sealed class UpgradeActionWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// One sweep. Not while a restore runs or a failed one holds the site closed over a
+    /// database that may be half-loaded: a sweep installs apps and moves update dates in
+    /// customers' environments (#1321), so it returns false and booked rows stay pending
+    /// for the first sweep after the site reopens. A sweep that runs is counted, so a
+    /// restore waits for a step polling an install (or refuses) instead of dropping the
+    /// schema under it (#1579). Test seam.
+    /// </summary>
+    internal async Task<bool> RunSweepAsync(HashSet<int> recovered, CancellationToken ct)
+    {
+        if (_maintenance?.TryBeginJob(nameof(UpgradeActionWorker)) == false) return false;
+        try
+        {
+            // The restore waits for a counted sweep, so it may finish on the database (#1571).
+            using var allowDatabase = _maintenance?.AllowDatabase();
+            _heartbeat.BeginActive();
+            try
+            {
+                await ForEachOrgAsync(async (org, sys, token) =>
+                {
+                    if (recovered.Contains(org))
+                    {
+                        await SettleStaleClaimsAsync(org, sys, token).ConfigureAwait(false);
+                        return;
+                    }
+                    // Nothing of ours is running yet, so anything found mid-send was
+                    // orphaned by a restart. Once per org, until it succeeds.
+                    await FailInterruptedAsync(org, sys, token).ConfigureAwait(false);
+                    recovered.Add(org);
+                }, ct).ConfigureAwait(false);
+                // Two passes. Every organisation's platform-update moves first - a
+                // date the customer agreed, seconds each - then one booked app install
+                // in all (an upload or an AppSource update, or a second look at one
+                // nobody saw finish), which waits for it to finish. So no organisation's agreed slot waits behind another's
+                // ten-minute install, a sweep costs at most one install, and two
+                // installs never run at once: that can deadlock on Business Central's
+                // own bookkeeping table.
+                await ForEachOrgAsync((org, sys, token) => RunDueActionsAsync(org, sys, token, SweepPass.PlatformUpdates), ct).ConfigureAwait(false);
+                // Whoever checks an environment after its update hears when it is on
+                // the target version (#1047). A read, cheap when nothing is new.
+                await ForEachOrgAsync(NotifyReadyToCheckAsync, ct).ConfigureAwait(false);
+                await RunOneUploadAsync(ct).ConfigureAwait(false);
+                // Every start sent is followed until Business Central's update ends, so a
+                // failure reaches somebody with the page closed (#1711). Last, so its reads
+                // never hold up an install's agreed slot.
+                await ForEachOrgAsync(FollowStartedUpdatesAsync, ct).ConfigureAwait(false);
+            }
+            finally { _heartbeat.EndActive(); }
+        }
+        finally
+        {
+            _maintenance?.EndJob(nameof(UpgradeActionWorker));
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The sweep's one booked app install, across every organisation, taken in turns
+    /// (#1539). Among the organisations with an install due (or one still owed a second
+    /// look), the turn goes to the one whose most recent install was sent longest ago -
+    /// one never served first - and only then to the longest-waiting due install (booked first, on a tie), then the
+    /// lowest id. So a twenty-app batch booked for one organisation's opening alternates
+    /// with another organisation's install in the same window instead of running to the
+    /// end first; it does not speed anything up. The order is read from the rows each
+    /// sweep, so it survives a restart. Still one install in all - see the comment in
+    /// <see cref="ExecuteAsync"/>. An organisation whose due rows all turn out to be
+    /// waiting (a batch gate, a window that closed) passes the turn on. Internal so a test
+    /// can drive the pass. True when one was sent.
+    /// </summary>
+    internal async Task<bool> RunOneUploadAsync(CancellationToken ct)
+    {
+        var orgs = await ListOrgsAsync(ct).ConfigureAwait(false);
+        var turns = new Dictionary<int, InstallTurn>();
+        await RunForOrgsAsync(orgs, async (org, sys, token) =>
+        {
+            if (await InstallTurnAsync(org, sys, token).ConfigureAwait(false) is { } turn) turns[org] = turn;
+        }, ct).ConfigureAwait(false);
+
+        var sent = false;
+        await RunForOrgsAsync(
+            orgs.Where(o => turns.ContainsKey(o.Id))
+                .OrderBy(o => turns[o.Id].LastSentAt ?? DateTime.MinValue)
+                .ThenBy(o => turns[o.Id].OldestDue)
+                .ThenBy(o => turns[o.Id].OldestBooked)
+                .ThenBy(o => o.Id),
+            async (org, sys, token) =>
+            {
+                if (sent) return;
+                sent = await RunDueActionsAsync(org, sys, token, SweepPass.OneUpload).ConfigureAwait(false) > 0;
+            }, ct).ConfigureAwait(false);
+        return sent;
+    }
+
+    /// <summary>Where one organisation stands for the install turn: when its last install went, and when its longest-waiting due one came due and was booked.</summary>
+    private sealed record InstallTurn(DateTime? LastSentAt, DateTime OldestDue, DateTime OldestBooked);
+
+    /// <summary>This org's place in the install turn, or null when it has nothing to send or ask about again.</summary>
+    private async Task<InstallTurn?> InstallTurnAsync(int orgId, bool isSystem, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        using var ambient = AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
+        await using var scope = _services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var installs = db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp);
+        // The first due row in the order one organisation sends them (#1568): a move to a
+        // window's next opening rewrites ExecuteAfter, so an install that has waited since
+        // last night ties with one booked for tonight, and its booking time breaks the tie
+        // rather than the organisation id (#1575).
+        var first = await installs
+            .Where(a => a.ConfirmationDue
+                        || (a.Status == UpgradeActionStatus.Pending && a.SentAt == null && a.ExecuteAfter <= now))
+            .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.RequestedAt)
+            .Select(a => new { a.ExecuteAfter, a.RequestedAt })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (first is null) return null;
+        var lastSent = await installs
+            // A sent time marks a row the worker tried to send, whatever Business Central
+            // answered. The two settles that never try - a dependent skipped after a
+            // failure, a booking whose requester was disabled - leave it unset, so they do
+            // not count as an install (#1603).
+            .Where(a => a.SentAt != null)
+            .MaxAsync(a => a.SentAt, ct).ConfigureAwait(false);
+        return new InstallTurn(lastSent, first.ExecuteAfter, first.RequestedAt);
+    }
+
     /// <summary>Which of a sweep's two passes a call makes; <see cref="Both"/> is the one-call form a test drives.</summary>
     internal enum SweepPass { PlatformUpdates, OneUpload, Both }
 
@@ -183,7 +299,8 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// <see cref="ConfirmOneAsync"/>). Internal so a test can drive one sweep against a
     /// seeded database without the hosted-service loop. Returns how many rows were sent or
     /// asked about again; rows only settled on the way (a dependent skipped because the
-    /// app before it failed) do not count, so the sweep does not stop on one.
+    /// app before it failed, or a booking whose requester was disabled since) do not
+    /// count, so the sweep does not stop on one.
     /// </summary>
     internal async Task<int> RunDueActionsAsync(int orgId, bool isSystem, CancellationToken ct, SweepPass pass = SweepPass.Both)
     {
@@ -192,6 +309,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         var updates = pass != SweepPass.OneUpload;
 
         List<DueAction> due;
+        var startedBatches = new HashSet<Guid>();
         using (AmbientOrganizationScope.Enter(
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
         await using (var scope = _services.CreateAsyncScope())
@@ -209,11 +327,28 @@ public sealed class UpgradeActionWorker : BackgroundService
                 // take seconds, and must not queue behind an app install that takes minutes.
                 .OrderBy(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
                 .ThenBy(a => a.ExecuteAfter)
-                .ThenBy(a => a.BatchOrder)
+                // Then first booked, first served (#1568). A row moved to a window's next
+                // opening is given that opening as its time and ties with everything booked
+                // for it, so the booking time is what keeps its place: without it a single
+                // booking moved past a closed window queued behind the leftovers of a batch
+                // booked after it, and behind a batch booked for the new night, and could
+                // slip night after night. A single booking has no batch order; it counts as
+                // a batch's first app, never sorted behind every batch (a plain ascending
+                // order puts NULL last).
+                .ThenBy(a => a.RequestedAt)
+                .ThenBy(a => a.BatchOrder ?? 0)
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
-                    a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder))
+                    a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder, a.ScheduledByWindow,
+                    a.Project!.BcTenantId, a.Environment!.Name, a.RequestedAt, a.Upgrade != null ? a.Upgrade.TargetVersion : null,
+                    a.Automatic, a.Upgrade != null && a.Upgrade.ClosedAt != null))
                 .ToListAsync(ct).ConfigureAwait(false);
+
+            if (uploads)
+            {
+                due = await WithoutInstallsHeldBehindAnEarlierBookingAsync(db, due, now, ct).ConfigureAwait(false);
+                (due, startedBatches) = await InEnvironmentTurnOrderAsync(db, due, now, ct).ConfigureAwait(false);
+            }
         }
 
         var sent = 0;
@@ -235,10 +370,32 @@ public sealed class UpgradeActionWorker : BackgroundService
             }
             else
             {
+                // A single window booking that took the turn and was skipped (its window
+                // closed, or a cancel won the claim) must not hand the turn to the batch
+                // queued behind it while another customer's batch is part-installed: that
+                // would leave two customers part-installed (#1625). It waits a sweep. So
+                // does a started batch whose next app found a deployment running on its
+                // environment (#1629): it keeps the turn, and no unstarted batch starts.
+                var holdUnstarted = false;
                 foreach (var action in due.Where(a => UpgradeActionService.IsAppInstall(a.Kind)))
                 {
                     if (ct.IsCancellationRequested) break;
-                    if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false) != RunOutcome.Sent) continue;
+                    if (holdUnstarted && startedBatches.Count > 0 && action.ScheduledByWindow != null
+                        && action.BatchId is { } batch && !startedBatches.Contains(batch))
+                    {
+                        continue;
+                    }
+                    var outcome = await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false);
+                    if (outcome != RunOutcome.Sent)
+                    {
+                        if (action.ScheduledByWindow != null && action.BatchId == null) holdUnstarted = true;
+                        if (outcome == RunOutcome.EnvironmentBusy
+                            && action.BatchId is { } busyBatch && startedBatches.Contains(busyBatch))
+                        {
+                            holdUnstarted = true;
+                        }
+                        continue;
+                    }
                     sent++;
                     break;
                 }
@@ -251,6 +408,193 @@ public sealed class UpgradeActionWorker : BackgroundService
         }
         return sent;
     }
+
+    /// <summary>
+    /// The environment in Business Central, as the delivery queue keys it: two solutions
+    /// connected to one tenant share their "Production", whatever their own environment
+    /// rows are numbered, and the name is matched ignoring case. A solution with no tenant
+    /// yet keys on itself.
+    /// </summary>
+    internal static (string Tenant, string Environment) EnvironmentKey(Guid? tenantId, int projectId, string name) =>
+        (tenantId?.ToString() ?? $"solution:{projectId}", name.ToUpperInvariant());
+
+    /// <summary>
+    /// Puts a sweep's due installs in turn order between this org's environments (#1596,
+    /// #1608); platform-update moves stay in front. The turn rotates the way it rotates
+    /// between organisations: the environment whose last install went longest ago goes
+    /// first, one never served first of all, so an Install now does not wait for the rest
+    /// of a batch that came due earlier on another customer's environment.
+    /// <para>Two things keep the rotation from doing harm. It is keyed on the environment
+    /// in Business Central, not on the solution's row for it, and bookings for one
+    /// environment never rotate among themselves: a later upload may need an app an
+    /// earlier one brings, even when the two came from different solutions on one tenant.
+    /// The sort is stable, so the SQL order (#1568) holds inside each environment. And an
+    /// environment holding a window batch that has started keeps the turn until it is
+    /// done, ahead of environments with only unstarted window batches: when the window
+    /// closes, the rest of every unstarted batch moves to the next opening whole, so at
+    /// most the customers whose batch was running are left part-installed, not every
+    /// customer who had one booked. A single window booking shares that place with the
+    /// started batches, first booked first (#1625): it is one install and can never be
+    /// left part-installed, so making it wait behind another customer's batch, night after
+    /// night, protected nobody. An environment with any due row whose time a person picked -
+    /// Install now, an upload for now, or a time they set - still goes ahead of both,
+    /// because nobody asked that row to wait for a window.</para>
+    /// </summary>
+    private static async Task<(List<DueAction> Due, HashSet<Guid> StartedBatches)> InEnvironmentTurnOrderAsync(
+        AppDbContext db, List<DueAction> due, DateTime now, CancellationToken ct)
+    {
+        var byEnvironment = due.Where(a => UpgradeActionService.IsAppInstall(a.Kind))
+            .GroupBy(a => a.BcEnvironment)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        if (byEnvironment.Count < 2) return (due, new HashSet<Guid>());
+
+        // Every solution's row for those environments - a shared environment's history is
+        // on the other solution's row too - then each row's latest install, through the
+        // environment index and only as far back as the rotation needs.
+        var installing = byEnvironment.Values.SelectMany(rows => rows).ToList();
+        var tenants = installing.Where(a => a.TenantId != null).Select(a => a.TenantId!.Value).Distinct().ToList();
+        var untenanted = installing.Where(a => a.TenantId == null).Select(a => a.ProjectId).Distinct().ToList();
+        var environmentRows = (await db.OeProjectEnvironments.AsNoTracking()
+                .Where(e => (e.Project!.BcTenantId != null && tenants.Contains(e.Project.BcTenantId.Value))
+                            || (e.Project.BcTenantId == null && untenanted.Contains(e.ProjectId)))
+                .Select(e => new { e.Id, e.ProjectId, e.Project!.BcTenantId, e.Name })
+                .ToListAsync(ct).ConfigureAwait(false))
+            .Select(e => (e.Id, Key: EnvironmentKey(e.BcTenantId, e.ProjectId, e.Name)))
+            .Where(e => byEnvironment.ContainsKey(e.Key))
+            .ToDictionary(e => e.Id, e => e.Key);
+        var rowIds = environmentRows.Keys.ToList();
+        var since = now - RotationHistory;
+        var sentPerRow = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => rowIds.Contains(a.EnvironmentId)
+                        && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
+                        && a.SentAt != null && a.SentAt >= since)
+            .GroupBy(a => a.EnvironmentId)
+            .Select(g => new { EnvironmentId = g.Key, LastSentAt = g.Max(a => a.SentAt) })
+            .ToListAsync(ct).ConfigureAwait(false);
+        var lastSent = sentPerRow
+            .GroupBy(x => environmentRows[x.EnvironmentId])
+            .ToDictionary(g => g.Key, g => g.Max(x => x.LastSentAt));
+
+        // A batch's rows all sit on one environment row, so the index finds them.
+        var windowBatches = installing
+            .Where(a => a.ScheduledByWindow != null && a.BatchId != null)
+            .Select(a => a.BatchId!.Value).Distinct().ToList();
+        var batchRowIds = installing.Where(a => a.ScheduledByWindow != null && a.BatchId != null)
+            .Select(a => a.EnvironmentId).Distinct().ToList();
+        var started = windowBatches.Count == 0
+            ? new HashSet<Guid>()
+            : (await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => batchRowIds.Contains(a.EnvironmentId)
+                            && a.BatchId != null && windowBatches.Contains(a.BatchId.Value) && a.SentAt != null)
+                .Select(a => a.BatchId!.Value).Distinct()
+                .ToListAsync(ct).ConfigureAwait(false)).ToHashSet();
+
+        // An environment's tier is the best of its due installs: 0 when any has a time a
+        // person picked; 1 when any is in a window batch already part-sent, which keeps
+        // the turn, or is a single window booking (#1625); 2 when all are window batches
+        // not yet started. The tier only picks the environment; inside it the installs
+        // still go in the order above. So a single booking counts as tier 1 only while no
+        // unstarted batch sits ahead of it on its environment: that batch's first app is
+        // what the turn would send, and starting it would leave a second customer
+        // part-installed when the window closes.
+        var tiers = new Dictionary<(string, string), int>();
+        var bookedAt = new Dictionary<(string, string), DateTime>();
+        foreach (var (key, rows) in byEnvironment)
+        {
+            var tier = 2;
+            var firstBooked = DateTime.MaxValue;
+            var unstartedAhead = false;
+            foreach (var a in rows)
+            {
+                if (a.ScheduledByWindow == null)
+                {
+                    tier = 0;
+                }
+                else if (a.BatchId is { } b ? started.Contains(b) : !unstartedAhead)
+                {
+                    tier = Math.Min(tier, 1);
+                    // The row the turn reaches first, not the oldest: an older single
+                    // queued behind a started batch must not lend the batch its place.
+                    if (firstBooked == DateTime.MaxValue) firstBooked = a.RequestedAt;
+                }
+                else if (a.BatchId != null)
+                {
+                    unstartedAhead = true;
+                }
+            }
+            tiers[key] = tier;
+            bookedAt[key] = firstBooked;
+        }
+        var rank = byEnvironment.Keys
+            .OrderBy(k => tiers[k])
+            // Tier 1 goes first booked, first served, as on one environment (#1568): a
+            // single booking booked before a started batch goes between two of its apps,
+            // one booked after it waits for the batch.
+            .ThenBy(k => tiers[k] == 1 ? bookedAt[k] : DateTime.MinValue)
+            .ThenBy(k => tiers[k] == 1
+                // Of two started batches booked together, the one served most recently is
+                // the one running: it carries on.
+                ? -(lastSent.GetValueOrDefault(k) ?? DateTime.MinValue).Ticks
+                : (lastSent.GetValueOrDefault(k) ?? DateTime.MinValue).Ticks)
+            .Select((k, i) => (k, i))
+            .ToDictionary(x => x.k, x => x.i);
+
+        return (due
+            .OrderBy(a => UpgradeActionService.IsAppInstall(a.Kind))
+            .ThenBy(a => UpgradeActionService.IsAppInstall(a.Kind) ? rank[a.BcEnvironment] : 0)
+            .ToList(), started);
+    }
+
+    /// <summary>
+    /// Drops the due installs a window chose the time for that were booked after another
+    /// install on the same Business Central environment that has not been sent yet
+    /// (#1629): the earlier booking may be the base an add-on needs. When a window closes
+    /// on a base solution's batch it moves to the next opening, and an add-on booked after
+    /// it, under a window still open, would otherwise go now and be refused by Business
+    /// Central. So it waits until the base is sent - not only until the base is due again:
+    /// the add-on keeps its earlier time, which would sort it ahead of the base at the next
+    /// opening. Read from the rows each sweep, so it holds across sweeps and restarts. Which
+    /// bookings hold is <see cref="UpgradeActionService.EarlierBookingsThatHold"/>, which
+    /// the environment page reads too, to say what a held row waits for.
+    /// <para>A row whose time a person picked never waits, because nobody asked it to wait
+    /// for a window. A held row is not moved when its own window closes, so it keeps its
+    /// original time until it goes.</para>
+    /// </summary>
+    private static async Task<List<DueAction>> WithoutInstallsHeldBehindAnEarlierBookingAsync(
+        AppDbContext db, List<DueAction> due, DateTime now, CancellationToken ct)
+    {
+        var windowInstalls = due
+            .Where(a => UpgradeActionService.IsAppInstall(a.Kind) && a.ScheduledByWindow != null)
+            .ToList();
+        if (windowInstalls.Count == 0) return due;
+
+        // A shared environment's other solutions book on their own rows, so read by tenant.
+        var tenants = windowInstalls.Where(a => a.TenantId != null).Select(a => a.TenantId!.Value).Distinct().ToList();
+        var untenanted = windowInstalls.Where(a => a.TenantId == null).Select(a => a.ProjectId).Distinct().ToList();
+        var waiting = await UpgradeActionService.EarlierBookingsThatHold(db.OeEnvironmentUpgradeActions.AsNoTracking(), now)
+            .Where(a => (a.Project!.BcTenantId != null && tenants.Contains(a.Project.BcTenantId.Value))
+                        || (a.Project.BcTenantId == null && untenanted.Contains(a.ProjectId)))
+            .Select(a => new { a.Project!.BcTenantId, a.ProjectId, a.Environment!.Name, a.RequestedAt })
+            .ToListAsync(ct).ConfigureAwait(false);
+        if (waiting.Count == 0) return due;
+
+        var firstWaiting = waiting
+            .GroupBy(w => EnvironmentKey(w.BcTenantId, w.ProjectId, w.Name))
+            .ToDictionary(g => g.Key, g => g.Min(w => w.RequestedAt));
+        return due
+            .Where(a => !(UpgradeActionService.IsAppInstall(a.Kind)
+                          && a.ScheduledByWindow != null
+                          && firstWaiting.TryGetValue(a.BcEnvironment, out var bookedFirst)
+                          && bookedFirst < a.RequestedAt))
+            .ToList();
+    }
+
+    /// <summary>
+    /// How far back the install turn looks for an environment's last install. An
+    /// environment not served within it counts as never served; that only reorders
+    /// environments idle for weeks, and keeps a sweep from reading the whole history.
+    /// </summary>
+    private static readonly TimeSpan RotationHistory = TimeSpan.FromDays(30);
 
     /// <summary>
     /// Tells the people checking environments on this org's planned upgrades which ones
@@ -276,8 +620,89 @@ public sealed class UpgradeActionWorker : BackgroundService
         && await db.Users.AsNoTracking()
             .AnyAsync(u => u.Id == id && u.Status == UserStatus.Active, ct).ConfigureAwait(false);
 
-    /// <summary>What one due row came to: left alone, settled without a send, or sent.</summary>
-    private enum RunOutcome { Skipped, Settled, Sent }
+    /// <summary>
+    /// The deliveries rule (#1124) for a booked install a window chose the time for: judged
+    /// against the window the booking applied, as it is now on the environment: the
+    /// delivery window for a DeliveryWindow row (Microsoft's, if the delivery window has
+    /// since been removed - where such a booking made now would land), Microsoft's update
+    /// window for a BcUpdateWindow row. When the window
+    /// has closed, the row and the rest of its batch still waiting are moved to its next
+    /// opening rather than sent. A time the person picked is never held back - those rows
+    /// carry no window. Nothing is moved when no window is configured any more. The write
+    /// is a compare-and-set on rows still pending, unsent and window-chosen, so a cancel
+    /// or an "Install now" in between wins. True when the row was moved.
+    /// </summary>
+    private async Task<bool> MovedPastClosedWindowAsync(
+        AsyncServiceScope scope, AppDbContext db, DueAction action, UploadAppTiming window, CancellationToken ct)
+    {
+        var env = await db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == action.EnvironmentId)
+            .Select(e => new
+            {
+                e.Name, e.UpdateWindowStart, e.UpdateWindowEnd, e.UpdateWindowDays, e.Project!.BcTimeZone,
+                e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana,
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (env is null) return false;
+
+        TimeOnly? start, end;
+        DeliveryDays days;
+        TimeZoneInfo tz;
+        if (window == UploadAppTiming.DeliveryWindow && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
+        {
+            (start, end, days, tz) = (env.UpdateWindowStart, env.UpdateWindowEnd, env.UpdateWindowDays,
+                UpdateWindow.ResolveTimeZone(env.BcTimeZone));
+        }
+        else if (UpdateWindow.IsConfigured(env.BcUpdateWindowStart, env.BcUpdateWindowEnd))
+        {
+            // Microsoft's window is expressed in its own zone, as the booking read it.
+            (start, end, days, tz) = (env.BcUpdateWindowStart, env.BcUpdateWindowEnd, DeliveryDays.Every,
+                UpdateWindow.ResolveTimeZone(env.BcUpdateWindowTimeZoneIana ?? env.BcTimeZone));
+        }
+        else
+        {
+            return false;
+        }
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (UpdateWindow.IsWithin(start, end, tz, now, days)) return false;
+
+        var next = UpdateWindow.NextOpeningUtc(start, end, tz, now, days);
+        var moved = await db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null
+                        && a.ScheduledByWindow != null && a.ExecuteAfter < next)
+            .Where(a => action.BatchId != null ? a.BatchId == action.BatchId : a.Id == action.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, next), ct).ConfigureAwait(false);
+        if (moved > 0)
+        {
+            _logger.LogInformation(
+                "Booked install {ActionId} ({FileName}) on {Environment} came up after its window closed; {Moved} row(s) moved to the next opening, {NextOpening}.",
+                action.Id, action.Label, env.Name, moved, next);
+
+            // The requester hears it once per move (the moved rows are not due again until
+            // the opening), so a batch left part-installed overnight is not news only on
+            // the environment's page (#1575).
+            var nextLocal = TimeZoneInfo.ConvertTimeFromUtc(next, tz);
+            var when = $"{nextLocal:yyyy-MM-dd} at {UpdateWindow.Clock(TimeOnly.FromDateTime(nextLocal))} ({tz.Id})";
+            var message = moved == 1
+                ? $"{action.Label} didn't get its turn before the window closed. It now runs when the window next opens, {when}."
+                : $"{moved} apps didn't get their turn before the window closed. They now run when the window next opens, {when}.";
+            await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
+                .NotifyMovedAsync(action.Id, moved, message, CancellationToken.None).ConfigureAwait(false);
+        }
+        return moved > 0;
+    }
+
+    /// <summary>The history line for a booking whose requester may no longer do it: disabled since, or off the solution or the update team.</summary>
+    private static string NoPermissionOutcome(UpgradeActionKind kind) => kind switch
+    {
+        UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
+        UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
+        _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
+    };
+
+    /// <summary>What one due row came to: left alone, settled without a send, sent, or left alone because a deployment holds its environment.</summary>
+    private enum RunOutcome { Skipped, Settled, Sent, EnvironmentBusy }
 
     /// <summary>
     /// Claims one row, performs it, and writes down what happened. Skipped when the
@@ -294,17 +719,19 @@ public sealed class UpgradeActionWorker : BackgroundService
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        // A row in a multi-app upload waits its turn: the one before it must have
-        // finished installing (the sweep runs them in order, so within one sweep it
-        // has), and if that one failed this one is not tried - its dependency may be the
-        // very thing that did not go in. A cancelled predecessor is the person's choice
-        // and does not stop the rest.
+        // A row in a batch - a multi-app upload, or several AppSource updates booked
+        // together - waits its turn: the one before it must have finished installing
+        // (the sweep runs them in order, so within one sweep it has), and if that one
+        // failed this one is not tried - its dependency may be the very thing that did
+        // not go in. An upload cannot tell which of the files before it it needs, so any
+        // failure stops it; an update can, so only a failed app it waits for does. A
+        // cancelled predecessor is the person's choice and does not stop the rest.
         if (action.BatchId is { } batch && action.BatchOrder is { } order)
         {
             var earlier = await db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.BatchId == batch && a.BatchOrder < order)
                 .OrderBy(a => a.BatchOrder)
-                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.ConfirmationDue })
+                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.AppName, a.BcAppId, a.PrerequisiteAppIds, a.ConfirmationDue })
                 .ToListAsync(ct).ConfigureAwait(false);
             // One Business Central accepted but nobody saw finish is asked about before
             // its dependents go, so a failure found that way still stops them. The sweep
@@ -323,26 +750,92 @@ public sealed class UpgradeActionWorker : BackgroundService
             {
                 return RunOutcome.Skipped;
             }
-            if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed) is { } blocked)
+            var waitsFor = action.Kind == UpgradeActionKind.UpdateApp
+                ? await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                    .Where(a => a.Id == action.Id)
+                    .Select(a => a.PrerequisiteAppIds)
+                    .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? new List<Guid>()
+                : null;
+            // An update also stops when one before it failed while bringing along an app
+            // this one waits for too: asking Business Central for the same app again
+            // would only fail the same way.
+            if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed
+                    && (waitsFor is null
+                        || (e.BcAppId is { } failedApp && waitsFor.Contains(failedApp))
+                        || (e.PrerequisiteAppIds != null && e.PrerequisiteAppIds.Any(waitsFor.Contains)))) is { } blocked)
             {
+                var blockedName = blocked.PackageFileName ?? blocked.AppName ?? "the app";
                 _logger.LogInformation(
-                    "Upload booking {ActionId} ({FileName}) is not tried: {Blocked} before it in the same batch failed.",
-                    action.Id, action.Label, blocked.PackageFileName);
-                var skippedAt = _clock.GetUtcNow().UtcDateTime;
+                    "Booked install {ActionId} ({FileName}) is not tried: {Blocked} before it in the same batch failed.",
+                    action.Id, action.Label, blockedName);
+                var skippedOutcome = waitsFor is null
+                    ? $"{action.Label} wasn't installed, because {blockedName} before it in the same upload didn't install."
+                    : blocked.BcAppId is { } blockedApp && waitsFor.Contains(blockedApp)
+                    ? $"{action.Label} wasn't updated, because {blockedName}, which it waits for, wasn't updated."
+                    : $"{action.Label} wasn't updated, because the update of {blockedName} before it failed, and it brings along an app both of them wait for.";
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                    // No sent time: nothing went to Business Central, and the install
+                    // turns read a sent time as an install this environment got (#1603).
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
-                        .SetProperty(a => a.SentAt, skippedAt)
                         .SetProperty(a => a.PackageContent, (byte[]?)null)
-                        .SetProperty(a => a.Outcome,
-                            $"{action.Label} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
+                        .SetProperty(a => a.Outcome, skippedOutcome),
                         ct).ConfigureAwait(false);
                 if (skipped == 0) return RunOutcome.Skipped;
                 await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);
                 return RunOutcome.Settled;
             }
         }
+
+        // A window chose this install's time, so it runs inside that window or waits for
+        // the next opening (#1539): a batch or a queue of other bookings can outlast the
+        // window, and an install is not sent into the customer's working day for that.
+        if (action.ScheduledByWindow is { } window
+            && UpgradeActionService.IsAppInstall(action.Kind)
+            && await MovedPastClosedWindowAsync(scope, db, action, window, ct).ConfigureAwait(false))
+        {
+            return RunOutcome.Skipped;
+        }
+
+        // A disabled account runs nothing, booked before it was disabled or not (#1235).
+        // Settled before the claim and without a sent time, as a skipped dependent is:
+        // nothing goes to Business Central, so it is no install for the turns (#1603). The
+        // compare-and-set still lets a racing cancel win.
+        if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
+        {
+            var refused = await db.OeEnvironmentUpgradeActions
+                .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                    .SetProperty(a => a.PackageContent, (byte[]?)null)
+                    .SetProperty(a => a.Outcome, NoPermissionOutcome(action.Kind)),
+                    ct).ConfigureAwait(false);
+            if (refused == 0) return RunOutcome.Skipped;
+            await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);
+            return RunOutcome.Settled;
+        }
+
+        // A deployment and a booked install never go to one Business Central environment
+        // at once (#1139, #1629): they share the delivery queue's gate, keyed the same way
+        // as the install turn. A busy environment leaves the row due for the next sweep,
+        // as a deployment waits for a booked install. Held until the install is settled.
+        // The confirmation re-poll (ConfirmOneAsync) sends nothing, so it takes no gate.
+        IDisposable? environmentGate = null;
+        if (UpgradeActionService.IsAppInstall(action.Kind))
+        {
+            environmentGate = scope.ServiceProvider.GetRequiredService<DeliveryQueue>()
+                .TryEnterEnvironment(action.TenantId, action.ProjectId, action.EnvironmentName);
+            if (environmentGate is null)
+            {
+                _logger.LogInformation(
+                    "Booked install {ActionId} ({FileName}) waits: a deployment to {Environment} is running.",
+                    action.Id, action.Label, action.EnvironmentName);
+                return RunOutcome.EnvironmentBusy;
+            }
+        }
+        // Released as soon as the outcome is written, below; this only covers an exception.
+        using var heldEnvironment = environmentGate;
 
         // Claim first, and this compare-and-set is what beats a racing cancel: stamping
         // sent_at while the row is still pending takes it out of both the due query and
@@ -372,11 +865,6 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         try
         {
-            // A disabled account runs nothing, booked before it was disabled or not (#1235).
-            if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
-            {
-                throw new ProjectAccessDeniedException();
-            }
             var actions = scope.ServiceProvider.GetRequiredService<UpgradeActionService>();
             if (action.Kind == UpgradeActionKind.UploadApp)
             {
@@ -454,12 +942,35 @@ public sealed class UpgradeActionWorker : BackgroundService
                             result.Message ?? "Business Central didn't finish the update.", action.TargetVersion, action.Label));
                 confirmationDue = result.IsUnconfirmed;
             }
+            else if (action.Automatic && action.UpgradeClosed)
+            {
+                // Booked by the workbench for an upgrade somebody has since marked done:
+                // the wave is over, so its housekeeping is too.
+                status = UpgradeActionStatus.Cancelled;
+                outcome = "Not moved: the upgrade was marked done first.";
+            }
             else
             {
-                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
+                // A start runs as the upgrade's own only when it was booked for the upgrade's
+                // release. A booking made before starts honoured the release carries the
+                // update that was next at the time, and keeps that booking's rule (#1234):
+                // start that one or nothing, never switch the environment back to it.
+                var fromUpgrade = action.UpgradeTargetVersion is { } release && action.TargetVersion is { } booked
+                    && ProjectConnectionService.CompareVersions(
+                        UpgradeFleetService.MajorMinor(booked), UpgradeFleetService.MajorMinor(release)) == 0;
+                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct,
+                    fromUpgrade).ConfigureAwait(false);
                 status = UpgradeActionStatus.Sent;
                 outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label);
             }
+        }
+        catch (NothingToMoveException ex) when (action.Automatic)
+        {
+            // The date move booked after an update found nothing to move - Business Central
+            // set no next update, or set it as late as it goes. Nobody asked for the move,
+            // so that is an answer, not a failure: it ends quietly with the reason.
+            status = UpgradeActionStatus.Cancelled;
+            outcome = "Nothing to move: " + ex.Errors.Values.First();
         }
         catch (PlanValidationException ex)
         {
@@ -473,12 +984,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         catch (ProjectAccessDeniedException)
         {
             status = UpgradeActionStatus.Failed;
-            outcome = action.Kind switch
-            {
-                UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
-                UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
-                _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
-            };
+            outcome = NoPermissionOutcome(action.Kind);
         }
         catch (Exception ex)
         {
@@ -495,7 +1001,11 @@ public sealed class UpgradeActionWorker : BackgroundService
         // An unconfirmed one is asked about again only when its operation was stamped:
         // without both ids there is nothing to ask about.
         var finishedAt = _clock.GetUtcNow().UtcDateTime;
-        if (!await SettleAsync(db, action.Id, status, outcome, confirmationDue, finishedAt).ConfigureAwait(false))
+        var settled = await SettleAsync(db, action.Id, status, outcome, confirmationDue, finishedAt).ConfigureAwait(false);
+        // Business Central is done with this environment as far as this install goes; a
+        // deployment need not wait for the notification emails (releasing twice is harmless).
+        environmentGate?.Dispose();
+        if (!settled)
         {
             // Still claimed and pending: a later sweep's SettleStaleClaimsAsync settles it.
             return RunOutcome.Sent;
@@ -806,5 +1316,11 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// </summary>
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
-        string? Label, Guid? BatchId, int? BatchOrder);
+        string? Label, Guid? BatchId, int? BatchOrder, UploadAppTiming? ScheduledByWindow,
+        Guid? TenantId, string EnvironmentName, DateTime RequestedAt, string? UpgradeTargetVersion, bool Automatic = false,
+        bool UpgradeClosed = false)
+    {
+        /// <summary>The environment in Business Central this row installs into (see <see cref="EnvironmentKey"/>).</summary>
+        public (string Tenant, string Environment) BcEnvironment => EnvironmentKey(TenantId, ProjectId, EnvironmentName);
+    }
 }

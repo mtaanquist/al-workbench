@@ -54,7 +54,7 @@ public sealed class PushBuildService
     {
         if (!IsBuildable(push)) return [];
 
-        var repositories = await GitHubRepositoryMatch.TrackingRepositoriesAsync(_db, push.CloneUrl, ct).ConfigureAwait(false);
+        var repositories = await GitHubRepositoryMatch.TrackingRepositoriesAsync(_db, push.CloneUrl, ct);
         if (repositories.Count == 0) return [];
         var repositoryByProject = repositories
             .GroupBy(r => r.ProjectId)
@@ -71,7 +71,7 @@ public sealed class PushBuildService
                         && h.Branch == push.Branch
                         && h.PushedAt > push.PushedAt)
             .Select(h => h.ProjectRepositoryId)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         foreach (var project in repositoryByProject.Where(r => superseded.Contains(r.Value)).Select(r => r.Key).ToList())
         {
             repositoryByProject.Remove(project);
@@ -83,6 +83,11 @@ public sealed class PushBuildService
         // GitHub names on every push.
         var isDefault = push.DefaultBranch.Length > 0
                         && string.Equals(push.Branch, push.DefaultBranch, StringComparison.Ordinal);
+        // A build refused at pickup for a reason outside itself (someone took the automatic
+        // builds over, the person left) never built the commit, so it does not count as
+        // having built it: a redelivery of that push builds it as the current run-as
+        // person (#1551).
+        var refusals = ProjectBuildService.AutomationRefusals.ToList();
         var pipelines = await _db.OePipelines.AsNoTracking()
             .Where(p => p.BuildOnPush && p.DeletedAt == null && p.DisabledAt == null && p.Project!.DeletedAt == null
                         && projectIds.Contains(p.ProjectId)
@@ -93,7 +98,8 @@ public sealed class PushBuildService
                 p.ProjectId,
                 p.BuildOnPushByUserId,
                 OwnerActive = p.BuildOnPushByUser != null && p.BuildOnPushByUser.Status == UserStatus.Active,
-                AlreadyBuilt = p.Builds.Any(b => b.Trigger == ProjectBuildTrigger.Push && b.HeadSha == push.HeadSha),
+                AlreadyBuilt = p.Builds.Any(b => b.Trigger == ProjectBuildTrigger.Push && b.HeadSha == push.HeadSha
+                    && !(b.Status == ProjectBuildStatus.Failed && b.FailureMessage != null && refusals.Contains(b.FailureMessage))),
                 BeforeBuilt = push.DocumentationOnly && p.Builds.Any(b =>
                     b.BcTarget == ProjectBuildTarget.Current
                     && b.Status != ProjectBuildStatus.Failed
@@ -103,7 +109,7 @@ public sealed class PushBuildService
                                                   && repositoryIds.Contains(c.ProjectRepositoryId.Value)))),
             })
             .OrderBy(p => p.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         return pipelines
             .Where(p => !p.AlreadyBuilt && !p.BeforeBuilt)

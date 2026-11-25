@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
@@ -201,9 +202,13 @@ internal static class StartupTasks
         // them to failed here would silently undo the resume. Cross-org by
         // design — same blessed startup-maintenance category as the
         // migration/seed/bootstrap steps above, never a request.
+        // A queued backfill does not count: it re-reads a ready release and never
+        // resumes an import, so it must not keep a release a crashed Add modules
+        // left "ingesting" from being failed here (#1616).
+        // Fence category 3 (startup, no request org): job rows only, ids out.
         var resumableReleaseIds = await db.OeImportJobs
             .IgnoreQueryFilters()
-            .Where(j => j.Status == "queued")
+            .Where(WillResumeAnImport)
             .Select(j => j.ReleaseId)
             .ToListAsync(stopping);
         var stranded = await db.OeReleases
@@ -271,6 +276,16 @@ internal static class StartupTasks
     }
 
     /// <summary>
+    /// The job rows the startup sweep treats as about to resume their release's
+    /// import: queued, and not a system-reference backfill, which re-reads a ready
+    /// release and never resumes an import (#1616). Only the predicate lives here,
+    /// so the sweep's fence reads stay in <see cref="RunAsync"/> and a test can
+    /// check it on seeded rows.
+    /// </summary>
+    internal static readonly System.Linq.Expressions.Expression<Func<ALDevToolbox.Domain.Entities.ObjectExplorer.OeImportJob, bool>> WillResumeAnImport =
+        j => j.Status == "queued" && j.Kind != "backfill_system_references";
+
+    /// <summary>
     /// Idempotently resolves the singleton system organisation, creating or
     /// stamping it as needed. Keyed on <see cref="Organization.IsSystem"/> —
     /// not on the literal <c>default</c> slug — because single-tenant first-run
@@ -301,6 +316,10 @@ internal static class StartupTasks
                 CreatedAt = DateTime.UtcNow,
             };
             db.Organizations.Add(systemOrg);
+            // Only on a database this fresh: an existing system org got its
+            // defaults from the SeedRefreshTestWorkflow migration, and re-adding
+            // them on boot would undo an Admin's delete.
+            DefaultRepositoryStandardFiles.AddForNewOrganization(db, systemOrg, systemOrg.CreatedAt);
         }
         else
         {

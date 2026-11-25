@@ -33,14 +33,18 @@ public sealed class GatewayDeliveryFollower : PolledScheduler
     private readonly IServiceProvider _services;
     private readonly ILogger<GatewayDeliveryFollower> _logger;
 
-    public GatewayDeliveryFollower(IServiceProvider services, ILogger<GatewayDeliveryFollower> logger, WorkerHeartbeatRegistry heartbeats)
+    public GatewayDeliveryFollower(IServiceProvider services, ILogger<GatewayDeliveryFollower> logger, WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(GatewayDeliveryFollower),
             // Short, because the deployment page shows the gateway's lines as they arrive.
             pollInterval: TimeSpan.FromSeconds(5),
             // A pass reads one command per deployment in flight and appends a few lines.
             maxActiveDuration: TimeSpan.FromMinutes(5),
             maxIdleSilence: TimeSpan.FromMinutes(1),
-            disableEnvVar: DisableEnvVar)
+            disableEnvVar: DisableEnvVar,
+            maintenance: maintenance)
     {
         _services = services;
         _logger = logger;

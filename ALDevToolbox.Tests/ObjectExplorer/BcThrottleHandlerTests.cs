@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
+using ALDevToolbox.Tests.Auth;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -31,11 +32,21 @@ public sealed class BcThrottleHandlerTests
         return response;
     }
 
+    /// <summary>The fixed "now" every test runs at, so an HTTP-date Retry-After has a known distance.</summary>
+    private static readonly DateTimeOffset Now = new(2026, 10, 27, 2, 0, 0, TimeSpan.Zero);
+
+    private static HttpResponseMessage ThrottledUntil(DateTimeOffset until, HttpStatusCode status = HttpStatusCode.TooManyRequests)
+    {
+        var response = new HttpResponseMessage(status);
+        response.Headers.RetryAfter = new RetryConditionHeaderValue(until);
+        return response;
+    }
+
     private static (HttpClient Client, Scripted Inner, List<TimeSpan> Waits) Build(params HttpResponseMessage[] answers)
     {
         var inner = new Scripted(answers);
         var waits = new List<TimeSpan>();
-        var handler = new BcThrottleHandler(TimeProvider.System, NullLogger<BcThrottleHandler>.Instance)
+        var handler = new BcThrottleHandler(new FakeTimeProvider(Now), NullLogger<BcThrottleHandler>.Instance)
         {
             InnerHandler = inner,
             Delay = (wait, _) => { waits.Add(wait); return Task.CompletedTask; },
@@ -75,14 +86,30 @@ public sealed class BcThrottleHandlerTests
         waits.Should().Equal(BcThrottleHandler.DefaultWait);
     }
 
+    /// <summary>
+    /// A long wait is not shortened to suit us: trying again after a minute when asked
+    /// for thirty would be ignoring the answer. It is handed back for the caller to carry.
+    /// </summary>
     [Fact]
-    public async Task A_wait_longer_than_a_minute_is_capped_so_one_customer_cannot_stall_the_sweep()
+    public async Task A_wait_longer_than_a_minute_is_not_cut_short_but_handed_back()
     {
-        var (client, _, waits) = Build(Throttled(TimeSpan.FromMinutes(30)), new HttpResponseMessage(HttpStatusCode.OK));
+        var (client, inner, waits) = Build(Throttled(TimeSpan.FromMinutes(30)), new HttpResponseMessage(HttpStatusCode.OK));
 
-        await client.SendAsync(Get());
+        var response = await client.SendAsync(Get());
 
-        waits.Should().Equal(BcThrottleHandler.MaxWait);
+        response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        inner.Seen.Should().ContainSingle("nothing is sent before the time Business Central named");
+        waits.Should().BeEmpty("one customer's long wait must not hold up the caller either");
+    }
+
+    [Fact]
+    public void The_wait_asked_for_is_reported_uncapped_for_the_clients_to_carry()
+    {
+        BcThrottleHandler.RequestedWait(Throttled(TimeSpan.FromMinutes(30)), Now).Should().Be(TimeSpan.FromMinutes(30));
+        BcThrottleHandler.RequestedWait(Throttled(), Now).Should().Be(BcThrottleHandler.DefaultWait);
+        BcThrottleHandler.RequestedWait(ThrottledUntil(Now.AddMinutes(2)), Now).Should().Be(TimeSpan.FromMinutes(2));
+        BcThrottleHandler.RequestedWait(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable), Now).Should().BeNull();
+        BcThrottleHandler.RequestedWait(new HttpResponseMessage(HttpStatusCode.Forbidden), Now).Should().BeNull();
     }
 
     [Fact]
@@ -98,6 +125,41 @@ public sealed class BcThrottleHandlerTests
         response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
         inner.Seen.Should().HaveCount(1);
         waits.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_503_that_names_a_wait_is_waited_out_and_tried_once_more()
+    {
+        var (client, inner, waits) = Build(
+            Throttled(TimeSpan.FromSeconds(7), HttpStatusCode.ServiceUnavailable), new HttpResponseMessage(HttpStatusCode.OK));
+
+        var response = await client.SendAsync(Get());
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        waits.Should().Equal(TimeSpan.FromSeconds(7));
+        inner.Seen.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task A_retry_after_given_as_a_date_waits_until_that_time()
+    {
+        var (client, inner, waits) = Build(ThrottledUntil(Now.AddSeconds(20)), new HttpResponseMessage(HttpStatusCode.OK));
+
+        await client.SendAsync(Get());
+
+        waits.Should().Equal(TimeSpan.FromSeconds(20));
+        inner.Seen.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task A_retry_after_date_already_past_still_waits_a_second()
+    {
+        var (client, _, waits) = Build(
+            ThrottledUntil(Now.AddSeconds(-30), HttpStatusCode.ServiceUnavailable), new HttpResponseMessage(HttpStatusCode.OK));
+
+        await client.SendAsync(Get());
+
+        waits.Should().Equal(TimeSpan.FromSeconds(1));
     }
 
     [Fact]

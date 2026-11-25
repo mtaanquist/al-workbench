@@ -48,7 +48,10 @@ public sealed class BcQualityRefreshScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<BcQualityRefreshScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         // A full ingest is a shallow clone plus ~250 upserts — seconds, not
         // minutes. 15 minutes of active time is a wedged-job ceiling, and a
         // 15-minute idle ceiling matches the 5-minute poll with slack.
@@ -56,7 +59,8 @@ public sealed class BcQualityRefreshScheduler : PolledScheduler
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(15),
             maxIdleSilence: TimeSpan.FromMinutes(15),
-            disableEnvVar: "DISABLE_BCQUALITY_REFRESH")
+            disableEnvVar: "DISABLE_BCQUALITY_REFRESH",
+            maintenance: maintenance)
     {
         _services = services;
         _clock = clock;

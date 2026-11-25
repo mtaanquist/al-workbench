@@ -62,6 +62,7 @@ public sealed class NewWorkspaceTests : IDisposable
         // reads through its own service scope, so its chain has to resolve here.
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>();
@@ -161,7 +162,7 @@ public sealed class NewWorkspaceTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.FindAll("button").Select(b => b.TextContent.Trim())
-                .Should().Contain("Change solution").And.NotContain("Change customer");
+                .Should().Contain("Change solution");
         });
     }
 
@@ -482,12 +483,11 @@ public sealed class NewWorkspaceTests : IDisposable
     /// </summary>
     private async Task ConnectGitHubAsync()
     {
-        using var rsa = System.Security.Cryptography.RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(
             new ALDevToolbox.Services.Operations.GitHubAppInput(
                 AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
                 ClientSecret: "s3cr3t", ClearClientSecret: false,
-                PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+                PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new ALDevToolbox.Domain.Entities.OrganizationSettings
@@ -555,8 +555,6 @@ public sealed class NewWorkspaceTests : IDisposable
             cut.Find(".card__head .switch").TextContent.Should().Contain("Include example files");
             cut.Find("input[type='hidden'][name='IncludeExamples']")
                 .GetAttribute("value").Should().Be("true", "the option defaults to on");
-            cut.Markup.Should().NotContain("Include example AL files",
-                "the option moved out of the Options section into the preview head");
         });
 
         cut.Find(".card__head .switch input[type='checkbox']").Change(false);

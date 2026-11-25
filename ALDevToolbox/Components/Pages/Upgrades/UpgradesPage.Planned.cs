@@ -128,15 +128,16 @@ public partial class UpgradesPage
         else await CountArchiveAsync();
     }
 
-    private async Task LoadOpenAsync()
-    {
-        var open = await Upgrades.ListOpenAsync();
-        _open = UpgradesListWording.OpenOrder(open, Zone.ToDisplay, Zone.ToDisplay(DateTime.UtcNow));
-    }
+    private async Task LoadOpenAsync() => ShowOpen(await Upgrades.ListOpenAsync());
 
-    private async Task LoadArchiveAsync()
+    private void ShowOpen(List<EnvironmentUpgradeSummary> open) =>
+        _open = UpgradesListWording.OpenOrder(open, Zone.ToDisplay, Zone.ToDisplay(DateTime.UtcNow));
+
+    private async Task LoadArchiveAsync() => ShowArchive(await Upgrades.ListArchivedAsync());
+
+    private void ShowArchive(List<EnvironmentUpgradeSummary> archive)
     {
-        _archive = await Upgrades.ListArchivedAsync();
+        _archive = archive;
         _archiveCount = _archive.Count;
         _archivePage = Math.Min(_archivePage, Math.Max(0, (ShownArchiveAll().Count - 1) / ArchivePageSize));
     }
@@ -156,9 +157,9 @@ public partial class UpgradesPage
         try
         {
             await using var scope = ScopeFactory.CreateAsyncScope();
-            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: _gone.Token);
+            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: Gone);
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
         {
             return; // the page went while the read was out
         }
@@ -170,10 +171,24 @@ public partial class UpgradesPage
         UpgradeFleetService.OfferedVersions(rows).Select(o => o.Version).ToList();
 
     /// <summary>
+    /// Counts the view changes and the fleet's own reloads, so a view read is laid down
+    /// only if nothing newer started while it was out.
+    /// </summary>
+    private int _viewLoads;
+
+    /// <summary>
     /// A tab was followed. The Fleet view's timers belong to it: leaving it stops the
     /// refresh poll and the watch, and coming back reads the fleet afresh (the ticks are
     /// kept, less any row that has gone). The others were read with the page.
     /// </summary>
+    /// <remarks>
+    /// The view's read is on a DI scope of its own, like the poll's and the tab count's
+    /// (#1069): a tab clicked again before the last one's read is back, or while a click
+    /// is still awaiting a query, would otherwise start a second command on the circuit's
+    /// one context (#1495). Reads may then land out of order, so the latest change wins
+    /// and an earlier one's rows are dropped: a fleet read landing under the Open view
+    /// would start the watch there.
+    /// </remarks>
     private async Task OnViewChangedAsync(UpgradesView was)
     {
         _planNotice = null;
@@ -183,17 +198,35 @@ public partial class UpgradesPage
             _watch.Clear();
         }
         if (was == UpgradesView.Archive) _archive = null;
-        switch (_view)
+
+        var load = ++_viewLoads;
+        bool Latest() => load == _viewLoads && !Gone.IsCancellationRequested;
+        try
         {
-            case UpgradesView.Fleet:
-                await LoadAsync();
-                break;
-            case UpgradesView.Archive:
-                await LoadArchiveAsync();
-                break;
-            default:
-                await LoadOpenAsync();
-                break;
+            await using var scope = ScopeFactory.CreateAsyncScope();
+            var services = scope.ServiceProvider;
+            switch (_view)
+            {
+                case UpgradesView.Fleet:
+                    var fleet = await services.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: Gone);
+                    var pending = await services.GetRequiredService<UpgradeActionService>().ListPendingAsync(Gone);
+                    // Not under a run or a dialog that a tick on the old rows opened: those own
+                    // the table, as they do against the poll, and reload it when they finish.
+                    if (Latest() && !PollPaused) ShowLoaded(fleet, pending);
+                    break;
+                case UpgradesView.Archive:
+                    var archive = await services.GetRequiredService<EnvironmentUpgradeService>().ListArchivedAsync(ct: Gone);
+                    if (Latest()) ShowArchive(archive);
+                    break;
+                default:
+                    var open = await services.GetRequiredService<EnvironmentUpgradeService>().ListOpenAsync(Gone);
+                    if (Latest()) ShowOpen(open);
+                    break;
+            }
+        }
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
+        {
+            // the page went while the read was out
         }
     }
 

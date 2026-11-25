@@ -25,41 +25,22 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 /// </summary>
 public sealed class ExplorerTreeTests : IDisposable
 {
-    private readonly TestDb _db = new();
+    // Created on first use, so a test that starts by seeding gets a clone of
+    // the seeded template instead of an empty database (#1552).
+    private TestDb? _database;
+    private TestDb _db => _database ??= new TestDb();
 
-    public void Dispose() => _db.Dispose();
-
-    private static readonly string FixtureRoot =
-        Path.Combine(AppContext.BaseDirectory, "Fixtures", "ObjectExplorer");
-
-    private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext,
-                new ALDevToolbox.Services.Translation.TranslationMemoryService(
-                    ctx, _db.OrgContext,
-                    NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-                NullLogger<TranslationImportService>.Instance),
-            new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+    public void Dispose() => _database?.Dispose();
 
     private ExplorerTreeService NewTree(Data.AppDbContext ctx) =>
         new(ctx, new SourceVisibility(ctx, new ProjectAccess(ctx, _db.OrgContext)));
 
     /// <summary>Two modules in one release, so the tree has siblings to close.</summary>
-    private async Task<int> SeedAsync()
+    private Task<int> SeedAsync()
     {
-        await using var ctx = _db.NewContext();
-        await using var s1 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
-        await using var s2 = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
-        var summary = await NewImporter(ctx).ImportReleaseAsync(new ReleaseImportRequest(
-            Label: "BC 25.18 DK", Kind: "first_party",
-            ParentReleaseId: null, ApplicationVersionId: null,
-            Uploads: new[]
-            {
-                new AppFileUpload("Microsoft_DK_Core.app", s1, null),
-                new AppFileUpload("Microsoft_OIOUBL.app", s2, null),
-            }));
-        return summary.ReleaseId;
+        if (_database is not null) return DkReleaseSeed.ImportAsync(_database);
+        _database = DkReleaseSeed.NewDatabase(out var releaseId);
+        return Task.FromResult(releaseId);
     }
 
     private static async Task<(long FileId, string Path, long ModuleId)> AFileAsync(Data.AppDbContext ctx) =>
@@ -514,9 +495,9 @@ public sealed class ExplorerTreeTests : IDisposable
     }
 
     /// <summary>
-    /// Grouping by object kind puts one section per AL kind above its files,
-    /// already open — the sections arrive with their children, so folding one
-    /// never asks the server again.
+    /// Grouping by object kind puts one section per AL kind above its files.
+    /// The sections arrive with their children, so folding one never asks the
+    /// server again; only the open file's section starts open.
     /// </summary>
     [Fact]
     public async Task Grouping_by_kind_sections_the_apps_files()
@@ -530,7 +511,18 @@ public sealed class ExplorerTreeTests : IDisposable
 
         var sections = tree.Where(n => n.Kind == "section").ToList();
         sections.Should().NotBeEmpty();
-        sections.Should().OnlyContain(sn => sn.IsOpen && sn.HasChildren && sn.Depth == 0);
+        sections.Should().OnlyContain(sn => sn.HasChildren && sn.Depth == 0);
+        // Only the section holding the open file starts open; the others are
+        // folded, with their rows present but hidden.
+        var openSection = sections.Should().ContainSingle(sn => sn.IsOpen).Which;
+        foreach (var section in sections)
+        {
+            tree.Skip(tree.IndexOf(section) + 1).TakeWhile(n => n.Depth == 1)
+                .Should().OnlyContain(n => n.IsHidden == !section.IsOpen,
+                    because: $"rows under '{section.Name}' follow its fold");
+        }
+        tree.Skip(tree.IndexOf(openSection) + 1).TakeWhile(n => n.Depth == 1)
+            .Should().Contain(n => n.IsActive, because: "the open section is the one holding the open file");
         sections.Select(sn => sn.Name).Should().Contain("Codeunits");
         tree.Where(n => n.Kind == "file").Should().OnlyContain(n => n.Depth == 1);
         tree.Should().ContainSingle(n => n.IsActive).Which.FileId.Should().Be(fileId);
@@ -545,6 +537,58 @@ public sealed class ExplorerTreeTests : IDisposable
         }
         tree.Count(n => n.Kind == "file").Should()
             .Be(await ctx.OeModuleFiles.AsNoTracking().CountAsync(f => f.ModuleId == moduleId));
+    }
+
+    /// <summary>
+    /// #1339: the kind grouping used to be built from the flat list, which is
+    /// already cut to the alphabetically first few hundred files, so on a
+    /// large app the badges counted a subset and late kinds vanished. Now each
+    /// section counts every file of its kind and is capped on its own.
+    /// </summary>
+    [Fact]
+    public async Task Grouping_by_kind_counts_every_file_and_caps_each_section_on_its_own()
+    {
+        await SeedAsync();
+        long fileId, moduleId;
+        const int extra = 405;
+        await using (var ctx = _db.NewContext())
+        {
+            (fileId, _, moduleId) = await AFileAsync(ctx);
+            // No object behind these, so they land in "Other files"; their
+            // names sort ahead of every object name.
+            for (var i = 0; i < extra; i++)
+            {
+                await AddFileAsync(ctx, moduleId, $"Extra/{i:D4}.txt");
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var tree = await NewTree(read).ListModuleTreeAsync(
+            moduleId, ExplorerTreeService.TreeGrouping.Kind, fileId);
+
+        var sections = tree.Where(n => n.Kind == "section").ToList();
+        sections.Select(n => n.Name).Should().Contain("Codeunits",
+            because: "a kind that sorts after the cap is still drawn");
+
+        var other = sections.Should().ContainSingle(n => n.Name == "Other files").Which;
+        var objectFileIds = await read.OeModuleObjects.AsNoTracking()
+            .Where(o => o.ModuleId == moduleId && o.SourceFileId != null)
+            .Select(o => o.SourceFileId!.Value)
+            .Distinct()
+            .ToListAsync();
+        var otherTotal = await read.OeModuleFiles.AsNoTracking()
+            .CountAsync(f => f.ModuleId == moduleId && !objectFileIds.Contains(f.Id));
+        other.Badge.Should().Be(otherTotal.ToString("N0"), because: "the badge counts every file of the kind");
+
+        var under = tree.Skip(tree.IndexOf(other) + 1).TakeWhile(n => n.Depth == 1).ToList();
+        under.Count(n => n.Kind == "file").Should().Be(100);
+        under[^1].Kind.Should().Be("overflow", because: "the cut section says what it left out, at its own end");
+        under[^1].Name.Should().Be($"{otherTotal - 100:N0} more files - type a name in the search box above",
+            because: "the row names what it left out and where to find it");
+        other.IsOpen.Should().BeFalse(because: "the open file is not in it");
+        under.Should().OnlyContain(n => n.IsHidden, because: "a folded section's rows, overflow row included, start hidden");
+
+        tree.Should().ContainSingle(n => n.IsActive).Which.FileId.Should().Be(fileId);
     }
 
     [Theory]

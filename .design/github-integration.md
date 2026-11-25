@@ -379,11 +379,12 @@ extension, translation and recipe flows write as the *user*, not the app, so
 the bypass does not reach them and they keep going through pull requests.
 
 **Working branches and their build pipelines.** Once the default branch holds
-the workspace, `test` and `staging` are created at that same commit
+the workspace, `test` is created at that same commit (`staging` was dropped
+2026-11-05: Mads found it unnecessary)
 (`POST /git/refs`, installation token), before the ruleset so a ruleset over
 every branch cannot refuse them. After the repository is registered on a
 solution, the solution gets one build pipeline per branch - the default branch
-by name, then `test` and `staging` - each building every extension, with the
+(with no branch, so it follows the default branch and is named "Default branch", like one added by hand; Mads 2026-11-05), then `test` - each building every extension, with the
 pipeline defaults (build numbers on, preview check off). Pipelines are only
 added when the new repository is the solution's only one, because a pipeline
 checks its branch out in every repository of the solution and older
@@ -540,7 +541,15 @@ credential, where there is no user (phase 2, #627).
 - **Save.** One Contents API `PUT` with the remembered SHA, onto
   `aldt/translate-<lang>`, with the user's token. The branch is reused while its PR
   is open (found by head), so repeated saves add commits to one PR rather than opening
-  five. A 409 is the conflict signal and surfaces as "this file changed in the
+  five; while it is open, opening that language's file reads it from the branch. Once
+  the PR is merged or closed, a kept branch is history: opening reads the default
+  branch, and the next save first moves the branch to the default branch's head
+  before committing and opening a new PR (#1329) - by fast-forward when its commits
+  are all on the default branch, or by reset only when its head is the head of its
+  latest closed or merged PR (GitHub keeps that commit under the PR). A branch holding
+  commits no PR carried is left alone and the save walks on to `-2`, `-3`, ... up to
+  ten names, the walk recipe delivery uses; opening and saving both take the first of
+  those with an open PR. A 409 is the conflict signal and surfaces as "this file changed in the
   repository since you opened it" with a re-open - never a silent overwrite.
 
 Five details settled while building it.
@@ -574,7 +583,14 @@ it gets its own refusal: open that file instead.
 A save feeds the **translation memory** exactly as an export does
 (`TranslationMemoryService.LearnFromXliffAsync`, which both paths now share).
 Taking delivery through GitHub rather than through a download should not cost the
-organisation what it just learned.
+organisation what it just learned. Unlike an export, the save records the repository
+and path it wrote to, so its pairs are hidden from readers who cannot see a solution
+tracking that repository exactly as the ingest's are (#1252, #1324). Two limits:
+pairs a save learned before #1324 carry no repository and stay visible to everyone -
+they are not backfilled, because `Origin` holds only the file name - and the hidden
+set is built from each Solution's stored repository URL, so a repository renamed on
+GitHub after a Solution started tracking it is compared by its old name until the URL
+is updated.
 
 The one thing the page shows that the service does not decide: the toolbar's
 primary button becomes **Save to repository** when the open file came from one,
@@ -584,12 +600,19 @@ one that matches how the file arrived.
 ## MCP parity
 
 - `generate_workspace` gains the create-repository option (#622). It returns the
-  repository *and* the ZIP whose files are in it, for the same reason
-  `generate_extension` does.
+  repository, with the size and hash of the ZIP whose files are in it.
 - `generate_extension` gains the add-to-repository option (#623). It returns the
-  pull request *and* the ZIP that went into it - generating a second time would
-  mint different extension GUIDs, so a download offered beside the pull request
-  has to be those same bytes.
+  pull request, with the size and hash of the ZIP that went into it.
+- Since #1508 neither returns the ZIP's bytes: base64 made a typical workspace too
+  large for an assistant's answer. Without a repository the result carries a
+  `downloadPath` instead, kept by `GeneratedDownloadStore` for 30 minutes and served
+  only to the user who generated it, in their organisation, from a signed-in
+  browser. The store holds at most 256 MB of archives at once and refuses a new one
+  past that, so a retry loop cannot fill the app's memory; when it is full it also
+  drops its oldest links in the background, which can end one before its 30 minutes. The bytes are held
+  rather than regenerated on fetch because generating a second time would mint
+  different extension GUIDs. With a repository there is no link: the repository or
+  pull request holds the files.
 - Both resolve the repository through the same service the pages use, so the access
   gate is inherited rather than re-implemented in the tool class - see the resolver
   rule in PROJECT.md.

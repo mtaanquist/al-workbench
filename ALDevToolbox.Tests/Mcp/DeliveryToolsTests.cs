@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
@@ -68,9 +69,47 @@ public sealed class DeliveryToolsTests : IDisposable
         }
 
         await using var read = _db.NewContext();
-        var rows = await NewTools(read).ListReleasePipelinesAsync();
+        var rows = (await NewTools(read).ListReleasePipelinesAsync()).Rows;
 
         rows.Should().ContainSingle(r => r.Name == "CRONUS App → Production" && r.EnvironmentName == "Production");
+    }
+
+    [Fact]
+    public async Task List_deployment_pipelines_narrows_by_search_and_limit()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            // Named unlike its type, so the search has to read the type to find it.
+            await ctx.OeProjectEnvironments.Where(e => e.ProjectId == seed.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(e => e.Name, "Live"));
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Name, "CRONUS App to Live"));
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        (await tools.ListReleasePipelinesAsync(search: "production")).Rows.Should().ContainSingle();
+        (await tools.ListReleasePipelinesAsync(search: "live")).Rows.Should().ContainSingle();
+        (await tools.ListReleasePipelinesAsync(search: "nowhere")).Rows.Should().BeEmpty();
+        var cut = await tools.ListReleasePipelinesAsync(limit: 0);
+        cut.Rows.Should().HaveCount(1, "a limit below one still returns one row");
+    }
+
+    [Fact]
+    public async Task List_release_pipelines_leaves_out_archived_ones()
+    {
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow).SetProperty(r => r.ArchivedAt, DateTime.UtcNow));
+        }
+
+        await using var read = _db.NewContext();
+        (await NewTools(read).ListReleasePipelinesAsync()).Rows.Should().NotContain(r => r.Id == seed.ReleasePipelineId);
     }
 
     [Fact]
@@ -206,7 +245,7 @@ public sealed class DeliveryToolsTests : IDisposable
 
         await using var list = _db.NewContext();
         var rows = await NewTools(list).ListDeliveriesAsync(seed.ReleasePipelineId);
-        rows.Should().ContainSingle(r => r.Id == result.DeploymentId && r.Status == ProjectDeliveryStatus.Scheduled);
+        rows.Rows.Should().ContainSingle(r => r.Id == result.DeploymentId && r.Status == ProjectDeliveryStatus.Scheduled);
     }
 
     /// <summary>Turns the seeded environment into a linked on-premises tier on an approved, online gateway.</summary>
@@ -280,13 +319,31 @@ public sealed class DeliveryToolsTests : IDisposable
             await narrow.SaveChangesAsync();
         }
 
+        // A real colleague with nothing granting them this solution: not an admin, not
+        // its owner, on no team.
+        const int colleagueId = 9620;
+        await using (var seedUser = _db.NewContext())
+        {
+            seedUser.Users.Add(new ALDevToolbox.Domain.Entities.User
+            {
+                Id = colleagueId, OrganizationId = TestDb.DefaultOrgId, Email = "pat@cronus.example", PasswordHash = "x",
+                DisplayName = "Pat", Role = ALDevToolbox.Domain.Entities.UserRole.Editor,
+                Status = ALDevToolbox.Domain.Entities.UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await seedUser.SaveChangesAsync();
+        }
         _db.OrgContext.IsSiteAdmin = false;
-        _db.OrgContext.CurrentUserId = 999;
+        _db.OrgContext.CurrentUserId = colleagueId;
 
         await using var read = _db.NewContext();
         var act = () => NewTools(read).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId);
 
-        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("permission");
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Be(
+            "You don't have permission to deploy this solution's builds — you must be someone who manages the solution.");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectDeliveries.AsNoTracking().AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId))
+            .Should().BeFalse("nothing is queued when the caller is refused");
+        _queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     [Fact]
@@ -310,10 +367,218 @@ public sealed class DeliveryToolsTests : IDisposable
         }
 
         await using var read = _db.NewContext();
-        var rows = await NewTools(read).ListDeliveriesAsync(seed.ReleasePipelineId);
+        var rows = (await NewTools(read).ListDeliveriesAsync(seed.ReleasePipelineId)).Rows;
 
         rows.Should().ContainSingle(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled);
         rows[0].Apps.Should().ContainSingle(a => a.AppName == "CRONUS Core");
+    }
+
+    [Fact]
+    public async Task List_deliveries_cuts_long_messages_and_reads_one_deployment_whole()
+    {
+        Seed seed;
+        int first, second;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" });
+            first = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            second = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        // Business Central's schema-sync errors run to thousands of characters (#1525).
+        var longMessage = "The field 'CRONUS Amount' cannot be removed. " + new string('x', 2_000);
+        await using (var ctx = _db.NewContext())
+        {
+            var delivery = await ctx.OeProjectDeliveries.SingleAsync(d => d.Id == first);
+            delivery.FailureMessage = longMessage;
+            foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == first).ToListAsync())
+                result.Message = longMessage;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+        var listed = (await tools.ListDeliveriesAsync(seed.ReleasePipelineId)).Rows.Single(d => d.Id == first);
+        listed.FailureMessage!.Length.Should().BeLessThan(500);
+        listed.FailureMessage.Should().Contain("list_deployments with deploymentId has the whole message");
+        listed.Apps.Should().OnlyContain(a => a.Message!.Length < 500);
+
+        var one = (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: first)).Rows;
+        one.Should().ContainSingle();
+        one[0].FailureMessage.Should().Be(longMessage);
+        one[0].Apps.Should().OnlyContain(a => a.Message == longMessage);
+        one[0].Number.Should().Be(1, "it keeps its place in the pipeline's history");
+        (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: second)).Rows.Single().Number.Should().Be(2);
+
+        var act = () => tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: 999_999);
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("999999");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task One_deployment_with_many_long_app_messages_still_fits_one_answer(bool escapedText)
+    {
+        // #1601, GBC-3: a 20-app deployment whose installs all failed with long
+        // Business Central errors. The deployment's own message stays whole.
+        Seed seed;
+        int id;
+        var apps = Enumerable.Range(1, 20).Select(i => $"CRONUS App {i:00}").ToArray();
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, apps);
+            id = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        var deploymentMessage = "The deployment failed. " + new string('d', 3_000);
+        await using (var ctx = _db.NewContext())
+        {
+            var delivery = await ctx.OeProjectDeliveries.SingleAsync(d => d.Id == id);
+            delivery.FailureMessage = deploymentMessage;
+            foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id).ToListAsync())
+                result.Message = "The extension could not be installed. " + (escapedText
+                    // Quotes and Danish letters grow when serialised, which a plain
+                    // character count of the cut does not see (#1644 review).
+                    ? string.Concat(Enumerable.Repeat("Feltet 'Beløb' i \"Kundeposter\" kan ikke ændres på grund af åbne poster. ", 50))
+                    : new string('x', 3_000));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var answer = await NewTools(read).ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: id);
+
+        var row = answer.Rows.Should().ContainSingle().Subject;
+        row.FailureMessage.Should().Be(deploymentMessage);
+        row.Apps.Should().HaveCount(20).And.OnlyContain(a => a.Message!.Contains("whole message"));
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("cut");
+        System.Text.Json.JsonSerializer.Serialize(row, ModelContextProtocol.McpJsonUtilities.DefaultOptions)
+            .Length.Should().BeLessThanOrEqualTo(McpAnswerBudget.Characters);
+    }
+
+    [Fact]
+    public async Task One_deployment_that_fits_is_returned_whole_and_not_marked_cut()
+    {
+        Seed seed;
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core", "CRONUS Payroll" });
+            id = (await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId;
+        }
+        var message = "Feltet 'Beløb' kan ikke ændres. " + new string('x', 1_000);
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var result in await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id).ToListAsync())
+                result.Message = message;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var answer = await NewTools(read).ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: id);
+
+        answer.Rows.Single().Apps.Should().OnlyContain(a => a.Message == message);
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task List_deliveries_reads_further_back_from_the_oldest_deployment_returned()
+    {
+        Seed seed;
+        var ids = new List<int>();
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" });
+        }
+        for (var i = 0; i < 3; i++)
+        {
+            await using var ctx = _db.NewContext();
+            ids.Add((await NewTools(ctx).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId)).DeploymentId);
+        }
+        // The two older ones requested in the same instant are told apart by id.
+        await using (var ctx = _db.NewContext())
+        {
+            var same = DateTime.UtcNow.AddHours(-1);
+            foreach (var d in await ctx.OeProjectDeliveries.Where(d => d.Id == ids[0] || d.Id == ids[1]).ToListAsync())
+                d.CreatedAt = same;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+        var newestPage = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: 1);
+        newestPage.Truncated.Should().BeTrue("two older deployments were left out");
+        newestPage.Note.Should().Contain("beforeDeploymentId");
+        var newest = newestPage.Rows;
+        newest.Select(d => (d.Id, d.Number)).Should().Equal((ids[2], 3));
+        var older = (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: 1, beforeDeploymentId: newest[^1].Id)).Rows;
+        older.Select(d => (d.Id, d.Number)).Should().Equal((ids[1], 2));
+        var oldest = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: 5, beforeDeploymentId: older[^1].Id);
+        oldest.Rows.Select(d => (d.Id, d.Number)).Should().Equal((ids[0], 1));
+        oldest.Truncated.Should().BeFalse();
+        oldest.Note.Should().BeNull();
+        (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, beforeDeploymentId: ids[0])).Rows.Should().BeEmpty();
+        (await tools.ListDeliveriesAsync(seed.ReleasePipelineId, beforeDeploymentId: 999_999)).Rows
+            .Should().BeEmpty("that deployment does not exist");
+        var both = () => tools.ListDeliveriesAsync(seed.ReleasePipelineId, deploymentId: ids[1], beforeDeploymentId: ids[2]);
+        await both.Should().ThrowAsync<McpException>();
+    }
+
+    [Fact]
+    public async Task List_deliveries_of_a_five_app_solution_stays_within_the_answer_budget()
+    {
+        // Twenty deployments of a five-app solution, every one deployed and none with a
+        // message, ran to about 40,000 characters: the per-app rows make a row long, not
+        // the messages (#1572).
+        var apps = new[] { "CRONUS Core", "CRONUS Sales", "CRONUS Purchase", "CRONUS Warehouse", "CRONUS Reports" };
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, apps);
+            var start = DateTime.UtcNow.AddDays(-30);
+            for (var i = 0; i < 60; i++)
+            {
+                var at = start.AddHours(i * 8);
+                var delivery = new OeProjectDelivery
+                {
+                    OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, ReleasePipelineId = seed.ReleasePipelineId,
+                    ProjectBuildId = seed.BuildId, EnvironmentName = "Production", Status = ProjectDeliveryStatus.Deployed,
+                    ScheduledFor = at, StartedAt = at, InstallStartedAt = at.AddMinutes(1), FinishedAt = at.AddMinutes(9),
+                    CreatedAt = at, UpdatedAt = at,
+                };
+                for (var a = 0; a < apps.Length; a++)
+                {
+                    delivery.Results.Add(new OeProjectDeliveryResult
+                    {
+                        OrganizationId = TestDb.DefaultOrgId, Ordering = a, AppName = apps[a],
+                        AppId = Guid.NewGuid().ToString(), AppVersion = $"26.2.{4800 + i}.0", PreviousVersion = $"26.2.{4799 + i}.0",
+                        OperationId = Guid.NewGuid(), Status = ProjectDeliveryResultStatus.Completed,
+                        StartedAt = at.AddMinutes(a), FinishedAt = at.AddMinutes(a + 1), CreatedAt = at, UpdatedAt = at,
+                    });
+                }
+                ctx.OeProjectDeliveries.Add(delivery);
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+        foreach (var limit in new[] { McpListLimit.Default, McpListLimit.Max })
+        {
+            var page = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: limit);
+            JsonSerializer.Serialize(page.Rows, McpJsonUtilities.DefaultOptions).Length
+                .Should().BeLessThanOrEqualTo(McpAnswerBudget.Characters, "limit {0} must still fit one answer", limit);
+            page.Rows.Should().NotBeEmpty().And.HaveCountLessThan(limit, "the budget, not the limit, cut this history");
+            page.Rows.Should().OnlyContain(d => d.Apps.Count == apps.Length);
+            page.Truncated.Should().BeTrue();
+            page.Note.Should().Contain("too long").And.Contain("beforeDeploymentId");
+
+            // The note's way on reads the next page, which picks up where this one stopped.
+            var next = await tools.ListDeliveriesAsync(seed.ReleasePipelineId, limit: limit, beforeDeploymentId: page.Rows[^1].Id);
+            next.Rows[0].Number.Should().Be(page.Rows[^1].Number - 1);
+        }
     }
 
     // ── GitHub releases as an artifact source (#632) ──────────────────────
@@ -484,7 +749,7 @@ public sealed class DeliveryToolsTests : IDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(seed.ProjectId, ProjectVisibility.Private, new[] { teamId });
         }
 
@@ -493,7 +758,7 @@ public sealed class DeliveryToolsTests : IDisposable
         await using (var read = _db.NewContext())
         {
             var tools = NewTools(read);
-            (await tools.ListReleasePipelinesAsync()).Should().NotContain(r => r.Id == seed.ReleasePipelineId);
+            (await tools.ListReleasePipelinesAsync()).Rows.Should().NotContain(r => r.Id == seed.ReleasePipelineId);
             (await ((Func<Task>)(() => tools.ListDeliveriesAsync(seed.ReleasePipelineId)))
                 .Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("not found");
             await ((Func<Task>)(() => tools.ListReleasePipelinesAsync(seed.ProjectId)))
@@ -504,8 +769,8 @@ public sealed class DeliveryToolsTests : IDisposable
         await using (var read = _db.NewContext())
         {
             var tools = NewTools(read);
-            (await tools.ListReleasePipelinesAsync()).Should().ContainSingle(r => r.Id == seed.ReleasePipelineId);
-            (await tools.ListDeliveriesAsync(seed.ReleasePipelineId)).Should().BeEmpty();
+            (await tools.ListReleasePipelinesAsync()).Rows.Should().ContainSingle(r => r.Id == seed.ReleasePipelineId);
+            (await tools.ListDeliveriesAsync(seed.ReleasePipelineId)).Rows.Should().BeEmpty();
         }
     }
 
@@ -551,12 +816,11 @@ public sealed class DeliveryToolsTests : IDisposable
 
     private async Task ConnectOrganisationAsync()
     {
-        using var rsa = System.Security.Cryptography.RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(
             new ALDevToolbox.Services.Operations.GitHubAppInput(
                 AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
                 ClientSecret: "s3cr3t", ClearClientSecret: false,
-                PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+                PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new ALDevToolbox.Domain.Entities.OrganizationSettings

@@ -116,4 +116,14 @@ public sealed class McpToolCatalogTests
                 + "name is agent prompt text, not help for a reader");
         }
     }
+
+    [Fact]
+    public void The_remove_translation_blurb_says_it_reaches_the_whole_memory_and_needs_the_editor_role()
+    {
+        // #1601: it read as if it only withdrew the assistant's own suggestion, so an
+        // Admin deciding whether to trust assistants underestimated what it changes.
+        var blurb = McpToolCatalog.Find("remove_translation")!.Blurb;
+        blurb.Should().Contain("organisation's memory").And.Contain("Editor role");
+        blurb.Should().NotContain("the assistant suggested");
+    }
 }

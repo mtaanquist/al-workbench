@@ -133,6 +133,60 @@ public sealed class PushBuildTests : IDisposable
         (await ListDueAsync(Push())).Should().BeEmpty("GitHub redelivering a push does not build it twice");
     }
 
+    /// <summary>
+    /// A waiting push build refused because someone else took the automatic builds over
+    /// never built its commit, so a redelivery of that push builds it as the new person
+    /// (#1551). A build that failed on its own merits still counts as built.
+    /// </summary>
+    [Theory]
+    [InlineData("Someone else took over this pipeline's automatic builds before this build started.", true)]
+    [InlineData("The compiler reported 3 errors.", false)]
+    public async Task A_commit_whose_push_build_was_refused_at_pickup_is_due_again(string failure, bool due)
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await ctx.OePipelines.Where(p => p.Id == pipelineId).Select(p => p.ProjectId).SingleAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Trigger = ProjectBuildTrigger.Push, HeadSha = GitHubWebhookPayloads.After,
+                Status = ProjectBuildStatus.Failed, FailureMessage = failure, StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await ListDueAsync(Push())).Should().HaveCount(due ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Every reason a waiting build is refused at pickup, not only a takeover: none of them
+    /// built the commit, so the next delivery of that commit builds it (#1551).
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(PickupRefusals))]
+    public async Task Any_pickup_refusal_leaves_the_commit_due(string refusal)
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await ctx.OePipelines.Where(p => p.Id == pipelineId).Select(p => p.ProjectId).SingleAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Trigger = ProjectBuildTrigger.Push, HeadSha = GitHubWebhookPayloads.After,
+                Status = ProjectBuildStatus.Failed, FailureMessage = refusal, StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await ListDueAsync(Push())).Should().ContainSingle();
+    }
+
+    public static TheoryData<string> PickupRefusals() => new(ProjectBuildService.AutomationRefusals);
+
     [Fact]
     public async Task A_push_older_than_the_branch_head_already_recorded_is_not_due()
     {
@@ -520,11 +574,10 @@ public sealed class PushBuildTests : IDisposable
 
     private async Task ConnectAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new OrganizationSettings
         {
@@ -566,11 +619,13 @@ public sealed class PushBuildTests : IDisposable
             sp.GetRequiredService<StorageQuotaGuard>(),
             sp.GetRequiredService<TranslationImportService>(),
             sp.GetRequiredService<CallSiteReferenceEmitter>(),
-            NullLogger<ReleaseImportService>.Instance));
+            NullLogger<ReleaseImportService>.Instance,
+            sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>()));
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
         services.AddScoped(sp => new ReleaseManagementService(
             sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>()),
             NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         services.AddScoped(sp => new UserRepositoryTokenService(

@@ -252,6 +252,46 @@ readiness - one more database read, no call to GitHub, so the card still renders
 GitHub is down. The success card names the second commit and shows the ruleset warning as a
 warning beside the success rather than instead of it.
 
+### Default standards: keeping test up to date with main
+
+New repositories get a `test` branch beside the default branch, and keeping it current by
+hand is the chore teams kept skipping. The fix lives in the customer's repository, not in
+the workbench: a GitHub Actions workflow, `.github/workflows/refresh-test.yml`, seeded as a
+**default repository standard**. The workbench only puts it there; it never runs, watches or
+re-applies it.
+
+- **A row, not code.** It is an ordinary `github_repository_standard_files` row, so an Admin
+  edits or deletes it on the Repository standards page like any file they added. New
+  organisations get it when they are created (signup, and the system org on a fresh
+  database); existing ones got it from the `SeedRefreshTestWorkflow` migration, which keeps
+  an Admin's own file at the same path. It is never re-seeded on boot, so a delete sticks.
+  The body is `DefaultRepositoryStandardFiles.RefreshTestWorkflowContent`.
+- **Merge, never reset.** On every push to `main` (and on demand) the workflow merges `main`
+  into `test` through the merges API. A force-reset would be simpler and would throw away
+  work that is on `test` but not yet on `main`, which is what `test` is for.
+- **When it cannot merge, it opens a pull request instead of failing quietly.** A conflict,
+  branch rules on `test`, or a change to a workflow file (the built-in token may not push
+  those) all end in a pull request into `test`. It comes from a branch of its own,
+  `refresh-test-from-main`, so resolving a conflict in the browser commits there rather than
+  to `main`. An open pull request is fast-forwarded, never reset, so a half-finished
+  resolution survives the next push to `main`.
+- **Needs one repository setting** for that pull request: "Allow GitHub Actions to create
+  and approve pull requests". Without it the run fails with a message saying so, so
+  somebody gets the failure email. Any other refusal it does not expect (a 5xx, an
+  unreadable `test`) also fails the run rather than reporting success.
+- **Merge the pull request with a merge commit.** A squash leaves `main`'s commits out of
+  `test`'s history and the next run meets the same conflicts. The workflow's header and the
+  pull request body both say so. Pull requests opened by the built-in token start no other
+  workflows, so required Actions checks on `test` need a push or a reopen; the header says
+  that too.
+- Merges pushed by the built-in token do not start other workflows, but the workbench's own
+  build pipelines listen to the GitHub App's push webhook, so the `test` pipeline still
+  builds the result.
+
+Every repository the workbench creates also has **"Automatically delete head branches"**
+turned on (`delete_branch_on_merge` on the create call). GitHub has no organisation-wide
+default for it.
+
 ## #626 Cookbook: apply a recipe to a repository, and update every repository that took it
 
 Named user: a consultant on a customer project who found the right recipe and wants it
@@ -261,10 +301,10 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
 
 - **One operation, two callers.** `GitHubRecipeDeliveryService.ApplyAsync(recipeId,
   repoFullName, customerName?)` commits the recipe's files at their `RelativePath` onto
-  `aldt/recipe-<slug>` **with the user's token** and opens a pull request into the default
+  `aldt/recipe-<id>-<slug>` **with the user's token** and opens a pull request into the default
   branch. The download modal calls it once; the admin "Open update pull requests" calls
   it once per repository that took the recipe. The pull request body says which it is.
-- **Branch reuse, then stepping.** If `aldt/recipe-<slug>` has an open pull request, the
+- **Branch reuse, then stepping.** If `aldt/recipe-<id>-<slug>` has an open pull request, the
   commit is added to it (find-before-create, as the Translator does). If the branch
   exists with no open pull request (merged or closed), the name is stepped (`-2`, `-3`)
   as extension delivery does, so history is never rewritten.
@@ -293,7 +333,7 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   tree, blob, tree, commit, create/update ref, find/create pull request - was already
   on `GitHubAppClient` from phase 1, so this feature adds no
   `GitHubAppClient.<Feature>.cs` file and leaves that class as it found it.
-- **Branch choice is one read-only walk, not two rules.** `aldt/recipe-<slug>`,
+- **Branch choice is one read-only walk, not two rules.** `aldt/recipe-<id>-<slug>`,
   `-2`, `-3`... are tried in order and each is asked two questions: is a pull request
   open on it (join that one, and commit on the branch's own head), and does the branch
   exist at all (if not, cut it from the default branch head). The first name to answer
@@ -302,6 +342,20 @@ in the customer's repository as a reviewable change, not a ZIP on their desktop.
   name's pull request is merged, a third apply would open a *third* pull request
   beside the still-open `-2` rather than joining it. Ten names is the cap, as
   extension delivery uses.
+- **The recipe id is in the branch name (#1600).** Names were `aldt/recipe-<slug>` at
+  first, so two recipes whose titles slug the same shared one branch, and the second
+  apply joined the first recipe's pull request. The id keeps them apart. A recipe's pull
+  request opened under the old name is still joined until it is merged or closed: before
+  the walk starts a new branch, it asks the old names (`aldt/recipe-<slug>`, `-2`...) for
+  an open pull request, stopping at the first name with no branch. Because the old name
+  is shared by every recipe with that slug, one found there is joined only when its title
+  is this recipe's ("Apply the <title> recipe") and this recipe has been applied to that
+  repository before; otherwise a new-style branch is started. An old name for a title
+  that starts with a number can equal a new one (recipe 7 "12 Setup" was
+  `aldt/recipe-12-setup`, recipe 12 "Setup" is now), so the new-style walk steps past an
+  open pull request whose "Apply the X recipe" title slugs to exactly the branch it is
+  on. Any other open pull request on a new-style name is joined, retitled or not: the id
+  says whose it is.
 - **The tree's base is the target's own tree**, not always the default branch's -
   otherwise the second commit on a reused branch would silently revert the first.
   Files are still written over rather than merged, as the issue asks.
@@ -824,8 +878,10 @@ immediate, and a deployment whose App is not subscribed simply has no heads.
   organisation by installation id exactly as for a pull request - the same per-org ambient
   walk, **no `IgnoreQueryFilters()`** - then hands it to `GitHubBranchActivityService`.
   Repository matching is the same normalised clone URL, now shared by both paths
-  (`GitHubRepositoryMatch`). A push to a repository no solution tracks, or for an
-  installation nobody connected, is dropped with a Debug log.
+  (`GitHubRepositoryMatch`). A push for an installation nobody connected is dropped
+  with a Debug log. A push to a repository no solution tracks records nothing, but
+  still refreshes any template module copied from that branch (#1415; see
+  `templates-and-seeding.md`, "Modules from a GitHub repository").
 - **`oe_repository_branch_heads`**: one row per solution repository and branch
   (`project_repository_id`, `branch`, unique together), upserted per push: `head_sha`,
   `pushed_at`, `pusher_login`, `forced`, `commit_count` (what the last push listed),
@@ -877,8 +933,9 @@ started after the push), the sentence is "Building the latest commit on main" in
 the pipeline is not ahead: there is nothing for anybody to start (#1128). A preview check
 does not count.
 
-- **Builds list**: the sentence under the pipeline's name. An ahead pipeline with no build
-  already queued or running takes the warning keyline, a **Build** button beside the sentence (outline, not in the kebab-only actions cell, and
+- **Builds list**: the sentence under the pipeline's name. A disabled pipeline is never
+  ready to build, here or on the dashboard: it refuses Build, so it is not asked for (#1551).
+  An ahead pipeline with no build already queued or running takes the warning keyline, a **Build** button beside the sentence (outline, not in the kebab-only actions cell, and
   only for someone who manages the solution) and the **Ready to build** tab
   (`?show=ready`). Build queues the build and stays on the list.
 - **Pipeline page**: a **Branch** card above the latest build, per repository: the branch,
@@ -926,8 +983,10 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   runs as is no longer active or can no longer manage the solution
   (`ProjectBuildService.EnsureAutomationStillOnAsync`). The build fails with that reason
   and clones nothing. Such a refusal sends no build email and is not the build the next
-  one is compared with. Only the first run is checked: Retry or Recover symbols on a
-  finished build is a person's own choice and runs as them.
+  one is compared with. Only the first run is held to the pipeline's settings: Retry or
+  Recover symbols on a finished build is a person's own choice and runs as them, and like a
+  build by hand it is refused as it starts only if that person is no longer active or can no
+  longer manage the solution (#1551).
 - **What does not build.** A forced push (it may have removed others' work, so a person
   decides), a deleted branch, a push to any other branch, and a redelivery of a push whose
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
@@ -956,7 +1015,11 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   solution, of either provider, or changing one's address, likewise makes whoever saves it
   the person building on push and the nightly preview check run as, on every pipeline of
   the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
-  waiting as the previous person is then refused when its turn comes. When the new person
+  waiting as the previous person is then refused when its turn comes; such a refused build
+  does not count as having built its commit, and neither does a build refused at pickup
+  for any other reason: a redelivery of that push from GitHub builds it as the current
+  run-as person; otherwise it waits for the next push or a manual Build. Nothing
+  re-queues it on its own (#1551). When the new person
   has nothing to clone one of the solution's providers with, the pipeline shows it as
   paused straight away. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
@@ -997,7 +1060,18 @@ suggestions without anyone uploading anything.
   translations; suggestions, pre-translate and the memory search leave out any pair
   attributed to a repository that only solutions the reader cannot see track (deleted
   ones included). A repository a visible solution also tracks is not hidden - the reader
-  can already see it, and the pair is the same whichever file taught it last.
+  can already see it, and the pair is the same whichever file taught it last. A
+  Translator save to a repository records that repository too (#1324), so a pull
+  request that is never merged - and so never read by the ingest - does not leave its
+  pairs visible to everyone. "Export a copy" of a file opened from a repository teaches
+  the memory nothing (#1540), also after a page reload, because the browser's session
+  record keeps the file's repository and path: the export endpoint has no repository to attach, so its
+  pairs would be visible to everyone; Save to repository and the ingest of a copy
+  committed by hand learn the same units with the repository named. Pairs saved before
+  #1324 are not backfilled (their
+  `Origin` is only the file name) and stay visible; and the comparison is against each
+  Solution's stored repository URL, so a repository renamed after it was tracked is
+  matched by its old name.
 - **The ingest runs daily** (`TranslationMemoryIngestScheduler : PolledScheduler`,
   `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER=1`), per org through the ambient loop,
   and **on demand** from the admin Translation memory page ("Refresh from
@@ -1075,8 +1149,8 @@ year's Business Central after a new release lands in the Object Explorer.
   versions survive), and compares `application` / `platform` against the release and
   `dependencies[*].version` against the well-known-dependency defaults.
 - **Drift is a per-org table**, `github_repository_drift` (repository, path, field,
-  current, proposed, release id, detected_at), so the Solutions page can say "12
-  repositories still on 27.x" from the database.
+  current, proposed, release id, detected_at), so the Repositories list (Solutions page
+  until #1719) can say which repositories are still on 27.x from the database.
 - **Open update pull requests** edits the `app.json` in place (only the fields that
   moved, preserving formatting elsewhere) on `aldt/bump-bc-<major.minor>` **with the
   user's token**, one pull request per repository, reused while open. The body says what
@@ -1094,7 +1168,7 @@ year's Business Central after a new release lands in the Object Explorer.
   anybody should be offered a pull request for, and "replace everything" is also
   what makes drift somebody has fixed by hand disappear on its own. The unique
   index is `(organization_id, repository, path, field)`; `field` is
-  `application`, `platform` or `dependency:<app id>`, the id normalised the way
+  `application`, `platform`, `version`, `version-adopt` or `dependency:<app id>`, the id normalised the way
   AL means it (braces and case are decoration). The row hangs off `oe_releases`
   with a cascade, which is why the table is in `TenantTableCatalog.ContentTables`
   rather than excluded as a cache - a per-tenant restore that deleted the
@@ -1109,6 +1183,20 @@ year's Business Central after a new release lands in the Object Explorer.
   well-known-dependency catalogue's default. A manifest with no `application` is
   skipped whole: it states no Business Central to be behind of. So is a
   dependency entry that states no version - there would be nothing to edit.
+- **The app's own `version` follows its `application`.** The house convention is
+  that an app's Major.Minor say which Business Central it was built for, and the
+  pipeline's build numbering only adds to Build, so nothing else would move them.
+  When `application` is behind and the app's `version` has the same major as the
+  old `application`, `version` is proposed too: the target's Major.Minor with Build
+  and Revision back at 0 (`28.2.3.0` on application 28.2 becomes `28.5.0.0` when the
+  target is 28.5). A version already at or past the target is never lowered.
+- **An app that numbers itself is offered the switch, never given it.** One whose
+  major differs (`1.3.0.0` on BC 27) gets a `version-adopt` row instead: the same
+  proposal, kept out of the list of what is behind. When a person opens the pull
+  request from the Repositories list and any app in it has such a row, a dialog lists
+  them with a checkbox, off by default, to switch them in the same pull request. After
+  the switch the app follows the convention and the bullet above keeps it in step.
+  The automatic run never switches anything: nobody is there to ask.
 - **The scan reads the same manifests repository discovery does**, through
   `RepositoryDiscoveryService.ManifestPaths` on one recursive tree read per
   repository, so the two features cannot come to disagree about what a
@@ -1260,6 +1348,77 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   a person opened is theirs to close.
 - **Left out.** No email or in-app notification: GitHub already tells the people watching
   the repository. No auto-merge.
+
+### The Repositories list (#1719)
+
+Named user: a lead developer keeping the customers' repositories current, who wants to see
+at a glance which ones are behind and fix them from one place. Most people opening
+Solutions are looking up a customer, so the drift card and the "AL repositories on GitHub"
+card moved off the Solutions list onto a page of their own, `/repositories`, listed under
+Solutions in the sidebar beside Environments. A top-level route like `/environments` rather
+than `/solutions/repositories`, which `/solutions/{slug}` would have claimed.
+
+- **One row per repository on a solution the viewer may see**, any provider: repository,
+  solution, last build, BC version, app.json, and a row menu. A Private solution the viewer
+  is not on contributes nothing. `RepositoryListService.GetAsync` reads the database only.
+- **Last build** is the newest build that recorded a commit of that repository
+  (`oe_project_build_repo_commits`), leaving out pull-request builds and preview checks:
+  the column answers "does the branch build".
+- **BC version** is the environment drift measures against
+  (`DependencyDriftService.YardstickEnvironmentsAsync`: first production by name, else
+  first sandbox), shown as `major.minor`. "No environment" when there is none, with no
+  warning, since such a solution is not checked.
+- **app.json** is the oldest `application` the repository's manifests ask for. A scan now
+  stores it for every repository it reads, behind or not, in `github_repository_checks`
+  (one row per repository, replaced like the findings). A warning icon marks a repository
+  with findings, its tooltip saying what would move; an update pull request already
+  recorded for the version (`github_update_pull_requests`, not superseded) is linked in its
+  place, so a repository already in review does not keep warning.
+- **Actions.** The row menu has "Create app.json pull request" (the existing
+  `OpenUpdatePullRequestsAsync` for that one repository), "Create workspace files pull
+  request" (below), "Check again" (the drift service's `CheckRepositoryAsync`, which re-reads
+  one repository and replaces only its findings and check, then the workspace files check),
+  "Open repository" and "Open solution". The page has a bulk "Create N app.json pull
+  requests" over the rows shown that have none open yet, and "Check all again" (the
+  organisation-wide drift scan, then every repository's workspace files) in a freshness
+  strip that says when GitHub was last read. The GitHub actions show only when the
+  organisation allows GitHub and the viewer has linked their account. "Updates available"
+  counts a row behind on either column.
+
+#### Workspace files
+
+The column says whether a repository still has the files the workbench manages, as the
+organisation has them now. `RepositoryFilesService` owns it.
+
+- **What is compared.** The repository standards, verbatim. And, when the repository
+  carries `workspace.aldt.toml` naming a template that still exists, the always-included
+  files that template opts into **that have no placeholders and sit at the workspace root**
+  (the `.gitignore`, the ruleset), plus the `settings` of its `.code-workspace`. A file with
+  placeholders - the README stub, each extension's app.json - is a starting point the team
+  is expected to edit, so it is never compared; flagging it would put a warning on every
+  row. A standard at the same path as an always-included file wins, as it does when the
+  workbench creates a repository. Maintainer's call, 2026-11-05.
+- **What the generator would write is read out of its archive**, built from the saved
+  settings with no optional extensions, modules or examples, so the column cannot come to
+  disagree with what New Workspace produces. Line endings and trailing blank lines are not a
+  difference.
+- **Workspace settings are merged, not replaced.** Every value the organisation sets must be
+  present (nested objects compared key by key); settings the repository added itself are
+  kept. The pull request writes the merged file, which drops comments; its body says so. A
+  `.code-workspace` that does not parse, or is not there, is left alone.
+- **Stored** in `github_repository_file_checks`, one row per repository with the missing and
+  changed paths and the workspace files pull request open when it was read. Replaced per
+  repository by "Check again" and for the organisation by "Check all again"; nothing runs it
+  on a schedule yet.
+- **The pull request** is opened with the person's own account on `aldt/workspace-files`,
+  added to while open, and started again from the default branch once merged or closed. It
+  writes only the files that differ.
+- **A refusal says what GitHub said.** GitHub refuses a commit that adds or changes a file
+  under `.github/workflows/` unless the GitHub App may write workflow files, and the
+  default standards include one (`refresh-test.yml`), so that refusal names the files and
+  the permission (granted on the app, then accepted by an organisation owner). Any other
+  403 or 404 asks the person to check their own and the app's access to the repository, and
+  other 4xx answers show GitHub's message. Only a 5xx still reads as "could not reach GitHub".
 
 ## #633 MCP parity for the GitHub workflows
 

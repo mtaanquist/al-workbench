@@ -44,6 +44,21 @@ public sealed class CookbookTools
     /// </summary>
     public static readonly TimeSpan GuidanceTokenLifetime = TimeSpan.FromMinutes(30);
 
+    private const int DefaultRecipeLimit = 25;
+    private const int MaxRecipeLimit = 50;
+
+    /// <summary>A search row's description is cut here; get_recipe has the whole one (#1512).</summary>
+    internal const int MaxSummaryDescriptionLength = 300;
+
+    /// <summary>
+    /// How many characters of recipe text and file bodies one get_recipe answer carries
+    /// (#1512), leaving room for JSON escaping under what an assistant client accepts.
+    /// </summary>
+    internal const int MaxRecipeAnswerLength = 30_000;
+
+    /// <summary>The least room file bodies get, however long the recipe's own text is.</summary>
+    private const int MinRecipeContentLength = 10_000;
+
     private readonly RecipeService _recipes;
     private readonly AppDbContext _db;
     private readonly RecipeSuggestionService _suggestions;
@@ -106,34 +121,44 @@ public sealed class CookbookTools
     [Description(
         "Searches the caller's organisation Cookbook by free-text query (title, description, keywords). " +
         "Returns lightweight summaries with the recipe Type (Snippet, Pattern, or Module) — search itself " +
-        "ignores type; the type field is for the agent to post-filter. Use get_recipe to fetch the files.")]
-    public async Task<IReadOnlyList<RecipeSummary>> SearchAsync(
-        [Description("Search text. Matches against title, description, and keywords. Pass an empty string to list everything.")] string query,
+        "ignores type; the type field is for the agent to post-filter. Returns at most 25 by default, in title order; " +
+        "Truncated and Note say whether more matched, so use a more specific query. A description longer than 300 characters " +
+        "is cut here; get_recipe has the whole one, and the files.")]
+    public async Task<CappedRows<RecipeSummary>> SearchAsync(
+        [Description("Search text. Matches against title, description, and keywords. Pass an empty string to list everything, up to the limit.")] string query,
         [Description("If true, also return recipes that have been marked deprecated. Defaults to false.")] bool includeDeprecated = false,
+        [Description("How many to return. Default 25, at least 1, at most 50.")] int limit = DefaultRecipeLimit,
         CancellationToken ct = default)
     {
-        var rows = await _recipes.SearchAsync(query, includeDeprecated, ct);
-        if (rows.Count == 0) return Array.Empty<RecipeSummary>();
+        var cap = Math.Clamp(limit, 1, MaxRecipeLimit);
+        var rows = await _recipes.SearchAsync(query, includeDeprecated, cap + 1, ct);
+        if (rows.Count == 0) return new CappedRows<RecipeSummary>(Array.Empty<RecipeSummary>(), false, null);
         var ids = rows.Select(r => r.Id).ToList();
         var counts = await _db.RecipeFiles.AsNoTracking()
             .Where(f => ids.Contains(f.RecipeId))
             .GroupBy(f => f.RecipeId)
             .Select(g => new { RecipeId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.RecipeId, x => x.Count, ct);
-        return rows.Select(s => new RecipeSummary(
-            s.Id, s.Title, s.Description, s.Keywords,
+        var summaries = rows.Select(s => new RecipeSummary(
+            s.Id, s.Title,
+            s.Description.Length > MaxSummaryDescriptionLength ? s.Description[..MaxSummaryDescriptionLength] + "..." : s.Description,
+            s.Keywords,
             s.Type.ToString(),
             s.Deprecated,
             counts.TryGetValue(s.Id, out var c) ? c : 0,
             s.MinimumApplicationVersion?.Name,
             s.MinimumApplicationVersion?.Application,
             s.EstimatedValueHours)).ToList();
+        return CappedRows<RecipeSummary>.From(summaries, cap, "recipes", "ordered by title",
+            "Use a more specific query to narrow the search.");
     }
 
     [McpServerTool(Name = "get_recipe", ReadOnly = true)]
-    [Description("Returns the full content of a recipe (every file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). Use search_recipes to find candidate ids.")]
+    [Description("Returns the content of a recipe (each file's path and body) by id. Each file's Path includes its folder layout (RelativePath/FileName). File bodies come back in order while they fit in one answer (about 30,000 characters with the recipe's text); a file past that is listed with its path and a null body, and a single file too large for one answer is cut. Truncated and Note say which, and how to read the rest: pass path (a file's Path, or a folder to get the files under it), and offset to continue a cut file. When editing with update_recipe, a file listed with a null body can be sent back with Content null to keep it as it is. Use search_recipes to find candidate ids.")]
     public async Task<RecipeDetail> GetAsync(
         [Description("Recipe id from search_recipes.")] int id,
+        [Description("Optional file Path, or a folder, to return only those files, e.g. 'Setup/SetupTable.al' or 'Setup'.")] string? path = null,
+        [Description("Optional character offset into the one file path names, to continue a file that was cut. Default 0.")] int offset = 0,
         CancellationToken ct = default)
     {
         var row = await _recipes.GetAsync(id, ct);
@@ -141,17 +166,86 @@ public sealed class CookbookTools
         {
             throw new McpException($"Recipe {id} not found, or not visible to your organisation.");
         }
+
+        var files = row.Files.OrderBy(f => f.Ordering)
+            .Select(f => (Path: string.IsNullOrEmpty(f.RelativePath) ? f.FileName : f.RelativePath + "/" + f.FileName, f.Content))
+            .ToList();
+        var wanted = path?.Trim().Trim('/');
+        if (!string.IsNullOrEmpty(wanted))
+        {
+            files = files.Where(f => string.Equals(f.Path, wanted, StringComparison.OrdinalIgnoreCase)
+                                     || f.Path.StartsWith(wanted + "/", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (files.Count == 0)
+            {
+                throw new McpException($"Recipe {id} has no file or folder '{path}'. Call get_recipe without path to see its files.");
+            }
+        }
+        // The whole file's length, for a note that has to say where in it a cut fell.
+        var fileLength = files.Count > 0 ? files[0].Content.Length : 0;
+        if (offset != 0)
+        {
+            if (files.Count != 1 || offset < 0 || offset >= files[0].Content.Length)
+            {
+                throw new McpException("offset needs path to name one file, and must lie inside that file's body.");
+            }
+            files = [(files[0].Path, files[0].Content[offset..])];
+        }
+
+        // The recipe's own text rides in the same answer, so it comes off the budget.
+        var metadata = row.Title.Length + row.Description.Length + row.Keywords.Length + (row.Instructions?.Length ?? 0);
+        var budget = Math.Max(MinRecipeContentLength, MaxRecipeAnswerLength - metadata);
+        var fit = FitFiles(files, budget);
+
+        var notes = new List<string>();
+        if (fit.LeftOut > 0)
+            notes.Add($"{fit.LeftOut} of {fit.Files.Count} files are listed without their body to keep the answer short. Call get_recipe again with path set to one of those files' Path to read it.");
+        if (fit.CutAt is { } cutAt)
+            notes.Add($"{fit.Files[0].Path} was cut at character {offset + cutAt} of {fileLength}. Call get_recipe again with path set to it and offset {offset + cutAt} to read on.");
         return new RecipeDetail(
             row.Id, row.Title, row.Description, row.Keywords,
             row.Type.ToString(),
             row.Deprecated,
-            row.Files.OrderBy(f => f.Ordering).Select(f => new RecipeFileDto(
-                string.IsNullOrEmpty(f.RelativePath) ? f.FileName : f.RelativePath + "/" + f.FileName,
-                f.Content)).ToList(),
+            fit.Files,
             row.Instructions,
             row.MinimumApplicationVersion?.Name,
             row.MinimumApplicationVersion?.Application,
-            row.EstimatedValueHours);
+            row.EstimatedValueHours,
+            Truncated: notes.Count > 0,
+            Note: notes.Count > 0 ? string.Join(" ", notes) : null);
+    }
+
+    /// <summary>
+    /// Keeps file bodies in order while they fit in <paramref name="budget"/> characters and
+    /// lists the rest by path alone. The first body is always kept, cut at the budget if it
+    /// must be, so a call for one large file still answers; <c>CutAt</c> says where.
+    /// </summary>
+    internal static (List<RecipeFileDto> Files, int LeftOut, int? CutAt) FitFiles(
+        IReadOnlyList<(string Path, string Content)> files, int budget)
+    {
+        var result = new List<RecipeFileDto>(files.Count);
+        var used = 0;
+        var leftOut = 0;
+        int? cutAt = null;
+        foreach (var (filePath, content) in files)
+        {
+            if (result.Count == 0 && content.Length > budget)
+            {
+                result.Add(new RecipeFileDto(filePath, content[..budget]));
+                used = budget;
+                cutAt = budget;
+            }
+            else if (used + content.Length <= budget)
+            {
+                result.Add(new RecipeFileDto(filePath, content));
+                used += content.Length;
+            }
+            else
+            {
+                result.Add(new RecipeFileDto(filePath, null));
+                leftOut++;
+            }
+        }
+        return (result, leftOut, cutAt);
     }
 
     [McpServerTool(Name = "get_cookbook_guidance", ReadOnly = true)]
@@ -192,7 +286,9 @@ public sealed class CookbookTools
         "with customer-specific names stripped) that the team's Cookbook is missing. " +
         "Provide a descriptive Title, a 1-3 sentence Description of when to use it, comma-separated Keywords, " +
         "a Type (Snippet / Pattern / Module — see get_cookbook_guidance for definitions), and one or more files. " +
-        "Optionally propose EstimatedValueHours — roughly how many hours of implementer work the recipe saves. " +
+        "Optionally propose EstimatedValueHours — roughly how many hours of implementer work the recipe saves — and " +
+        "MinimumApplication, the oldest Business Central application version the recipe works on (e.g. '24.0.0.0', " +
+        "or a version's name). " +
         "Each file has a flat FileName (no slashes), an optional RelativePath for the folder it lives in (no '..', " +
         "no leading '/', empty = root), and the file body in Content. Returns the new SuggestionId.")]
     public async Task<SuggestRecipeResult> SuggestAsync(
@@ -204,7 +300,9 @@ public sealed class CookbookTools
 
         try
         {
-            var id = await _suggestions.SubmitAsync(input.ToDomain(), ct);
+            var minimumVersionId = await ResolveSuggestedMinimumVersionAsync(
+                input.MinimumApplicationVersionId, input.MinimumApplication, ct);
+            var id = await _suggestions.SubmitAsync(input.ToDomain(minimumVersionId), ct);
             return new SuggestRecipeResult(
                 id,
                 "Submitted for review. An admin will approve or reject it at /admin/cookbook/suggestions.");
@@ -225,7 +323,7 @@ public sealed class CookbookTools
         "file list, so include every file you want the suggestion to end up with, not just the ones " +
         "you're changing. Returns the unchanged SuggestionId on success.")]
     public async Task<UpdateRecipeSuggestionResult> UpdateSuggestionAsync(
-        [Description("The replacement payload, including the id of the suggestion to update and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe: Title, Description and Type required, Files non-empty, FileName flat (no slashes or '..'), RelativePath relative (no leading '/', no '..').")] UpdateRecipeSuggestionInput input,
+        [Description("The replacement payload, including the id of the suggestion to update and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe: Title, Description and Type required, Files non-empty, FileName flat (no slashes or '..'), RelativePath relative (no leading '/', no '..'), optional MinimumApplication (e.g. '24.0.0.0'; omit for none).")] UpdateRecipeSuggestionInput input,
         CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
@@ -233,7 +331,9 @@ public sealed class CookbookTools
 
         try
         {
-            await _suggestions.UpdateAsync(input.SuggestionId, input.ToDomain(), ct);
+            var minimumVersionId = await ResolveSuggestedMinimumVersionAsync(
+                input.MinimumApplicationVersionId, input.MinimumApplication, ct);
+            await _suggestions.UpdateAsync(input.SuggestionId, input.ToDomain(minimumVersionId), ct);
             return new UpdateRecipeSuggestionResult(
                 input.SuggestionId,
                 "Updated. The suggestion is still Pending at /admin/cookbook/suggestions.");
@@ -249,29 +349,69 @@ public sealed class CookbookTools
         "Edits an already-published recipe. Requires the Editor or Admin role — regular users should use " +
         "suggest_recipe / update_recipe_suggestion and go through the review queue instead. " +
         "MANDATORY two-step protocol: include a fresh GuidanceToken from get_cookbook_guidance (same rules " +
-        "as suggest_recipe). The payload is a full replace: every field and every file you want the recipe " +
-        "to end up with, not just the ones you're changing — call get_recipe first and start from its " +
-        "current content. Deprecated is optional and keeps the recipe's current flag when omitted. " +
+        "as suggest_recipe). The payload is a full replace of the title, description, keywords, type, " +
+        "instructions and file list: list every file you want the recipe to end up with, not just the ones " +
+        "you're changing — call get_recipe first and start from its current content. A file whose body you " +
+        "don't change can be sent with Content null (as get_recipe lists a file it left out) and keeps its " +
+        "stored body; a file get_recipe cut short must be sent with its whole body or with Content null. " +
+        "Files left out of the list are removed. The optional fields keep the recipe's current value when " +
+        "omitted: Deprecated, EstimatedValueHours (set ClearEstimatedValueHours to remove it) and the minimum " +
+        "Business Central version (set MinimumApplication to the application version get_recipe returns, " +
+        "e.g. '24.0.0.0', or the version's name; an empty string removes it). " +
         "Returns the unchanged RecipeId on success.")]
     public async Task<UpdateRecipeResult> UpdateRecipeAsync(
-        [Description("The replacement payload, including the id of the recipe to update (from search_recipes) and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe, plus optional EstimatedValueHours and Deprecated.")] UpdateRecipeInput input,
+        [Description("The replacement payload, including the id of the recipe to update (from search_recipes) and a GuidanceToken from get_cookbook_guidance. Same field rules as suggest_recipe, plus the optional Deprecated, EstimatedValueHours, ClearEstimatedValueHours and MinimumApplication, which keep the current value when omitted. A file's Content may be null to keep its stored body.")] UpdateRecipeInput input,
         CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         RequireValidGuidanceToken(input.GuidanceToken, orgId);
         await RequireEditorAsync(ct);
 
-        // Resolve the current Deprecated flag so an omitted field preserves
-        // it instead of resetting; also fronts a clear not-found error.
+        // Resolve the current optional fields and file bodies so an omitted
+        // field or a null file body keeps what is stored instead of resetting
+        // it (#1626); also fronts a clear not-found error.
         var current = await _db.Recipes.AsNoTracking()
             .Where(r => r.Id == input.RecipeId && r.DeletedAt == null)
-            .Select(r => new { r.Deprecated })
+            .Select(r => new
+            {
+                r.Deprecated,
+                r.EstimatedValueHours,
+                r.MinimumApplicationVersionId,
+                Files = r.Files.Select(f => new { f.RelativePath, f.FileName, f.Content }).ToList(),
+            })
             .FirstOrDefaultAsync(ct)
             ?? throw new McpException($"Recipe {input.RecipeId} not found, or not visible to your organisation.");
 
+        var minimumVersionId = await ResolveMinimumVersionAsync(input, current.MinimumApplicationVersionId, ct);
+
+        var storedBodies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in current.Files)
+        {
+            storedBodies[RecipeFileKey(f.RelativePath, f.FileName)] = f.Content;
+        }
+        var files = new List<ALDevToolbox.Services.Cookbook.RecipeFileInput>(input.Files.Count);
+        foreach (var f in input.Files)
+        {
+            var content = f.Content;
+            if (content is null)
+            {
+                var key = RecipeFileKey(f.RelativePath, f.FileName);
+                if (!storedBodies.TryGetValue(key, out content))
+                {
+                    throw new McpException(
+                        $"File '{key}' has no Content and is not in recipe {input.RecipeId} yet. " +
+                        "Send its body, or leave Content out only for files get_recipe listed.");
+                }
+            }
+            files.Add(new ALDevToolbox.Services.Cookbook.RecipeFileInput(f.FileName, content, f.RelativePath));
+        }
+
         try
         {
-            await _recipes.UpdateAsync(input.RecipeId, input.ToDomain(current.Deprecated), ct);
+            await _recipes.UpdateAsync(
+                input.RecipeId,
+                input.ToDomain(current.Deprecated, current.EstimatedValueHours, minimumVersionId, files),
+                ct);
             return new UpdateRecipeResult(input.RecipeId, "Updated. The change is live in the Cookbook.");
         }
         catch (PlanValidationException ex)
@@ -295,7 +435,7 @@ public sealed class CookbookTools
     public async Task<RepositoryDeliveryResult> ApplyRecipeAsync(
         [Description("Recipe id from search_recipes.")] int recipeId,
         [Description("The repository as 'owner/name'. It must be in the GitHub organisation your organisation has connected, and one you can open on GitHub yourself.")] string repository,
-        [Description("Optional. The customer this recipe is being applied for; a name that matches one of your organisation's Solutions is recorded against it.")] string? customer = null,
+        [Description("Optional. The customer this recipe is being applied for; a name that matches a Solution you can see is recorded against it.")] string? customer = null,
         CancellationToken ct = default)
     {
         try
@@ -324,6 +464,100 @@ public sealed class CookbookTools
         {
             throw new McpException(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Works out which minimum version <c>update_recipe</c> stores. An explicit
+    /// id wins; otherwise <c>MinimumApplication</c> is matched against the
+    /// organisation's version catalogue (tenant-filtered like every other read)
+    /// by application version, name or key, an empty string clears it, and
+    /// leaving both out keeps the stored one. That last rule is the point of
+    /// #1626: <c>get_recipe</c> returns the version string but not the id, so a
+    /// round-trip that could only send the id silently dropped the requirement.
+    /// </summary>
+    private async Task<int?> ResolveMinimumVersionAsync(UpdateRecipeInput input, int? currentId, CancellationToken ct)
+    {
+        if (input.MinimumApplicationVersionId is int explicitId) return explicitId;
+        if (input.MinimumApplication is null)
+        {
+            if (currentId is not int keptId) return null;
+            // A stored version since removed from the catalogue would make the
+            // service refuse the whole edit with a message naming a field the
+            // assistant never sent, so name the one it can act on instead.
+            var removed = await _db.ApplicationVersions.AsNoTracking()
+                .Where(a => a.Id == keptId)
+                .Select(a => new { a.Name, a.DeletedAt })
+                .FirstOrDefaultAsync(ct);
+            if (removed is null || removed.DeletedAt is not null)
+            {
+                throw new McpException(
+                    $"This recipe's minimum Business Central version{(removed is null ? "" : $" ('{removed.Name}')")} " +
+                    "has been removed from your organisation's version list. Set MinimumApplication to a current " +
+                    "version (e.g. '24.0.0.0'), or to an empty string to remove the minimum version.");
+            }
+            return keptId;
+        }
+
+        return await MatchVersionAsync(input.MinimumApplication, currentId, ct);
+    }
+
+    /// <summary>
+    /// The minimum version a suggestion stores: an explicit id wins, otherwise
+    /// <c>MinimumApplication</c> is matched the way <c>update_recipe</c> matches it,
+    /// and leaving both out (or an empty string) means none. A suggestion is a full
+    /// replace, so unlike <c>update_recipe</c> there is no stored value to keep.
+    /// Before #1547 these tools took only the id, which no tool returns.
+    /// </summary>
+    private async Task<int?> ResolveSuggestedMinimumVersionAsync(int? explicitId, string? minimumApplication, CancellationToken ct)
+    {
+        if (explicitId is int id) return id;
+        if (minimumApplication is null) return null;
+        return await MatchVersionAsync(minimumApplication, currentId: null, ct);
+    }
+
+    /// <summary>
+    /// Matches a version string against the organisation's version catalogue by
+    /// application version, name or key; empty means none. <paramref name="currentId"/>
+    /// breaks a tie in favour of the row already stored.
+    /// </summary>
+    private async Task<int?> MatchVersionAsync(string minimumApplication, int? currentId, CancellationToken ct)
+    {
+        var wanted = minimumApplication.Trim();
+        if (wanted.Length == 0) return null;
+
+        var lowered = wanted.ToLowerInvariant();
+        var matches = await _db.ApplicationVersions.AsNoTracking()
+            .Where(a => a.DeletedAt == null
+                        && (a.Application.ToLower() == lowered
+                            || a.Name.ToLower() == lowered
+                            || a.Key.ToLower() == lowered))
+            .OrderBy(a => a.Ordering)
+            .Select(a => new { a.Id, a.Key, a.Name, a.Application })
+            .ToListAsync(ct);
+
+        // The value get_recipe returned for the stored version must round-trip
+        // to that same row, even when another catalogue entry shares it.
+        if (currentId is int stored && matches.Any(m => m.Id == stored)) return stored;
+        return matches.Count switch
+        {
+            1 => matches[0].Id,
+            0 => throw new McpException(
+                $"No Business Central version '{wanted}' in your organisation's version list. " +
+                "Use an application version as MinimumApplication (e.g. '24.0.0.0', as get_recipe returns it) or the version's name, " +
+                "or an empty string to remove the minimum version."),
+            _ => throw new McpException(
+                $"'{wanted}' matches more than one version: " +
+                string.Join(", ", matches.Select(m => $"'{m.Name}' (key '{m.Key}', {m.Application})")) +
+                ". Pass the key of the one you mean."),
+        };
+    }
+
+    /// <summary>The case-insensitive path key a recipe file is matched on: folder + "/" + name, or the name at the root.</summary>
+    private static string RecipeFileKey(string? relativePath, string fileName)
+    {
+        var folder = ALDevToolbox.Services.Cookbook.RecipeService.NormaliseRelativePath(relativePath);
+        var name = fileName?.Trim() ?? string.Empty;
+        return folder.Length == 0 ? name : folder + "/" + name;
     }
 
     /// <summary>

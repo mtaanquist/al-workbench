@@ -13,9 +13,11 @@ namespace ALDevToolbox.Services.Account;
 /// Result of <see cref="TotpService.BeginEnrollmentAsync"/>. The Base32 secret
 /// and <c>otpauth://</c> URI are the same value in two presentations; the QR
 /// PNG is rendered server-side so we don't ship a JS QR library.
-/// All three are shown to the user once during setup.
+/// All three are shown to the user once during setup. <see cref="ResumeTicket"/>
+/// is not shown: the setup page keeps it in a cookie so that browser, and only
+/// that browser, sees the same secret again when it comes back.
 /// </summary>
-public sealed record TotpEnrollment(string SecretBase32, string OtpAuthUri, byte[] QrPng);
+public sealed record TotpEnrollment(string SecretBase32, string OtpAuthUri, byte[] QrPng, string ResumeTicket);
 
 /// <summary>
 /// TOTP (RFC 6238) enrollment + verification. Secret is generated server-side
@@ -35,8 +37,27 @@ public sealed class TotpService
     public const string TotpSecretProtectionPurpose = "ALDevToolbox.UserTotpSecret";
     private const string Issuer = "AL Workbench";
 
+    /// <summary>
+    /// Protects <see cref="TotpEnrollment.ResumeTicket"/>. New with #1614 and
+    /// nothing long-lived is stored under it, but like every purpose string it
+    /// must not be renamed while tickets are in flight.
+    /// </summary>
+    public const string PendingSetupProtectionPurpose = "ALDevToolbox.TotpPendingSetup";
+
+    /// <summary>The cookie the setup page keeps <see cref="TotpEnrollment.ResumeTicket"/> in.</summary>
+    public const string PendingSetupCookieName = "alwb_totp_setup";
+
+    /// <summary>
+    /// How long the setup page shows the same unconfirmed secret again rather
+    /// than making a new one: long enough to come back from a refused confirm
+    /// or a step-up, short enough that a setup page left open overnight
+    /// starts afresh.
+    /// </summary>
+    public static readonly TimeSpan PendingSecretReuse = TimeSpan.FromMinutes(15);
+
     private readonly AppDbContext _db;
     private readonly IDataProtector _protector;
+    private readonly IDataProtector _ticketProtector;
     private readonly TimeProvider _clock;
     private readonly RecoveryCodeService _recoveryCodes;
 
@@ -48,6 +69,7 @@ public sealed class TotpService
     {
         _db = db;
         _protector = protection.CreateProtector(TotpSecretProtectionPurpose);
+        _ticketProtector = protection.CreateProtector(PendingSetupProtectionPurpose);
         _clock = clock;
         _recoveryCodes = recoveryCodes;
     }
@@ -58,8 +80,19 @@ public sealed class TotpService
     /// is for one-time display: the QR / Base32 lets the user scan; submitting
     /// a current code to <see cref="ConfirmEnrollmentAsync"/> flips the
     /// enrollment to active.
+    /// <para>
+    /// With a <paramref name="resumeTicket"/> from an earlier call, an
+    /// unconfirmed secret made within <see cref="PendingSecretReuse"/> is shown
+    /// again instead of replaced. The setup page asks for that: a refused
+    /// confirm (wrong password, a confirmation that ran out) sends the person
+    /// back to it, and a new secret would leave the entry they already scanned
+    /// dead (#1614). The ticket names that exact secret and the page keeps it
+    /// in the browser that made it, so another session on the account - one
+    /// that should not be able to read the owner's pending secret - gets a
+    /// fresh one, which leaves the owner's confirm failing as before.
+    /// </para>
     /// </summary>
-    public async Task<TotpEnrollment> BeginEnrollmentAsync(int userId, CancellationToken ct = default)
+    public async Task<TotpEnrollment> BeginEnrollmentAsync(int userId, CancellationToken ct = default, string? resumeTicket = null)
     {
         // Fence category 4 (explicitly scoped user-id lookup): both reads pinned to userId.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
@@ -71,7 +104,13 @@ public sealed class TotpService
         // Same category 4 read, pinned to s.UserId == userId.
         var existing = await _db.UserTotpSecrets.IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.UserId == userId, ct);
-        if (existing is null)
+        if (existing is { ConfirmedAt: null } && now - existing.CreatedAt < PendingSecretReuse
+            && TicketMatches(resumeTicket, userId, existing.SecretEncrypted))
+        {
+            secretBase32 = _protector.Unprotect(existing.SecretEncrypted);
+            encrypted = existing.SecretEncrypted;
+        }
+        else if (existing is null)
         {
             _db.UserTotpSecrets.Add(new UserTotpSecret
             {
@@ -94,63 +133,126 @@ public sealed class TotpService
             // factor out from under the user.
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Totp"] = "TOTP is already enabled. Disable it first if you want to re-enroll."
+                ["Totp"] = "The authenticator app is already turned on. Turn it off first if you want to set it up again."
             });
         }
-        await _db.SaveChangesAsync(ct);
+        if (_db.ChangeTracker.HasChanges()) await _db.SaveChangesAsync(ct);
 
         var label = $"{Issuer}:{user.Email}";
         var uri = $"otpauth://totp/{Uri.EscapeDataString(label)}?secret={secretBase32}&issuer={Uri.EscapeDataString(Issuer)}";
         var qr = RenderQr(uri);
-        return new TotpEnrollment(secretBase32, uri, qr);
+        return new TotpEnrollment(secretBase32, uri, qr, _ticketProtector.Protect(TicketFor(userId, encrypted)));
+    }
+
+    // The ticket names one stored secret by a hash of its ciphertext, which a
+    // restart replaces; the ciphertext itself never leaves the server.
+    private static string TicketFor(int userId, string secretEncrypted) =>
+        $"{userId}:{Convert.ToBase64String(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secretEncrypted)))}";
+
+    private bool TicketMatches(string? ticket, int userId, string secretEncrypted)
+    {
+        if (string.IsNullOrEmpty(ticket)) return false;
+        try
+        {
+            return _ticketProtector.Unprotect(ticket) == TicketFor(userId, secretEncrypted);
+        }
+        catch (CryptographicException)
+        {
+            return false; // tampered, or from a key ring that has since rotated out
+        }
     }
 
     /// <summary>
     /// Verifies a code against the still-unconfirmed enrollment; on success
     /// stamps <c>confirmed_at</c>, flips <see cref="User.TotpEnabled"/>, and
-    /// issues 10 fresh recovery codes (returned for one-time display).
+    /// issues 10 fresh recovery codes (returned for one-time display). Refused
+    /// once the enrollment is confirmed (issue #1422).
     /// </summary>
     public async Task<IReadOnlyList<string>> ConfirmEnrollmentAsync(int userId, string code, CancellationToken ct = default)
     {
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId.
-        var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.UserId == userId, ct)
-            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start a TOTP enrollment first." });
+        // The claim below narrows this same query to the row read here.
+        var mine = _db.UserTotpSecrets.IgnoreQueryFilters().Where(s => s.UserId == userId);
+        var secret = await mine.AsNoTracking().FirstOrDefaultAsync(ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start setting up the authenticator app first." });
+        // Confirming again would wipe the recovery codes and hand out new ones, with nothing
+        // asked but a code in its window - one that may already have signed someone in.
+        // Regenerating codes asks for the password, so this path must not offer a way round it.
+        // A double-clicked Confirm lands here too, after the first post already issued codes
+        // the browser never showed, so the message points at the way to get new ones.
+        if (secret.ConfirmedAt is not null) throw AlreadyConfirmed();
 
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
-        if (!VerifyCode(base32, code))
+        if (VerifyCode(base32, code) is not { } step)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Code"] = "That code didn't match. Check your authenticator and try again." });
         }
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        secret.ConfirmedAt = now;
-        secret.LastUsedAt = now;
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        // The check above was a read, so two confirms posted together can both pass it.
+        // Claiming with a conditional update lets exactly one of them go on to issue
+        // recovery codes; the other would replace the set the first one's browser shows.
+        // The secret must still be the one the code matched: a setup restarted in
+        // another tab since the read above replaced it, and this code proves nothing
+        // about the new one. The code that confirmed setup counts as used, like any other.
+        var claimed = await mine
+            .Where(s => s.Id == secret.Id && s.ConfirmedAt == null && s.SecretEncrypted == secret.SecretEncrypted)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.ConfirmedAt, now)
+                .SetProperty(s => s.LastUsedAt, now)
+                .SetProperty(s => s.LastUsedTimeStep, step), ct);
+        if (claimed == 0)
+        {
+            var stored = await mine.AsNoTracking().Select(s => new { s.ConfirmedAt }).FirstOrDefaultAsync(ct);
+            if (stored?.ConfirmedAt is not null) throw AlreadyConfirmed();
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Code"] = "Setup was started again in another window. Scan the new QR code and enter a code from it."
+            });
+        }
         // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId.
         var user = await _db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId, ct);
         user.TotpEnabled = true;
         await _db.SaveChangesAsync(ct);
-
-        return await _recoveryCodes.RegenerateAsync(userId, ct);
+        // Inside the same transaction, so setup is never left on without codes.
+        var codes = await _recoveryCodes.RegenerateAsync(userId, ct);
+        await tx.CommitAsync(ct);
+        return codes;
     }
+
+    private static PlanValidationException AlreadyConfirmed() => new(new Dictionary<string, string>
+    {
+        ["Totp"] = "The authenticator app is already turned on. If you didn't see your recovery codes, generate new ones below."
+    });
 
     /// <summary>
     /// Verifies a code against the user's confirmed TOTP secret. Returns false
     /// when there's no confirmed enrollment or the code is wrong / out of
-    /// window. Stamps <c>last_used_at</c> on success.
+    /// window, and when the code's time step is not later than the last one
+    /// accepted: a code works once, so one someone else saw or relayed (a
+    /// screen share during a step-up, a phishing proxy) cannot be replayed
+    /// inside its ~90-second window. The step is claimed with a conditional
+    /// update, like a recovery code, so two posts racing with the same code
+    /// cannot both win. Stamps <c>last_used_at</c> on success.
     /// </summary>
     public async Task<bool> VerifyAsync(int userId, string code, CancellationToken ct = default)
     {
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId
         // (the half-authenticated MFA state).
-        var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.UserId == userId && s.ConfirmedAt != null, ct);
+        var confirmed = _db.UserTotpSecrets.IgnoreQueryFilters()
+            .Where(s => s.UserId == userId && s.ConfirmedAt != null);
+        var secret = await confirmed.AsNoTracking().FirstOrDefaultAsync(ct);
         if (secret is null) return false;
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
-        if (!VerifyCode(base32, code)) return false;
-        secret.LastUsedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct);
-        return true;
+        if (VerifyCode(base32, code) is not { } step) return false;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var claimed = await confirmed
+            .Where(s => s.Id == secret.Id && (s.LastUsedTimeStep == null || s.LastUsedTimeStep < step))
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.LastUsedTimeStep, step)
+                .SetProperty(s => s.LastUsedAt, now), ct);
+        return claimed == 1;
     }
 
     /// <summary>
@@ -174,17 +276,31 @@ public sealed class TotpService
         await _db.SaveChangesAsync(ct);
     }
 
-    private bool VerifyCode(string secretBase32, string code)
+    /// <summary>
+    /// Whether <paramref name="code"/> has the shape of an authenticator code: six
+    /// digits, spaces ignored. Anything else cannot match, so the sign-in challenge
+    /// checks this before it takes one of the person's limited guesses.
+    /// </summary>
+    public static bool IsWellFormed(string? code)
     {
         if (string.IsNullOrWhiteSpace(code)) return false;
         var trimmed = code.Replace(" ", "").Trim();
-        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return false;
+        return trimmed.Length == 6 && trimmed.All(char.IsDigit);
+    }
+
+    /// <summary>The matched time step, or null when the code does not match.</summary>
+    private long? VerifyCode(string secretBase32, string code)
+    {
+        if (!IsWellFormed(code)) return null;
+        var trimmed = code.Replace(" ", "").Trim();
         var secretBytes = Base32Encoding.ToBytes(secretBase32);
         var totp = new Totp(secretBytes);
         // VerificationWindow.RfcSpecifiedNetworkDelay accepts the current step
         // and one on either side (±30s), which is RFC-recommended to handle
         // clock skew without opening a brute-force window.
-        return totp.VerifyTotp(_clock.GetUtcNow().UtcDateTime, trimmed, out _, VerificationWindow.RfcSpecifiedNetworkDelay);
+        return totp.VerifyTotp(_clock.GetUtcNow().UtcDateTime, trimmed, out var step, VerificationWindow.RfcSpecifiedNetworkDelay)
+            ? step
+            : null;
     }
 
     private static byte[] RenderQr(string content)

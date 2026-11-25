@@ -54,7 +54,7 @@ public sealed class EntraSettingsTests : IDisposable
 
         var view = await _db.NewOrganizationAdminService(_db.NewContext()).GetIdentityViewAsync();
 
-        view.Name.Should().Be("Default");
+        view.Name.Should().Be("Tenant");
         view.RequireStrongAuth.Should().BeFalse();
         view.AutoJoinVerifiedDomainUsers.Should().BeFalse();
         view.MembersTotal.Should().Be(2);

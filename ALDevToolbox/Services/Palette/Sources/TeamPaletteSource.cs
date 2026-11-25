@@ -70,7 +70,7 @@ public sealed class TeamPaletteSource : IPaletteSource
                 MemberCount = t.Members.Count,
                 IsMine = userId != null && t.Members.Any(m => m.UserId == userId),
             })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var candidates = rows.Select(r => new PaletteCandidate(
             "team", r.Name, Describe(r.MemberCount, r.IsMine), $"/teams/{r.Id}"));

@@ -1,0 +1,179 @@
+@using ALDevToolbox.Services.Migration
+@using ALDevToolbox.Services.ObjectExplorer.Projects
+@implements IDisposable
+
+@*
+    Earlier migrations on Migrate repositories (#1701), split out of the page and
+    given a search, Show more and Migrate again (#1706): with a hundred customers
+    to move, the Admin looks one up by name, and runs a failed one again without
+    filling in steps 1 to 3 by hand. The page owns the reads; this card owns the
+    search box and says when to read.
+*@
+
+<section class="card">
+    <div class="card__head">
+        <div>
+            <h2 class="card__title">Earlier migrations</h2>
+            <p class="card__sub">Every migration run in your organisation, newest first.</p>
+        </div>
+    </div>
+    <div class="card__body u-stack">
+        @if (Page is null)
+        {
+            <LoadingBlock />
+        }
+        else if (Page.Total == 0 && string.IsNullOrWhiteSpace(Search))
+        {
+            <EmptyState Icon="history" Title="No migrations yet">
+                <Text>When you create a repository from a preview above, it is listed here.</Text>
+            </EmptyState>
+        }
+        else
+        {
+            <div class="u-row">
+                <span class="search mig__search">
+                    <Icon Name="search" Width="15" Height="15" Css="search__icon" />
+                    <input type="search" class="input" placeholder="Search by customer, project or repository..."
+                           aria-label="Search earlier migrations"
+                           data-page-search aria-keyshortcuts="F3" title="Search earlier migrations (F3)"
+                           value="@_search" @oninput="OnSearchInput" />
+                </span>
+            </div>
+
+            @if (Page.Rows.Count == 0)
+            {
+                <EmptyState Icon="search" Title="No migrations match">
+                    <Text>Nothing matches "@Search". Check the spelling, or clear the search to see every migration.</Text>
+                    <Action><button type="button" class="btn" @onclick="ClearAsync">Clear search</button></Action>
+                </EmptyState>
+            }
+            else
+            {
+                <div class="mig__scroll">
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>When</th><th>Customer</th><th>From</th><th>Repository</th><th>Result</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in Page.Rows)
+                            {
+                                <tr>
+                                    <td class="u-nowrap"><Timestamp Value="@row.CreatedAt" /></td>
+                                    <td>
+                                        @if (row.SolutionId is { } solutionId)
+                                        {
+                                            <a class="u-nowrap" href="@SolutionLinks.Solution(row.SolutionSlug, solutionId)">@row.CustomerName</a>
+                                        }
+                                        else
+                                        {
+                                            <span class="u-nowrap">@row.CustomerName</span>
+                                        }
+                                        @if (row.StartedBy is { } by)
+                                        {
+                                            <div class="field__hint">by @by</div>
+                                        }
+                                    </td>
+                                    <td><a href="@row.SourceProjectUrl" target="_blank" rel="noopener">@row.SourceProject</a></td>
+                                    <td>
+                                        @if (row.RepositoryUrl is { } url)
+                                        {
+                                            <a class="u-nowrap" href="@url" target="_blank" rel="noopener">@row.RepositoryFullName</a>
+                                        }
+                                        else
+                                        {
+                                            <span class="u-muted">-</span>
+                                        }
+                                    </td>
+                                    <td class="mig__result">
+                                        <StatusPill Tone="@(row.Succeeded ? "succeeded" : "failed")">@(row.Succeeded ? "Created" : "Failed")</StatusPill>
+                                        @if (row.Message is { } message)
+                                        {
+                                            <div class="field__hint">@message</div>
+                                        }
+                                        @if (!row.Succeeded)
+                                        {
+                                            <button type="button" class="btn btn--sm mig__again" @onclick="() => OnMigrateAgain.InvokeAsync(row)"
+                                                    disabled="@Busy" title="Fill in the steps above with this run's project, repositories, customer and template">
+                                                <Icon Name="refresh-cw" Width="14" Height="14" />
+                                                <span>Migrate again</span>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                @if (Page.Rows.Count < Page.Total)
+                {
+                    <div class="u-row">
+                        <button type="button" class="btn btn--sm" @onclick="OnShowMore" disabled="@LoadingMore">
+                            <span>@(LoadingMore ? "Loading..." : "Show more")</span>
+                        </button>
+                        <span class="u-muted">Showing @Page.Rows.Count of @Page.Total</span>
+                    </div>
+                }
+            }
+        }
+    </div>
+</section>
+
+@code {
+    private static readonly TimeSpan SearchDelay = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>The rows read so far, and how many match; null while the first read runs.</summary>
+    [Parameter] public RepositoryMigrationHistoryPage? Page { get; set; }
+
+    /// <summary>The search the rows were read with.</summary>
+    [Parameter] public string Search { get; set; } = string.Empty;
+
+    /// <summary>True while more rows are being read.</summary>
+    [Parameter] public bool LoadingMore { get; set; }
+
+    /// <summary>True while Migrate again can't fill in the steps: no Azure DevOps token, or the page is busy listing or starting.</summary>
+    [Parameter] public bool Busy { get; set; }
+
+    /// <summary>Read again with this search, from the first page.</summary>
+    [Parameter] public EventCallback<string> OnSearch { get; set; }
+
+    /// <summary>Read the next page of the same search.</summary>
+    [Parameter] public EventCallback OnShowMore { get; set; }
+
+    /// <summary>Fill in steps 1 to 3 from this run.</summary>
+    [Parameter] public EventCallback<RepositoryMigrationHistoryRow> OnMigrateAgain { get; set; }
+
+    private string _search = string.Empty;
+    private CancellationTokenSource? _typing;
+
+    protected override void OnInitialized() => _search = Search;
+
+    // Waits until the Admin stops typing, so a name is one read and not one per letter.
+    private async Task OnSearchInput(ChangeEventArgs e)
+    {
+        _search = e.Value?.ToString() ?? string.Empty;
+        _typing?.Cancel();
+        _typing?.Dispose();
+        var typing = _typing = new CancellationTokenSource();
+        try
+        {
+            await Task.Delay(SearchDelay, typing.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        await OnSearch.InvokeAsync(_search);
+    }
+
+    private async Task ClearAsync()
+    {
+        _search = string.Empty;
+        await OnSearch.InvokeAsync(_search);
+    }
+
+    public void Dispose()
+    {
+        _typing?.Cancel();
+        _typing?.Dispose();
+    }
+}

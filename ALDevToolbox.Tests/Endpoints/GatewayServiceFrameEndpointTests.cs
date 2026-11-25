@@ -23,7 +23,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// policy file read and checked and its effective content stored by AL Workbench.
 /// Only the Windows key store and the file-permission check are replaced.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GatewayServiceFrameEndpointTests : IDisposable
 {
     private readonly TestDb _db = new();

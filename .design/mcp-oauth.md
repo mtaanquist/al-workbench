@@ -29,7 +29,7 @@ PAT stays. OAuth is added. The MCP endpoint accepts either.
 | PAT   | Reads `Authorization: Bearer aldt_pat_…` from its config file | Desktop apps, CLI tools, scripts                                     |
 | OAuth | DCR-registers itself as a public client, runs the auth-code   | claude.ai, Claude mobile, Cowork — the hosted Claude surfaces        |
 | OAuth | Identifies itself with a CIMD URL (`token_endpoint_auth_method=none`)            | Claude prefers this when the AS metadata advertises CIMD support     |
-| OAuth | Identifies itself with a CIMD URL (`token_endpoint_auth_method=private_key_jwt`) | ChatGPT custom connectors. The CIMD document points at a `jwks_uri` we fetch every authorize so key rotation is self-healing. |
+| OAuth | Identifies itself with a CIMD URL (`token_endpoint_auth_method=private_key_jwt`) | ChatGPT custom connectors. The CIMD document points at a `jwks_uri` we fetch on authorize, and again on a token request once the stored keys are ten minutes old, so key rotation is self-healing. |
 
 Hosted MCP clients pick CIMD over DCR only when the AS metadata advertises
 `client_id_metadata_document_supported: true` **and** the client-auth method
@@ -204,20 +204,48 @@ the resolver:
    with `registration_source: "cimd"` and the auth method stamped into
    `properties` JSON.
 
-The resolver re-fetches on **every** authorize request, not just the
-first one. That's what lets ChatGPT (or any issuer) rotate its signing
-keys or amend its `redirect_uris` without an admin nuking the application
-row: a stale snapshot would otherwise break every refresh attempt until
-someone deleted the row by hand. /authorize is rare enough (once per
-consent grant per device, not once per API call) that the extra HTTPS GET
-is affordable.
+The resolver re-fetches on authorize requests, not just the first one.
+That's what lets ChatGPT (or any issuer) rotate its signing keys or amend
+its `redirect_uris` without an admin nuking the application row: a stale
+snapshot would otherwise break every refresh attempt until someone deleted
+the row by hand.
 
-Recovery flow when the issuer rotates: the user's refresh fails because
-the JWKS attached to the application no longer matches the assertion key
-→ the client prompts the user to reconnect → /authorize fires → the
-resolver re-fetches the CIMD document and the JWKS → the row is updated
-in place via `UpdateAsync` → consent screen → fresh tokens issued. No
-admin needed.
+The authorize request is anonymous, though, so a fetch is also a way for
+anyone to make the server dial a URL and write an `oauth_applications`
+row (#1336). Two limits bound it. A row the resolver created or refreshed
+within the last ten minutes (`refreshed_at` in its `properties`,
+`CimdClientResolver.RefreshInterval`) is used as it is with no fetch,
+which also covers the consent form posting the same request back. And
+every fetch spends a permit from `CimdFetchLimiter`, ten per ten minutes
+per client IP, the same budget `/oauth/register` has; past it the request
+is refused with `temporarily_unavailable`. A row registered another way
+(DCR or by an admin) is refused before any fetch.
+
+When the issuer rotates its signing key, the token endpoint heals it
+without the person ([#1576](https://github.com/mtaanquist/al-workbench/issues/1576)).
+The resolver also runs on `ValidateTokenRequestContext`, ahead of
+OpenIddict's `ValidateAuthentication`, which is where the client assertion
+is checked. For a token request carrying a client assertion from a CIMD
+`private_key_jwt` row whose last key read (the document on `/authorize`, or
+the key set here) is older than the ten-minute window, it re-reads the key
+set from the row's stored `jwks_uri` on the same `CimdFetchLimiter` budget
+and updates only the row's key set. The client id comes from `client_id`,
+or from the assertion's `iss` when that is absent, and it only picks the
+row: the keys always come from the URL the row was registered with. A
+re-read that fails, finds no keys, or is over budget leaves the stored keys
+in place and lets OpenIddict decide, so an outage at the client's end never
+refuses a request the old key could still sign. A failed or empty read
+still counts as the client's one attempt for the window (held in memory,
+per client), so a `jwks_uri` that is down is not dialled on every token
+request; a request turned away for budget makes no fetch and gives its
+attempt back. Within the window nothing
+is fetched, so a key rotated moments ago is refused until the window
+passes - the cost of not letting every token request dial out.
+
+The person still recovers the old way if that ever fails: the client
+prompts them to reconnect → /authorize fires → the resolver re-fetches the
+CIMD document and the JWKS → the row is updated in place via `UpdateAsync`
+→ consent screen → fresh tokens issued. No admin needed.
 
 Resolver failures reject the authorise request with RFC 6749
 `invalid_client`, which the client surfaces with the metadata-fetch
@@ -259,15 +287,17 @@ we couldn't diagnose without deeper instrumentation. Rather than pile on
 more workarounds, both validators are turned off.
 
 This is safe in our threat model: ALDevToolbox only ever issues tokens
-for the `/mcp` resource, the audience is still recorded on the issued
-token, and `Services/OAuth/McpBearerPolicy.cs` enforces the audience on
-every incoming `/mcp` request. Both validators were defence-in-depth for
-servers fronting multiple resources, which we are not.
+for the `/mcp` resource and the audience is still recorded on the issued
+token. Note that `Services/OAuth/McpBearerPolicy.cs` does **not** check the
+audience: it only requires authentication and the user/org claims. Both
+validators were defence-in-depth for servers fronting multiple resources,
+which we are not. If a second protected resource is ever added, turn
+resource validation back on (or add an explicit audience requirement)
+first.
 
-Revisit when OpenIddict adds native DCR / CIMD support
-(openiddict/openiddict-core#2404, targeted at 7.6.0) — that release will
-likely surface a more idiomatic way to register resources from a CIMD
-application descriptor, at which point both opt-outs can come back on.
+Both opt-outs, and the CIMD resolver itself, exist only because OpenIddict
+has no native CIMD support yet. Issue #1744 tracks the upstream status and
+what to change when it lands.
 
 ## Consent screen
 

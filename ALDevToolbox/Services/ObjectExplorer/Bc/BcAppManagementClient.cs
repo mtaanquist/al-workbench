@@ -252,7 +252,10 @@ public sealed class BcAppManagementClient : IBcAppManagementClient
                     detail = BcAdminClient.ExtractError(body);
                 }
                 throw new BcApiException(response.StatusCode,
-                    $"The Admin Center API returned {(int)response.StatusCode} while {action}. {detail}".TrimEnd());
+                    $"The Admin Center API returned {(int)response.StatusCode} while {action}. {detail}".TrimEnd())
+                {
+                    RetryAfter = BcThrottleHandler.RequestedWait(response, TimeProvider.System.GetUtcNow()),
+                };
             }
             return body;
         }

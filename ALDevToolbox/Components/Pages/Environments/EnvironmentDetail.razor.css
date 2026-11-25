@@ -122,3 +122,50 @@
     display: block;
     margin-top: var(--space-3);
 }
+
+/* The facts in the rail: one to a line beside the content, two or more to a row once
+   the rail drops under it on a narrower screen. Values wrap rather than clip - the
+   rail is narrower than the meta row they came from, and a delivery window with its
+   time zone is the longest of them. */
+.env-detail__facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: var(--space-3) var(--space-5);
+    align-items: start;
+}
+
+.env-detail__facts .meta-item__value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+/* The tab row with the page's actions at its end, GitHub's shape: one rule under
+   both, which the row draws instead of the tab strip so it runs the full width. The
+   active tab's underline still lands on it, since the strip sits on the row's bottom
+   edge. On a narrow page the actions take their own line above the tabs, so the tabs
+   keep the rule their underline belongs to. */
+.env-detail__tabs {
+    flex-wrap: wrap;
+    align-items: flex-end;
+    column-gap: var(--space-4);
+    row-gap: var(--space-2);
+    border-bottom: 1px solid var(--border);
+}
+
+.env-detail__tabs ::deep .header-tabs {
+    border-bottom: 0;
+}
+
+.env-detail__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding-bottom: var(--space-1);
+}
+
+@container (max-width: 720px) {
+    .env-detail__actions {
+        order: -1;
+        flex-basis: 100%;
+    }
+}

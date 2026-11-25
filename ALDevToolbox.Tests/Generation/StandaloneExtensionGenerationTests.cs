@@ -110,6 +110,55 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Publisher_is_the_organisations_in_app_json_and_the_root_files_whatever_the_caller_passed()
+    {
+        // generation-engine.md: one publisher per organisation. The page has no
+        // publisher field, and an assistant passing its own cannot override it
+        // (#1615); the root files say what app.json says.
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationConfigService(ctx).SaveSettingsAsync(new OrganizationSettingsInput(
+                "Org Default Publisher", 50000, 50999, string.Empty, string.Empty));
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = TemplateBuilder.DefaultOrganizationId,
+                Path = "PUBLISHER.txt",
+                Content = "by {{publisher}}",
+                MustacheEnabled = true,
+                Scope = OrganizationFileScope.WorkspaceRoot,
+                Ordering = 3000,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        using var zip = await GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature", publisher: "Guessed Publisher"));
+
+        ReadEntry(zip.GetEntry("MyCustomFeature/PUBLISHER.txt")!).Should().Be("by Org Default Publisher");
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("MyCustomFeature/app.json")!));
+        appJson.RootElement.GetProperty("publisher").GetString().Should().Be("Org Default Publisher");
+    }
+
+    [Fact]
+    public async Task A_dependency_id_is_written_to_app_json_in_its_usual_form()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        using var zip = await GenerateExtensionAsync(PlanBuilder.ExtensionPlan(
+            extensionName: "My Custom Feature",
+            dependencies: new[]
+            {
+                new ALDevToolbox.Domain.ValueObjects.DependencyEntry(
+                    "437DBF0E84FF417A965DED2BB9650972", "Base Application", "Microsoft", "24.0.0.0"),
+            }));
+
+        ReadEntry(zip.GetEntry("MyCustomFeature/app.json")!)
+            .Should().Contain("437dbf0e-84ff-417a-965d-ed2bb9650972", "the id is written in the usual 8-4-4-4-12 form (#1615)");
+    }
+
+    [Fact]
     public async Task Sibling_workspace_file_keeps_the_root_entry_last_and_excludes_every_extension()
     {
         await SeedTemplateAsync(TemplateBuilder.Default());

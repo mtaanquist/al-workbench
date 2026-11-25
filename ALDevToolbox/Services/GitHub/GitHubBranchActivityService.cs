@@ -49,12 +49,12 @@ public sealed class GitHubBranchActivityService
     public async Task<int> RecordPushAsync(GitHubPushJob push, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var repositoryIds = await GitHubRepositoryMatch.TrackingRepositoryIdsAsync(_db, push.CloneUrl, ct).ConfigureAwait(false);
+        var repositoryIds = await GitHubRepositoryMatch.TrackingRepositoryIdsAsync(_db, push.CloneUrl, ct);
         if (repositoryIds.Count == 0) return 0;
 
         var existing = await _db.OeRepositoryBranchHeads
             .Where(h => repositoryIds.Contains(h.ProjectRepositoryId))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var now = DateTime.UtcNow;
         foreach (var repositoryId in repositoryIds)
@@ -120,7 +120,7 @@ public sealed class GitHubBranchActivityService
             head.UpdatedAt = now;
         }
 
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "Recorded a push to {Repository} ({Branch} at {HeadSha}, forced {Forced}, deleted {Deleted}) for {Count} solution repositories.",
             push.RepositoryFullName, push.Branch, push.HeadSha, push.Forced, push.Deleted, repositoryIds.Count);
@@ -135,12 +135,12 @@ public sealed class GitHubBranchActivityService
     public async Task<int> RecordMergedPullRequestAsync(GitHubMergedPullRequestJob merged, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var repositoryIds = await GitHubRepositoryMatch.TrackingRepositoryIdsAsync(_db, merged.CloneUrl, ct).ConfigureAwait(false);
+        var repositoryIds = await GitHubRepositoryMatch.TrackingRepositoryIdsAsync(_db, merged.CloneUrl, ct);
         if (repositoryIds.Count == 0) return 0;
 
         var existing = await _db.OeRepositoryMergedPullRequests
             .Where(m => repositoryIds.Contains(m.ProjectRepositoryId) && m.Number == merged.Number)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         foreach (var repositoryId in repositoryIds)
         {
@@ -162,7 +162,7 @@ public sealed class GitHubBranchActivityService
             row.AuthorLogin = merged.AuthorLogin;
         }
 
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         // Retention (#1138): these rows only name what merged since a pipeline's last
         // build, so ones far older than any build anyone still reads are dropped as new
@@ -170,7 +170,7 @@ public sealed class GitHubBranchActivityService
         var cutoff = merged.MergedAt - MergedPullRequestRetention;
         await _db.OeRepositoryMergedPullRequests
             .Where(m => repositoryIds.Contains(m.ProjectRepositoryId) && m.MergedAt < cutoff)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            .ExecuteDeleteAsync(ct);
         _logger.LogInformation(
             "Recorded merged pull request {Repository}#{Number} into {Branch} for {Count} solution repositories.",
             merged.RepositoryFullName, merged.Number, merged.BaseBranch, repositoryIds.Count);
@@ -220,7 +220,7 @@ internal static class GitHubRepositoryMatch
         var candidates = await db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == Domain.ValueObjects.RepositoryProvider.GitHub && r.Project!.DeletedAt == null)
             .Select(r => new { r.Id, r.Url, r.ProjectId, ProjectName = r.Project!.Name })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var wanted = GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(cloneUrl);
         return candidates
@@ -230,7 +230,7 @@ internal static class GitHubRepositoryMatch
     }
 
     public static async Task<List<int>> TrackingRepositoryIdsAsync(AppDbContext db, string cloneUrl, CancellationToken ct) =>
-        (await TrackingRepositoriesAsync(db, cloneUrl, ct).ConfigureAwait(false))
+        (await TrackingRepositoriesAsync(db, cloneUrl, ct))
             .Select(r => r.RepositoryId)
             .Distinct()
             .ToList();

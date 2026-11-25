@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.GitHub;
@@ -30,7 +31,7 @@ namespace ALDevToolbox.Services.Mcp.Tools;
 /// <c>.design/github-integration-phase2.md</c>.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class GitHubTools
+public sealed partial class GitHubTools
 {
     private readonly GitHubRepositoryService _repositories;
     private readonly GitHubWorkspaceRepositoryService _workspaces;
@@ -58,6 +59,19 @@ public sealed class GitHubTools
     /// <summary>The suffix the AL compiler gives the generated source file.</summary>
     private const string SourceFileSuffix = ".g.xlf";
 
+    /// <summary>The most files <c>list_translation_files</c> returns in one answer.</summary>
+    internal const int TranslationFileCap = 100;
+
+    /// <summary>
+    /// A BCP-47-shaped language tag such as <c>da-DK</c>. It goes into the file name and
+    /// the XLIFF <c>target-language</c>, so "Danish" or "da_DK" would open a pull request
+    /// Business Central never loads, and a '/' or '..' would put the file elsewhere (#1576).
+    /// </summary>
+    [GeneratedRegex("^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")]
+    private static partial Regex LanguageTag();
+
+    private const int DefaultRepositoryLimit = 50;
+
     [McpServerTool(Name = "list_repositories", ReadOnly = true)]
     [Description(
         "Lists the GitHub repositories you can act on: the ones in the GitHub organisation your " +
@@ -65,20 +79,47 @@ public sealed class GitHubTools
         "offered, and every other tool that takes a repository accepts only what this one lists. " +
         "When the list is empty because something is not set up yet - no GitHub organisation connected, " +
         "or your own GitHub account not connected - the answer says which, in a sentence you can pass " +
-        "on to the person.")]
-    public async Task<RepositoryListResult> ListRepositoriesAsync(CancellationToken ct = default)
+        "on to the person. To read or search a customer's code, use list_releases with the customer's " +
+        "name as search instead: a solution's built code is searchable there, and a repository is not. " +
+        "Returns the first 50 by name unless you raise limit; truncated and note say " +
+        "whether more were left out, so pass search to narrow it.")]
+    public async Task<RepositoryListResult> ListRepositoriesAsync(
+        [Description("Optional case-insensitive substring of the repository's name, e.g. a customer name.")] string? search = null,
+        [Description(McpCatalogueLimit.Description + " Default 50.")] int limit = DefaultRepositoryLimit,
+        CancellationToken ct = default)
     {
         try
         {
             var access = await _repositories.GetAccessAsync(ct);
-            var repositories = await _repositories.ListAccessibleAsync(ct);
+            var listing = await _repositories.ListAccessibleWithTruncationAsync(ct);
+            var needle = search?.Trim();
+            var matched = listing.Repositories
+                .Where(r => string.IsNullOrEmpty(needle) || r.FullName.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var cap = McpCatalogueLimit.Clamp(limit);
+            var truncated = matched.Count > cap;
             return new RepositoryListResult(
                 Readiness: access.Readiness.ToString(),
                 Guidance: GuidanceFor(access.Readiness),
-                Repositories: repositories
+                Repositories: matched.Take(cap)
                     .Select(r => new RepositorySummary(
                         r.FullName, r.DefaultBranch, r.IsPrivate, r.Description, r.HtmlUrl, r.CloneUrl))
-                    .ToList());
+                    .ToList(),
+                Truncated: truncated || listing.Truncated,
+                Note: string.Join(" ", new[]
+                {
+                    truncated
+                        ? $"Showing the first {cap} of {matched.Count} repositories (ordered by name); more were left out. Pass search to narrow the list, or raise limit."
+                        : null,
+                    // GitHub lists an installation's repositories only so far; past that a
+                    // search that finds nothing has not looked everywhere.
+                    listing.Truncated
+                        ? $"The organisation has more repositories on GitHub than this server reads, so a repository past the first {GitHubAppClient.MaxInstallationRepositories} by GitHub's order may be missing here."
+                        : null,
+                    listing.Incomplete
+                        ? "GitHub stopped answering (usually a rate limit) while this list was checked against what the user can open, so some repositories may be missing. Try again in a minute."
+                        : null,
+                }.Where(n => n is not null)) is { Length: > 0 } note ? note : null);
         }
         catch (GitHubApiException ex)
         {
@@ -99,7 +140,7 @@ public sealed class GitHubTools
         "not connected its GitHub account, is refused and nothing is created. A name the organisation " +
         "already uses is refused too. The repository is registered on a solution only when the " +
         "organisation has Solutions enabled. The files are committed straight to the default branch, " +
-        "and test and staging branches are created at the same commit; when the repository is the only " +
+        "and a test branch is created at the same commit; when the repository is the only " +
         "one on its solution, that solution also gets a build pipeline per branch. " +
         "If the GitHub organisation's branch rules refuse the commit, the call is refused with what an owner " +
         "of the organisation has to allow. Use generate_workspace instead when you want the workspace " +
@@ -168,18 +209,32 @@ public sealed class GitHubTools
         "extension is covered as well as a single-app repository. The file marked isSource is the one the " +
         "AL compiler generates: it holds every string and no translations, so it is the file a new " +
         "language starts from. Only repositories in the GitHub organisation your organisation has " +
-        "connected, and that you can open on GitHub yourself, are accepted.")]
-    public async Task<IReadOnlyList<TranslationFileSummary>> ListTranslationFilesAsync(
+        "connected, and that you can open on GitHub yourself, are accepted. Returns at most 100 files, " +
+        "ordered by folder; Truncated and Note say when more were left out, and folder narrows the list " +
+        "to one extension.")]
+    public async Task<CappedRows<TranslationFileSummary>> ListTranslationFilesAsync(
         [Description("The repository as 'owner/name', from list_repositories.")]
         string repository,
+        [Description("Optional. Only the files of this extension folder, as the folder field names it (case-insensitive). Leave it out for every folder.")]
+        string? folder = null,
         CancellationToken ct = default)
     {
         try
         {
-            var files = await _translations.ListFilesAsync((repository ?? string.Empty).Trim(), ct);
-            return files
+            var (files, treeTruncated) = await _translations.ListFilesWithTreeStateAsync(
+                (repository ?? string.Empty).Trim(), ct);
+            var wanted = folder?.Trim().Trim('/');
+            var rows = files
+                .Where(f => string.IsNullOrEmpty(wanted) || string.Equals(f.Folder, wanted, StringComparison.OrdinalIgnoreCase))
                 .Select(f => new TranslationFileSummary(f.Path, f.Folder, f.Language, f.IsSource))
                 .ToList();
+            // A workspace of 20 extensions in 12 languages ran to ~45,000 characters,
+            // past what an assistant client accepts in one answer (#1601).
+            var answer = CappedRows<TranslationFileSummary>.From(
+                rows, TranslationFileCap, "files", "by folder", "Pass folder to narrow the list.");
+            if (!treeTruncated) return answer;
+            const string cut = "GitHub cut this repository's file tree short, so some translation files may be missing from the list.";
+            return answer with { Truncated = true, Note = answer.Note is null ? cut : $"{answer.Note} {cut}" };
         }
         catch (Exception ex) when (IsGitHubRefusal(ex))
         {
@@ -219,6 +274,11 @@ public sealed class GitHubTools
         var language = (targetLanguage ?? string.Empty).Trim();
 
         if (language.Length == 0) throw new McpException("Say which language you are translating into, e.g. da-DK.");
+        if (!LanguageTag().IsMatch(language))
+        {
+            throw new McpException(
+                $"'{language}' is not a language tag. Pass a language tag such as da-DK, the way Business Central names its translation files.");
+        }
         if (edits is null || edits.Count == 0)
         {
             throw new McpException(

@@ -60,11 +60,10 @@ public sealed class GitHubAccessServiceTests : IDisposable
     /// </summary>
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     /// <summary>Connects the organisation to a GitHub organisation without going through the guarded ConnectAsync.</summary>
@@ -319,11 +318,10 @@ public sealed class GitHubAccessServiceTests : IDisposable
         // App id and private key only - the #620 half. The link flow needs the
         // OAuth client id and secret on top, and the failure names the setup
         // rather than GitHub.
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: null,
             ClientSecret: null, ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
         var (service, ctx) = NewService(LinkableApi());
         await using var _ = ctx;
 
@@ -429,6 +427,78 @@ public sealed class GitHubAccessServiceTests : IDisposable
         var row = await read.UserExternalLogins.AsNoTracking().SingleAsync();
         row.AccessTokenExpiresAt.Should().BeAfter(clock.GetUtcNow().UtcDateTime,
             "the rotated pair has to be persisted or the next call refreshes a spent token");
+    }
+
+    [Fact]
+    public async Task Two_callers_refreshing_one_link_at_once_spend_the_refresh_token_once()
+    {
+        // The nightly next minor and next major checks start side by side as the same
+        // person, long after the access token lapsed. GitHub rotates the refresh token
+        // on use, so whichever refreshes second with the same token is refused, and that
+        // build had nothing to clone with.
+        await ConfigureDeploymentAsync();
+        var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-04T09:00:00Z"));
+        var spent = 0;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Post, "login/oauth/access_token", request =>
+            {
+                var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                if (!body.Contains("grant_type=refresh_token"))
+                {
+                    return (HttpStatusCode.OK, FakeGitHubApi.TokenJson("ghu_first", refreshToken: "ghr_first"));
+                }
+                return body.Contains("ghr_first") && Interlocked.Increment(ref spent) == 1
+                    ? (HttpStatusCode.OK, FakeGitHubApi.TokenJson("ghu_second", refreshToken: "ghr_second"))
+                    : (HttpStatusCode.BadRequest, "{\"error\":\"bad_refresh_token\"}");
+            })
+            .On(HttpMethod.Get, "/user", HttpStatusCode.OK, FakeGitHubApi.UserJson());
+        var (first, firstCtx) = NewService(api, clock);
+        await using var _ = firstCtx;
+        await first.LinkAsync("the-code");
+        var (second, secondCtx) = NewService(api, clock);
+        await using var __ = secondCtx;
+
+        clock.Advance(TimeSpan.FromHours(8));
+        // Hold the first refresh at GitHub, and let it go only once the second caller has
+        // read the same expired row and is queued behind the first. Waiting for those two
+        // facts rather than for a while (#1439): a second caller that came late would read
+        // the refreshed row and pass without any lock at all.
+        var gate = api.PauseUntilReleased(HttpMethod.Post, "login/oauth/access_token");
+        var firstToken = first.ResolveUserTokenAsync(UserId, TestContext.Current.CancellationToken);
+        await api.HeldAt(HttpMethod.Post, "login/oauth/access_token")
+            .WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var secondToken = second.ResolveUserTokenAsync(UserId, TestContext.Current.CancellationToken);
+        await UntilSomeoneWaitsForTheRefreshLockAsync();
+        gate.SetResult();
+
+        (await firstToken).Should().Be("ghu_second");
+        (await secondToken).Should().Be("ghu_second", "the second caller waits and uses the pair the first stored");
+        api.OAuthBodies.Count(b => b.Contains("grant_type=refresh_token")).Should().Be(1);
+    }
+
+    /// <summary>
+    /// Polls Postgres until a session in this test's database is queued for the per-user
+    /// refresh lock: the advisory lock the service takes is two keys, its namespace and
+    /// the user id.
+    /// </summary>
+    private async Task UntilSomeoneWaitsForTheRefreshLockAsync()
+    {
+        const long refreshLockClass = GitHubAccessService.TokenRefreshLockClass;
+        const long userId = UserId;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            await using var ctx = _db.NewContext();
+            var waiting = await ctx.Database.SqlQuery<int>($"""
+                SELECT count(*)::int AS "Value" FROM pg_locks
+                WHERE locktype = 'advisory' AND NOT granted AND objsubid = 2
+                  AND classid::bigint = {refreshLockClass} AND objid::bigint = {userId}
+                  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                """).SingleAsync(TestContext.Current.CancellationToken);
+            if (waiting > 0) return;
+            DateTime.UtcNow.Should().BeBefore(deadline, "the second caller has to queue for the lock the first one holds");
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]
@@ -563,6 +633,76 @@ public sealed class GitHubAccessServiceTests : IDisposable
             UserId, ["cronus-dk/alpha", "cronus-dk/beta", "cronus-dk/gamma"]);
 
         visible.Should().Equal("cronus-dk/alpha", "cronus-dk/gamma");
+    }
+
+    /// <summary>
+    /// #1340: the per-repository burst is what trips GitHub's secondary rate limit,
+    /// so once one answer comes back rate limited the rest are not asked.
+    /// </summary>
+    [Fact]
+    public async Task Filtering_stops_asking_after_github_rate_limits_an_answer()
+    {
+        await ConfigureDeploymentAsync();
+        var api = LinkableApi()
+            .On(HttpMethod.Get, "repos/cronus-dk/alpha", HttpStatusCode.OK, "{}")
+            .OnWithHeaders(HttpMethod.Get, "repos/cronus-dk/beta", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+                [("retry-after", "60"), ("x-ratelimit-remaining", "4987")]))
+            .On(HttpMethod.Get, "repos/cronus-dk/gamma", HttpStatusCode.OK, "{}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        await service.LinkAsync("the-code");
+
+        var visible = await service.FilterAccessibleAsync(
+            UserId, ["cronus-dk/alpha", "cronus-dk/beta", "cronus-dk/gamma"]);
+
+        visible.Should().Equal("cronus-dk/alpha");
+        api.Calls.Should().NotContain(c => c.Contains("repos/cronus-dk/gamma"));
+    }
+
+    /// <summary>
+    /// #1754: the names left out unasked are counted, so a list built from them can
+    /// say it may be missing some instead of looking complete.
+    /// </summary>
+    [Fact]
+    public async Task Filtering_says_how_many_were_left_out_once_github_stops_answering()
+    {
+        await ConfigureDeploymentAsync();
+        var api = LinkableApi()
+            .On(HttpMethod.Get, "repos/cronus-dk/alpha", HttpStatusCode.OK, "{}")
+            .OnWithHeaders(HttpMethod.Get, "repos/cronus-dk/beta", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+                [("retry-after", "60"), ("x-ratelimit-remaining", "4987")]))
+            .On(HttpMethod.Get, "repos/cronus-dk/gamma", HttpStatusCode.OK, "{}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        await service.LinkAsync("the-code");
+
+        var result = await service.FilterAccessibleWithStateAsync(
+            UserId, ["cronus-dk/alpha", "cronus-dk/beta", "cronus-dk/gamma"]);
+
+        result.Visible.Should().Equal("cronus-dk/alpha");
+        result.Unanswered.Should().Be(2, "beta got no answer and gamma was never asked");
+        result.Incomplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Filtering_that_got_every_answer_is_complete()
+    {
+        await ConfigureDeploymentAsync();
+        var api = LinkableApi()
+            .On(HttpMethod.Get, "repos/cronus-dk/alpha", HttpStatusCode.OK, "{}")
+            .On(HttpMethod.Get, "repos/cronus-dk/beta", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        await service.LinkAsync("the-code");
+
+        var result = await service.FilterAccessibleWithStateAsync(UserId, ["cronus-dk/alpha", "cronus-dk/beta"]);
+
+        result.Visible.Should().Equal("cronus-dk/alpha");
+        result.Incomplete.Should().BeFalse("a definite no is an answer");
     }
 
     [Fact]

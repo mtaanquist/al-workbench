@@ -1057,7 +1057,7 @@ kind.
   off instead, and the follower appends the gateway's lines to the deployment log, which is what the
   page polls; the gateway target's `StartInstallAsync` and `WaitForInstallAsync` are never called.
 
-**Migration** `20270205000000_DeployToOnPremises`: `oe_release_pipelines.unpublish_previous`
+**Migration** `20270316000000_DeployToOnPremises`: `oe_release_pipelines.unpublish_previous`
 (default true), `oe_project_deliveries.tiers_restarted`, `gateway_command_id` (no foreign key, as
 above) and `gateway_log_offset` (default 0), and
 `gateway_command_files.project_build_artifact_id` with its index and foreign key.
@@ -1347,7 +1347,7 @@ mode, `restarted`, a message when nothing was restarted, and each tier with `res
 
 **AL Workbench.** The follower (`DeliveryService.FollowGatewayDeliveryAsync`) reads the steps out of
 the result (`DeliveryGatewaySteps.From`) and stores them on the deployment as
-`oe_project_deliveries.gateway_steps` (jsonb, migration `20270206000000_RecordGatewaySteps`): the
+`oe_project_deliveries.gateway_steps` (jsonb, migration `20270317000000_RecordGatewaySteps`): the
 before script, one line per tier, the after script, each `done`, `failed` or `not-done`. A group
 nothing was done to (nothing installed, the settings changed) is one line naming its tiers. A
 command that failed though no app did fails the deployment with the step's own sentence: "The
@@ -1532,7 +1532,7 @@ gateway settings did not allow this import ... Ask the customer's IT to check th
 raw text stays in the command's log on the gateway's page; a restart the settings stopped is said the
 same way.
 
-**Storage and audit.** `oe_project_licenses` (migration `20270208000000_AddProjectLicenses`) keeps
+**Storage and audit.** `oe_project_licenses` (migration `20270318000000_AddProjectLicenses`) keeps
 each upload once, never changed afterwards, so its one audit row (`ProjectLicense`, "Licence file")
 is the upload itself. It stores the target and, for a Tenant import, the tenant as sent, so "Last
 upload ... into the tenant X" names where it went even if the environment is later linked elsewhere; the bytes are recorded as `ContentSha256`, never copied. How the import went is
@@ -1632,7 +1632,7 @@ pull-request builds alike, before it prepares or makes any automatic deployment;
 skipped (it is never deployed). It checks each linked, not-missing on-premises environment of the
 Solution that is **Production, or that a deployment pipeline drawing from the build's pipeline
 targets** (a test tier included), each on its own, and stores the answers as
-`oe_project_builds.licence_check` (jsonb, migration `20270210000000_RecordBuildLicenceCheck`): per
+`oe_project_builds.licence_check` (jsonb, migration `20270319000000_RecordBuildLicenceCheck`): per
 environment the outcome (`passed`, `outside_licence`, `not_checked`), the reason, the findings (at most
 200 kept, the count whole), how many objects were asked about, the tier's version, when it was checked
 and when the licence it was compared with was read. It is best-effort: anything thrown is logged and
@@ -1760,7 +1760,7 @@ confirm button stays disabled until the plan has loaded without a refusal.
 other tiers come from the customer's settings file. In one transaction it queues the command,
 writes an `oe_environment_upgrade_actions` row (`RestartServiceTier`, `RestartServiceTiers`,
 `StopServiceTier`, `StartServiceTier`) linked by the new nullable `gateway_command_id` (migration
-`20270212000000_LinkServiceTierActionsToCommands`, no foreign key, as `oe_project_licenses`), and an
+`20270320000000_LinkServiceTierActionsToCommands`, no foreign key, as `oe_project_licenses`), and an
 audit row on the environment (who, when, the action, the tiers, the command id). That table is not
 audited by the interceptor, so the audit row is written by hand, as `ProjectConnectionService`
 does for its environment actions. The gateway is woken after the commit. If the save fails after the

@@ -176,6 +176,34 @@ public sealed class ProjectFollowServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Followers_by_role_keep_those_holding_one_and_those_with_no_role()
+    {
+        // Person is a consultant (from the seed), Colleague a developer and project
+        // leader, the owner on no list at all, and Admin follows by choice.
+        var id = await SeedAsync(people: [PersonUserId]);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeProjectPeople.Add(new OeProjectPerson
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, UserId = ColleagueUserId,
+                Roles = [ProjectPersonRole.Developer, ProjectPersonRole.ProjectLeader], CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        await SetAsAsync(AdminUserId, id, following: true);
+
+        _db.OrgContext.CurrentUserId = null;
+        await using var read = _db.NewContext();
+        var svc = Svc(read);
+        (await svc.ListFollowerIdsAsync(id, [ProjectPersonRole.Developer, ProjectPersonRole.Architect]))
+            .Should().Equal(OwnerUserId, ColleagueUserId, AdminUserId);
+        (await svc.ListFollowerIdsAsync(id, [ProjectPersonRole.Consultant]))
+            .Should().Equal(OwnerUserId, PersonUserId, AdminUserId);
+        (await svc.ListFollowerIdsAsync(id, roles: null))
+            .Should().Equal(OwnerUserId, PersonUserId, ColleagueUserId, AdminUserId);
+    }
+
+    [Fact]
     public async Task A_disabled_account_is_left_out()
     {
         var projectId = await SeedAsync(people: [DisabledUserId]);
@@ -236,7 +264,7 @@ public sealed class ProjectFollowServiceTests : IDisposable
             ctx.OeProjectPeople.Add(new OeProjectPerson
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, UserId = userId,
-                Role = ProjectPersonRole.Consultant, CreatedAt = DateTime.UtcNow,
+                Roles = [ProjectPersonRole.Consultant], CreatedAt = DateTime.UtcNow,
             });
         }
         await ctx.SaveChangesAsync();

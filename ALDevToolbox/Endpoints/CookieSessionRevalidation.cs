@@ -42,6 +42,18 @@ internal static class CookieSessionRevalidation
             ?? principal.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!int.TryParse(idClaim, out var userId)) return;
 
+        // A cookie issued before the sign-in time was mirrored as a claim
+        // (#1567) gets the claim now, from the stamp it already carries. No
+        // database read, and ahead of the throttle, so an open page does not
+        // have to make a trip through the refresh endpoint to learn it.
+        if (principal.FindFirst(EndpointHelpers.SignedInAtClaim) is null
+            && context.Properties.Items.TryGetValue(EndpointHelpers.SignedInAtKey, out var signedInStamp)
+            && !string.IsNullOrEmpty(signedInStamp))
+        {
+            context.ReplacePrincipal(EndpointHelpers.WithStampsFrom(principal, context.Properties));
+            context.ShouldRenew = true;
+        }
+
         var clock = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
         var now = clock.GetUtcNow().UtcDateTime;
 
@@ -63,8 +75,8 @@ internal static class CookieSessionRevalidation
             return;
         }
 
-        // Read across the tenant fence by the cookie's user id — the same trust
-        // posture StrongAuthGate uses for its per-request enrolment re-check.
+        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId,
+        // the cookie's own user id - the same posture as StrongAuthGate's re-check.
         var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
         var user = await db.Users.IgnoreQueryFilters()
             .Include(u => u.Organization)
@@ -100,6 +112,111 @@ internal static class CookieSessionRevalidation
         context.ReplacePrincipal(new ClaimsPrincipal(rebuilt));
         context.Properties.Items[LastValidatedKey] = now.ToString("o", CultureInfo.InvariantCulture);
         context.ShouldRenew = true;
+    }
+
+    /// <summary>
+    /// Where <see cref="ALDevToolbox.Services.Account.SessionRevalidationCircuitHandler"/>
+    /// sends an interactive page whose user no longer matches their row.
+    /// </summary>
+    public const string RefreshPath = "/auth/session/refresh";
+
+    /// <summary>
+    /// <c>GET /auth/session/refresh?return=...</c>: the same check as
+    /// <see cref="ValidateAsync"/>, without its throttle, then back to the page.
+    /// A circuit cannot re-run the cookie check itself, and a plain reload
+    /// would not help while the throttle still holds the old claims (the new
+    /// circuit would carry them again), so the page comes here first. An
+    /// account that is gone, disabled or past a credential change is signed
+    /// out to the sign-in page; otherwise the cookie is re-issued with claims
+    /// rebuilt from the row, and the page's own authorisation decides what the
+    /// user sees next (#1534).
+    /// </summary>
+    public static IEndpointRouteBuilder MapSessionRefresh(this IEndpointRouteBuilder app)
+    {
+        app.MapGet(RefreshPath, async (HttpContext ctx, IOrganizationContext org, AppDbContext db, TimeProvider clock,
+            MaintenanceModeState maintenance, CancellationToken ct) =>
+        {
+            var back = EndpointHelpers.ResolveSafeReturn(ctx.Request.Query["return"].ToString());
+            // As in ValidateAsync: during a restore the users table is empty or
+            // gone, so a check now would sign a SiteAdmin out or fail. Leave the
+            // cookie alone and send them back (#1269).
+            if (maintenance.IsActive) return Results.Redirect(back);
+
+            var cookie = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            User? user = null;
+            if (cookie.Succeeded && cookie.Properties is not null && org.CurrentUserId is int userId)
+            {
+                // Filtered: the cookie's own user, inside the organisation its claims name.
+                user = await db.Users.AsNoTracking()
+                    .Include(u => u.Organization)
+                    .FirstOrDefaultAsync(u => u.Id == userId, ct);
+            }
+            if (user is null || user.Status != UserStatus.Active
+                || (user.CredentialsChangedAt is { } changedAt && SignedInAt(cookie.Properties!) < changedAt))
+            {
+                await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                return Results.Redirect(RouteConstants.Login);
+            }
+
+            var properties = cookie.Properties!;
+            var rebuilt = EndpointHelpers.BuildIdentity(user);
+            ALDevToolbox.Services.Account.StepUpAuth.ApplyClaims(rebuilt, properties);
+            properties.Items[LastValidatedKey] = clock.GetUtcNow().UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+            await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(rebuilt), properties);
+            return Results.Redirect(back);
+        }).RequireAuthorization();
+        return app;
+    }
+
+    /// <summary>
+    /// Endpoint filter for the endpoints that hand out a credential that
+    /// outlives the cookie: an access token, a passkey, an authenticator app,
+    /// recovery codes, a Microsoft link, an assistant's consent. The check
+    /// above runs at most once per <see cref="ValidationInterval"/>, so a
+    /// cookie validated just before the owner reset their password could
+    /// otherwise still mint one of these for up to five minutes, and since it
+    /// would be dated after the reset nothing would refuse it later (#1336).
+    /// This applies the same cut-off on the request itself, with no throttle.
+    /// A refused session is signed out: a form post goes to the sign-in page,
+    /// a script call gets a 401.
+    /// </summary>
+    public static RouteHandlerBuilder RequireCurrentCredentials(this RouteHandlerBuilder builder) =>
+        builder.AddEndpointFilter(async (filterContext, next) =>
+        {
+            var ctx = filterContext.HttpContext;
+            if (!await SessionPredatesCredentialChangeAsync(ctx)) return await next(filterContext);
+
+            await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            // The 401 carries a body: a bare one is re-executed by the status
+            // pages as a POST to /not-found, which fails antiforgery and
+            // reaches the script as a 400.
+            return ctx.Request.HasFormContentType
+                ? Results.Redirect(RouteConstants.Login)
+                : Results.Json(new { error = "Your session has ended. Sign in again." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+        });
+
+    /// <summary>
+    /// True when this request's cookie session started before the user's
+    /// last credential change, or the user is no longer there to ask. A
+    /// request with no cookie session is left to the endpoint's own
+    /// authorisation.
+    /// </summary>
+    internal static async Task<bool> SessionPredatesCredentialChangeAsync(HttpContext ctx)
+    {
+        var cookie = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        if (!cookie.Succeeded || cookie.Properties is null) return false;
+        var userId = ctx.RequestServices.GetRequiredService<IOrganizationContext>().CurrentUserId;
+        if (userId is null) return false;
+
+        // Filtered: the cookie's own user, inside the organisation its claims name.
+        var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
+        var row = await db.Users.AsNoTracking()
+            .Where(u => u.Id == userId.Value)
+            .Select(u => new { u.CredentialsChangedAt })
+            .FirstOrDefaultAsync(ctx.RequestAborted);
+        if (row is null) return true;
+        return row.CredentialsChangedAt is { } changedAt && SignedInAt(cookie.Properties) < changedAt;
     }
 
     /// <summary>

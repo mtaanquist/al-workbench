@@ -50,14 +50,13 @@
                 </div>
 
                 <div class="field @(Has("Slot") ? "field--invalid" : "")">
-                    <span class="field__label" id="nu-slot-label">Planned slot</span>
+                    <span class="field__label" id="nu-slot-label">Planned for<FieldTip Text="@UpgradeSlotTip.For(Zone)" /></span>
                     <span class="nu-slot" role="group" aria-labelledby="nu-slot-label">
                         <input class="input" type="date" aria-label="Planned date"
                                value="@_date" @oninput="e => _date = e.Value?.ToString() ?? string.Empty" disabled="@_saving" />
                         <input class="input" type="time" aria-label="Planned time"
                                value="@_time" @oninput="e => _time = e.Value?.ToString() ?? string.Empty" disabled="@_saving" />
                     </span>
-                    <small class="field__hint">Optional. The time is in @ZoneName. Nothing is booked until you start the update.</small>
                     <FieldError Field="Slot" Errors="_errors" />
                 </div>
 
@@ -67,6 +66,16 @@
                               placeholder="e.g. Agreed with the customers on the September call."
                               @bind="_note" disabled="@_saving"></textarea>
                     <FieldError Field="Note" Errors="_errors" />
+                </div>
+
+                <div class="field">
+                    <label class="@(_moveDate ? "check is-checked" : "check")">
+                        <input id="nu-move-date" type="checkbox" checked="@_moveDate" disabled="@_saving"
+                               @onchange="e => _moveDate = (bool)(e.Value ?? false)" />
+                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                        <span>Move the next update to the latest date once each environment is updated</span>
+                    </label>
+                    <small class="field__hint">A few minutes after an environment's update finishes, its next update is moved as late as Microsoft allows.</small>
                 </div>
 
                 @if (_failure is { } failure)
@@ -115,6 +124,7 @@
     private string _date = string.Empty;
     private string _time = string.Empty;
     private string _note = string.Empty;
+    private bool _moveDate = true;
     private Dictionary<string, string> _errors = new();
     private string? _failure;
     private ElementReference _nameInput;
@@ -124,7 +134,6 @@
     /// <summary>True while the dialog is up; the page holds its timers while it is.</summary>
     public bool IsOpen => _open;
 
-    private string ZoneName => Zone.Zone.Id == TimeZoneInfo.Utc.Id ? "UTC" : Zone.Zone.Id;
 
     /// <summary>
     /// Opens the dialog empty, with the newest offered version picked. The page passes the
@@ -140,6 +149,7 @@
         _date = string.Empty;
         _time = string.Empty;
         _note = string.Empty;
+        _moveDate = true;
         _errors = new();
         _failure = null;
         _saving = false;
@@ -208,7 +218,7 @@
         _saving = true;
         try
         {
-            var id = await Upgrades.CreateAsync(_name, _target, slot, _note);
+            var id = await Upgrades.CreateAsync(_name, _target, slot, _note, moveDateAfterUpdate: _moveDate);
             _open = false;
             await OnCreated.InvokeAsync(id);
         }

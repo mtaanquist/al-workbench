@@ -191,6 +191,40 @@ public sealed class CookieSessionRevalidationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_cookie_without_the_sign_in_claim_gets_it_from_its_stamp_without_a_database_read()
+    {
+        var user = await SeedUserAsync();
+        var signedInAt = _clock.GetUtcNow().UtcDateTime.AddDays(-2);
+        var properties = new AuthenticationProperties();
+        properties.Items[EndpointHelpers.SignedInAtKey] = signedInAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        // Inside the throttle window, as a cookie issued before the deploy would be.
+        properties.Items["revalidated_at"] = _clock.GetUtcNow().UtcDateTime.AddMinutes(-1).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var context = NewValidationContext(user, properties);
+        var readsBefore = _contextsCreated;
+
+        await CookieSessionRevalidation.ValidateAsync(context);
+
+        _contextsCreated.Should().Be(readsBefore, "the stamp is already in the cookie");
+        EndpointHelpers.SignedInAt(context.Principal).Should().Be(signedInAt);
+        context.Principal!.FindFirstValue(HttpOrganizationContext.UserIdClaim).Should().Be(user.Id.ToString());
+        context.ShouldRenew.Should().BeTrue("the claim has to reach the cookie the open page will use");
+    }
+
+    [Fact]
+    public async Task A_cookie_without_a_sign_in_stamp_is_not_given_a_claim()
+    {
+        var user = await SeedUserAsync();
+        var properties = new AuthenticationProperties();
+        properties.Items["revalidated_at"] = _clock.GetUtcNow().UtcDateTime.AddMinutes(-1).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var context = NewValidationContext(user, properties);
+
+        await CookieSessionRevalidation.ValidateAsync(context);
+
+        context.Principal!.FindFirst(EndpointHelpers.SignedInAtClaim).Should().BeNull();
+        context.ShouldRenew.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Past_the_throttle_window_the_row_is_read_again()
     {
         var user = await SeedUserAsync();

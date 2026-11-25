@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
@@ -18,7 +19,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// the victim would receive a genuine email whose single-use token pointed at
 /// the attacker. With PUBLIC_BASE_URL set the forged host must be ignored.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class CredentialEmailLinkTests : IDisposable
 {
     private const string PublicBaseUrl = "https://workbench.cronus.example";
@@ -30,6 +30,16 @@ public sealed class CredentialEmailLinkTests : IDisposable
 
     public void Dispose() => _db.Dispose();
 
+    /// <summary>
+    /// Stands in for PUBLIC_BASE_URL: registers the singleton startup would
+    /// parse the variable into, so these tests cover what the app does with a
+    /// configured origin without setting a process-wide variable, which would
+    /// force this class to run alone after everything else (#1584). Reading the
+    /// variable itself is pinned by <see cref="PublicOriginEnvironmentTests"/>.
+    /// </summary>
+    private static void WithOrigin(IServiceCollection services, string? configured) =>
+        services.AddSingleton(new PublicOrigin(PublicOrigin.Parse(configured)));
+
     [Fact]
     public async Task Reset_link_uses_the_configured_public_base_url_not_the_request_host()
     {
@@ -37,8 +47,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
         var email = new CapturingEmailService();
         using var factory = new EndpointFactory(
             _db,
-            services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = PublicBaseUrl });
+            services => WithOrigin(services.AddSingleton<IEmailService>(email), PublicBaseUrl));
 
         await PostForgotPasswordAsync(factory, forgedHost: "attacker.example");
 
@@ -59,8 +68,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
         var email = new CapturingEmailService();
         using var factory = new EndpointFactory(
             _db,
-            services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = null });
+            services => WithOrigin(services.AddSingleton<IEmailService>(email), configured: null));
 
         await PostForgotPasswordAsync(factory, forgedHost: "fallback.example");
 
@@ -80,8 +88,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
         var email = new CapturingEmailService();
         using var factory = new EndpointFactory(
             _db,
-            services => services.AddSingleton<IEmailService>(email),
-            new Dictionary<string, string?> { ["PUBLIC_BASE_URL"] = PublicBaseUrl });
+            services => WithOrigin(services.AddSingleton<IEmailService>(email), PublicBaseUrl));
         using var client = await SignedInAdminAsync(factory);
 
         using var page = await client.GetAsync("/admin/administration/users");
@@ -130,8 +137,7 @@ public sealed class CredentialEmailLinkTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId,
             Email = AdminEmail,
             DisplayName = "Admin",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                .HashPassword(AdminPassword),
+            PasswordHash = TestPasswords.Hash(AdminPassword),
             Role = UserRole.Admin,
             Status = UserStatus.Active,
             CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
@@ -154,6 +160,28 @@ public sealed class CredentialEmailLinkTests : IDisposable
         login.StatusCode.Should().Be(HttpStatusCode.Redirect);
         login.Headers.Location!.OriginalString.Should().NotContain("err=");
         return client;
+    }
+
+    [Fact]
+    public async Task A_refused_reset_link_redirects_with_a_reason_code_and_no_message()
+    {
+        // The page renders its own copy for a refused link, so nothing it shows
+        // there travels in the address.
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+        using var page = await client.GetAsync("/forgot-password");
+        var antiforgery = ExtractAntiforgeryToken(await page.Content.ReadAsStringAsync());
+
+        using var response = await client.PostAsync("/auth/reset-password", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string, string>("Token", "no-such-link"),
+            new KeyValuePair<string, string>("Password", "a long enough new password"),
+            new KeyValuePair<string, string>("__RequestVerificationToken", antiforgery),
+        }));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.OriginalString
+            .Should().Be("/reset-password?token=no-such-link&err=" + ResetPasswordReasons.InvalidLink);
     }
 
     private async Task SeedVictimAsync()

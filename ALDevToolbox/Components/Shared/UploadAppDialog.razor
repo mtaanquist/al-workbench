@@ -98,15 +98,17 @@
     /// <param name="bcWindowStart">Microsoft's update window as mirrored from the admin centre, when read. Both bounds or neither.</param>
     /// <param name="bcWindowTimeZone">The IANA zone Microsoft's window is expressed in; the customer's zone when unknown.</param>
     /// <param name="customerTimeZone">The IANA zone the delivery window is agreed in - the solution's.</param>
+    /// <param name="deliveryWindowDays">The days the delivery window opens on.</param>
     public async Task<Upload?> OpenAsync(
         string projectName, string environmentName, bool isProduction,
         TimeOnly? deliveryWindowStart = null, TimeOnly? deliveryWindowEnd = null, string? customerTimeZone = null,
-        TimeOnly? bcWindowStart = null, TimeOnly? bcWindowEnd = null, string? bcWindowTimeZone = null)
+        TimeOnly? bcWindowStart = null, TimeOnly? bcWindowEnd = null, string? bcWindowTimeZone = null,
+        DeliveryDays deliveryWindowDays = DeliveryDays.Every)
     {
         if (_confirm is null) return null;
         _files = new();
         _error = null;
-        await _when.ResetAsync(DisplayZone, deliveryWindowStart, deliveryWindowEnd, customerTimeZone, bcWindowStart, bcWindowEnd, bcWindowTimeZone);
+        await _when.ResetAsync(DisplayZone, deliveryWindowStart, deliveryWindowEnd, deliveryWindowDays, customerTimeZone, bcWindowStart, bcWindowEnd, bcWindowTimeZone);
         StateHasChanged();
 
         var confirmed = await _confirm.OpenAsync(

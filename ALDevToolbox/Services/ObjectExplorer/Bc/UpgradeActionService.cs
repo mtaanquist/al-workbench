@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -101,7 +102,7 @@ public sealed class UpgradeActionService
     {
         var orgId = RequireOrganizationId();
         targetVersion = ValidateKind(kind, targetVersion);
-        await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct).ConfigureAwait(false);
+        await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct);
 
         // The environment has to belong to the project the gate was checked against —
         // otherwise a request could name someone else's environment with a project it is
@@ -110,7 +111,7 @@ public sealed class UpgradeActionService
         // has none to move or start.
         var exists = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(EnvironmentQueries.Online)
-            .AnyAsync(e => e.Id == environmentId && e.ProjectId == projectId, ct).ConfigureAwait(false);
+            .AnyAsync(e => e.Id == environmentId && e.ProjectId == projectId, ct);
         if (!exists)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -119,35 +120,45 @@ public sealed class UpgradeActionService
             });
         }
 
+        string? upgradeVersion = null;
         if (upgradeId is { } fromUpgrade)
         {
             // An action run from an upgrade must be for one of its lines, and the upgrade
             // must still be open: a closed one is the record of a finished wave, and
             // crediting it with a new action would rewrite that record.
             var onOpenUpgrade = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
-                .AnyAsync(l => l.UpgradeId == fromUpgrade && l.EnvironmentId == environmentId
-                               && l.Upgrade!.ClosedAt == null, ct).ConfigureAwait(false);
-            if (!onOpenUpgrade)
+                .Where(l => l.UpgradeId == fromUpgrade && l.EnvironmentId == environmentId
+                            && l.Upgrade!.ClosedAt == null)
+                .Select(l => new { l.Upgrade!.TargetVersion })
+                .FirstOrDefaultAsync(ct);
+            if (onOpenUpgrade is null)
             {
                 throw new PlanValidationException(new Dictionary<string, string>
                 {
                     ["Upgrade"] = "This environment isn't on that upgrade any more, or the upgrade has been marked done. Reload the upgrade and try again.",
                 });
             }
+            upgradeVersion = onOpenUpgrade.TargetVersion;
         }
 
-        // A booked start remembers the update it was booked for - the one the person was
-        // shown - so the slot starts that one or nothing, never whatever is next by then (#1234).
-        if (kind == UpgradeActionKind.RunNow && executeAt is not null)
+        if (kind == UpgradeActionKind.RunNow && upgradeVersion is not null)
         {
+            // A start from an upgrade starts the upgrade's release, whatever the environment
+            // has lined up next: an upgrade to 28.5 that starts 28.3 is the wrong update.
+            targetVersion = upgradeVersion;
+        }
+        else if (kind == UpgradeActionKind.RunNow && executeAt is not null)
+        {
+            // A booked start remembers the update it was booked for - the one the person was
+            // shown - so the slot starts that one or nothing, never whatever is next by then (#1234).
             targetVersion = await _db.OeProjectEnvironments.AsNoTracking()
                 .Where(e => e.Id == environmentId)
                 .Select(e => e.BcNextUpdateVersion)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
         }
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
+        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
 
         var action = new OeEnvironmentUpgradeAction
         {
@@ -176,7 +187,7 @@ public sealed class UpgradeActionService
             action.Status = UpgradeActionStatus.Pending;
             action.ExecuteAfter = slotUtc;
             _db.OeEnvironmentUpgradeActions.Add(action);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
 
             _logger.LogInformation(
                 "User {UserId} scheduled a {Kind} on environment {EnvironmentId} (project {ProjectId}, upgrade {UpgradeId}) for {ExecuteAfter}.",
@@ -186,12 +197,12 @@ public sealed class UpgradeActionService
 
         // Immediate: do the work here, then write down what happened. The name is read
         // first, so nothing after a write that landed can turn it into a failure.
-        var environmentName = await EnvironmentNameAsync(environmentId, ct).ConfigureAwait(false);
+        var environmentName = await EnvironmentNameAsync(environmentId, ct);
         action.ExecuteAfter = now;
         action.SentAt = now;
         try
         {
-            await RunAsync(projectId, environmentId, kind, targetVersion, ct).ConfigureAwait(false);
+            await RunAsync(projectId, environmentId, kind, targetVersion, ct, fromUpgrade: upgradeId is not null);
             action.Status = UpgradeActionStatus.Sent;
             action.Outcome = SuccessOutcome(kind, targetVersion, environmentName);
         }
@@ -201,13 +212,73 @@ public sealed class UpgradeActionService
             action.Outcome = FailureOutcome(kind,
                 ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the change.", targetVersion);
             _db.OeEnvironmentUpgradeActions.Add(action);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _db.SaveChangesAsync(ct);
             throw;
         }
 
         _db.OeEnvironmentUpgradeActions.Add(action);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
         return UpgradeActionRow.From(action);
+    }
+
+    /// <summary>
+    /// Stops waiting for the update a start set off, by hand: for a start Business Central
+    /// accepted but never began - during an outage at Microsoft, say - which would otherwise
+    /// read Booked until the worker gives up on it a day later, or for ever once it is past
+    /// the worker's follow window. The row becomes <c>Failed</c> with
+    /// <see cref="PlatformUpdateResult.Dismissed"/>, so the upgrade's line reads not updated
+    /// and can be ticked, started again or left for a later upgrade. Nothing is sent to
+    /// Business Central and nobody is notified. Gated like the start itself. Refused once
+    /// the update has been seen to end, and - compare-and-set - when the worker settles it
+    /// in the meantime. See <c>.design/environment-updates.md</c>, "Following a started update".
+    /// </summary>
+    public async Task StopWaitingForUpdateAsync(int actionId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+
+        var action = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Id == actionId)
+            .Select(a => new { a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status, a.UpdateResult, a.TargetVersion })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "That update no longer exists.",
+            });
+
+        await _access.EnsureCanManageEnvironmentUpdatesAsync(action.ProjectId, ct);
+
+        if (action.Kind != UpgradeActionKind.RunNow || action.Status != UpgradeActionStatus.Sent || action.UpdateResult is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "This update isn't waiting for Business Central any more, so there is nothing to stop waiting for.",
+            });
+        }
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var by = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
+        var to = string.IsNullOrWhiteSpace(action.TargetVersion) ? string.Empty : $" to {action.TargetVersion}";
+        var outcome = $"{UpgradeActionRow.NameOf(by)} stopped waiting for the update{to}: Business Central hadn't begun it.";
+
+        var updated = await _db.OeEnvironmentUpgradeActions
+            .Where(a => a.Id == actionId && a.Status == UpgradeActionStatus.Sent && a.UpdateResult == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.UpdateResult, PlatformUpdateResult.Dismissed)
+                .SetProperty(a => a.UpdateCheckedAt, now)
+                .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                .SetProperty(a => a.Outcome, outcome), ct);
+
+        if (updated == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "Business Central has just reported how this update went. Refresh to see it.",
+            });
+        }
+
+        _logger.LogInformation(
+            "User {UserId} stopped waiting for the update started by action {ActionId} on environment {EnvironmentId}.",
+            _orgContext.CurrentUserId, actionId, action.EnvironmentId);
     }
 
     /// <summary>
@@ -224,7 +295,7 @@ public sealed class UpgradeActionService
         var action = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Id == actionId)
             .Select(a => new { a.Id, a.ProjectId, a.Status, a.Kind, OwnerId = a.Project!.CreatedByUserId })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Action"] = "That scheduled action no longer exists.",
@@ -235,11 +306,11 @@ public sealed class UpgradeActionService
         // team's. Whoever may book it may call it off.
         if (IsAppInstall(action.Kind))
         {
-            await _access.EnsureCanManageAsync(action.ProjectId, action.OwnerId, ct).ConfigureAwait(false);
+            await _access.EnsureCanManageAsync(action.ProjectId, action.OwnerId, ct);
         }
         else
         {
-            await _access.EnsureCanManageEnvironmentUpdatesAsync(action.ProjectId, ct).ConfigureAwait(false);
+            await _access.EnsureCanManageEnvironmentUpdatesAsync(action.ProjectId, ct);
         }
 
         if (action.Status != UpgradeActionStatus.Pending)
@@ -251,7 +322,7 @@ public sealed class UpgradeActionService
         }
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        var cancelledBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
+        var cancelledBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         var cancelledByUserId = _orgContext.CurrentUserId;
 
         var updated = await _db.OeEnvironmentUpgradeActions
@@ -264,7 +335,7 @@ public sealed class UpgradeActionService
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
                 .SetProperty(a => a.CancelledAt, now)
                 .SetProperty(a => a.CancelledBy, cancelledBy)
-                .SetProperty(a => a.CancelledByUserId, cancelledByUserId), ct).ConfigureAwait(false);
+                .SetProperty(a => a.CancelledByUserId, cancelledByUserId), ct);
 
         if (updated == 0)
         {
@@ -294,7 +365,7 @@ public sealed class UpgradeActionService
         var booking = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Id == actionId)
             .Select(a => new { a.Id, a.ProjectId, a.Kind, a.Status, a.PackageFileName, a.AppName, a.BatchId, OwnerId = a.Project!.CreatedByUserId })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Action"] = "That booked install no longer exists.",
@@ -318,17 +389,24 @@ public sealed class UpgradeActionService
         }
 
         // The same gate that made the booking: a manager's write.
-        await _access.EnsureCanManageAsync(booking.ProjectId, booking.OwnerId, ct).ConfigureAwait(false);
+        await _access.EnsureCanManageAsync(booking.ProjectId, booking.OwnerId, ct);
 
         var now = _clock.GetUtcNow().UtcDateTime;
+        // The person has picked the time now, so no window holds these rows back any more:
+        // the worker's window check (#1539) must not move them out again. Unmarked and
+        // moved in one statement, so a failure part-way can't leave rows with their future
+        // window slot but no longer held to the window, which could then install into the
+        // working day (#1575); and no row is ever due while still held to a window.
         var moved = await _db.OeEnvironmentUpgradeActions
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
             .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
-            .Where(a => a.ExecuteAfter > now)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
+            .Where(a => a.ScheduledByWindow != null || a.ExecuteAfter > now)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.ScheduledByWindow, (UploadAppTiming?)null)
+                .SetProperty(a => a.ExecuteAfter, a => a.ExecuteAfter > now ? now : a.ExecuteAfter), ct);
 
         _logger.LogInformation(
-            "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep.",
+            "User {UserId} asked for booked install {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep and no longer held to a window.",
             _orgContext.CurrentUserId, actionId, booking.PackageFileName ?? booking.AppName, moved);
     }
 
@@ -343,7 +421,7 @@ public sealed class UpgradeActionService
     public async Task<List<UpgradeActionRow>> ListEnvironmentActivityAsync(
         int projectId, int environmentId, CancellationToken ct = default)
     {
-        await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
+        await _access.EnsureCanViewAsync(projectId, ct);
 
         var rows = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId)
@@ -351,10 +429,11 @@ public sealed class UpgradeActionService
             .ThenByDescending(a => a.Id)
             .Take(FeedLimit)
             .Select(ToRow)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         // A service tier action on an on-premises tier is a gateway command; how it went is
         // read from there (#1371).
-        return await Gateways.ServiceTierActionOutcome.ApplyAsync(_db, rows, ct).ConfigureAwait(false);
+        rows = await Gateways.ServiceTierActionOutcome.ApplyAsync(_db, rows, ct);
+        return await WithWhatTheyWaitForAsync(projectId, environmentId, rows, ct);
     }
 
     /// <summary>The kinds that are service tier actions on an on-premises environment, carried by a gateway command (#1371).</summary>
@@ -370,7 +449,7 @@ public sealed class UpgradeActionService
     /// </summary>
     public async Task<List<UpgradeActionRow>> ListPendingAsync(CancellationToken ct = default)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
         // Booked app installs are pending rows too, but they are not platform-update moves:
@@ -384,7 +463,7 @@ public sealed class UpgradeActionService
                 .Any(p => p.Id == a.ProjectId && p.DeletedAt == null))
             .OrderBy(a => a.ExecuteAfter)
             .Select(ToRow)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
     }
 
     /// <summary>
@@ -396,15 +475,94 @@ public sealed class UpgradeActionService
     public async Task<List<UpgradeActionRow>> ListBookedInstallsAsync(
         int projectId, int environmentId, CancellationToken ct = default)
     {
-        await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
+        await _access.EnsureCanViewAsync(projectId, ct);
 
-        return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+        var rows = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
                         && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
                         && a.Status == UpgradeActionStatus.Pending)
             .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder).ThenBy(a => a.Id)
             .Select(ToRow)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
+        return await WithWhatTheyWaitForAsync(projectId, environmentId, rows, ct);
+    }
+
+    /// <summary>
+    /// The installs that hold a later window booking on the same Business Central
+    /// environment until they are sent (#1629): any install not sent yet that a window
+    /// chose the time for, or whose own time has come. A booking a person set for later
+    /// holds nothing until its time. The worker drops the rows these hold from a sweep;
+    /// the environment page names them, so a held row does not read "Starting shortly"
+    /// for as long as it waits.
+    /// </summary>
+    internal static IQueryable<OeEnvironmentUpgradeAction> EarlierBookingsThatHold(
+        IQueryable<OeEnvironmentUpgradeAction> actions, DateTime now) =>
+        actions.Where(a => a.Status == UpgradeActionStatus.Pending
+                           && a.SentAt == null
+                           && (a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
+                           && (a.ScheduledByWindow != null || a.ExecuteAfter <= now));
+
+    /// <summary>
+    /// Names, on each pending window booking of one environment, the earlier booking it
+    /// waits for (<see cref="EarlierBookingsThatHold"/>), looked up across every solution
+    /// connected to that environment in Business Central, as the worker looks.
+    /// </summary>
+    private async Task<List<UpgradeActionRow>> WithWhatTheyWaitForAsync(
+        int projectId, int environmentId, List<UpgradeActionRow> rows, CancellationToken ct)
+    {
+        var candidates = rows.Where(r => r.IsPending && r.SentAt == null && IsAppInstall(r.Kind)).Select(r => r.Id).ToList();
+        if (candidates.Count == 0) return rows;
+        var windowed = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => candidates.Contains(a.Id) && a.ScheduledByWindow != null)
+            .Select(a => a.Id)
+            .ToListAsync(ct);
+        if (windowed.Count == 0) return rows;
+
+        var here = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.ProjectId == projectId)
+            .Select(e => new { e.Project!.BcTenantId, e.Name })
+            .FirstOrDefaultAsync(ct);
+        if (here is null) return rows;
+        var name = here.Name.ToUpperInvariant();
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var holding = EarlierBookingsThatHold(_db.OeEnvironmentUpgradeActions.AsNoTracking(), now);
+        // A shared environment's other solutions book on their own rows, matched by name
+        // ignoring case (UpgradeActionWorker.EnvironmentKey); a solution with no tenant yet
+        // counts as its own environment.
+        holding = here.BcTenantId is { } tenant
+            ? holding.Where(a => a.Project!.BcTenantId == tenant && a.Environment!.Name.ToUpper() == name)
+            : holding.Where(a => a.ProjectId == projectId && a.Environment!.Name.ToUpper() == name);
+        var holders = await holding
+            .OrderBy(a => a.RequestedAt).ThenBy(a => a.BatchOrder ?? 0).ThenBy(a => a.Id)
+            .Select(a => new { a.ProjectId, a.RequestedAt, Label = a.PackageFileName ?? a.AppName })
+            .ToListAsync(ct);
+        if (holders.Count == 0) return rows;
+
+        // The earlier booking may be another solution's, and a Private one this person cannot
+        // see: its app is named only when its solution is visible to them
+        // (.design/teams-and-visibility.md).
+        var holderProjects = holders.Select(h => h.ProjectId).Distinct().ToList();
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visibleProjects = (await _db.OeProjects.AsNoTracking()
+                .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+                .Where(p => holderProjects.Contains(p.Id))
+                .Select(p => p.Id)
+                .ToListAsync(ct))
+            .ToHashSet();
+
+        var held = windowed.ToHashSet();
+        return rows.Select(r =>
+        {
+            if (!held.Contains(r.Id)) return r;
+            var first = holders.FirstOrDefault(h => h.RequestedAt < r.RequestedAt);
+            if (first is null) return r;
+            return r with
+            {
+                WaitsForEarlierBooking = true,
+                WaitsFor = visibleProjects.Contains(first.ProjectId) ? first.Label : null,
+            };
+        }).ToList();
     }
 
     /// <summary>The one projection every read of the table shares, so a new column reaches every list at once.</summary>
@@ -415,7 +573,7 @@ public sealed class UpgradeActionService
             a.CancelledBy, a.CancelledAt, a.TargetVersion,
             a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder,
             a.AppName, a.Kind == UpgradeActionKind.UpdateApp ? a.BcAppId : null, a.PrerequisiteAppIds,
-            a.GatewayCommandId);
+            null, false, a.UpdateResult, a.UpdateCheckedAt, a.Automatic, a.GatewayCommandId);
 
     // ── Shared with the worker ──────────────────────────────────────────
 
@@ -425,22 +583,48 @@ public sealed class UpgradeActionService
     /// audit entry. Used by both the immediate path here and
     /// <see cref="UpgradeActionWorker"/>, so a slot fired tonight does exactly what
     /// pressing the button would have done.
+    /// <para>With <paramref name="fromUpgrade"/>, a start's <paramref name="targetVersion"/>
+    /// is the upgrade's release, which the start selects if another update is next;
+    /// otherwise it is the update a booking was made for, and anything else is refused.</para>
     /// </summary>
-    internal Task RunAsync(
-        int projectId, int environmentId, UpgradeActionKind kind, string? targetVersion, CancellationToken ct) =>
-        kind switch
+    internal async Task RunAsync(
+        int projectId, int environmentId, UpgradeActionKind kind, string? targetVersion, CancellationToken ct,
+        bool fromUpgrade = false)
+    {
+        switch (kind)
         {
-            UpgradeActionKind.PushDateToLatest => _connections.PushUpdateDateToLatestAsync(projectId, environmentId, ct),
-            // A booked start carries the version it was booked for, and refuses another (#1234).
-            UpgradeActionKind.RunNow => _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion),
-            // SelectTargetVersionAsync re-reads the offer list live and refuses a version
-            // no longer offered, so a mirror a sweep old can't send a stale pick.
-            UpgradeActionKind.SelectVersion => _connections.SelectTargetVersionAsync(
-                projectId, environmentId,
-                targetVersion ?? throw new InvalidOperationException("A version change was run without a target version."),
-                ct),
-            _ => throw new InvalidOperationException($"{kind} is recorded, never run."),
-        };
+            case UpgradeActionKind.PushDateToLatest:
+                await _connections.PushUpdateDateToLatestAsync(projectId, environmentId, ct);
+                break;
+            case UpgradeActionKind.RunNow:
+                // A booked start carries the version it was booked for, and refuses another (#1234).
+                // One run from an upgrade starts the upgrade's release instead (see above).
+                if (fromUpgrade && targetVersion is not null)
+                {
+                    await _connections.RunUpdateNowAsync(projectId, environmentId, ct, upgradeVersion: targetVersion);
+                }
+                else
+                {
+                    await _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion);
+                }
+                break;
+            case UpgradeActionKind.SelectVersion:
+                // The write itself also lets a solution manager through, which suits the
+                // environment page, but every action here was booked on the
+                // environment-updates grant. Held to the same grant now, so a person taken
+                // off the update team since booking doesn't get the slot fired anyway.
+                await _access.EnsureCanManageEnvironmentUpdatesAsync(projectId, ct);
+                // SelectTargetVersionAsync re-reads the offer list live and refuses a version
+                // no longer offered, so a mirror a sweep old can't send a stale pick.
+                await _connections.SelectTargetVersionAsync(
+                    projectId, environmentId,
+                    targetVersion ?? throw new InvalidOperationException("A version change was run without a target version."),
+                    ct);
+                break;
+            default:
+                throw new InvalidOperationException($"{kind} is recorded, never run.");
+        }
+    }
 
     /// <summary>
     /// Sends a booked upload (<see cref="UpgradeActionKind.UploadApp"/> with a package on
@@ -520,7 +704,7 @@ public sealed class UpgradeActionService
         await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == environmentId)
             .Select(e => e.Name)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
 
     /// <summary>
     /// What the feed says about an action that worked. Plain words; the date moves name no
@@ -632,6 +816,16 @@ public sealed record UpgradeActionRow(
     Guid? AppId = null,
     /// <summary>The apps a booked AppSource update was agreed to bring along. Null for every other kind.</summary>
     IReadOnlyList<Guid>? PrerequisiteAppIds = null,
+    /// <summary>For a booked install that waits for one booked before it on the same environment (#1629), what that one installs: null when it is not waiting, or when the earlier booking is on a solution this person cannot see.</summary>
+    string? WaitsFor = null,
+    /// <summary>True when the install waits for one booked before it on the same environment (#1629), whether or not <see cref="WaitsFor"/> can name it.</summary>
+    bool WaitsForEarlierBooking = false,
+    /// <summary>How a sent start's platform update ended, once the worker saw it end (#1711). Null otherwise.</summary>
+    PlatformUpdateResult? UpdateResult = null,
+    /// <summary>When the worker last asked about a sent start's update: with <see cref="UpdateResult"/>, when it saw the update end.</summary>
+    DateTime? UpdateCheckedAt = null,
+    /// <summary>True for an action the workbench booked itself (the date move after a finished update).</summary>
+    bool Automatic = false,
     /// <summary>The gateway command a service tier action on an on-premises environment rides on (#1371). Null for every other kind.</summary>
     long? GatewayCommandId = null,
     /// <summary>The service tier a service tier action named, <c>SERVER / INSTANCE</c>, read from its command. Null for every other kind.</summary>
@@ -652,6 +846,11 @@ public sealed record UpgradeActionRow(
 {
     /// <summary>True for a service tier action on an on-premises environment (#1371).</summary>
     public bool IsServiceTierAction => UpgradeActionService.IsServiceTierAction(Kind);
+
+    /// <summary>What a held booking says instead of "Starting shortly"; null when it is not held.</summary>
+    public string? WaitingText => !WaitsForEarlierBooking ? null
+        : WaitsFor is { } first ? $"Waits for {first}, booked before it"
+        : "Waits for an app booked before it on this environment";
 
     /// <summary>True while the action is still waiting for its slot — the only state with a Cancel.</summary>
     public bool IsPending => Status == UpgradeActionStatus.Pending;
@@ -701,5 +900,12 @@ public sealed record UpgradeActionRow(
     internal static UpgradeActionRow From(OeEnvironmentUpgradeAction a) => new(
         a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
         a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
-        a.CancelledBy, a.CancelledAt, a.TargetVersion, a.UpgradeId, a.Upgrade?.Name);
+        a.CancelledBy, a.CancelledAt, a.TargetVersion, a.UpgradeId, a.Upgrade?.Name,
+        UpdateResult: a.UpdateResult, UpdateCheckedAt: a.UpdateCheckedAt, Automatic: a.Automatic);
+
+    /// <summary>
+    /// When the thing this row records went wrong or finished: for a start whose update the
+    /// worker saw end, when it saw that (#1711); otherwise when it was sent, or asked for.
+    /// </summary>
+    public DateTime SettledAt => UpdateResult is not null && UpdateCheckedAt is { } ended ? ended : SentAt ?? RequestedAt;
 }

@@ -52,7 +52,7 @@
                                    own control, so typing a version cannot untick the box. *@
                                 <span class="dep-version">
                                     <span class="dep-version__label">Version</span>
-                                    <input type="text" class="input input--sm dep-version__input"
+                                    <input type="text" class="input input--sm dep-version__input" required
                                            value="@selected.DepVersion"
                                            @onchange="e => UpdateVersion(item.DepId, e.Value?.ToString() ?? string.Empty)"
                                            aria-label="@($"Version of {item.DepName}")" />

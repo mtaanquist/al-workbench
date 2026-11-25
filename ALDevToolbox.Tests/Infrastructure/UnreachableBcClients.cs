@@ -56,7 +56,7 @@ internal class UnreachableAdminClient : IBcAdminClient
         => throw new NotSupportedException();
 }
 
-internal sealed class UnreachableAppManagementClient : IBcAppManagementClient
+internal class UnreachableAppManagementClient : IBcAppManagementClient
 {
     public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
         => throw new NotSupportedException();
@@ -68,7 +68,7 @@ internal sealed class UnreachableAppManagementClient : IBcAppManagementClient
         => throw new NotSupportedException();
     public Task<BcAppOperation> InstallPteAsync(string accessToken, string applicationFamily, string environmentName, byte[] appBytes, string fileName, string deploymentSchedule, string syncMode, string languageId, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
         => throw new NotSupportedException();
-    public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
+    public virtual Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
         => throw new NotSupportedException();
     public Task<BcAppOperation> UpdateAppAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, bool useEnvironmentUpdateWindow, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
         => throw new NotSupportedException();

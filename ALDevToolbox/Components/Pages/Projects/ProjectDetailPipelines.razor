@@ -35,7 +35,13 @@
                 {
                     <a class="sub-row pd-pipe" href="@($"/pipelines/{pl.Id}")">
                         <div class="sub-row__stack">
-                            <span class="sub-row__name">@pl.Name</span>
+                            <span class="sub-row__name">
+                                @pl.Name
+                                @if (pl.DisabledAt is not null)
+                                {
+                                    <StatusPill Tone="muted"><span>Disabled</span></StatusPill>
+                                }
+                            </span>
                             <span class="sub-row__val">@PipelineScope(pl)</span>
                         </div>
                         <span class="sub-row__acts">

@@ -1,0 +1,23 @@
+/* .page is a one-column grid, and a grid item is never narrower than its
+   content unless told otherwise. A failed import's error message is one long
+   unbroken line (a path, a type name), so it set the width of the whole column
+   and both cards ran off the right of the window, where .app__content clips
+   them. min-width: 0 lets each card take the page's width instead. */
+.workers__card {
+    min-width: 0;
+}
+
+/* Several columns of names and timestamps do not fit a phone, so each table
+   gets a box of its own to scroll sideways in rather than being clipped, the
+   same as the Repositories and Upgrades lists. */
+.workers__scroll {
+    min-width: 0;
+    overflow-x: auto;
+}
+
+/* An error is read, not scanned: wrap it instead of making the reader scroll
+   sideways along a stack trace. */
+.workers__error {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

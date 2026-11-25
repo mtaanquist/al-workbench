@@ -47,7 +47,7 @@ public sealed class InviteServiceTests : IDisposable
             CurrentOrganizationId = orgId,
             CurrentUserId = actingUserId,
         };
-        return new InviteService(ctx, orgContext, _clock, NullLogger<InviteService>.Instance);
+        return new InviteService(ctx, orgContext, new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
     }
 
     [Fact]
@@ -72,6 +72,40 @@ public sealed class InviteServiceTests : IDisposable
         row.RevokedAt.Should().BeNull();
         row.TokenHash.Should().NotBe(token, "raw token must not be stored");
         row.ExpiresAt.Should().Be(_clock.GetUtcNow().UtcDateTime + InviteService.InviteLifetime);
+    }
+
+    [Theory]
+    [InlineData(UserRole.User, UserStatus.Active)]
+    [InlineData(UserRole.Editor, UserStatus.Active)]
+    [InlineData(UserRole.Admin, UserStatus.Disabled)]
+    public async Task A_demoted_or_disabled_admin_can_neither_invite_nor_revoke(UserRole role, UserStatus status)
+    {
+        // The cookie still says Admin for up to the revalidation interval; the
+        // row is what counts (#1614).
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        int inviteId;
+        await using (var ctx = _db.NewContext())
+        {
+            (_, inviteId) = await NewService(ctx, admin.Id, TestDb.DefaultOrgId).CreateAsync("pending@example.com", UserRole.User, null);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == admin.Id);
+            row.Role = role;
+            row.Status = status;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var act = _db.NewContext();
+        var svc = NewService(act, admin.Id, TestDb.DefaultOrgId);
+        (await FluentActions.Awaiting(() => svc.CreateAsync("backdoor@elsewhere.example", UserRole.Admin, null))
+            .Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+        (await FluentActions.Awaiting(() => svc.RevokeAsync(inviteId))
+            .Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+
+        await using var read = _db.NewContext();
+        (await read.Invites.IgnoreQueryFilters().AnyAsync(i => i.Email == "backdoor@elsewhere.example")).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync(i => i.Id == inviteId)).RevokedAt.Should().BeNull();
     }
 
     [Fact]
@@ -115,7 +149,7 @@ public sealed class InviteServiceTests : IDisposable
         {
             // Accept runs anonymously — no org context.
             var orgContext = new AmbientOrganizationContext();
-            var svc = new InviteService(ctx, orgContext, _clock, NullLogger<InviteService>.Instance);
+            var svc = new InviteService(ctx, orgContext, new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
             var user = await svc.AcceptAsync(token, "New Admin", "verylongpassword1!");
             user.Email.Should().Be("newadmin@example.com");
             user.Role.Should().Be(UserRole.Admin);
@@ -141,13 +175,100 @@ public sealed class InviteServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var svc = new InviteService(ctx, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+            var svc = new InviteService(ctx, new AmbientOrganizationContext(), new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
             var user = await svc.AcceptAsync(token, "New Editor", "verylongpassword1!");
             user.Email.Should().Be("editor@example.com");
             user.Role.Should().Be(UserRole.Editor);
             user.Status.Should().Be(UserStatus.Active);
             user.OrganizationId.Should().Be(TestDb.DefaultOrgId);
         }
+    }
+
+    [Fact]
+    public async Task Accept_with_a_password_is_refused_in_a_microsoft_only_organisation()
+    {
+        // Every later password sign-in, reset and magic link is refused there,
+        // so the password could never be used again (#1336).
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = NewService(ctx, admin.Id, TestDb.DefaultOrgId);
+            (token, _) = await svc.CreateAsync("entra.only@example.com", UserRole.User, null);
+            var settings = await ctx.OrganizationSettings.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                ctx.OrganizationSettings.Add(settings);
+            }
+            settings.EntraEnabled = true;
+            settings.LocalLoginPolicy = LocalLoginPolicy.EntraOnly;
+            settings.UpdatedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = new InviteService(ctx, new AmbientOrganizationContext(), new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
+            Func<Task> act = () => svc.AcceptAsync(token, "Entra Person", "verylongpassword1!");
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors.Should().ContainKey("Password");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "entra.only@example.com")).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync(i => i.Email == "entra.only@example.com")).AcceptedAt
+            .Should().BeNull("the invite stays usable for accepting with Microsoft");
+    }
+
+    [Fact]
+    public async Task Accepting_with_microsoft_is_refused_where_a_password_works()
+    {
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            (token, _) = await NewService(ctx, admin.Id, TestDb.DefaultOrgId).CreateAsync("password.org@example.com", UserRole.User, null);
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var svc = new InviteService(ctx2, new AmbientOrganizationContext(), new AuthService(ctx2, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
+        Func<Task> act = () => svc.PrepareMicrosoftAcceptanceAsync(token, "Password Person");
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Password");
+    }
+
+    [Fact]
+    public async Task Accepting_with_microsoft_is_allowed_in_a_microsoft_only_organisation()
+    {
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            (token, _) = await NewService(ctx, admin.Id, TestDb.DefaultOrgId).CreateAsync("ms.org@example.com", UserRole.User, null);
+        }
+        await MakeMicrosoftOnlyAsync(TestDb.DefaultOrgId);
+
+        await using var ctx2 = _db.NewContext();
+        var svc = new InviteService(ctx2, new AmbientOrganizationContext(), new AuthService(ctx2, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
+        var invite = await svc.PrepareMicrosoftAcceptanceAsync(token, "MS Person");
+        invite.Email.Should().Be("ms.org@example.com");
+    }
+
+    private async Task MakeMicrosoftOnlyAsync(int orgId)
+    {
+        await using var ctx = _db.NewContext();
+        var settings = await ctx.OrganizationSettings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.OrganizationId == orgId);
+        if (settings is null)
+        {
+            settings = new OrganizationSettings { OrganizationId = orgId };
+            ctx.OrganizationSettings.Add(settings);
+        }
+        settings.EntraEnabled = true;
+        settings.LocalLoginPolicy = LocalLoginPolicy.EntraOnly;
+        settings.UpdatedAt = DateTime.UtcNow;
+        await ctx.SaveChangesAsync();
     }
 
     [Fact]
@@ -163,13 +284,13 @@ public sealed class InviteServiceTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var svc = new InviteService(ctx, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+            var svc = new InviteService(ctx, new AmbientOrganizationContext(), new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
             await svc.AcceptAsync(token, "Once", "verylongpassword1!");
         }
 
         await using (var ctx = _db.NewContext())
         {
-            var svc = new InviteService(ctx, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+            var svc = new InviteService(ctx, new AmbientOrganizationContext(), new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
             Func<Task> reuse = () => svc.AcceptAsync(token, "Twice", "verylongpassword1!");
             var ex = await reuse.Should().ThrowAsync<PlanValidationException>();
             ex.Which.Errors.Should().ContainKey("Token");
@@ -191,7 +312,7 @@ public sealed class InviteServiceTests : IDisposable
         _clock.Advance(InviteService.InviteLifetime + TimeSpan.FromSeconds(1));
 
         await using var ctx2 = _db.NewContext();
-        var svc2 = new InviteService(ctx2, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+        var svc2 = new InviteService(ctx2, new AmbientOrganizationContext(), new AuthService(ctx2, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
         Func<Task> act = () => svc2.AcceptAsync(token, "Late", "verylongpassword1!");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("Token");
@@ -216,7 +337,7 @@ public sealed class InviteServiceTests : IDisposable
         }
 
         await using var ctx3 = _db.NewContext();
-        var svc3 = new InviteService(ctx3, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+        var svc3 = new InviteService(ctx3, new AmbientOrganizationContext(), new AuthService(ctx3, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
         Func<Task> act = () => svc3.AcceptAsync(token, "Nope", "verylongpassword1!");
         await act.Should().ThrowAsync<PlanValidationException>();
     }
@@ -235,6 +356,9 @@ public sealed class InviteServiceTests : IDisposable
             (_, inviteId) = await svc.CreateAsync("victim@example.com", UserRole.User, null);
         }
 
+        // Admin B's request filters to OrgB, as it would in production; the
+        // acting-admin re-read (#1614) reads B's row inside that filter.
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
         await using var ctx2 = _db.NewContext();
         var svcB = NewService(ctx2, adminB.Id, TestDb.OtherOrgId);
         Func<Task> act = () => svcB.RevokeAsync(inviteId);
@@ -271,7 +395,7 @@ public sealed class InviteServiceTests : IDisposable
     private async Task<Func<Task<User>>> AcceptLaterAsync(string token)
     {
         var ctx = _db.NewContext();
-        var svc = new InviteService(ctx, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+        var svc = new InviteService(ctx, new AmbientOrganizationContext(), new AuthService(ctx, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
         return () => svc.AcceptAsync(token, "Taken Person", "verylongpassword1!");
     }
 

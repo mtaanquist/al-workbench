@@ -370,7 +370,7 @@ public sealed class ReferenceQueryService
             ,
             matched AS (
                 SELECT mr.id, mr.module_id, mr.source_object_id, mr.source_symbol_id,
-                       mr.reference_kind, mr.line_number,
+                       mr.reference_kind, mr.line_number, mr.column_number,
                        mr.target_member_name, mr.target_member_kind
                 FROM oe_module_references mr
                 WHERE mr.module_id = ANY(ARRAY(SELECT id FROM winning))
@@ -394,7 +394,7 @@ public sealed class ReferenceQueryService
                   )
                 UNION ALL
                 SELECT mr.id, mr.module_id, mr.source_object_id, mr.source_symbol_id,
-                       mr.reference_kind, mr.line_number,
+                       mr.reference_kind, mr.line_number, mr.column_number,
                        mr.target_member_name, mr.target_member_kind
                 FROM oe_module_references mr
                 WHERE mr.module_id = ANY(ARRAY(SELECT id FROM winning))
@@ -433,7 +433,10 @@ public sealed class ReferenceQueryService
                 -- and rows imported before the symbol link existed.
                 ss.name                  AS "SourceMemberName",
                 ss.kind                  AS "SourceMemberKind",
-                ss.signature             AS "SourceMemberSignature"
+                ss.signature             AS "SourceMemberSignature",
+                mr.column_number         AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM matched mr
             JOIN oe_module_objects so ON so.id = mr.source_object_id
             JOIN oe_modules        m  ON m.id  = mr.module_id
@@ -469,6 +472,42 @@ public sealed class ReferenceQueryService
     }
 
     /// <summary>
+    /// The chain walk plus the <c>matched</c> CTE behind Find built-in calls:
+    /// every system-reference row on the target in the release's winning
+    /// modules, before any join or row limit. Shared by
+    /// <see cref="FindSystemReferencesAsync"/> and
+    /// <see cref="ListSystemReferenceMethodsAsync"/> so the method list counts
+    /// exactly the rows the list is cut from. Parameters: <c>{0}</c> seed
+    /// release, <c>{1}</c> app id, <c>{2}</c> kind, <c>{3}</c> object id,
+    /// <c>{4}</c> object name, <c>{5}</c> lower-cased method names or null.
+    /// </summary>
+    private const string SystemReferencesMatchedSql = ReleaseAncestrySql.WinningModules + "\n" + """
+        ,
+        matched AS (
+            SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
+                   sr.reference_kind, sr.line_number, sr.system_method_name
+            FROM oe_module_system_references sr
+            WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
+              AND {3}::int IS NOT NULL
+              AND sr.target_app_id      = {1}::uuid
+              AND sr.target_object_kind = {2}
+              AND sr.target_object_id   = {3}::int
+              AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
+            UNION ALL
+            SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
+                   sr.reference_kind, sr.line_number, sr.system_method_name
+            FROM oe_module_system_references sr
+            WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
+              AND {3}::int IS NULL
+              AND sr.target_app_id      = {1}::uuid
+              AND sr.target_object_kind = {2}
+              AND sr.target_object_id   IS NULL
+              AND sr.target_object_name = {4}
+              AND ({5}::text[] IS NULL OR lower(sr.system_method_name) = ANY({5}::text[]))
+        )
+        """;
+
+    /// <summary>
     /// "Find System References": every call to a built-in / system method
     /// (<c>Insert</c>, <c>Modify</c>, <c>SetRange</c>, …) on the target object,
     /// read from the separate <c>oe_module_system_references</c> table. Same
@@ -489,30 +528,7 @@ public sealed class ReferenceQueryService
         // index (ix_oe_module_system_references_module_target /
         // ix_oe_module_system_references_module_target_name) instead of the
         // app-keyed indexes that match the receiver in every imported Release.
-        string sql = ReleaseAncestrySql.WinningModules + "\n" + $$"""
-            ,
-            matched AS (
-                SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
-                       sr.reference_kind, sr.line_number, sr.system_method_name
-                FROM oe_module_system_references sr
-                WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
-                  AND {3}::int IS NOT NULL
-                  AND sr.target_app_id      = {1}::uuid
-                  AND sr.target_object_kind = {2}
-                  AND sr.target_object_id   = {3}::int
-                  AND ({5}::text IS NULL OR sr.system_method_name = {5}::text)
-                UNION ALL
-                SELECT sr.id, sr.module_id, sr.source_object_id, sr.source_symbol_id,
-                       sr.reference_kind, sr.line_number, sr.system_method_name
-                FROM oe_module_system_references sr
-                WHERE sr.module_id = ANY(ARRAY(SELECT id FROM winning))
-                  AND {3}::int IS NULL
-                  AND sr.target_app_id      = {1}::uuid
-                  AND sr.target_object_kind = {2}
-                  AND sr.target_object_id   IS NULL
-                  AND sr.target_object_name = {4}
-                  AND ({5}::text IS NULL OR sr.system_method_name = {5}::text)
-            )
+        string sql = SystemReferencesMatchedSql + "\n" + $$"""
             SELECT
                 sr.id                    AS "Id",
                 sr.module_id             AS "SourceModuleId",
@@ -531,7 +547,10 @@ public sealed class ReferenceQueryService
                 NULL::text               AS "MemberSignature",
                 ss.name                  AS "SourceMemberName",
                 ss.kind                  AS "SourceMemberKind",
-                ss.signature             AS "SourceMemberSignature"
+                ss.signature             AS "SourceMemberSignature",
+                NULL::int                AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM matched sr
             JOIN oe_module_objects so ON so.id = sr.source_object_id
             JOIN oe_modules        m  ON m.id  = sr.module_id
@@ -548,16 +567,63 @@ public sealed class ReferenceQueryService
                 query.TargetObjectKind,
                 (object?)query.TargetObjectId ?? DBNull.Value,
                 query.TargetObjectName,
-                (object?)query.SystemMethodName ?? DBNull.Value)
+                query.SystemMethodNames is { Count: > 0 } methods
+                    ? methods.Select(n => n.Trim().ToLowerInvariant()).ToArray()
+                    : DBNull.Value)
             .ToListAsync(ct);
 
         matches = await EnrichReferencesWithSnippetsAsync(matches, ct);
 
         _logger.LogInformation(
             "FindSystemReferences ReleaseId={ReleaseId} TargetAppId={TargetAppId} Kind={Kind} Id={Id} Name={Name} Method={Method} Matches={Count}",
-            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName, query.SystemMethodName, matches.Count);
+            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName,
+            query.SystemMethodNames is null ? null : string.Join(",", query.SystemMethodNames), matches.Count);
 
         return matches;
+    }
+
+    /// <summary>
+    /// Every built-in method called on the target, with how often, counted over
+    /// the whole matched set rather than the rows <see cref="FindSystemReferencesAsync"/>
+    /// keeps. A list cut at the cap holds the alphabetically first objects only,
+    /// so a method called only from later ones would be missing from a picker
+    /// built from the rows in hand, with no way to reach it (#1543). One
+    /// grouped pass, no joins or snippets, so it stays cheap on Sales Line.
+    /// <see cref="FindSystemReferencesQuery.SystemMethodNames"/> is ignored:
+    /// this lists every method. Each method once, without regard to case, in
+    /// its most used spelling, most used first.
+    /// </summary>
+    public async Task<List<SystemMethodCount>> ListSystemReferenceMethodsAsync(
+        int releaseId, FindSystemReferencesQuery query, CancellationToken ct = default)
+    {
+        if (!await ReleaseVisibleAsync(releaseId, ct)) return new();
+
+        const string sql = SystemReferencesMatchedSql + "\n" + """
+            SELECT
+                mode() WITHIN GROUP (ORDER BY system_method_name) AS "Name",
+                count(*)::int                                     AS "Count"
+            FROM matched
+            WHERE system_method_name <> ''
+            GROUP BY lower(system_method_name)
+            ORDER BY 2 DESC, lower(system_method_name)
+            """;
+
+        var methods = await _db.Database
+            .SqlQueryRaw<SystemMethodCount>(
+                sql,
+                releaseId,
+                query.TargetAppId,
+                query.TargetObjectKind,
+                (object?)query.TargetObjectId ?? DBNull.Value,
+                query.TargetObjectName,
+                DBNull.Value)
+            .ToListAsync(ct);
+
+        _logger.LogInformation(
+            "ListSystemReferenceMethods ReleaseId={ReleaseId} TargetAppId={TargetAppId} Kind={Kind} Id={Id} Name={Name} Methods={Count}",
+            releaseId, query.TargetAppId, query.TargetObjectKind, query.TargetObjectId, query.TargetObjectName, methods.Count);
+
+        return methods;
     }
 
     /// <summary>
@@ -630,7 +696,10 @@ public sealed class ReferenceQueryService
                 -- A declaration isn't a call site inside a member body.
                 NULL::text               AS "SourceMemberName",
                 NULL::text               AS "SourceMemberKind",
-                NULL::text               AS "SourceMemberSignature"
+                NULL::text               AS "SourceMemberSignature",
+                NULL::int                AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM oe_module_symbols s
             JOIN oe_module_objects o  ON o.id = s.object_id
             JOIN oe_modules        m  ON m.id = o.module_id
@@ -737,7 +806,10 @@ public sealed class ReferenceQueryService
                 -- An implementing-procedure declaration, not a call site.
                 NULL::text               AS "SourceMemberName",
                 NULL::text               AS "SourceMemberKind",
-                NULL::text               AS "SourceMemberSignature"
+                NULL::text               AS "SourceMemberSignature",
+                NULL::int                AS "ColumnNumber",
+                NULL::text               AS "Usage",
+                NULL::boolean            AS "IsTemporary"
             FROM oe_module_references mr
             JOIN oe_module_objects    so ON so.id = mr.source_object_id
             JOIN oe_modules           sm ON sm.id = mr.module_id
@@ -784,7 +856,7 @@ public sealed class ReferenceQueryService
     /// when no user is signed in, so an unauthenticated call enriches nothing
     /// exactly as the filtered query it replaces did.</para>
     /// </summary>
-    private async Task<List<ReferenceMatch>> EnrichReferencesWithSnippetsAsync(
+    internal async Task<List<ReferenceMatch>> EnrichReferencesWithSnippetsAsync(
         List<ReferenceMatch> matches, CancellationToken ct)
     {
         // Distinct (file, line) pairs — many matches share a file, and popular
@@ -796,19 +868,77 @@ public sealed class ReferenceQueryService
             .ToList();
         if (pairs.Count == 0) return matches;
 
+        // The files whose field references need the "is the record temporary?"
+        // answer. Only those are scanned for temporary declarations; the scan
+        // runs once per file however many of its lines matched.
+        var temporaryFiles = matches
+            .Where(m => m.SourceFileId.HasValue && m.ReferenceKind == "field_access")
+            .Select(m => m.SourceFileId!.Value)
+            .Distinct()
+            .ToArray();
+
+        // The files whose reference sites are classified as read or set. Those
+        // are split into lines once, so each site can take the lines around it
+        // too: a statement split over several lines keeps its := or Validate(
+        // on a line of its own.
+        var contextFiles = matches
+            .Where(m => m.SourceFileId.HasValue && ReferenceUsage.AppliesTo(m.ReferenceKind))
+            .Select(m => m.SourceFileId!.Value)
+            .Distinct()
+            .ToArray();
+
         // split_part counts fields from 1 and returns '' past the end of the
         // string, which is exactly what we want for a line number beyond the
         // file. Splitting on '\n' alone leaves the '\r' of CRLF content on the
         // end of the line; the TrimEnd below takes it off along with trailing
-        // indentation.
-        const string sql = """
+        // indentation. The temps CTE runs the two declaration patterns of
+        // ReferenceUsage in the database, so only the captured names travel
+        // back rather than the file bodies (#687). Both per-file CTEs are
+        // MATERIALIZED: inlined, Postgres ran the regexes and the line split
+        // once per (file, line) pair rather than once per file, about ten
+        // times slower on a 5000-row field search.
+        var sql = $$"""
+            WITH temps AS MATERIALIZED (
+                SELECT f.id AS file_id,
+                       -- Both alternatives of the pattern contain the word, so
+                       -- the substring test is a safe and cheaper gate.
+                       g.has_temporary AND fc.content ~* {4} AS rec_temporary,
+                       -- The capture walks the whole file; most files declare
+                       -- nothing temporary, and the plain substring test
+                       -- skips them for the price of one scan.
+                       CASE WHEN g.has_temporary THEN
+                           ARRAY(SELECT coalesce(x.m[1], x.m[2])
+                                 FROM regexp_matches(fc.content, {3}, 'gi') AS x(m))
+                       END AS names
+                FROM oe_module_files  f
+                JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+                -- The gate is computed once per file, not once per use; OFFSET 0
+                -- keeps the planner from folding it back into both columns.
+                CROSS JOIN LATERAL (SELECT fc.content ILIKE '%temporary%' AS has_temporary OFFSET 0) g
+                WHERE f.id = ANY({5}::bigint[]) AND f.organization_id = {2}::int
+            ),
+            split AS MATERIALIZED (
+                SELECT f.id AS file_id, string_to_array(fc.content, E'\n') AS lines
+                FROM oe_module_files  f
+                JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+                WHERE f.id = ANY({6}::bigint[]) AND f.organization_id = {2}::int
+            )
             SELECT m.file_id                             AS "FileId",
                    m.line                                AS "LineNumber",
                    f.path                                AS "Path",
-                   split_part(fc.content, E'\n', m.line) AS "Text"
+                   -- A file already split takes its line from the array, so
+                   -- only the others decompress their content once per line.
+                   CASE WHEN s.file_id IS NOT NULL THEN coalesce(s.lines[m.line], '')
+                        ELSE split_part(fc.content, E'\n', m.line) END AS "Text",
+                   t.rec_temporary                       AS "RecTemporary",
+                   t.names                               AS "TemporaryNames",
+                   greatest(m.line - {7}, 1)             AS "ContextStart",
+                   s.lines[greatest(m.line - {7}, 1) : m.line + {7}] AS "Context"
             FROM unnest({0}::bigint[], {1}::int[]) AS m(file_id, line)
             JOIN oe_module_files  f  ON f.id = m.file_id AND f.organization_id = {2}::int
             JOIN oe_file_contents fc ON fc.content_hash = f.content_hash
+            LEFT JOIN temps t ON t.file_id = m.file_id
+            LEFT JOIN split s ON s.file_id = m.file_id
             """;
 
         var rows = await _db.Database
@@ -816,10 +946,16 @@ public sealed class ReferenceQueryService
                 sql,
                 pairs.Select(p => p.FileId).ToArray(),
                 pairs.Select(p => p.Line).ToArray(),
-                _orgContext.OrganizationIdForFilter)
+                _orgContext.OrganizationIdForFilter,
+                ReferenceUsage.TemporaryDeclarationPattern,
+                ReferenceUsage.TemporaryRecPattern,
+                temporaryFiles,
+                contextFiles,
+                ReferenceUsage.ContextLines)
             .ToListAsync(ct);
 
         var lookup = rows.ToDictionary(r => (r.FileId, r.LineNumber));
+        var temporaryNames = new Dictionary<long, HashSet<string>>();
 
         var enriched = new List<ReferenceMatch>(matches.Count);
         foreach (var m in matches)
@@ -827,9 +963,26 @@ public sealed class ReferenceQueryService
             if (m.SourceFileId is { } fid && m.LineNumber is { } ln
                 && lookup.TryGetValue((fid, ln), out var row))
             {
-                var raw = (row.Text ?? string.Empty).TrimEnd();
+                var text = row.Text ?? string.Empty;
+                var raw = text.TrimEnd();
                 if (raw.Length > 200) raw = raw[..200] + "...";
-                enriched.Add(m with { SourceFilePath = row.Path, Snippet = raw });
+                var classified = m with { SourceFilePath = row.Path, Snippet = raw };
+                if (ReferenceUsage.AppliesTo(m.ReferenceKind)
+                    && ClassifySite(row, text, m) is { } site)
+                {
+                    bool? isTemporary = null;
+                    if (m.ReferenceKind == "field_access" && row.RecTemporary is { } recTemporary)
+                    {
+                        if (!temporaryNames.TryGetValue(fid, out var names))
+                        {
+                            names = ReferenceUsage.ParseTemporaryNames(row.TemporaryNames ?? []);
+                            temporaryNames[fid] = names;
+                        }
+                        isTemporary = ReferenceUsage.IsTemporary(site.Receiver, recTemporary, names);
+                    }
+                    classified = classified with { Usage = site.Usage, IsTemporary = isTemporary };
+                }
+                enriched.Add(classified);
             }
             else
             {
@@ -843,8 +996,31 @@ public sealed class ReferenceQueryService
     /// One extracted source line, keyed back to the requested (file, line) pair
     /// — see <see cref="EnrichReferencesWithSnippetsAsync"/>. <c>Text</c> is
     /// empty when the line number runs past the end of the file.
+    /// <c>RecTemporary</c> and <c>TemporaryNames</c> are only filled for files
+    /// holding a field reference: whether the file's own <c>Rec</c> is
+    /// temporary, and the name lists of its temporary record declarations.
+    /// <c>Context</c> is the lines from <c>ContextStart</c> around the
+    /// reference, for files holding a field or variable reference.
     /// </summary>
-    private sealed record SnippetRow(long FileId, int LineNumber, string Path, string? Text);
+    private sealed record SnippetRow(
+        long FileId, int LineNumber, string Path, string? Text,
+        bool? RecTemporary, string[]? TemporaryNames,
+        int ContextStart, string[]? Context);
+
+    /// <summary>
+    /// Read or set for one reference, from the lines around it when the query
+    /// brought them back, else from its own line.
+    /// </summary>
+    private static ReferenceUsage.Site? ClassifySite(SnippetRow row, string text, ReferenceMatch m)
+    {
+        var target = row.LineNumber - row.ContextStart;
+        if (row.Context is { Length: > 0 } context && target >= 0 && target < context.Length)
+        {
+            var lines = context.Select(l => (l ?? string.Empty).TrimEnd('\r')).ToArray();
+            return ReferenceUsage.Classify(lines, target, m.ColumnNumber, m.MemberName);
+        }
+        return ReferenceUsage.Classify(text.TrimEnd('\r'), m.ColumnNumber, m.MemberName);
+    }
 
     /// <summary>
     /// Returns the codeunits (across the visible module chain seeded by

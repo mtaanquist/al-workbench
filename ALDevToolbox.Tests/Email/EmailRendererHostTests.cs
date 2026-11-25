@@ -10,7 +10,6 @@ namespace ALDevToolbox.Tests.Email;
 /// <see cref="EmailRenderer"/> as the app registers it, rendering in a request-like
 /// scope the way the endpoints and, later, the notification senders use it.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class EmailRendererHostTests : IDisposable
 {
     private readonly TestDb _db = new();

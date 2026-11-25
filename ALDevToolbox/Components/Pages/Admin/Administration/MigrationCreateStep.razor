@@ -1,0 +1,144 @@
+@using ALDevToolbox.Services.GitHub
+@using ALDevToolbox.Services.Migration
+@using ALDevToolbox.Services.ObjectExplorer.Projects
+
+@*
+    Step 5 of Migrate repositories (#1701): name the new repository and create it
+    from a ready preview. Split out of the page (#1706). The page owns the call
+    that starts the run; this card owns the choices and asks before a replace.
+*@
+
+<section class="card">
+    <div class="card__head">
+        <div>
+            <h2 class="card__title">5. Create the repository</h2>
+            <p class="card__sub">
+                Creates the repository in your GitHub organisation with the files shown above in a single commit,
+                and @(Clash is { CanJoin: true } ? "adds it to the existing solution" : "a new solution") for @Preview.CustomerName.
+            </p>
+        </div>
+    </div>
+    <div class="card__body form-sec">
+        @if (GitHub?.Blocker is { } blocker)
+        {
+            <Alert Tone="AlertTone.Warn"><span>@blocker</span></Alert>
+        }
+        <div class="field">
+            <label class="field__label" for="mig-repo">Repository name</label>
+            <input class="input" id="mig-repo" type="text" required maxlength="@GitHubWorkspaceRepositoryService.MaxNameLength"
+                   pattern="@GitHubWorkspaceRepositoryService.NamePattern"
+                   placeholder="e.g. cronus-as"
+                   @bind="_repositoryName" @bind:event="oninput" />
+            <span class="field__hint">
+                @if (GitHub?.OrgLogin is { } org)
+                {
+                    <text>Created as @org/@(_repositoryName.Trim().Length > 0 ? _repositoryName.Trim() : "..."). </text>
+                }
+                Letters, digits, hyphens, underscores and full stops.
+            </span>
+            <FieldError Field="@RepositoryMigrationService.RepositoryNameField" Errors="Errors" />
+        </div>
+        <div class="field">
+            <Switch Name="mig-private" Label="Private repository" Checked="_isPrivate" CheckedChanged="v => _isPrivate = v" />
+            <span class="field__hint">Only people you give access to in GitHub can see it.</span>
+        </div>
+        <div class="field">
+            <Switch Name="mig-pipelines" Label="Set up build pipelines" Checked="_addPipelines" CheckedChanged="v => _addPipelines = v" />
+            <span class="field__hint">Adds build pipelines to the solution in AL Workbench, so it builds straight away.</span>
+        </div>
+        @if (Clash is { CanReplace: true } replaceable)
+        {
+            <div class="field">
+                <Switch Name="mig-replace" Label="Replace the existing solution" Checked="_replace" CheckedChanged="v => _replace = v" />
+                <span class="field__hint">
+                    A solution called @replaceable.Name came from an earlier migration, and its repository has since been
+                    deleted from GitHub. Replacing it deletes that solution and its pipelines first.
+                </span>
+            </div>
+        }
+        else if (Clash is { CanJoin: true } joined)
+        {
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    The repository is added to the existing solution
+                    <a href="@SolutionLinks.Solution(joined.Slug, joined.Id)">@joined.Name</a>, which has no GitHub repository yet.
+                </span>
+            </Alert>
+        }
+        else if (Clash is { } taken)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    A solution called <a href="@SolutionLinks.Solution(taken.Slug, taken.Id)">@taken.Name</a> already has a GitHub repository, so this would be refused.
+                    Change the customer name above and preview again, or remove that repository from the solution first.
+                </span>
+            </Alert>
+        }
+        <FieldError Field="@RepositoryMigrationService.SolutionField" Errors="Errors" />
+        <FieldError Field="@RepositoryMigrationService.RepositoryField" Errors="Errors" />
+        @foreach (var (_, message) in Errors.Where(e => e.Key is not (RepositoryMigrationService.SolutionField or RepositoryMigrationService.RepositoryField or RepositoryMigrationService.RepositoryNameField)))
+        {
+            <FieldError Message="@message" />
+        }
+        <div class="u-row mig__go">
+            <button type="button" class="btn btn--primary" @onclick="CreateAsync"
+                    disabled="@(Starting || string.IsNullOrWhiteSpace(_repositoryName) || Clash is { CanJoin: false, CanReplace: false } || GitHub?.Blocker is not null)">
+                <Icon Name="folder-git-2" Width="16" Height="16" />
+                <span>@(Starting ? "Starting..." : "Create repository")</span>
+            </button>
+        </div>
+    </div>
+</section>
+
+<ConfirmDialog @ref="_confirmReplace" />
+
+@code {
+    /// <summary>The ready preview the repository is created from.</summary>
+    [Parameter, EditorRequired] public MigrationPreview Preview { get; set; } = default!;
+
+    /// <summary>A solution that already has the preview's customer name, if any.</summary>
+    [Parameter] public MigrationSolutionClash? Clash { get; set; }
+
+    /// <summary>Where the repository would go on GitHub, or what stops it.</summary>
+    [Parameter] public MigrationGitHubReadiness? GitHub { get; set; }
+
+    /// <summary>Why the last attempt was refused, by field.</summary>
+    [Parameter] public IReadOnlyDictionary<string, string> Errors { get; set; } = new Dictionary<string, string>();
+
+    /// <summary>True while the page is starting the run.</summary>
+    [Parameter] public bool Starting { get; set; }
+
+    /// <summary>Starts the run with what the Admin chose.</summary>
+    [Parameter] public EventCallback<MigrationCreateInput> OnCreate { get; set; }
+
+    private Guid? _preparedFor;
+    private string _repositoryName = string.Empty;
+    private bool _isPrivate = true;
+    private bool _addPipelines = true;
+    private bool _replace;
+    private ConfirmDialog? _confirmReplace;
+
+    // Once per preview: suggest the repository name from the customer's, and
+    // forget a replace chosen for another one.
+    protected override void OnParametersSet()
+    {
+        if (_preparedFor == Preview.Id) return;
+        _preparedFor = Preview.Id;
+        _repositoryName = GitHubWorkspaceRepositoryService.SuggestName(Preview.CustomerName);
+        _replace = false;
+    }
+
+    private async Task CreateAsync()
+    {
+        if (Starting) return;
+        if (_replace && Clash is { CanReplace: true } clash && _confirmReplace is not null
+            && !await _confirmReplace.OpenAsync(
+                $"Replace {clash.Name}?",
+                $"The solution {clash.Name} and its pipelines are deleted, then the new repository and a new solution are created.",
+                "Replace and create", "btn--danger", "trash-2"))
+        {
+            return;
+        }
+        await OnCreate.InvokeAsync(new MigrationCreateInput(_repositoryName, _isPrivate, _addPipelines, _replace));
+    }
+}

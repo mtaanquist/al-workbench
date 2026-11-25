@@ -23,6 +23,7 @@ Living specification for the AL Workbench. The code in `ALDevToolbox/` is the im
 | `environment-updates.md` | The Upgrades fleet page: the team-scoped grant, the mirrored next platform update, the two date writes, the action-and-history table. |
 | `on-prem-gateway.md` | The on-premises gateway: managing on-premises service tiers through a Windows service in the customer's network; on-premises environments, deployments, licences and restarts. |
 | `solution-customer-info.md` | Customer information on a Solution: hosting and on-premises Solutions, the Customer tab (getting in, contacts, modules, who knows the customer), the Solutions list's side panel. |
+| `sealed.md` | Sealed, the one-time secret links: browser-side encryption, what the server keeps, the recipient's anonymous half. |
 | `command-palette.md` | The command palette: why it is a script and an endpoint rather than a Blazor island, the hotkey, the source contract, matching and ranking, what it may return and what it never does. |
 | `completed-milestones.md` | The record of what each shipped milestone added (M1–M21). |
 | `roadmap.md` | Uncommitted forward-looking ideas (successor to the retired `milestones.md`). |

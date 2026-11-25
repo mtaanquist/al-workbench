@@ -44,6 +44,16 @@ public sealed class DeliveryTargetFactory
     internal GatewayCommandService? GatewayCommands => _gateway?.Commands;
 
     /// <summary>
+    /// The online connection's token source and admin client, for re-reading a refusing
+    /// environment status before a deployment is set up (#1492). Online only: an
+    /// on-premises tier's status comes from its gateway's inventory.
+    /// </summary>
+    internal IDeliveryTokenSource OnlineTokens => _tokens;
+
+    /// <inheritdoc cref="OnlineTokens"/>
+    internal IBcAdminClient OnlineAdmin => _admin;
+
+    /// <summary>
     /// Why nothing can be deployed to an environment of <paramref name="kind"/>, in a
     /// sentence for the person; null when <see cref="Create"/> has a target for it. Every
     /// kind has one now; this stays the place a kind without one would say so.

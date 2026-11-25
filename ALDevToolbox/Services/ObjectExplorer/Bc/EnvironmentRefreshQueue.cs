@@ -26,6 +26,31 @@ public sealed class EnvironmentRefreshQueue : JobQueue<EnvironmentRefreshJob, in
     // a fleet rather than for a single page action; the worker drains one at a time and a
     // full channel simply makes the scheduler wait.
     public EnvironmentRefreshQueue() : base(capacity: 256, keySelector: job => job.ProjectId) { }
+
+    // Projects Business Central has asked us to leave alone until a given time (UTC),
+    // from the Retry-After of a throttled read. In memory like the dedupe gate: a restart
+    // forgets it, and the worst that costs is one more throttled answer.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> _deferredUntil = new();
+
+    /// <summary>
+    /// Records that Business Central asked for no more requests about this project before
+    /// <paramref name="untilUtc"/>. A later, shorter answer never shortens a longer wait
+    /// already on record.
+    /// </summary>
+    public void DeferUntil(int projectId, DateTime untilUtc) =>
+        _deferredUntil.AddOrUpdate(projectId, untilUtc, (_, existing) => existing > untilUtc ? existing : untilUtc);
+
+    /// <summary>
+    /// Until when the scheduled sweep should leave this project alone, or null when it is
+    /// free to ask. A wait that has passed is forgotten here.
+    /// </summary>
+    public DateTime? DeferredUntil(int projectId, DateTime nowUtc)
+    {
+        if (!_deferredUntil.TryGetValue(projectId, out var until)) return null;
+        if (until > nowUtc) return until;
+        _deferredUntil.TryRemove(new KeyValuePair<int, DateTime>(projectId, until));
+        return null;
+    }
 }
 
 /// <summary>

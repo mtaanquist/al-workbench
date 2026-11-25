@@ -246,6 +246,19 @@ public sealed class ReleaseComparisonService
             .ToListAsync(ct);
 
     /// <summary>
+    /// The ids of a release's modules that <see cref="OneModulePerApp"/> picks, so
+    /// the object loads can be restricted to them in the query (#1332). Without it
+    /// the object compare and "Compare with..." read whichever of two versions of
+    /// one app the database returned first, usually the older one. A release holds
+    /// tens to a few hundred modules, so picking in memory costs one small read.
+    /// </summary>
+    private async Task<List<long>> LoadWinningModuleIdsAsync(int releaseId, CancellationToken ct)
+        => OneModulePerApp(await LoadModuleCompareRowsAsync(releaseId, ct))
+            .Values
+            .Select(m => m.ModuleId)
+            .ToList();
+
+    /// <summary>
     /// File-pair diff for one Changed module. Files are joined on canonical
     /// <c>Path</c>. Returns null when either module id is missing.
     /// </summary>
@@ -304,7 +317,7 @@ public sealed class ReleaseComparisonService
     /// </summary>
     public async Task<List<ReleaseCompareFileRow>> CompareReleaseFilesFlatAsync(
         int leftReleaseId, int rightReleaseId, int? take = MaxCompareFileRows,
-        CancellationToken ct = default)
+        string? pathPattern = null, CancellationToken ct = default)
     {
         var context = await CompareReleasesCoreAsync(leftReleaseId, rightReleaseId, ct);
         if (context is null) return new();
@@ -321,6 +334,13 @@ public sealed class ReleaseComparisonService
         // punctuation and digits differently, and left gaps in the cut (#1262).
         var fetch = take.HasValue ? take.Value + 1 : int.MaxValue;
 
+        // The path filter runs before the cap, in the database where it can, so
+        // narrowing a large diff reaches files past the first few thousand rather
+        // than filtering only those (#1510).
+        var needle = string.IsNullOrWhiteSpace(pathPattern) ? null : pathPattern.Trim();
+        var likePattern = needle is null ? null : "%" + ObjectSearchService.EscapeLike(needle) + "%";
+        bool PathMatches(string path) => needle is null || path.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
         // Added / Removed modules: every file in that module is added/removed.
         var addedRightModuleIds = summary.Added.Where(m => m.RightModuleId.HasValue)
             .Select(m => m.RightModuleId!.Value).ToList();
@@ -331,6 +351,7 @@ public sealed class ReleaseComparisonService
         {
             var addedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => addedRightModuleIds.Contains(f.ModuleId))
+                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern, "\\"))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
                 .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
                 .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
@@ -345,6 +366,7 @@ public sealed class ReleaseComparisonService
         {
             var removedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => removedLeftModuleIds.Contains(f.ModuleId))
+                .Where(f => likePattern == null || EF.Functions.ILike(f.Path, likePattern, "\\"))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
                 .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
                 .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
@@ -367,17 +389,17 @@ public sealed class ReleaseComparisonService
                 context.LeftFilesByModule.GetValueOrDefault(lm, EmptyFiles),
                 context.RightFilesByModule.GetValueOrDefault(rm, EmptyFiles));
 
-            foreach (var f in pairsAdded)
+            foreach (var f in pairsAdded.Where(f => PathMatches(f.Path)))
             {
                 rows.Add(new ReleaseCompareFileRow(m.AppId, m.Name, f.Path, "added",
                     LeftFileId: null, RightFileId: f.RightFileId));
             }
-            foreach (var f in pairsRemoved)
+            foreach (var f in pairsRemoved.Where(f => PathMatches(f.Path)))
             {
                 rows.Add(new ReleaseCompareFileRow(m.AppId, m.Name, f.Path, "removed",
                     LeftFileId: f.LeftFileId, RightFileId: null));
             }
-            foreach (var f in pairsChanged)
+            foreach (var f in pairsChanged.Where(f => PathMatches(f.Path)))
             {
                 rows.Add(new ReleaseCompareFileRow(m.AppId, m.Name, f.Path, "modified",
                     LeftFileId: f.LeftFileId, RightFileId: f.RightFileId));
@@ -425,8 +447,8 @@ public sealed class ReleaseComparisonService
         CancellationToken ct = default)
     {
         if (!await BothSidesVisibleAsync(leftReleaseId, rightReleaseId, ct)) return new([], 0, false);
-        var left = await LoadCompareObjectsAsync(leftReleaseId, ct).ConfigureAwait(false);
-        var right = await LoadCompareObjectsAsync(rightReleaseId, ct).ConfigureAwait(false);
+        var left = await LoadCompareObjectsAsync(leftReleaseId, ct);
+        var right = await LoadCompareObjectsAsync(rightReleaseId, ct);
 
         var leftByKey = ToKeyedMap(left.Where(o => MatchesFilter(o, kind, nameContains)));
         var rightByKey = ToKeyedMap(right.Where(o => MatchesFilter(o, kind, nameContains)));
@@ -496,8 +518,9 @@ public sealed class ReleaseComparisonService
         int releaseId, string kind, int? objectId, string name, CancellationToken ct = default)
     {
         if (!await _access.IsReleaseVisibleAsync(releaseId, ct)) return null;
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct);
         var query = _db.OeModuleObjects.AsNoTracking()
-            .Where(o => o.Module!.ReleaseId == releaseId
+            .Where(o => moduleIds.Contains(o.ModuleId)
                         && o.Kind == kind
                         && o.SourceFileId != null);
         query = objectId is int id
@@ -505,18 +528,25 @@ public sealed class ReleaseComparisonService
             : query.Where(o => o.ObjectId == null && o.Name.ToLower() == name.ToLower());
         return await query
             .Select(o => o.SourceFileId)
-            .FirstOrDefaultAsync(ct)
-            .ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
     }
 
+    /// <summary>
+    /// A release's objects, from the one module per app the module compare picks
+    /// (<see cref="LoadWinningModuleIdsAsync"/>), so a release amended with a newer
+    /// version of an app compares that version's objects (#1332).
+    /// </summary>
     private async Task<List<CompareObject>> LoadCompareObjectsAsync(int releaseId, CancellationToken ct)
-        => await _db.OeModuleObjects.AsNoTracking()
-            .Where(o => o.Module!.ReleaseId == releaseId)
+    {
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct);
+        return await _db.OeModuleObjects.AsNoTracking()
+            .Where(o => moduleIds.Contains(o.ModuleId))
             .Select(o => new CompareObject(
                 o.Kind, o.ObjectId, o.Name, o.SourceFileId,
                 o.SourceFile != null ? o.SourceFile.ContentHash : null,
                 o.Module!.AppId, o.Module.Version, o.Module.AppFileHash))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
+    }
 
     /// <summary>
     /// Whether two matched objects are the same. The hash is the source file's,
@@ -537,8 +567,11 @@ public sealed class ReleaseComparisonService
         var map = new Dictionary<string, CompareObject>(StringComparer.Ordinal);
         foreach (var o in objects)
         {
-            // (kind, object id) is unique within a release; fall back to name for
-            // id-less objects (AL interfaces). First wins on the rare collision.
+            // The objects come from one module per app (LoadCompareObjectsAsync), and
+            // (kind, object id) is unique across those; a release with two versions
+            // of an app repeats it, which is why the loads keep only the winner.
+            // Fall back to name for id-less objects (AL interfaces). First wins on
+            // the rare collision between two different apps.
             var key = o.ObjectId is int id
                 ? $"{o.Kind}#{id}"
                 : $"{o.Kind}#name:{o.Name.ToLowerInvariant()}";
@@ -556,6 +589,18 @@ public sealed class ReleaseComparisonService
     /// <c>(AppId, Path)</c> — populates the "Compare with release" picker on
     /// the source-file viewer. Only ready Releases that actually carry a
     /// matching file are returned, keeping the dropdown dead-link-free.
+    /// <para>
+    /// A file in a pipeline build is offered the other builds of its own
+    /// Solution, as the build's release page is (#1075): same order (own
+    /// pipeline first, newest first), same "Build #N of {pipeline}" labels and
+    /// the same cap, from <see cref="BuildCompareCandidates"/>. Every build
+    /// shares one release label, so the plain list showed hundreds of
+    /// identical entries (#1570). Any other file is offered every other
+    /// release with the file except builds, which the global pickers never list.
+    /// So is a file in a project release no build row points at any more (an
+    /// imported one, or one whose build was removed): it has no Solution builds
+    /// to offer, and an empty picker would be no use to anyone.
+    /// </para>
     /// </summary>
     public async Task<List<CompareTargetOption>> GetCompareTargetsAsync(
         long fileId, CancellationToken ct = default)
@@ -567,6 +612,7 @@ public sealed class ReleaseComparisonService
                 f.Path,
                 AppId = f.Module!.AppId,
                 ReleaseId = f.Module!.ReleaseId,
+                ReleaseKind = f.Module!.Release!.Kind,
                 BcVersion = f.Module!.Release!.BcVersion,
                 ImportedAt = f.Module!.Release!.ImportedAt,
             })
@@ -577,29 +623,74 @@ public sealed class ReleaseComparisonService
         var snapshot = await _access.GetSnapshotAsync(ct);
         var visibleRelease = _access.VisibleReleasePredicate(snapshot);
 
-        var candidates = await _db.OeModuleFiles.AsNoTracking()
+        var files = _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.Path == anchor.Path
                 && f.Module!.AppId == anchor.AppId
                 && f.Module!.ReleaseId != anchor.ReleaseId
                 && f.Module!.Release!.Status == "ready"
                 && f.Module!.Release!.DeletedAt == null)
-            .Where(f => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == f.Module!.ReleaseId))
+            .Where(f => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == f.Module!.ReleaseId));
+
+        // Build releases: the picker's order and labels come from the build list.
+        List<ReleaseListItem>? builds = null;
+        if (anchor.ReleaseKind == OeRelease.ProjectBuildKind
+            && await _db.OeProjectBuilds.AsNoTracking().AnyAsync(b => b.ReleaseId == anchor.ReleaseId, ct))
+        {
+            builds = await BuildCompareCandidates.ListAsync(_db, _access, anchor.ReleaseId, ct,
+                withFile: (anchor.AppId, anchor.Path));
+            if (builds.Count == 0) return new();
+            var buildReleaseIds = builds.Select(b => b.Id).ToList();
+            files = files.Where(f => buildReleaseIds.Contains(f.Module!.ReleaseId));
+        }
+        else
+        {
+            files = files.Where(f => f.Module!.Release!.Kind != OeRelease.ProjectBuildKind);
+        }
+
+        var candidates = await files
             .OrderBy(f => f.Module!.Release!.Label)
             .Select(f => new
             {
                 ReleaseId = f.Module!.ReleaseId,
                 Label = f.Module!.Release!.Label,
                 FileId = f.Id,
+                f.ModuleId,
                 BcVersion = f.Module!.Release!.BcVersion,
                 ImportedAt = f.Module!.Release!.ImportedAt,
             })
             .ToListAsync(ct);
+        if (candidates.Count == 0) return new();
 
-        return candidates
-            .Select(c => new CompareTargetOption(
-                c.ReleaseId, c.Label, c.FileId,
-                TargetIsOlder: IsOlderRelease(c.BcVersion, c.ImportedAt, anchor.BcVersion, anchor.ImportedAt)))
+        // A release holding two versions of this app (an amend) would be listed
+        // once per version, and one entry would open the old file. Keep only the
+        // file of the version that release resolves to, the module compare's pick;
+        // if that version dropped the file, the release is not offered (#1332).
+        var releaseIds = candidates.Select(c => c.ReleaseId).Distinct().ToList();
+        var appModules = await _db.OeModules.AsNoTracking()
+            .Where(m => m.AppId == anchor.AppId && releaseIds.Contains(m.ReleaseId))
+            .Select(m => new { m.ReleaseId, m.Id, m.AppId, m.Name, m.Publisher, m.Version })
+            .ToListAsync(ct);
+        var winningModuleIds = appModules
+            .GroupBy(m => m.ReleaseId)
+            .Select(g => OneModulePerApp(g.Select(m => new ModuleCompareRow(m.Id, m.AppId, m.Name, m.Publisher, m.Version)).ToList())[anchor.AppId].ModuleId)
+            .ToHashSet();
+
+        var offered = candidates.Where(c => winningModuleIds.Contains(c.ModuleId)).ToList();
+        if (builds is not null)
+        {
+            var byRelease = offered.GroupBy(c => c.ReleaseId).ToDictionary(g => g.Key, g => g.First());
+            return builds
+                .Where(b => byRelease.ContainsKey(b.Id))
+                .Select(b => ToOption(b.Id, b.Label, byRelease[b.Id].FileId, b.BcVersion, byRelease[b.Id].ImportedAt))
+                .ToList();
+        }
+        return offered
+            .Select(c => ToOption(c.ReleaseId, c.Label, c.FileId, c.BcVersion, c.ImportedAt))
             .ToList();
+
+        CompareTargetOption ToOption(int releaseId, string label, long fileId, string? bcVersion, DateTime importedAt)
+            => new(releaseId, label, fileId,
+                TargetIsOlder: IsOlderRelease(bcVersion, importedAt, anchor.BcVersion, anchor.ImportedAt));
     }
 
     /// <summary>

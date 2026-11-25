@@ -55,6 +55,28 @@ public sealed class HealthCheckTests
         after.Status.Should().Be(HealthStatus.Healthy);
     }
 
+    [Fact]
+    public async Task DatabaseHealthCheck_is_healthy_when_the_database_answers()
+    {
+        using var db = new ALDevToolbox.Tests.Infrastructure.TestDb();
+        await using var ctx = db.NewContext();
+
+        var result = await new DatabaseHealthCheck(ctx).CheckHealthAsync(new HealthCheckContext());
+
+        result.Status.Should().Be(HealthStatus.Healthy);
+    }
+
+    /// <summary>The probe must answer 503, not fail with an exception of its own.</summary>
+    [Fact]
+    public async Task DatabaseHealthCheck_is_unhealthy_rather_than_throwing_when_the_database_is_unreachable()
+    {
+        await using var ctx = ALDevToolbox.Tests.Endpoints.HealthEndpointTests.UnreachableContext();
+
+        var result = await new DatabaseHealthCheck(ctx).CheckHealthAsync(new HealthCheckContext());
+
+        result.Status.Should().Be(HealthStatus.Unhealthy);
+    }
+
     private sealed class ThrowingDataProtectionProvider : IDataProtectionProvider
     {
         public IDataProtector CreateProtector(string purpose) => new ThrowingProtector();

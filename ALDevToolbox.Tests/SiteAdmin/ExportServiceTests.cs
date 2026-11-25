@@ -128,6 +128,44 @@ public sealed class ExportServiceTests : IDisposable
         parsed.Key.Should().Be("runtime-rt");
     }
 
+    /// <summary>
+    /// #1326 review: a template keeps its link to a deleted default module so a
+    /// restore brings it back, but the exported template.toml must leave it
+    /// out - the TOML editor refuses a key that names no live module.
+    /// </summary>
+    [Fact]
+    public async Task ExportAllAsync_template_toml_leaves_out_deleted_default_modules()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            var live = ModuleBuilder.Default("mod-live");
+            var retired = ModuleBuilder.Default("mod-retired");
+            retired.DeletedAt = DateTime.UtcNow;
+            seed.Modules.AddRange(live, retired);
+            await seed.SaveChangesAsync();
+
+            var template = TemplateBuilder.Default("runtime-defaults");
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule { OrganizationId = template.OrganizationId, ModuleId = retired.Id, Ordering = 0 });
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule { OrganizationId = template.OrganizationId, ModuleId = live.Id, Ordering = 1 });
+            seed.RuntimeTemplates.Add(template);
+            await seed.SaveChangesAsync();
+        }
+
+        string templateToml;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = new ExportService(ctx, _db.OrgContext, new FolderTreeHydrator(ctx), NullLogger<ExportService>.Instance);
+            var archive = await svc.ExportAllAsync();
+            using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+            using var reader = new StreamReader(zip.GetEntry("runtime-defaults/template.toml")!.Open());
+            templateToml = await reader.ReadToEndAsync();
+        }
+
+        templateToml.Should().NotContain("mod-retired");
+        TemplateTomlMapper.FromToml(templateToml, deprecated: false)
+            .DefaultModuleKeys.Should().Equal("mod-live");
+    }
+
     [Fact]
     public async Task ExportAllAsync_template_toml_carries_dependencies_folders_included_files_and_root_folders()
     {
@@ -191,6 +229,30 @@ public sealed class ExportServiceTests : IDisposable
         codeunits.Files.Should().ContainSingle(f => f.Path == "Hello.Codeunit.al" && f.Content == "codeunit 50100 Hello {}");
         parsed.IncludedFilePaths.Should().Equal("export-included.txt");
         parsed.RootFolderPaths.Should().Equal(".alpackages");
+    }
+
+    [Fact]
+    public async Task ExportAllAsync_writes_the_size_a_module_takes_from_its_repository()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            var following = ModuleBuilder.Default("mod-following");
+            following.SourceIdRangeSize = 120;
+            seed.Modules.Add(following);
+            await seed.SaveChangesAsync();
+        }
+
+        string toml;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = new ExportService(ctx, _db.OrgContext, new FolderTreeHydrator(ctx), NullLogger<ExportService>.Instance);
+            var archive = await svc.ExportAllAsync();
+            using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+            using var reader = new StreamReader(zip.GetEntry("modules/mod-following.toml")!.Open());
+            toml = await reader.ReadToEndAsync();
+        }
+
+        toml.Should().Contain("id_range_size = 120", "a blank size that follows the repository is exported as it stands (#1631)");
     }
 
     private async Task<List<string>> ExportAndListEntriesAsync()

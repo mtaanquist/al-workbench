@@ -107,7 +107,7 @@ public sealed class PaletteSearchService
         foreach (var source in _sources)
         {
             ct.ThrowIfCancellationRequested();
-            if (!await source.IsAvailableAsync(user, ct).ConfigureAwait(false)) continue;
+            if (!await source.IsAvailableAsync(user, ct)) continue;
 
             asked++;
             var sourceStartedAt = Stopwatch.GetTimestamp();
@@ -120,8 +120,7 @@ public sealed class PaletteSearchService
                 slice.CancelAfter(SourceBudget);
                 try
                 {
-                    candidates = await source.SearchAsync(query, CandidatesPerSource, slice.Token)
-                        .ConfigureAwait(false);
+                    candidates = await source.SearchAsync(query, CandidatesPerSource, slice.Token);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {

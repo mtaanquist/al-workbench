@@ -183,14 +183,14 @@
             var msg = ctx.Request.Query["msg"].ToString();
             if (!string.IsNullOrEmpty(err) && !string.IsNullOrEmpty(msg))
             {
-                Status = ($"{err}: {msg}", true);
+                Status = (msg, true);
             }
             else
             {
                 var ok = ctx.Request.Query["ok"].ToString();
                 if (!string.IsNullOrEmpty(ok))
                 {
-                    Status = (FormatOkMessage(ok, ctx.Request.Query["id"].ToString()), false);
+                    Status = (FormatOkMessage(ok, ctx.Request.Query["id"].ToString(), ctx.Request.Query["skipped"].ToString()), false);
                 }
             }
         }
@@ -212,7 +212,7 @@
             !string.IsNullOrEmpty(value) && value.Contains(_search, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string FormatOkMessage(string ok, string id) => ok switch
+    private static string FormatOkMessage(string ok, string id, string skipped) => ok switch
     {
         "queued"       => $"Release {id} queued - importing in the background. Refresh this page to check on its progress.",
         "imported"     => $"Release {id} imported.",
@@ -220,9 +220,24 @@
         "soft-deleted" => $"Release {id} soft-deleted. Restore from this page if it was a mistake.",
         "restored"     => $"Release {id} restored.",
         "hard-deleted" => $"Release {id} permanently deleted.",
-        "backfill-all-queued" => $"Queued a system-reference backfill for {id} ready release(s). They run in the background - watch progress on the workers page.",
+        "backfill-all-queued" => FormatBackfillQueued(id, skipped),
         _              => "Done.",
     };
+
+    internal static string FormatBackfillQueued(string queued, string skipped)
+    {
+        var alreadyQueued = int.TryParse(skipped, out var n) && n > 0
+            ? n == 1
+                ? " 1 release was left alone: its backfill is still waiting, or has already run since it last changed."
+                : $" {n} releases were left alone: their backfill is still waiting, or has already run since they last changed."
+            : string.Empty;
+        if (queued == "0" && alreadyQueued.Length > 0) return $"Nothing new to queue.{alreadyQueued}";
+        // "They" is the releases just queued, so the left-alone sentence follows it.
+        var queuedText = queued == "1"
+            ? "1 ready release. It runs"
+            : $"{queued} ready releases. They run";
+        return $"Queued a system-reference backfill for {queuedText} in the background - watch progress on the workers page.{alreadyQueued}";
+    }
 
     private static string FormatKind(string kind) => kind switch
     {

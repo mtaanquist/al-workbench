@@ -1,3 +1,5 @@
+using ALDevToolbox.Services.ObjectExplorer.Import;
+
 namespace ALDevToolbox.Services.Translation;
 
 /// <summary>
@@ -68,6 +70,60 @@ public static class TranslationFileRules
         var folder = segments.Length >= 3 ? string.Join('/', segments[..^2]) : string.Empty;
         var isSource = name.EndsWith(SourceFileSuffix, StringComparison.OrdinalIgnoreCase);
         return new TranslationFilePlace(path, name, folder, isSource ? null : ReadLanguage(name), isSource);
+    }
+
+    /// <summary>
+    /// True for a file that holds no translation yet: it names no target
+    /// language, or names the source language as its target, and no string in
+    /// it has a target yet. That is how the
+    /// AL compiler writes the generated <c>.g.xlf</c>, and it is the only test
+    /// a file opened from disk gives us - its name is whatever the user's
+    /// copy is called.
+    ///
+    /// <para>Such a file is the build's, not the translator's: the next build
+    /// writes it again and anything saved into it is gone (#1325). A
+    /// translation started from it belongs in a language file beside it - see
+    /// <see cref="LanguageFileName"/>.</para>
+    /// </summary>
+    public static bool IsUntranslatedSource(XliffDocument parsed) =>
+        (string.IsNullOrWhiteSpace(parsed.TargetLanguage)
+            || string.Equals(parsed.SourceLanguage?.Trim(), parsed.TargetLanguage.Trim(), StringComparison.OrdinalIgnoreCase))
+        // A curated en-US file (an English text pass over the captions) also
+        // names its source language as its target, but it carries targets; it
+        // is somebody's work, not the build's, and saves in place as before.
+        && parsed.Units.All(u => string.IsNullOrEmpty(u.TargetText));
+
+    /// <summary>
+    /// A full AL translation tag in a file name: a lower-case language, an
+    /// optional script, and an upper-case region or a UN M.49 number - the
+    /// <c>da-DK</c> AL writes, never a bare <c>app</c> or <c>ext</c>.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex LanguageTagPattern = new(
+        "^[a-z]{2,3}(-[A-Z][a-z]{3})?-([A-Z]{2}|[0-9]{3})$",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The name of the language file a translation started from
+    /// <paramref name="fileName"/> is saved as: <c>App.g.xlf</c> becomes
+    /// <c>App.da-DK.xlf</c>, the same name the repository path gives it. A name
+    /// that already carries a language tag has it replaced, so changing the
+    /// language twice does not stack two tags.
+    /// </summary>
+    public static string LanguageFileName(string fileName, string language)
+    {
+        var dot = fileName.LastIndexOf('.');
+        var stem = dot > 0 ? fileName[..dot] : fileName;
+        if (stem.EndsWith(".g", StringComparison.OrdinalIgnoreCase))
+        {
+            stem = stem[..^2];
+        }
+        // Only a full language tag is replaced: "my.app.xlf" and
+        // "Cronus.ext.xlf" keep every part of their names.
+        else if (dot > 0 && ReadLanguage(fileName) is { } tag && LanguageTagPattern.IsMatch(tag))
+        {
+            stem = stem[..^(tag.Length + 1)];
+        }
+        return $"{stem}.{language}.xlf";
     }
 
     /// <summary>

@@ -351,6 +351,84 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
         written.Should().Contain("\"Banking\"");
     }
 
+    /// <summary>
+    /// The organisation changed its folder style after the workspace was
+    /// generated, so the file at the root is not called what the style would
+    /// call it now. It is still the one updated, rather than a second file
+    /// written beside it (#1615).
+    /// </summary>
+    [Fact]
+    public async Task A_workspace_file_named_under_an_older_folder_style_is_updated_rather_than_duplicated()
+    {
+        await ReadyAsync();
+        const string current = """{"folders":[{"path":"Core"}],"settings":{"cronus.custom":true}}""";
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/trees/main", HttpStatusCode.OK,
+                "{\"sha\":\"base-tree-sha\",\"truncated\":false,\"tree\":["
+                + "{\"path\":\"cronus-customer.code-workspace\",\"type\":\"blob\",\"sha\":\"a\"},"
+                + "{\"path\":\"Core\",\"type\":\"tree\",\"sha\":\"b\"},"
+                + "{\"path\":\"Core/other.code-workspace\",\"type\":\"blob\",\"sha\":\"c\"}]}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/cronus-customer.code-workspace",
+                HttpStatusCode.OK, FakeGitHubApi.FileContentsJson("cronus-customer.code-workspace", current));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        await service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"),
+            new SiblingWorkspaceContext("CRONUS Customer", Array.Empty<string>(), new[] { "Core" }),
+            Repo);
+
+        var tree = BodyOf(api, "POST", "/git/trees");
+        tree.Should().Contain("\"path\":\"cronus-customer.code-workspace\"");
+        tree.Should().NotContain("CRONUSCustomer.code-workspace", "a second workspace file would sit beside the first");
+        BodyOf(api, "POST", "/pulls").Should().Contain("cronus-customer.code-workspace").And.Contain("is updated");
+    }
+
+    /// <summary>
+    /// #1615: the saved settings record the name the file was written under,
+    /// and that name is asked for first, ahead of the one today's folder style
+    /// would give it.
+    /// </summary>
+    [Fact]
+    public async Task The_workspace_file_name_the_saved_settings_recorded_is_the_one_updated()
+    {
+        await ReadyAsync();
+        const string current = """{"folders":[{"path":"Core"}],"settings":{"cronus.custom":true}}""";
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{WorkspaceConfigService.FileName}",
+                HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(
+                    WorkspaceConfigService.FileName, SavedSolutionConfig("cronus-customer.code-workspace")))
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/cronus-customer.code-workspace",
+                HttpStatusCode.OK, FakeGitHubApi.FileContentsJson("cronus-customer.code-workspace", current));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        await service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999), sibling: null, Repo);
+
+        var tree = BodyOf(api, "POST", "/git/trees");
+        tree.Should().Contain("\"path\":\"cronus-customer.code-workspace\"");
+        tree.Should().NotContain("CRONUSCustomer.code-workspace", "a second workspace file would sit beside the first");
+        api.Calls.Should().NotContain(c => c.Contains("contents/CRONUSCustomer.code-workspace"));
+        BodyOf(api, "POST", "/pulls").Should().Contain("cronus-customer.code-workspace").And.Contain("is updated");
+    }
+
+    [Fact]
+    public async Task A_workspace_with_no_workspace_file_says_the_file_is_added()
+    {
+        await ReadyAsync();
+        var api = WritableApi();
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        await service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"),
+            new SiblingWorkspaceContext("CRONUS Customer", Array.Empty<string>(), new[] { "Core" }),
+            Repo);
+
+        BodyOf(api, "POST", "/pulls").Should().Contain("CRONUSCustomer.code-workspace").And.Contain("is added");
+    }
+
     [Fact]
     public async Task A_repository_holding_a_solution_refuses_an_id_range_already_in_use()
     {
@@ -388,11 +466,12 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
     }
 
     /// <summary>The settings a workbench-generated CRONUS solution saved at its root.</summary>
-    private static string SavedSolutionConfig() =>
+    private static string SavedSolutionConfig(string? codeWorkspaceFile = null) =>
         new WorkspaceConfigService(null!).BuildWorkspace(
             PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "CRO"),
             [new WorkspaceExtensionIdentity(
-                WorkspaceExtensionIdentity.CoreKind, null, Guid.NewGuid(), "CRO Core", "Core", "CRONUS", 50000, 50999)]);
+                WorkspaceExtensionIdentity.CoreKind, null, Guid.NewGuid(), "CRO Core", "Core", "CRONUS", 50000, 50999)],
+            codeWorkspaceFile);
 
     // --- helpers ------------------------------------------------------------
 
@@ -426,6 +505,8 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
             .On(HttpMethod.Get, $"/repos/{Repo}/git/commits/{BaseSha}", HttpStatusCode.OK,
                 $"{{\"sha\":\"{BaseSha}\",\"tree\":{{\"sha\":\"base-tree-sha\"}}}}")
             .On(HttpMethod.Get, $"/repos/{Repo}/contents/", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/trees/main", HttpStatusCode.OK,
+                "{\"sha\":\"base-tree-sha\",\"truncated\":false,\"tree\":[]}")
             .On(HttpMethod.Post, $"/repos/{Repo}/git/blobs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("blob-sha"))
             .On(HttpMethod.Post, $"/repos/{Repo}/git/trees", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-tree-sha"))
             .On(HttpMethod.Post, $"/repos/{Repo}/git/commits", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-commit-sha"))
@@ -435,11 +516,10 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()

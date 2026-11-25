@@ -79,8 +79,8 @@ public sealed class DvdDownloadService
     /// </summary>
     public async Task<string> DownloadToTempAsync(string? url, CancellationToken ct = default)
     {
-        var uri = await ValidateUrlAsync(url, ct).ConfigureAwait(false);
-        return await DownloadValidatedAsync(uri, ct).ConfigureAwait(false);
+        var uri = await ValidateUrlAsync(url, ct);
+        return await DownloadValidatedAsync(uri, ct);
     }
 
     private async Task<string> DownloadValidatedAsync(Uri uri, CancellationToken ct)
@@ -94,7 +94,7 @@ public sealed class DvdDownloadService
             // append directly without re-opening / re-positioning between GETs.
             await using var dest = File.Create(tempPath);
             var bytesWritten = await CopyWithRetriesAsync(
-                client, uri, dest, MaxDownloadAttempts, IdleReadTimeout, _logger, ct).ConfigureAwait(false);
+                client, uri, dest, MaxDownloadAttempts, IdleReadTimeout, _logger, ct);
 
             _logger.LogInformation(
                 "Downloaded DVD ZIP from {Host} ({Bytes} bytes) to staging.",
@@ -170,8 +170,7 @@ public sealed class DvdDownloadService
             }
 
             using var response = await client
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
-                .ConfigureAwait(false);
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
 
             if (bytesWritten == 0)
             {
@@ -208,10 +207,10 @@ public sealed class DvdDownloadService
                 }
             }
 
-            await using var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            await using var source = await response.Content.ReadAsStreamAsync(ct);
             try
             {
-                bytesWritten = await CopyWithCapAsync(source, dest, idleReadTimeout, bytesWritten, ct).ConfigureAwait(false);
+                bytesWritten = await CopyWithCapAsync(source, dest, idleReadTimeout, bytesWritten, ct);
                 // Body ended cleanly.
                 return bytesWritten;
             }
@@ -242,7 +241,7 @@ public sealed class DvdDownloadService
     /// <see cref="PlanValidationException"/> (field key <c>DvdUrl</c>).
     /// </summary>
     public async Task ValidateUrlForQueueAsync(string? url, CancellationToken ct = default) =>
-        await ValidateUrlAsync(url, ct).ConfigureAwait(false);
+        await ValidateUrlAsync(url, ct);
 
     private async Task<Uri> ValidateUrlAsync(string? url, CancellationToken ct)
     {
@@ -256,7 +255,7 @@ public sealed class DvdDownloadService
             throw Invalid("Enter an absolute https:// URL.");
         }
 
-        var allowlist = await _settings.GetReleaseDownloadAllowedHostsAsync(ct).ConfigureAwait(false);
+        var allowlist = await _settings.GetReleaseDownloadAllowedHostsAsync(ct);
         if (!SystemSettingsService.IsHostAllowed(uri.Host, allowlist))
         {
             throw Invalid(
@@ -292,7 +291,7 @@ public sealed class DvdDownloadService
                 idle.CancelAfter(idleReadTimeout);
                 try
                 {
-                    read = await source.ReadAsync(buffer.AsMemory(), idle.Token).ConfigureAwait(false);
+                    read = await source.ReadAsync(buffer.AsMemory(), idle.Token);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
@@ -306,7 +305,7 @@ public sealed class DvdDownloadService
             {
                 throw Invalid("That download is larger than the 5 GB limit; it doesn't look like a BC DVD ZIP.");
             }
-            await dest.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+            await dest.WriteAsync(buffer.AsMemory(0, read), ct);
         }
     }
 

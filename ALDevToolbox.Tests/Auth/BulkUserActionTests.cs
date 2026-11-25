@@ -1,5 +1,6 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -26,6 +27,7 @@ public sealed class BulkUserActionTests : IDisposable
     {
         var orgId = TestDb.DefaultOrgId;
         var (adminId, aliceId, bobId) = await SeedTwoUsersWithAdminAsync(orgId);
+        _db.OrgContext.CurrentUserId = adminId;
 
         await using var ctx = _db.NewContext();
         var svc = _db.NewUserAdministrationService(ctx, _clock);
@@ -58,6 +60,9 @@ public sealed class BulkUserActionTests : IDisposable
             seed.Users.Add(NewUser(orgId, id: 101, "admin-b@example.com", "Admin B", UserRole.Admin));
             await seed.SaveChangesAsync();
         }
+        // Admin B acts, so the second row is their own and meets the
+        // last-admin guard rather than the stale-actor one.
+        _db.OrgContext.CurrentUserId = 101;
 
         await using var ctx = _db.NewContext();
         var svc = _db.NewUserAdministrationService(ctx, _clock);
@@ -98,6 +103,7 @@ public sealed class BulkUserActionTests : IDisposable
         }
 
         _db.OrgContext.CurrentOrganizationId = orgA;
+        _db.OrgContext.CurrentUserId = 200;
         await using var ctx = _db.NewContext();
         var svc = _db.NewUserAdministrationService(ctx, _clock);
         var result = await svc.BulkDisableUsersAsync(new[] { idA, idB }, orgA);
@@ -123,6 +129,7 @@ public sealed class BulkUserActionTests : IDisposable
             seed.Users.Add(NewUser(orgB, id: 301, "secret@example.com", "OrgB Secret Name", UserRole.User));
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 300;
 
         await using var ctx = _db.NewContext();
         var svc = _db.NewUserAdministrationService(ctx, _clock);
@@ -133,6 +140,33 @@ public sealed class BulkUserActionTests : IDisposable
         result.Failures.Should().ContainSingle(f => f.Id == 301);
         result.Failures[0].DisplayName.Should().Be("#301");
         result.Failures[0].DisplayName.Should().NotContain("OrgB Secret Name");
+    }
+
+    [Fact]
+    public async Task Bulk_promote_by_a_demoted_admin_is_refused_for_the_whole_batch()
+    {
+        // A page left open after its admin was demoted still offers the bulk
+        // actions; the service reads the actor's row and refuses (#1534).
+        var orgId = TestDb.DefaultOrgId;
+        var (_, aliceId, bobId) = await SeedTwoUsersWithAdminAsync(orgId);
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(NewUser(orgId, id: 53, "demoted@example.com", "Demoted", UserRole.User));
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentUserId = 53;
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = _db.NewUserAdministrationService(ctx, _clock);
+            Func<Task> act = () => svc.BulkChangeRoleAsync(new[] { 53, aliceId, bobId }, UserRole.Admin, orgId);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+        }
+
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().Where(u => u.Id == 53 || u.Id == aliceId || u.Id == bobId)
+                .Select(u => u.Role).ToListAsync())
+            .Should().OnlyContain(r => r == UserRole.User);
     }
 
     private async Task<(int admin, int alice, int bob)> SeedTwoUsersWithAdminAsync(int orgId)

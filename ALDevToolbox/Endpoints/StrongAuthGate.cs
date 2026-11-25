@@ -18,8 +18,12 @@ namespace ALDevToolbox.Endpoints;
 /// The gate runs after authentication and authorization. It re-checks on
 /// every request rather than stamping a sign-in-time claim so that flipping
 /// the toggle on (or having an admin disable a user's last method)
-/// evicts that user from privileged paths on their next click — without
-/// waiting for cookie sliding renewal.
+/// evicts that user from privileged paths on their next page load — without
+/// waiting for cookie sliding renewal. An interactive page that is already
+/// open talks over <c>/_blazor</c>, which is allow-listed, so it keeps
+/// working until the user next loads a page; a token or an assistant grant
+/// still cannot be minted from it, since those are plain HTTP posts and
+/// gated (#1614).
 /// </para>
 /// </summary>
 internal static class StrongAuthGate
@@ -53,6 +57,16 @@ internal static class StrongAuthGate
                 return;
             }
 
+            // While a restore runs the users table may not exist yet, so reading
+            // it would turn the request into a 500. The maintenance gate right
+            // after this one answers everyone but a SiteAdmin, and the rule does
+            // not matter while the site is closed (#1599).
+            if (ctx.RequestServices.GetRequiredService<Services.Operations.MaintenanceModeState>().IsActive)
+            {
+                await next();
+                return;
+            }
+
             // A PAT-authenticated request is a programmatic call with its own
             // strong credential, and the strong-auth enrolment UI (TOTP / passkey)
             // is browser-only — gating PATs would 403 the entire MCP/API surface
@@ -77,10 +91,10 @@ internal static class StrongAuthGate
             }
 
             var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
-            // One DB round-trip per gated request. Reads bypass the EF query
-            // filter because we're joining users → organization_settings
-            // across the tenant fence using the cookie's user id directly.
+            // One DB round-trip per gated request.
             var status = await db.Users
+                // Fence category 4 (explicitly scoped user-id lookup): pinned to
+                // u.Id == userId, the id on the request's own auth cookie.
                 .IgnoreQueryFilters()
                 .Where(u => u.Id == userId.Value)
                 .Select(u => new
@@ -207,6 +221,12 @@ internal static class StrongAuthGate
         "/.well-known",
         "/login",
         "/signup",
+        // A Sealed link's recipient half is anonymous by design and spends no
+        // credential of whoever opens it, so a signed-in member who hasn't
+        // enrolled yet can open a link a stranger could (#1544). "/s" matches
+        // by segment, so the creator's "/sealed" tool stays gated.
+        "/s",
+        "/api/sealed",
         "/_blazor",
         "/_framework",
         "/_content",

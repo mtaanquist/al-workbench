@@ -37,6 +37,15 @@ namespace ALDevToolbox.Services.ObjectExplorer;
 /// <see cref="DeliveryService"/>, <see cref="ProjectBuildImporter"/> and friends)
 /// so the rules live in one place. List queries use
 /// <see cref="VisibleProjectPredicate"/> rather than a per-row check.</para>
+///
+/// <para>No <c>ConfigureAwait(false)</c> in this class. Every check reads the
+/// signed-in user through <see cref="IOrganizationContext"/>, directly and through
+/// the tenant filter on each query, and in a request that is the request's
+/// <c>HttpContext</c>. The sidebar calls <see cref="GetSnapshotAsync"/> while a
+/// page renders on the server, and a continuation moved off the renderer's context
+/// read <c>HttpContext.User</c> at the same moment as the render did. That context
+/// is not thread-safe, and the clash turned the occasional 404 page into a 500
+/// (#1724).</para>
 /// </summary>
 public sealed class ProjectAccess
 {
@@ -72,12 +81,18 @@ public sealed class ProjectAccess
     /// <see cref="TeamMember.ManagesUpdates"/> — the teams through which they may run
     /// Business Central platform-update actions.
     /// </param>
+    /// <param name="UpgradeScope">
+    /// The org's <see cref="OrganizationSettings.UpgradePermissionScope"/>: whether
+    /// <paramref name="UpdateOpsTeamIds"/> counts only on those teams' solutions or on
+    /// every solution the caller may manage.
+    /// </param>
     public sealed record AccessSnapshot(
         int? UserId,
         bool IsSiteAdmin,
         bool IsOrgAdmin,
         IReadOnlySet<int> TeamIds,
-        IReadOnlySet<int> UpdateOpsTeamIds)
+        IReadOnlySet<int> UpdateOpsTeamIds,
+        UpgradePermissionScope UpgradeScope = UpgradePermissionScope.AssignedTeams)
     {
         /// <summary>True when the caller sees every project regardless of its visibility.</summary>
         public bool BypassesVisibility => IsSiteAdmin || IsOrgAdmin;
@@ -111,21 +126,36 @@ public sealed class ProjectAccess
         var isOrgAdmin = await _db.Users.AsNoTracking()
             .Where(u => u.Id == userId.Value)
             .Select(u => u.Role)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false) == UserRole.Admin;
+            .FirstOrDefaultAsync(ct) == UserRole.Admin;
 
         // Both sets come from the one membership read — the update-ops teams are a
         // subset of the same rows, not a second round-trip.
         var memberships = await _db.TeamMembers.AsNoTracking()
             .Where(m => m.UserId == userId.Value)
             .Select(m => new { m.TeamId, m.ManagesUpdates })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
+
+        var updateOpsTeamIds = memberships.Where(m => m.ManagesUpdates).Select(m => m.TeamId).ToHashSet();
+
+        // Only read when it can change an answer: admins act everywhere, and a member
+        // without the grant acts nowhere, whatever the org chose.
+        var upgradeScope = UpgradePermissionScope.AssignedTeams;
+        if (!isOrgAdmin && !_orgContext.IsSiteAdmin && updateOpsTeamIds.Count > 0)
+        {
+            var orgId = _orgContext.CurrentOrganizationId;
+            upgradeScope = await _db.OrganizationSettings.AsNoTracking()
+                .Where(s => s.OrganizationId == orgId)
+                .Select(s => (UpgradePermissionScope?)s.UpgradePermissionScope)
+                .FirstOrDefaultAsync(ct) ?? UpgradePermissionScope.AssignedTeams;
+        }
 
         return _snapshot = new AccessSnapshot(
             userId,
             _orgContext.IsSiteAdmin,
             isOrgAdmin,
             memberships.Select(m => m.TeamId).ToHashSet(),
-            memberships.Where(m => m.ManagesUpdates).Select(m => m.TeamId).ToHashSet());
+            updateOpsTeamIds,
+            upgradeScope);
     }
 
     // ── Manage axis ─────────────────────────────────────────────────────
@@ -148,7 +178,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task<bool> CanManageAsync(int projectId, int? createdByUserId, CancellationToken ct = default)
     {
-        var snapshot = await GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await GetSnapshotAsync(ct);
         if (snapshot.IsSiteAdmin) return true;
         if (snapshot.UserId is null) return false;
         if (createdByUserId is not null && createdByUserId == snapshot.UserId) return true;
@@ -156,10 +186,10 @@ public sealed class ProjectAccess
 
         // A project that isn't in this org reads as null and grants nothing: the
         // org query filter has already decided it doesn't exist for this caller.
-        var row = await GetProjectRowAsync(projectId, ct).ConfigureAwait(false);
+        var row = await GetProjectRowAsync(projectId, ct);
         if (row is { Visibility: ProjectVisibility.Public }) return true;
 
-        return await IsOnAnAssignedTeamAsync(projectId, snapshot, ct).ConfigureAwait(false);
+        return await IsOnAnAssignedTeamAsync(projectId, snapshot, ct);
     }
 
     /// <summary>
@@ -168,7 +198,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task EnsureCanManageAsync(int projectId, int? createdByUserId, CancellationToken ct = default)
     {
-        if (!await CanManageAsync(projectId, createdByUserId, ct).ConfigureAwait(false))
+        if (!await CanManageAsync(projectId, createdByUserId, ct))
         {
             throw new ProjectAccessDeniedException();
         }
@@ -218,16 +248,27 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task<bool> CanManageEnvironmentUpdatesAsync(int projectId, CancellationToken ct = default)
     {
-        var snapshot = await GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await GetSnapshotAsync(ct);
         if (snapshot.IsSiteAdmin) return true;
         if (snapshot.UserId is null) return false;
         if (snapshot.IsOrgAdmin) return true;
         if (snapshot.UpdateOpsTeamIds.Count == 0) return false;
 
-        var teamIds = snapshot.UpdateOpsTeamIds.ToList();
-        return await _db.OeProjectTeams.AsNoTracking()
-            .AnyAsync(t => t.ProjectId == projectId && teamIds.Contains(t.TeamId), ct)
-            .ConfigureAwait(false);
+        switch (snapshot.UpgradeScope)
+        {
+            case UpgradePermissionScope.AssignedTeams:
+                var teamIds = snapshot.UpdateOpsTeamIds.ToList();
+                return await _db.OeProjectTeams.AsNoTracking()
+                    .AnyAsync(t => t.ProjectId == projectId && teamIds.Contains(t.TeamId), ct);
+
+            case UpgradePermissionScope.ManagedSolutions:
+                // A project outside this org reads as null and grants nothing.
+                var row = await GetProjectRowAsync(projectId, ct);
+                return row is not null && await CanManageAsync(projectId, row.CreatedByUserId, ct);
+
+            default:
+                throw new InvalidOperationException($"Unknown upgrade permission scope {snapshot.UpgradeScope}.");
+        }
     }
 
     /// <summary>
@@ -236,10 +277,10 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task EnsureCanManageEnvironmentUpdatesAsync(int projectId, CancellationToken ct = default)
     {
-        if (!await CanManageEnvironmentUpdatesAsync(projectId, ct).ConfigureAwait(false))
+        if (!await CanManageEnvironmentUpdatesAsync(projectId, ct))
         {
             throw new ProjectAccessDeniedException(
-                "You need permission to manage environment updates for this solution's team.");
+                "You can't schedule upgrades for this solution. An admin can give you the Can schedule upgrades permission.");
         }
     }
 
@@ -261,8 +302,18 @@ public sealed class ProjectAccess
         // Written out longhand, like the other predicates in this file: EF has to
         // translate the whole tree to SQL and an invoked expression variable doesn't
         // survive that trip. Keep this in step with CanManageEnvironmentUpdatesAsync.
-        var updateOpsTeamIds = snapshot.UpdateOpsTeamIds.ToList();
-        return p => p.Teams.Any(t => updateOpsTeamIds.Contains(t.TeamId));
+        switch (snapshot.UpgradeScope)
+        {
+            case UpgradePermissionScope.AssignedTeams:
+                var updateOpsTeamIds = snapshot.UpdateOpsTeamIds.ToList();
+                return p => p.Teams.Any(t => updateOpsTeamIds.Contains(t.TeamId));
+
+            case UpgradePermissionScope.ManagedSolutions:
+                return ManageProjectPredicate(snapshot);
+
+            default:
+                throw new InvalidOperationException($"Unknown upgrade permission scope {snapshot.UpgradeScope}.");
+        }
     }
 
     /// <summary>
@@ -271,7 +322,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task<bool> IsOrganizationAdminAsync(CancellationToken ct = default)
     {
-        var snapshot = await GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await GetSnapshotAsync(ct);
         return snapshot.IsSiteAdmin || (snapshot.UserId is not null && snapshot.IsOrgAdmin);
     }
 
@@ -285,7 +336,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task<bool> CanDeleteAsync(int? createdByUserId, CancellationToken ct = default)
     {
-        var snapshot = await GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await GetSnapshotAsync(ct);
         if (snapshot.IsSiteAdmin) return true;
         if (snapshot.UserId is null) return false;
         if (createdByUserId is not null && createdByUserId == snapshot.UserId) return true;
@@ -298,7 +349,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task EnsureCanDeleteAsync(int? createdByUserId, CancellationToken ct = default)
     {
-        if (!await CanDeleteAsync(createdByUserId, ct).ConfigureAwait(false))
+        if (!await CanDeleteAsync(createdByUserId, ct))
         {
             throw new ProjectAccessDeniedException(
                 "Only the solution's owner or an organisation admin can delete it.");
@@ -306,10 +357,9 @@ public sealed class ProjectAccess
     }
 
     /// <summary>
-    /// True when the current user may delete a build or deployment pipeline: an org
-    /// Admin or a SiteAdmin. Stricter than deleting the solution itself, because a
-    /// deleted deployment pipeline takes its waiting deployments with it; everyone who
-    /// may manage the solution can disable a pipeline instead (#1131).
+    /// True when the current user may delete a build pipeline: an org Admin or a
+    /// SiteAdmin. Everyone who may manage the solution can disable a pipeline instead
+    /// (#1131). Deployment pipelines are archived rather than deleted (#1466).
     /// </summary>
     public Task<bool> CanDeletePipelinesAsync(CancellationToken ct = default) => IsOrganizationAdminAsync(ct);
 
@@ -319,7 +369,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task EnsureCanDeletePipelinesAsync(CancellationToken ct = default)
     {
-        if (!await CanDeletePipelinesAsync(ct).ConfigureAwait(false))
+        if (!await CanDeletePipelinesAsync(ct))
         {
             throw new ProjectAccessDeniedException(
                 "Only an admin can delete a pipeline. Disable it instead to stop it running.");
@@ -338,16 +388,16 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task<bool> CanViewAsync(int projectId, CancellationToken ct = default)
     {
-        var snapshot = await GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await GetSnapshotAsync(ct);
         if (snapshot.BypassesVisibility) return true;
 
-        var row = await GetProjectRowAsync(projectId, ct).ConfigureAwait(false);
+        var row = await GetProjectRowAsync(projectId, ct);
         if (row is null) return true;
         if (row.Visibility != ProjectVisibility.Private) return true;
 
         if (snapshot.UserId is null) return false;
         if (row.CreatedByUserId is not null && row.CreatedByUserId == snapshot.UserId) return true;
-        return await IsOnAnAssignedTeamAsync(projectId, snapshot, ct).ConfigureAwait(false);
+        return await IsOnAnAssignedTeamAsync(projectId, snapshot, ct);
     }
 
     /// <summary>
@@ -365,7 +415,7 @@ public sealed class ProjectAccess
         var project = await db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId)
             .Select(p => new { p.Visibility, p.CreatedByUserId })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (project is null || project.Visibility != ProjectVisibility.Private) return userIds.Distinct().ToList();
 
         // The owner, an org Admin, a SiteAdmin, or a member of one of its teams.
@@ -379,7 +429,7 @@ public sealed class ProjectAccess
                             || u.IsSiteAdmin
                             || members.Contains(u.Id)))
             .Select(u => u.Id)
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
     }
 
     /// <summary>
@@ -390,7 +440,7 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task EnsureCanViewAsync(int projectId, CancellationToken ct = default)
     {
-        if (!await CanViewAsync(projectId, ct).ConfigureAwait(false))
+        if (!await CanViewAsync(projectId, ct))
         {
             throw new ProjectAccessDeniedException(
                 "This solution is private. Ask its owner or a member of its team for access.");
@@ -471,14 +521,14 @@ public sealed class ProjectAccess
     /// </summary>
     public async Task<bool> IsReleaseVisibleAsync(int releaseId, CancellationToken ct = default)
     {
-        var snapshot = await GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await GetSnapshotAsync(ct);
         if (snapshot.BypassesVisibility) return true;
         if (_releaseVisibility.TryGetValue(releaseId, out var cached)) return cached;
 
         var blocked = await _db.OeProjects.AsNoTracking()
             .Where(LockedProjectPredicate(snapshot))
             .Where(LinkedToRelease(_db, releaseId))
-            .AnyAsync(ct).ConfigureAwait(false);
+            .AnyAsync(ct);
 
         return _releaseVisibility[releaseId] = !blocked;
     }
@@ -544,7 +594,7 @@ public sealed class ProjectAccess
         var row = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId)
             .Select(p => new ProjectRow(p.Visibility, p.CreatedByUserId))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
 
         return _projectRows[projectId] = row;
     }
@@ -557,7 +607,6 @@ public sealed class ProjectAccess
         if (snapshot.TeamIds.Count == 0) return false;
         var teamIds = snapshot.TeamIds.ToList();
         return await _db.OeProjectTeams.AsNoTracking()
-            .AnyAsync(t => t.ProjectId == projectId && teamIds.Contains(t.TeamId), ct)
-            .ConfigureAwait(false);
+            .AnyAsync(t => t.ProjectId == projectId && teamIds.Contains(t.TeamId), ct);
     }
 }

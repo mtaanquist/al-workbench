@@ -31,6 +31,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var (signupId, userId, _) = await SeedPendingSignupAsync(TestDb.OtherOrgId);
         var adminId = await SeedActiveAdminAsync(TestDb.OtherOrgId, "admin@example.com");
+        ActAs(TestDb.OtherOrgId, adminId);
 
         await using (var ctx = _db.NewContext())
         {
@@ -51,6 +52,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var (signupId, userId, _) = await SeedPendingSignupAsync(TestDb.OtherOrgId);
         var adminId = await SeedActiveAdminAsync(TestDb.OtherOrgId, "admin@example.com");
+        ActAs(TestDb.OtherOrgId, adminId);
 
         await using (var ctx = _db.NewContext())
         {
@@ -69,6 +71,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var (signupId, _, _) = await SeedPendingSignupAsync(TestDb.OtherOrgId);
         var adminId = await SeedActiveAdminAsync(TestDb.DefaultOrgId, "admin@example.com");
+        ActAs(TestDb.DefaultOrgId, adminId);
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewUserAdmin(ctx).ApproveSignupAsync(signupId, adminId, TestDb.DefaultOrgId);
@@ -81,6 +84,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var (signupId, _, _) = await SeedPendingSignupAsync(TestDb.OtherOrgId);
         var adminId = await SeedActiveAdminAsync(TestDb.OtherOrgId, "admin@example.com");
+        ActAs(TestDb.OtherOrgId, adminId);
         await using (var ctx = _db.NewContext())
         {
             await NewUserAdmin(ctx).ApproveSignupAsync(signupId, adminId, TestDb.OtherOrgId);
@@ -98,7 +102,7 @@ public sealed class AccountAdministrationTests : IDisposable
     public async Task Disable_then_enable_round_trips_user_status()
     {
         var orgId = TestDb.OtherOrgId;
-        await SeedActiveAdminAsync(orgId, "primary@example.com");
+        ActAs(orgId, await SeedActiveAdminAsync(orgId, "primary@example.com"));
         var subjectId = await SeedActiveUserAsync(orgId, "subject@example.com", UserRole.User);
 
         await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(subjectId, orgId);
@@ -123,7 +127,7 @@ public sealed class AccountAdministrationTests : IDisposable
         // revocations are filtered writes, so this runs in the fixture's
         // ambient org, as the admin endpoint does in production.
         var orgId = TestDb.DefaultOrgId;
-        await SeedActiveAdminAsync(orgId, "primary-default@example.com");
+        ActAs(orgId, await SeedActiveAdminAsync(orgId, "primary-default@example.com"));
         var subjectId = await SeedActiveUserAsync(orgId, "leaver@example.com", UserRole.User);
         await using (var seed = _db.NewContext())
         {
@@ -168,10 +172,92 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Disable_revokes_the_invites_the_user_sent_that_are_still_pending()
+    {
+        // An Admin on the way out could otherwise invite an address they
+        // control as Admin and use it for a week after being disabled (#1544).
+        var orgId = TestDb.DefaultOrgId;
+        var actorId = await SeedActiveAdminAsync(orgId, "primary-default@example.com");
+        ActAs(orgId, actorId);
+        var leaverId = await SeedActiveUserAsync(orgId, "leaver-admin@example.com", UserRole.Admin);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        Invite NewInvite(int by, string email, DateTime? acceptedAt = null) => new()
+        {
+            OrganizationId = orgId, Email = email, Role = UserRole.Admin, TokenHash = "hash-" + email,
+            CreatedAt = now, ExpiresAt = now.AddDays(7), AcceptedAt = acceptedAt, InvitedByUserId = by,
+        };
+        await using (var seed = _db.NewContext())
+        {
+            seed.Invites.AddRange(
+                NewInvite(leaverId, "backdoor@elsewhere.example"),
+                NewInvite(leaverId, "accepted@cronus.example", acceptedAt: now.AddHours(-1)),
+                NewInvite(actorId, "colleague@cronus.example"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(leaverId, orgId);
+
+        await using var read = _db.NewContext();
+        var invites = await read.Invites.IgnoreQueryFilters().AsNoTracking().ToDictionaryAsync(i => i.Email);
+        invites["backdoor@elsewhere.example"].RevokedAt.Should().Be(now);
+        invites["accepted@cronus.example"].RevokedAt.Should().BeNull("an accepted invite has nothing left to revoke");
+        invites["colleague@cronus.example"].RevokedAt.Should().BeNull("another admin's invites are theirs to keep");
+    }
+
+    [Fact]
+    public async Task Disable_closes_the_open_sealed_links_the_user_sent()
+    {
+        // Someone who has left, or whose account was taken over, should not
+        // leave links behind that still hand out what they shared (#1544).
+        var orgId = TestDb.DefaultOrgId;
+        var actorId = await SeedActiveAdminAsync(orgId, "sealed-actor@example.com");
+        ActAs(orgId, actorId);
+        var leaverId = await SeedActiveUserAsync(orgId, "sealed-leaver@example.com", UserRole.User);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        SealedLink NewLink(int by, string label, SealedLinkClosedReason? closed = null) => new()
+        {
+            OrganizationId = orgId, CreatedByUserId = by, Token = "tok-" + label, Label = label,
+            Ciphertext = closed is null ? [1, 2, 3] : null, Iv = [0], LinkCheckHash = [0],
+            CreatedAt = now.AddHours(-1), ExpiresAt = now.AddDays(1),
+            ClosedAt = closed is null ? null : now.AddMinutes(-30), ClosedReason = closed,
+        };
+        await using (var seed = _db.NewContext())
+        {
+            var lapsed = NewLink(leaverId, "lapsed");
+            lapsed.ExpiresAt = now.AddMinutes(-1);
+            seed.SealedLinks.AddRange(
+                NewLink(leaverId, "open"),
+                NewLink(leaverId, "used", SealedLinkClosedReason.UsedUp),
+                lapsed,
+                NewLink(actorId, "colleague"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(leaverId, orgId);
+
+        await using var read = _db.NewContext();
+        var links = await read.SealedLinks.AsNoTracking().ToDictionaryAsync(l => l.Label!);
+        links["open"].ClosedAt.Should().Be(now);
+        links["open"].ClosedReason.Should().Be(SealedLinkClosedReason.Revoked);
+        links["open"].Ciphertext.Should().BeNull("a closed link keeps no secret");
+        links["used"].ClosedReason.Should().Be(SealedLinkClosedReason.UsedUp, "a link that had already closed keeps its own reason");
+        links["colleague"].ClosedAt.Should().BeNull("another person's links are theirs to keep");
+        links["lapsed"].ClosedAt.Should().BeNull("a link already past its expiry is the sweep's to record as Expired, not Revoked");
+        var audit = await read.AuditLog.AsNoTracking()
+            .Where(a => a.EntityType == AuditEntityType.SealedLink)
+            .ToListAsync();
+        audit.Should().ContainSingle();
+        audit[0].EntityId.Should().Be(links["open"].Id);
+        audit[0].Action.Should().Be(AuditAction.Deleted);
+        audit[0].ChangedByUserId.Should().Be(actorId, "the admin who disabled the sender closed it");
+    }
+
+    [Fact]
     public async Task Disable_refuses_to_lock_out_the_last_active_admin()
     {
         var orgId = TestDb.OtherOrgId;
         var soloAdmin = await SeedActiveAdminAsync(orgId, "lonely@example.com");
+        ActAs(orgId, soloAdmin);
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewUserAdmin(ctx).DisableUserAsync(soloAdmin, orgId);
@@ -191,12 +277,17 @@ public sealed class AccountAdministrationTests : IDisposable
         {
             var challenger = await SeedActiveAdminAsync(orgId, $"admin-{round}@example.com");
             var demoteFirst = round % 2 == 0;
+            // Both calls act as the standing admin, so one of them is on their
+            // own row. When that one wins, the other is refused because its
+            // actor is no longer an active admin; otherwise the last-admin
+            // guard refuses it. Either way exactly one may go ahead.
+            ActAs(orgId, standing);
 
             async Task<bool> Attempt(Func<UserAdministrationService, Task> op)
             {
                 await using var ctx = _db.NewContext();
                 try { await op(NewUserAdmin(ctx)); return true; }
-                catch (PlanValidationException ex) when (ex.Errors.ContainsKey("LastAdmin")) { return false; }
+                catch (PlanValidationException ex) when (ex.Errors.ContainsKey("LastAdmin") || ex.Errors.ContainsKey("Actor")) { return false; }
             }
 
             var outcomes = await Task.WhenAll(
@@ -218,6 +309,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var orgId = TestDb.OtherOrgId;
         var soloAdmin = await SeedActiveAdminAsync(orgId, "lonely@example.com");
+        ActAs(orgId, soloAdmin);
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewUserAdmin(ctx).ChangeRoleAsync(soloAdmin, UserRole.User, orgId);
@@ -229,6 +321,7 @@ public sealed class AccountAdministrationTests : IDisposable
     public async Task ChangeDisplayName_admin_corrects_a_users_name_and_trims_it()
     {
         var orgId = TestDb.OtherOrgId;
+        ActAs(orgId, await SeedActiveAdminAsync(orgId, "admin@example.com"));
         var subjectId = await SeedActiveUserAsync(orgId, "typo@example.com", UserRole.User);
 
         await using (var ctx = _db.NewContext())
@@ -245,6 +338,7 @@ public sealed class AccountAdministrationTests : IDisposable
     public async Task ChangeDisplayName_rejects_a_name_outside_the_length_bounds()
     {
         var orgId = TestDb.OtherOrgId;
+        ActAs(orgId, await SeedActiveAdminAsync(orgId, "admin@example.com"));
         var subjectId = await SeedActiveUserAsync(orgId, "shortname@example.com", UserRole.User);
 
         await using var ctx = _db.NewContext();
@@ -259,6 +353,7 @@ public sealed class AccountAdministrationTests : IDisposable
         // The acting admin's org must own the target user — LoadUserAsync is
         // the tenant-isolation guard for this admin action.
         var subjectId = await SeedActiveUserAsync(TestDb.OtherOrgId, "outsider@example.com", UserRole.User);
+        ActAs(TestDb.DefaultOrgId, await SeedActiveAdminAsync(TestDb.DefaultOrgId, "admin@example.com"));
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewUserAdmin(ctx).ChangeDisplayNameAsync(subjectId, "New Name", TestDb.DefaultOrgId);
@@ -270,7 +365,7 @@ public sealed class AccountAdministrationTests : IDisposable
     public async Task ChangeRole_promotes_user_to_editor_without_tripping_last_admin_guard()
     {
         var orgId = TestDb.OtherOrgId;
-        await SeedActiveAdminAsync(orgId, "primary@example.com");
+        ActAs(orgId, await SeedActiveAdminAsync(orgId, "primary@example.com"));
         var subjectId = await SeedActiveUserAsync(orgId, "subject@example.com", UserRole.User);
 
         await using (var ctx = _db.NewContext())
@@ -288,6 +383,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var orgId = TestDb.OtherOrgId;
         var soloAdmin = await SeedActiveAdminAsync(orgId, "lonely@example.com");
+        ActAs(orgId, soloAdmin);
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewUserAdmin(ctx).ChangeRoleAsync(soloAdmin, UserRole.Editor, orgId);
@@ -300,7 +396,7 @@ public sealed class AccountAdministrationTests : IDisposable
     {
         var orgId = TestDb.OtherOrgId;
         var demoted = await SeedActiveAdminAsync(orgId, "one@example.com");
-        await SeedActiveAdminAsync(orgId, "two@example.com");
+        ActAs(orgId, await SeedActiveAdminAsync(orgId, "two@example.com"));
 
         await using (var ctx = _db.NewContext())
         {
@@ -318,6 +414,8 @@ public sealed class AccountAdministrationTests : IDisposable
         // Acting in DefaultOrg, target is in OtherOrg: must refuse.
         await SeedActiveAdminAsync(TestDb.OtherOrgId, "lonely@example.com");
         var subjectId = await SeedActiveUserAsync(TestDb.OtherOrgId, "victim@example.com", UserRole.User);
+        await SeedActiveAdminAsync(TestDb.DefaultOrgId, "default-admin@example.com");
+        ActAs(TestDb.DefaultOrgId, await SeedActiveAdminAsync(TestDb.DefaultOrgId, "acting@example.com"));
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewUserAdmin(ctx).DisableUserAsync(subjectId, TestDb.DefaultOrgId);
@@ -325,26 +423,157 @@ public sealed class AccountAdministrationTests : IDisposable
         ex.Which.Errors.Should().ContainKey("UserId");
     }
 
+    // ===== Acting admin re-read from the database (#1534) =====
+
+    [Fact]
+    public async Task A_demoted_admin_cannot_promote_themselves_back()
+    {
+        // The Users page runs in a circuit that keeps the principal it
+        // connected with, so the actor's role claim can say Admin long after
+        // another admin demoted them. The service reads the row instead.
+        var orgId = TestDb.OtherOrgId;
+        var alice = await SeedActiveAdminAsync(orgId, "alice@example.com");
+        await SeedActiveAdminAsync(orgId, "bob@example.com");
+        await SetRoleAndStatusAsync(alice, UserRole.User, UserStatus.Active);
+        ActAs(orgId, alice);
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> act = () => NewUserAdmin(ctx).ChangeRoleAsync(alice, UserRole.Admin, orgId);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+        }
+
+        (await ReadUserAsync(alice)).Role.Should().Be(UserRole.User);
+    }
+
+    [Fact]
+    public async Task A_disabled_admin_cannot_re_enable_themselves_or_change_anyone_else()
+    {
+        var orgId = TestDb.OtherOrgId;
+        var alice = await SeedActiveAdminAsync(orgId, "alice@example.com");
+        await SeedActiveAdminAsync(orgId, "bob@example.com");
+        var member = await SeedActiveUserAsync(orgId, "member@example.com", UserRole.User);
+        await SetRoleAndStatusAsync(alice, UserRole.Admin, UserStatus.Disabled);
+        ActAs(orgId, alice);
+
+        var attempts = new Func<UserAdministrationService, Task>[]
+        {
+            s => s.EnableUserAsync(alice, orgId),
+            s => s.ChangeRoleAsync(member, UserRole.Admin, orgId),
+            s => s.DisableUserAsync(member, orgId),
+            s => s.ChangeDisplayNameAsync(member, "Renamed Member", orgId),
+            s => s.RequestEmailChangeAsync(member, "member@elsewhere.example", orgId, alice),
+        };
+        foreach (var attempt in attempts)
+        {
+            await using var ctx = _db.NewContext();
+            Func<Task> act = () => attempt(NewUserAdmin(ctx));
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+        }
+
+        (await ReadUserAsync(alice)).Status.Should().Be(UserStatus.Disabled);
+        var after = await ReadUserAsync(member);
+        after.Role.Should().Be(UserRole.User);
+        after.Status.Should().Be(UserStatus.Active);
+        after.DisplayName.Should().Be("member@example.com");
+        after.PendingEmail.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_demoted_admin_cannot_approve_a_signup()
+    {
+        var (signupId, userId, _) = await SeedPendingSignupAsync(TestDb.OtherOrgId);
+        var alice = await SeedActiveAdminAsync(TestDb.OtherOrgId, "alice@example.com");
+        await SetRoleAndStatusAsync(alice, UserRole.Editor, UserStatus.Active);
+        ActAs(TestDb.OtherOrgId, alice);
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> act = () => NewUserAdmin(ctx).ApproveSignupAsync(signupId, alice, TestDb.OtherOrgId);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+        }
+
+        (await ReadUserAsync(userId)).Status.Should().Be(UserStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Admin_actions_refuse_without_a_signed_in_actor()
+    {
+        var orgId = TestDb.OtherOrgId;
+        await SeedActiveAdminAsync(orgId, "admin@example.com");
+        var member = await SeedActiveUserAsync(orgId, "member@example.com", UserRole.User);
+        _db.OrgContext.CurrentOrganizationId = orgId;
+        _db.OrgContext.CurrentUserId = null;
+
+        await using var ctx = _db.NewContext();
+        Func<Task> act = () => NewUserAdmin(ctx).ChangeRoleAsync(member, UserRole.Admin, orgId);
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Actor");
+    }
+
     // ===== ChangePasswordAsync =====
 
     [Fact]
     public async Task Change_password_rejects_wrong_current_password()
     {
-        var userId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "p@example.com", "correctpasswordlong");
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using var ctx = _db.NewContext();
-        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "wrong-current", "newpasswordlong12345");
+        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "wrong-current", "newpasswordlong12345", "198.51.100.1");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("CurrentPassword");
     }
 
     [Fact]
+    public async Task Wrong_current_passwords_count_towards_the_sign_in_lockout()
+    {
+        // A session without the password could otherwise guess it here with no
+        // limit (#1614). Each wrong guess is a failed attempt for the email,
+        // and once the email is locked out even the right one is refused.
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "guess@example.com", "correctpasswordlong");
+        for (var i = 0; i < AuthService.LockoutThreshold; i++)
+        {
+            await using var ctx = _db.NewContext();
+            Func<Task> wrong = () => NewService(ctx).ChangePasswordAsync(userId, $"guess-{i}", "newpasswordlong12345", "198.51.100.1");
+            (await wrong.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors["CurrentPassword"].Should().Be("Current password is incorrect.");
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> right = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newpasswordlong12345", "198.51.100.1");
+            (await right.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors["CurrentPassword"].Should().Be(AuthService.CurrentPasswordLockedOutMessage);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.LoginAttempts.CountAsync(a => a.Email == "guess@example.com" && !a.Succeeded))
+            .Should().Be(AuthService.LockoutThreshold);
+        var user = await read.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == userId);
+        NewAuth(read).VerifyPassword("correctpasswordlong", user.PasswordHash).Should().BeTrue("nothing was changed");
+    }
+
+    [Fact]
+    public async Task A_wrong_current_password_is_recorded_with_the_callers_address()
+    {
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "guess-ip@example.com", "correctpasswordlong");
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> wrong = () => NewService(ctx).ChangePasswordAsync(userId, "guess", "newpasswordlong12345", "203.0.113.7");
+            await wrong.Should().ThrowAsync<PlanValidationException>();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.LoginAttempts.SingleAsync(a => a.Email == "guess-ip@example.com")).Ip.Should().Be("203.0.113.7");
+    }
+
+    [Fact]
     public async Task Change_password_rejects_new_password_that_fails_policy()
     {
-        var userId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "p@example.com", "correctpasswordlong");
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using var ctx = _db.NewContext();
-        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "short");
+        Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "short", "198.51.100.1");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("NewPassword");
     }
@@ -352,11 +581,11 @@ public sealed class AccountAdministrationTests : IDisposable
     [Fact]
     public async Task Change_password_happy_path_re_hashes_so_old_password_no_longer_verifies()
     {
-        var userId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "p@example.com", "correctpasswordlong");
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using (var ctx = _db.NewContext())
         {
-            await NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newcorrectpasswordlong");
+            await NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "newcorrectpasswordlong", "198.51.100.1");
         }
 
         await using var read = _db.NewContext();
@@ -371,7 +600,7 @@ public sealed class AccountAdministrationTests : IDisposable
     [Fact]
     public async Task Change_display_name_trims_whitespace_and_rejects_too_short()
     {
-        var userId = await SeedActiveUserAsync(TestDb.OtherOrgId, "name@example.com", UserRole.User);
+        var userId = await SeedActiveUserAsync(TestDb.DefaultOrgId, "name@example.com", UserRole.User);
 
         await using (var ctx = _db.NewContext())
         {
@@ -387,6 +616,27 @@ public sealed class AccountAdministrationTests : IDisposable
         Func<Task> act = () => NewService(rejectCtx).ChangeDisplayNameAsync(userId, " ");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("DisplayName");
+    }
+
+    [Fact]
+    public async Task Self_service_changes_cannot_reach_a_user_in_another_organisation()
+    {
+        // Both run inside the tenant filter now (#1336): the signed-in user's
+        // own row is in their own organisation, so a foreign id finds nothing.
+        var strangerId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "stranger@example.com", "correctpasswordlong");
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> rename = () => NewService(ctx).ChangeDisplayNameAsync(strangerId, "Renamed");
+            await rename.Should().ThrowAsync<InvalidOperationException>();
+            Func<Task> repassword = () => NewService(ctx).ChangePasswordAsync(strangerId, "correctpasswordlong", "newcorrectpasswordlong", "198.51.100.1");
+            await repassword.Should().ThrowAsync<InvalidOperationException>();
+        }
+
+        await using var read = _db.NewContext();
+        var stranger = await read.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == strangerId);
+        stranger.DisplayName.Should().NotBe("Renamed");
+        NewAuth(read).VerifyPassword("correctpasswordlong", stranger.PasswordHash).Should().BeTrue();
     }
 
     // ===== GetAccountOverviewAsync (the Account page's opening read) =====
@@ -476,6 +726,31 @@ public sealed class AccountAdministrationTests : IDisposable
 
     private async Task<int> SeedActiveAdminAsync(int orgId, string email) =>
         await SeedActiveUserAsync(orgId, email, UserRole.Admin);
+
+    /// <summary>
+    /// Signs <paramref name="userId"/> in as the acting admin of
+    /// <paramref name="orgId"/>, the way the admin endpoints and the Users
+    /// page call the service: the acting org is the request's own.
+    /// </summary>
+    private void ActAs(int orgId, int userId)
+    {
+        _db.OrgContext.CurrentOrganizationId = orgId;
+        _db.OrgContext.CurrentUserId = userId;
+        _db.OrgContext.IsSiteAdmin = false;
+    }
+
+    private async Task SetRoleAndStatusAsync(int userId, UserRole role, UserStatus status)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.Users.IgnoreQueryFilters().Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.Role, role).SetProperty(u => u.Status, status));
+    }
+
+    private async Task<User> ReadUserAsync(int userId)
+    {
+        await using var read = _db.NewContext();
+        return await read.Users.IgnoreQueryFilters().AsNoTracking().SingleAsync(u => u.Id == userId);
+    }
 
     private async Task<int> SeedActiveUserAsync(int orgId, string email, UserRole role)
     {

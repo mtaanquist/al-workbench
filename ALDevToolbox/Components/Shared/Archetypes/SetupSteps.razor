@@ -8,14 +8,8 @@
     a page of its own and one a card inside a settings page, and share only the steps.
 *@
 
-<div class="steps@(Wide ? " steps--wide" : "")">@ChildContent</div>
+<div class="steps">@ChildContent</div>
 
 @code {
-    /// <summary>
-    /// Lifts the reading measure off the step bodies, for steps that hold cards, fields or
-    /// config rather than prose. <c>step__text</c> keeps its measure either way.
-    /// </summary>
-    [Parameter] public bool Wide { get; set; }
-
     [Parameter] public RenderFragment? ChildContent { get; set; }
 }

@@ -50,6 +50,7 @@ public sealed class PipelinesDashboardTests : IDisposable
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
@@ -277,6 +278,32 @@ public sealed class PipelinesDashboardTests : IDisposable
                 .Should().Equal("Build pipelines", "Builds this week", "Failed builds", "Ready to build");
             cut.FindAll("a[href^='/pipelines/deployments']").Should().BeEmpty();
             cut.FindAll(".page-head__actions a.btn").Select(b => b.TextContent.Trim()).Should().Equal("New build pipeline");
+        });
+    }
+
+    [Fact]
+    public async Task A_disabled_pipeline_ahead_of_its_last_build_is_not_offered_as_ready_to_build()
+    {
+        // Build refuses a disabled pipeline, so the dashboard must not ask for one (#1551).
+        var projectId = await SeedSolutionAsync();
+        var pipeline = await SeedBuildPipelineAsync(projectId);
+        var repo = await FreshnessSeed.AddRepositoryAsync(_db, projectId);
+        await FreshnessSeed.AddBuildAsync(_db, projectId, pipeline, repo);
+        await FreshnessSeed.AddHeadAsync(_db, repo, "main", FreshnessSeed.Newest,
+            commits: [FreshnessSeed.Built, FreshnessSeed.Newer, FreshnessSeed.Newest]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == pipeline)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<PipelinesDashboard>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var tile = cut.FindAll(".cue-grid a.cue").Single(t => t.QuerySelector(".cue__label")!.TextContent.Trim() == "Ready to build");
+            tile.QuerySelector(".cue__value")!.TextContent.Trim().Should().Be("0");
+            cut.Markup.Should().NotContain("ahead of its last build");
         });
     }
 

@@ -11,15 +11,31 @@ namespace ALDevToolbox.Services.Workers;
 /// </summary>
 public sealed class KeyedGate<TKey> where TKey : notnull
 {
-    private readonly ConcurrentDictionary<TKey, SemaphoreSlim> _gates = new();
+    private readonly ConcurrentDictionary<TKey, Entry> _gates = new();
 
     /// <summary>Waits until no one else holds <paramref name="key"/>; disposing the result lets the next one in.</summary>
     public async Task<IDisposable> EnterAsync(TKey key, CancellationToken ct = default)
     {
-        var gate = _gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct).ConfigureAwait(false);
-        return new Held(gate);
+        var entry = _gates.GetOrAdd(key, _ => new Entry());
+        Interlocked.Increment(ref entry.Waiting);
+        try
+        {
+            await entry.Gate.WaitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref entry.Waiting);
+        }
+        return new Held(entry.Gate);
     }
+
+    /// <summary>
+    /// How many callers are inside <see cref="EnterAsync"/> for <paramref name="key"/> and
+    /// have not got in yet. For tests: a caller parked on a gate the test holds is the
+    /// signal that it reached the gate, which a sleep only hopes for.
+    /// </summary>
+    internal int WaitingCount(TKey key) =>
+        _gates.TryGetValue(key, out var entry) ? Volatile.Read(ref entry.Waiting) : 0;
 
     /// <summary>
     /// Enters <paramref name="key"/> only if no one holds it, without waiting: null when it is
@@ -27,8 +43,14 @@ public sealed class KeyedGate<TKey> where TKey : notnull
     /// </summary>
     public IDisposable? TryEnter(TKey key)
     {
-        var gate = _gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        var gate = _gates.GetOrAdd(key, _ => new Entry()).Gate;
         return gate.Wait(0) ? new Held(gate) : null;
+    }
+
+    private sealed class Entry
+    {
+        public readonly SemaphoreSlim Gate = new(1, 1);
+        public int Waiting;
     }
 
     private sealed class Held(SemaphoreSlim gate) : IDisposable

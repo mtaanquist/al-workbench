@@ -17,8 +17,9 @@ namespace ALDevToolbox.Services.Generation;
 /// </summary>
 /// <remarks>
 /// The DB remains the source of truth: parsing validates the referenced template
-/// and module keys against live rows, refusing imports that point at deleted or
-/// missing entities. Publisher is derived from the picked template's defaults
+/// against live rows, refusing a file that points at a deleted or missing one.
+/// Module keys are kept as saved, deleted or not: the list records what the
+/// workspace was generated with (#1328). Publisher is derived from the picked template's defaults
 /// rather than persisted in the config file, so a reused workspace config always
 /// reflects the current template setup.
 /// </remarks>
@@ -56,9 +57,13 @@ public class WorkspaceConfigService
     /// id-ranges) of every generated extension. The identity block is what lets
     /// a later sibling-extension import declare real dependencies and avoid
     /// id-range collisions; pass an empty list when no identities are available
-    /// (e.g. legacy callers).
+    /// (e.g. legacy callers). <paramref name="codeWorkspaceFileName"/> is the
+    /// name the workspace's <c>.code-workspace</c> file was written under, so an
+    /// extension added later rewrites that file rather than one named after the
+    /// organisation's folder style as it stands then (#1615).
     /// </summary>
-    public string BuildWorkspace(ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions)
+    public string BuildWorkspace(
+        ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions, string? codeWorkspaceFileName = null)
     {
         var doc = new WorkspaceDoc
         {
@@ -80,6 +85,7 @@ public class WorkspaceConfigService
                 SelectedExtensions = plan.SelectedExtensionPaths.ToList(),
                 Modules = plan.SelectedModuleKeys.ToList(),
                 TenantId = plan.TenantId,
+                CodeWorkspace = codeWorkspaceFileName ?? string.Empty,
                 Extensions = extensions
                     .Select(e => new ExtensionIdentitySection
                     {
@@ -91,6 +97,8 @@ public class WorkspaceConfigService
                         Publisher = e.Publisher,
                         IdRangeFrom = e.IdRangeFrom,
                         IdRangeTo = e.IdRangeTo,
+                        SourceRepository = e.SourceRepository,
+                        SourceCommit = e.SourceCommit,
                     })
                     .ToList(),
             },
@@ -149,8 +157,9 @@ public class WorkspaceConfigService
     /// Parses the supplied TOML and validates it against the live database.
     /// Returns whichever shape the file declared via its <c>kind</c> key. Throws
     /// <see cref="PlanValidationException"/> when the file is malformed, points
-    /// at a missing/deleted template, or references unknown module keys; the
-    /// errors dictionary is keyed for inline display by the caller.
+    /// at a missing/deleted template; the errors dictionary is keyed for inline
+    /// display by the caller. Module keys that name no live module are kept as
+    /// saved, not refused: see <c>BuildWorkspaceImportAsync</c>.
     /// </summary>
     public async Task<WorkspaceConfigImport> ParseAsync(string toml, CancellationToken ct = default)
     {
@@ -196,7 +205,8 @@ public class WorkspaceConfigService
                 WorkspaceKind,
                 await BuildWorkspaceImportAsync(doc, ct),
                 null,
-                ParseExtensions(doc.Workspace?.Extensions)),
+                ParseExtensions(doc.Workspace?.Extensions),
+                ParseCodeWorkspaceFileName(doc.Workspace?.CodeWorkspace)),
             ExtensionKind => new WorkspaceConfigImport(
                 ExtensionKind,
                 null,
@@ -231,9 +241,34 @@ public class WorkspaceConfigService
                 Folder: row.Folder,
                 Publisher: row.Publisher,
                 IdRangeFrom: row.IdRangeFrom,
-                IdRangeTo: row.IdRangeTo));
+                IdRangeTo: row.IdRangeTo,
+                SourceRepository: string.IsNullOrEmpty(row.SourceRepository) ? null : row.SourceRepository,
+                SourceCommit: string.IsNullOrEmpty(row.SourceCommit) ? null : row.SourceCommit));
         }
         return result;
+    }
+
+    /// <summary>
+    /// The saved <c>.code-workspace</c> file name, when it is a plain file name
+    /// at the workspace root. The name is written back as a path in a ZIP and
+    /// in a repository, so anything with a folder in it, a <c>..</c>, a control
+    /// character, a character Windows refuses in a file name, or another
+    /// extension is dropped rather than trusted, and the
+    /// name is derived instead, as for a file saved before it was recorded.
+    /// </summary>
+    internal static string? ParseCodeWorkspaceFileName(string? saved)
+    {
+        if (string.IsNullOrWhiteSpace(saved)) return null;
+        var name = saved.Trim();
+        if (name.Length > 255
+            || name.IndexOfAny(['/', '\\', ':', '<', '>', '"', '|', '?', '*']) >= 0
+            || name.StartsWith('.')
+            || name.Any(char.IsControl)
+            || !name.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return name;
     }
 
     private async Task<ProjectPlan> BuildWorkspaceImportAsync(UnionDoc doc, CancellationToken ct)
@@ -258,22 +293,12 @@ public class WorkspaceConfigService
             }
         }
 
-        // Validate every referenced module key against the live, non-deleted set.
-        var unknownModules = new List<string>();
-        if (section.Modules.Count > 0)
-        {
-            var liveKeys = await _db.Modules
-                .AsNoTracking()
-                .Where(m => m.DeletedAt == null && section.Modules.Contains(m.Key))
-                .Select(m => m.Key)
-                .ToListAsync(ct);
-            var liveSet = liveKeys.ToHashSet(StringComparer.Ordinal);
-            unknownModules = section.Modules.Where(k => !liveSet.Contains(k)).ToList();
-            if (unknownModules.Count > 0)
-            {
-                errors["Modules"] = $"Unknown or deleted module key(s): {string.Join(", ", unknownModules)}.";
-            }
-        }
+        // Module keys are not checked against the catalogue. The list records
+        // what the workspace was generated with, and a module deleted since is
+        // still in it; every caller reads the file back to add an extension
+        // beside the existing ones, which needs only the template and the saved
+        // extensions (#1328). Generating a new workspace refuses a key that
+        // names no live module on its own.
 
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
@@ -412,6 +437,12 @@ public class WorkspaceConfigService
         /// the reader falls back to the empty string.
         /// </summary>
         public string TenantId { get; set; } = string.Empty;
+        /// <summary>
+        /// The name the workspace's <c>.code-workspace</c> file was written
+        /// under (#1615). Empty on older configs; the reader then derives it
+        /// from the organisation's folder style.
+        /// </summary>
+        public string CodeWorkspace { get; set; } = string.Empty;
     }
 
     private class ExtensionSection
@@ -453,6 +484,12 @@ public class WorkspaceConfigService
         public string Publisher { get; set; } = string.Empty;
         public int IdRangeFrom { get; set; }
         public int IdRangeTo { get; set; }
+
+        /// <summary>The repository a module's copy came from (#1415); absent for everything else.</summary>
+        public string? SourceRepository { get; set; }
+
+        /// <summary>The commit that copy was made at.</summary>
+        public string? SourceCommit { get; set; }
     }
 }
 
@@ -471,13 +508,21 @@ public record WorkspaceExtensionIdentity(
     string Folder,
     string Publisher,
     int IdRangeFrom,
-    int IdRangeTo)
+    int IdRangeTo,
+    // For a module copied from a GitHub repository (#1415): which repository and
+    // commit the workspace's copy came from. A record of where it started, not a
+    // link; nothing reads it to fetch again.
+    string? SourceRepository = null,
+    string? SourceCommit = null)
 {
     public const string CoreKind = "core";
     public const string ModuleKind = "module";
 
     /// <summary>An extension added to the workspace after it was generated, from New Extension.</summary>
     public const string AddedKind = "added";
+
+    /// <summary>An extension moved in from another repository by Migrate Repositories (#1700).</summary>
+    public const string MigratedKind = "migrated";
 }
 
 /// <summary>
@@ -487,9 +532,12 @@ public record WorkspaceExtensionIdentity(
 /// extension identity rows from a workspace config (GUIDs / names / id-ranges
 /// for Core + every module) and is empty for extension-kind imports or for
 /// older workspace configs that lack the section.
+/// <see cref="CodeWorkspaceFileName"/> is the name the workspace's
+/// <c>.code-workspace</c> file was written under; null on older configs.
 /// </summary>
 public record WorkspaceConfigImport(
     string Kind,
     ProjectPlan? Workspace,
     StandaloneExtensionPlan? Extension,
-    IReadOnlyList<WorkspaceExtensionIdentity> Extensions);
+    IReadOnlyList<WorkspaceExtensionIdentity> Extensions,
+    string? CodeWorkspaceFileName = null);

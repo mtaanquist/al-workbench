@@ -72,9 +72,15 @@ public static class BackgroundWorkerRegistration
         // repository against its solution's environment again, then opens the update
         // pull requests of the solutions that asked for that (#1104).
         services.AddHostedService<ALDevToolbox.Services.GitHub.DependencyDriftScheduler>();
+        // Daily refresh of the modules copied from a GitHub repository, for the
+        // repositories that send no pushes (#1415).
+        services.AddHostedService<ALDevToolbox.Services.Templates.ModuleSourceRefreshScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
+        // Writes the stored log lines for /site-admin/logs and deletes the ones past
+        // the retention setting. The provider that feeds it is added in Program.cs.
+        services.AddHostedService<ALDevToolbox.Services.Logging.StoredLogWriter>();
         // Removes expired, revoked and redeemed OAuth tokens and the dead
         // authorizations behind them, which nothing else deletes. See #1259.
         services.AddHostedService<ALDevToolbox.Services.OAuth.OAuthTokenPruneScheduler>();
@@ -84,6 +90,9 @@ public static class BackgroundWorkerRegistration
         // Sends the daily and weekly notification digests, and drops items that
         // waited too long. See .design/notifications.md.
         services.AddHostedService<ALDevToolbox.Services.Notifications.NotificationDigestScheduler>();
+        // Closes expired Sealed links, tells senders theirs were opened, and deletes
+        // closed ones after a month. See .design/sealed.md.
+        services.AddHostedService<ALDevToolbox.Services.Sealed.SealedLinkScheduler>();
         // Adds each newly shipped Business Central release wave to every org's
         // application-version catalogue, read daily off the Microsoft symbol feed.
         services.AddHostedService<ALDevToolbox.Services.Templates.ApplicationVersionSyncScheduler>();

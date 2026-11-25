@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
@@ -5,6 +6,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Generation;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Services.Templates;
 
@@ -55,6 +57,18 @@ public class GenerationService
         _logger = logger;
     }
 
+    /// <summary>
+    /// A read-only snapshot for one generation. The template or module, its
+    /// folders and its files are separate reads, and an Editor's save or a
+    /// repository refresh in between would otherwise leave extension folders
+    /// empty in a download that reports success (#1600). Null when the caller
+    /// already runs in a transaction, whose isolation then applies.
+    /// </summary>
+    private async Task<IDbContextTransaction?> BeginSnapshotAsync(CancellationToken ct) =>
+        _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct)
+            : null;
+
     private Task<OrganizationConfig> GetOrgConfigAsync(CancellationToken ct) =>
         _orgConfig.GetForAsync(
             _orgContext.CurrentOrganizationId
@@ -94,6 +108,7 @@ public class GenerationService
     public async Task<GeneratedArchive> GenerateWorkspaceAsync(ProjectPlan plan, CancellationToken ct = default)
     {
         var stopwatch = Stopwatch.StartNew();
+        await using var snapshot = await BeginSnapshotAsync(ct);
         var (resolvedPlan, template, extensions, orgConfig) = await PrepareWorkspaceAsync(plan, pathsOnly: false, ct);
 
         var (stream, fileCount) = await _zipBuilder.BuildWorkspaceAsync(resolvedPlan, template, extensions, orgConfig, ct);
@@ -141,10 +156,12 @@ public class GenerationService
         bool includeWorkspaceRootFiles = true,
         CancellationToken ct = default)
     {
+        plan = await ApplyOrganizationPublisherAsync(plan, ct);
         ValidateExtensionPlan(plan);
         plan = await ResolveLatestVersionAsync(plan, ct);
 
         var stopwatch = Stopwatch.StartNew();
+        await using var snapshot = await BeginSnapshotAsync(ct);
         var template = await LoadTemplateAsync(plan.TemplateKey, ct);
 
         // OrgConfig is needed both for the sibling-rewrite path (which
@@ -216,6 +233,7 @@ public class GenerationService
 
         var template = await LoadTemplateAsync(plan.TemplateKey, ct, pathsOnly);
         ValidateCoreRangeAgainstTemplate(plan, template);
+        ValidateSelectedExtensionPaths(plan, template);
         var modules = await LoadSelectedModulesAsync(plan.SelectedModuleKeys, ct, pathsOnly);
         var orgConfig = await GetOrgConfigAsync(ct);
 
@@ -223,7 +241,22 @@ public class GenerationService
         // decided here rather than trusted from the form or the MCP input -
         // under Hidden and Fixed whatever arrived is ignored. See
         // .design/customer-naming.md.
+        var typedPrefix = plan.ExtensionPrefix?.Trim();
+        // What the prefix would be with nothing typed: the page posts it when the
+        // field is left alone, and it can be as long as the customer's name.
+        var untypedPrefix = ExtensionPrefixPolicy.Resolve(orgConfig.Settings, null, plan.ShortName, plan.WorkspaceName);
         plan = plan with { ExtensionPrefix = ResolvePrefix(orgConfig, plan) };
+        // A prefix the user typed is checked on its own, so a long one is named
+        // under its own field rather than blamed on the short name (#1615).
+        if (orgConfig.Settings.ExtensionPrefixMode == ExtensionPrefixMode.PerWorkspace
+            && !string.IsNullOrEmpty(typedPrefix) && typedPrefix != untypedPrefix
+            && (typedPrefix.Length > CustomerNaming.MaxShortNameLength || typedPrefix.Any(char.IsControl)))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                [nameof(plan.ExtensionPrefix)] = "At most 50 characters.",
+            });
+        }
 
         // {{publisher}} resolves to the org's configuration default, falling
         // back to the template default for a fresh org. Resolved once here and
@@ -272,6 +305,7 @@ public class GenerationService
     {
         try
         {
+            plan = await ApplyOrganizationPublisherAsync(plan, ct);
             ValidateExtensionPlan(plan);
             await ResolveLatestVersionAsync(plan, ct);
             // Only whether the template is still there matters here, so ask
@@ -291,6 +325,20 @@ public class GenerationService
         {
             return ex.Errors;
         }
+    }
+
+    /// <summary>
+    /// <paramref name="plan"/> with the organisation's publisher, when it has one.
+    /// There is one publisher per organisation, set on the Defaults page: the New
+    /// Extension page has no publisher field, and an assistant calling
+    /// <c>generate_extension</c> cannot override it either (#1615). The plan's own
+    /// value is only used by an organisation that has not set one.
+    /// </summary>
+    private async Task<StandaloneExtensionPlan> ApplyOrganizationPublisherAsync(
+        StandaloneExtensionPlan plan, CancellationToken ct)
+    {
+        var publisher = (await GetOrgConfigAsync(ct)).Settings.DefaultPublisher;
+        return string.IsNullOrWhiteSpace(publisher) ? plan : plan with { Publisher = publisher };
     }
 
     private static readonly IReadOnlyDictionary<string, string> NoErrors =
@@ -454,9 +502,10 @@ public class GenerationService
         }
 
         // A key that names no live module used to be skipped, yet the saved
-        // settings still listed it - and reading those settings back refuses
-        // unknown keys, so every extension added to the workspace later lost
-        // its naming and prefix (#1242). Refuse the plan instead.
+        // settings still listed it, so the file described a module the
+        // workspace does not contain (#1242). Refuse the plan instead. Reading
+        // saved settings back accepts such keys, since a module can be
+        // deleted after the workspace was generated (#1328).
         if (missing.Count > 0)
         {
             throw new PlanValidationException(new Dictionary<string, string>
@@ -550,6 +599,15 @@ public class GenerationService
             .Select(d => new EmittableDependency(null, null, d.DepId, d.DepName, d.DepPublisher, d.DepVersion))
             .ToList();
 
+        // A module copied from a repository also carries what that repository's
+        // own app.json depended on (#1415), after the typed ones; a typed entry
+        // for the same app wins, so an Editor can pin a different version.
+        foreach (var dep in ModuleSourceColumns.ReadDependencies(module.SourceDependenciesJson))
+        {
+            if (deps.Any(d => string.Equals(d.LitId, dep.DepId, StringComparison.OrdinalIgnoreCase))) continue;
+            deps.Add(new EmittableDependency(null, null, dep.DepId, dep.DepName, dep.DepPublisher, dep.DepVersion));
+        }
+
         return new EmittableExtension(
             Path: module.ExtensionName,
             Name: name,
@@ -564,7 +622,9 @@ public class GenerationService
             ModuleName: module.ExtensionName,
             FolderRoots: BuildModuleFolderTree(module.ExtensionFolders),
             Dependencies: deps,
-            Required: false);
+            Required: false,
+            SourceRepository: module.SourceRepository,
+            SourceCommit: module.SourceRepository is null ? null : module.SourceCommitSha);
     }
 
     private static List<FolderNode> BuildFolderTree(IEnumerable<WorkspaceExtensionFolder> roots) =>
@@ -609,6 +669,12 @@ public class GenerationService
         if (plan.CoreIdRangeTo <= plan.CoreIdRangeFrom) errors[nameof(plan.CoreIdRangeTo)] = "Must be greater than 'from'.";
         if (string.IsNullOrWhiteSpace(plan.ApplicationVersion)) errors[nameof(plan.ApplicationVersion)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.RuntimeVersion)) errors[nameof(plan.RuntimeVersion)] = "Required.";
+        // The same 8-4-4-4-12 form the field's pattern asks for: the value goes
+        // into the launch configurations, where anything else fails only when
+        // the user publishes (#1545).
+        if (!string.IsNullOrWhiteSpace(plan.TenantId) && !Guid.TryParseExact(plan.TenantId.Trim(), "D", out _))
+            errors[nameof(plan.TenantId)] =
+                "Give the tenant ID as a GUID, for example 8a4f1c3e-1b2d-4e6f-9c1a-3d5b7e9f2a4c, or leave it blank.";
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
 
@@ -618,6 +684,9 @@ public class GenerationService
         if (string.IsNullOrWhiteSpace(plan.TemplateKey)) errors[nameof(plan.TemplateKey)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.ExtensionName) || !ExtensionNameRegex.IsMatch(plan.ExtensionName))
             errors[nameof(plan.ExtensionName)] = "Required. Letters, digits and spaces only; must start with a letter.";
+        else if (plan.ExtensionName.Length > CustomerNaming.MaxExtensionNameLength)
+            errors[nameof(plan.ExtensionName)] =
+                $"At most {CustomerNaming.MaxExtensionNameLength} characters, which is the most Business Central accepts.";
         // Not a form field: the publisher always comes from the org's defaults.
         // "Required." would send the user hunting for an input that isn't there.
         if (string.IsNullOrWhiteSpace(plan.Publisher))
@@ -629,15 +698,29 @@ public class GenerationService
         if (string.IsNullOrWhiteSpace(plan.ApplicationVersion)) errors[nameof(plan.ApplicationVersion)] = "Required.";
         if (string.IsNullOrWhiteSpace(plan.RuntimeVersion)) errors[nameof(plan.RuntimeVersion)] = "Required.";
 
-        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Each dependency goes into app.json as it is, so it needs all four
+        // fields and a real app id: the AL compiler refuses anything less, and
+        // only the page's manual-entry box checked this before (#1615).
+        var seenIds = new HashSet<Guid>();
         for (var i = 0; i < plan.Dependencies.Count; i++)
         {
             var dep = plan.Dependencies[i];
-            if (string.IsNullOrWhiteSpace(dep.DepId)) continue;
-            if (!seenIds.Add(dep.DepId.Trim()))
+            var which = string.IsNullOrWhiteSpace(dep.DepName) ? $"Dependency {i + 1}" : $"The dependency {dep.DepName.Trim()}";
+            if (!Guid.TryParse(dep.DepId?.Trim(), out var depId))
+            {
+                errors[$"Dependencies[{i}].DepId"] =
+                    $"{which} needs its app id as a GUID, for example 63ca2fa4-4f03-4f2b-a480-172fef340d3f.";
+            }
+            else if (!seenIds.Add(depId))
             {
                 errors[$"Dependencies[{i}].DepId"] = $"Duplicate dependency id '{dep.DepId}'.";
             }
+            if (string.IsNullOrWhiteSpace(dep.DepName))
+                errors[$"Dependencies[{i}].DepName"] = $"{which} needs a name.";
+            if (string.IsNullOrWhiteSpace(dep.DepPublisher))
+                errors[$"Dependencies[{i}].DepPublisher"] = $"{which} needs a publisher.";
+            if (string.IsNullOrWhiteSpace(dep.DepVersion))
+                errors[$"Dependencies[{i}].DepVersion"] = $"{which} needs a version, for example 1.0.0.0.";
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
@@ -713,6 +796,37 @@ public class GenerationService
 
         static string Describe(EmittableExtension e) =>
             e.IsModuleClone ? $"the {e.ModuleName} module ({e.ModuleKey})" : $"the template's {e.Path} extension";
+    }
+
+    /// <summary>
+    /// Refuses a selected extension the template does not have. It used to be
+    /// skipped while the saved workspace settings still listed it, so a typo
+    /// ("Tests" for "Test") produced a workspace without that extension and
+    /// reported success. Same rule as unknown module keys (#1242, #1342).
+    /// Matched ordinally, as <see cref="BuildExtensionList"/> matches them.
+    /// </summary>
+    private static void ValidateSelectedExtensionPaths(ProjectPlan plan, RuntimeTemplate template)
+    {
+        var known = new HashSet<string>(template.WorkspaceExtensions.Select(e => e.Path), StringComparer.Ordinal);
+        var unknown = plan.SelectedExtensionPaths
+            .Where(p => !known.Contains(p))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (unknown.Count == 0) return;
+
+        var optional = template.WorkspaceExtensions
+            .Where(e => !e.Required)
+            .OrderBy(e => e.Ordering)
+            .Select(e => e.Path)
+            .ToList();
+        var choices = optional.Count == 0
+            ? "This template has no optional extensions."
+            : $"Pick from {string.Join(", ", optional.Select(p => $"'{p}'"))}.";
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["SelectedExtensionPaths"] =
+                $"The template has no extension called {string.Join(", ", unknown.Select(p => $"'{p}'"))}. {choices}",
+        });
     }
 
     /// <summary>
@@ -843,7 +957,16 @@ public record SiblingWorkspaceContext(
     /// organisation's template, so whatever was changed in it by hand since it
     /// was generated survives. Null rebuilds it (the ZIP download).
     /// </summary>
-    string? CodeWorkspaceJson = null)
+    string? CodeWorkspaceJson = null,
+    /// <summary>
+    /// The name of the <c>.code-workspace</c> file the workspace already has,
+    /// when the caller knows it - a GitHub repository's own, or the name its
+    /// saved settings recorded. The file is
+    /// rewritten under that name rather than one derived again from the
+    /// organisation's folder style, which may have changed since the workspace
+    /// was generated (#1615). Null derives it.
+    /// </summary>
+    string? CodeWorkspaceFileName = null)
 {
     /// <summary>
     /// The context for a workspace read back from its saved settings, carrying
@@ -851,18 +974,31 @@ public record SiblingWorkspaceContext(
     /// generator checks the new extension's IDs against the saved ones, takes
     /// the saved publisher, and writes the settings back with the new extension
     /// listed. Shared by the GitHub delivery and the ZIP download so both build
-    /// the same context from the same file (#1239).
+    /// the same context from the same file (#1239). The <c>.code-workspace</c>
+    /// file name the settings recorded is carried too, so the file is rewritten
+    /// under the name it already has (#1615).
     /// </summary>
-    public static SiblingWorkspaceContext FromSavedWorkspace(
-        ProjectPlan workspace, IReadOnlyList<WorkspaceExtensionIdentity> extensions) =>
-        new(
+    public static SiblingWorkspaceContext FromSavedWorkspace(WorkspaceConfigImport import)
+    {
+        var workspace = import.Workspace
+            ?? throw new ArgumentException("Not a workspace's saved settings.", nameof(import));
+        return new(
             workspace.WorkspaceName,
             workspace.SelectedModuleKeys,
-            extensions.Select(e => e.Folder).ToList(),
+            import.Extensions.Select(e => e.Folder).ToList(),
             workspace.ShortName,
             workspace.ExtensionPrefix,
             SavedPlan: workspace,
-            SavedExtensions: extensions);
+            SavedExtensions: import.Extensions,
+            CodeWorkspaceFileName: import.CodeWorkspaceFileName);
+    }
+
+    /// <summary>
+    /// The <c>.code-workspace</c> file this workspace is rewritten under: the one
+    /// it already has, else the name the organisation's folder style gives it.
+    /// </summary>
+    public string CodeWorkspaceFileNameFor(NamingStyle folderStyle) =>
+        CodeWorkspaceFileName ?? $"{CustomerNaming.Apply(WorkspaceName, folderStyle)}.code-workspace";
 
     /// <summary>The tenant with its fallback applied: this context's own, else the saved plan's, else blank.</summary>
     public string EffectiveTenantId => TenantId ?? SavedPlan?.TenantId ?? string.Empty;

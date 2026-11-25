@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -74,8 +75,11 @@ public sealed class ProjectAccessTests : IDisposable
         var access = Access(ctx);
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance);
     }
+
+    private ProjectDiscoveryService Discovery(AppDbContext ctx) => new(
+        ctx, _db.OrgContext, Access(ctx), _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
 
     private TeamService Teams(AppDbContext ctx) => new(ctx, _db.OrgContext, NullLogger<TeamService>.Instance);
 
@@ -327,6 +331,159 @@ public sealed class ProjectAccessTests : IDisposable
         }
     }
 
+    // ── Team delete races (#1603) ───────────────────────────────────────
+    //
+    // Each test holds the first writer's transaction open, starts the second writer,
+    // checks it is waiting on the lock, then commits the first: the second must check
+    // what the first left. Without the locks the second passed its check against the
+    // old state and a Private solution was left with no team.
+
+    /// <summary>How long a second writer is given to show it is waiting, not done.</summary>
+    private static readonly TimeSpan LockWait = TimeSpan.FromMilliseconds(750);
+
+    private async Task<Exception?> SecondWriterAfterFirstCommitsAsync(
+        Func<AppDbContext, Task> first, Func<AppDbContext, Task> second)
+    {
+        await using var holder = _db.NewContext();
+        await using var tx = await holder.Database.BeginTransactionAsync();
+        await first(holder);
+
+        await using var other = _db.NewContext();
+        var waiting = Task.Run(() => second(other));
+        (await Task.WhenAny(waiting, Task.Delay(LockWait))).Should().NotBeSameAs(waiting,
+            "the second writer waits for the first one's lock");
+
+        await tx.CommitAsync();
+        try
+        {
+            await waiting;
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex;
+        }
+    }
+
+    [Fact]
+    public async Task Two_admins_deleting_a_private_solutions_two_teams_at_once_leave_it_one()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var first = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        var second = await SeedTeamAsync("Platform", OtherTeamUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, first, second);
+        ActAs(AdminUserId);
+
+        var refused = await SecondWriterAfterFirstCommitsAsync(
+            ctx => Teams(ctx).DeleteTeamAsync(first),
+            ctx => Teams(ctx).DeleteTeamAsync(second));
+
+        refused.Should().BeOfType<PlanValidationException>()
+            .Which.Errors["Name"].Should().Contain("the only team on the solution CRONUS Denmark");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectTeams.AsNoTracking().Where(t => t.ProjectId == projectId).Select(t => t.TeamId).ToListAsync())
+            .Should().Equal(second);
+    }
+
+    [Fact]
+    public async Task A_team_delete_waits_for_an_access_save_that_keeps_only_that_team_and_is_then_refused()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var first = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        var second = await SeedTeamAsync("Platform", OtherTeamUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, first, second);
+        ActAs(AdminUserId);
+
+        var refused = await SecondWriterAfterFirstCommitsAsync(
+            ctx => Svc(ctx).SetAccessAsync(projectId, ProjectVisibility.Private, new[] { first }),
+            ctx => Teams(ctx).DeleteTeamAsync(first));
+
+        refused.Should().BeOfType<PlanValidationException>().Which.Errors.Should().ContainKey("Name");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectTeams.AsNoTracking().Where(t => t.ProjectId == projectId).Select(t => t.TeamId).ToListAsync())
+            .Should().Equal(first);
+    }
+
+    [Fact]
+    public async Task A_team_delete_waits_for_an_access_save_that_adds_the_team_and_is_then_refused()
+    {
+        // The save makes a Public solution Private with this one team; the delete cannot
+        // see the solution through the team until the save commits, so the team row is
+        // what it waits on.
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        ActAs(AdminUserId);
+
+        var refused = await SecondWriterAfterFirstCommitsAsync(
+            ctx => Svc(ctx).SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId }),
+            ctx => Teams(ctx).DeleteTeamAsync(teamId));
+
+        refused.Should().BeOfType<PlanValidationException>().Which.Errors.Should().ContainKey("Name");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectTeams.AsNoTracking().CountAsync(t => t.ProjectId == projectId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Two_deletes_waiting_on_an_access_save_that_adds_a_team_leave_the_solution_one()
+    {
+        // Review of #1684: the save gives a Private solution a second team while both of its
+        // teams are being deleted. The delete of the added team could not see the solution
+        // until the save committed; it must still lock it then, or both deletes pass.
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var added = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        var kept = await SeedTeamAsync("Platform", OtherTeamUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, kept);
+        ActAs(AdminUserId);
+
+        await using var holder = _db.NewContext();
+        await using var tx = await holder.Database.BeginTransactionAsync();
+        await Svc(holder).SetAccessAsync(projectId, ProjectVisibility.Private, new[] { added, kept });
+
+        await using var first = _db.NewContext();
+        await using var second = _db.NewContext();
+        var deletes = new[]
+        {
+            Task.Run(() => Teams(first).DeleteTeamAsync(added)),
+            Task.Run(() => Teams(second).DeleteTeamAsync(kept)),
+        };
+        await Task.Delay(LockWait);
+        deletes.Should().OnlyContain(d => !d.IsCompleted, "both deletes wait for the save");
+
+        await tx.CommitAsync();
+        var outcomes = new List<Exception?>();
+        foreach (var delete in deletes)
+        {
+            try { await delete; outcomes.Add(null); }
+            catch (Exception ex) { outcomes.Add(ex); }
+        }
+
+        outcomes.Count(o => o is null).Should().Be(1, "the second delete checks what the first left");
+        outcomes.Single(o => o is not null).Should().BeOfType<PlanValidationException>()
+            .Which.Errors["Name"].Should().Contain("the only team on the solution CRONUS Denmark");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectTeams.AsNoTracking().CountAsync(t => t.ProjectId == projectId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_access_save_waits_for_a_team_delete_and_then_says_the_team_is_gone()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var first = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        var second = await SeedTeamAsync("Platform", OtherTeamUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, first, second);
+        ActAs(AdminUserId);
+
+        var refused = await SecondWriterAfterFirstCommitsAsync(
+            ctx => Teams(ctx).DeleteTeamAsync(first),
+            ctx => Svc(ctx).SetAccessAsync(projectId, ProjectVisibility.Private, new[] { first }));
+
+        refused.Should().BeOfType<PlanValidationException>()
+            .Which.Errors["Teams"].Should().Be("One of those teams no longer exists. Reload the page and try again.");
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectTeams.AsNoTracking().Where(t => t.ProjectId == projectId).Select(t => t.TeamId).ToListAsync())
+            .Should().Equal(second);
+    }
+
     // ── Manage / delete matrix ──────────────────────────────────────────
 
     public static TheoryData<ProjectVisibility> AllLevels => new()
@@ -456,11 +613,29 @@ public sealed class ProjectAccessTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Asks <see cref="ProjectAccess.CanManageAsync"/> as <paramref name="userId"/>, and
+    /// checks that the list form (<see cref="ProjectAccess.ManageProjectPredicate"/>, run
+    /// as a query the way the fleet and freshness pages run it) gives the same answer, so
+    /// every row of the manage matrix also holds the two in step.
+    /// </summary>
     private async Task<bool> CanManageAsAsync(int projectId, int userId, bool siteAdmin = false)
     {
         ActAs(userId, siteAdmin);
         await using var ctx = _db.NewContext();
-        return await Svc(ctx).CanManageAsync(projectId);
+        var canManage = await Svc(ctx).CanManageAsync(projectId);
+        (await ManageableProjectIdsAsync(ctx)).Contains(projectId).Should().Be(
+            canManage, $"the list form has to agree with CanManageAsync for user {userId} (siteAdmin={siteAdmin})");
+        return canManage;
+    }
+
+    private async Task<List<int>> ManageableProjectIdsAsync(AppDbContext ctx)
+    {
+        var snapshot = await Access(ctx).GetSnapshotAsync();
+        return await ctx.OeProjects.AsNoTracking()
+            .Where(ProjectAccess.ManageProjectPredicate(snapshot))
+            .Select(p => p.Id)
+            .ToListAsync();
     }
 
     // ── View matrix ─────────────────────────────────────────────────────
@@ -516,6 +691,7 @@ public sealed class ProjectAccessTests : IDisposable
 
         (await access.CanViewAsync(projectId)).Should().BeFalse();
         (await access.CanManageAsync(projectId, OwnerUserId)).Should().BeFalse();
+        (await ManageableProjectIdsAsync(ctx)).Should().BeEmpty("the list form of manage grants nobody nothing too");
         (await access.CanDeleteAsync(OwnerUserId)).Should().BeFalse();
     }
 
@@ -545,6 +721,8 @@ public sealed class ProjectAccessTests : IDisposable
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
             await ((Func<Task>)(() => artifacts.ListBuildsForProjectAsync(projectId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
+            await ((Func<Task>)(() => Discovery(ctx).GetDiscoveryAsync(projectId)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
 
             // The picker list omits it rather than refusing — a name you can't act
             // on is only in the way of choosing one you can.
@@ -557,6 +735,7 @@ public sealed class ProjectAccessTests : IDisposable
         {
             (await Svc(ctx).GetProjectAsync(projectId)).Should().NotBeNull();
             (await Artifacts(ctx).GetProjectHeaderAsync(projectId))!.Name.Should().Be("CRONUS Denmark");
+            (await Discovery(ctx).GetDiscoveryAsync(projectId)).Should().NotBeNull();
             (await Svc(ctx).ListProjectsAsync()).Should().ContainSingle();
         }
 
@@ -877,6 +1056,62 @@ public sealed class ProjectAccessTests : IDisposable
         (await Artifacts(ctx).ListProjectsAsync()).Should().ContainSingle().Which.IsLocked.Should().BeFalse();
     }
 
+    /// <summary>
+    /// The list form of release visibility (<see cref="ProjectAccess.VisibleReleasePredicate"/>)
+    /// walks two links from a release to its solution. Every other list test reaches it
+    /// through a build; this one has only the import job that brought the release in, so
+    /// the second half of the predicate is the only thing that can hide it.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AllLevels))]
+    public async Task The_releases_list_hides_a_release_linked_only_through_its_import_job(ProjectVisibility visibility)
+    {
+        var projectId = await SeedProjectAsync();
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        if (visibility != ProjectVisibility.Public)
+        {
+            await SetAccessAsOwnerAsync(projectId, visibility, teamId);
+        }
+        int releaseId;
+        await using (var seed = _db.NewContext())
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS Denmark on BC 26.0", BcVersion = "26.0",
+                DedupKey = Guid.NewGuid().ToString(), Kind = OeRelease.ProjectBuildKind, Status = "ready",
+                ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+            };
+            seed.OeReleases.Add(release);
+            await seed.SaveChangesAsync();
+            seed.OeImportJobs.Add(new OeImportJob
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = release.Id, ProjectId = projectId,
+                Kind = "project_build", Status = "done", CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+            releaseId = release.Id;
+        }
+
+        foreach (var (userId, siteAdmin, expected) in new (int, bool, bool)[]
+        {
+            (PlainUserId, false, visibility != ProjectVisibility.Private),
+            (TeamMemberUserId, false, true),
+            (OwnerUserId, false, true),
+            (AdminUserId, false, true),
+            (PlainUserId, true, true),
+        })
+        {
+            ActAs(userId, siteAdmin);
+            await using var ctx = _db.NewContext();
+            var explorer = new ObjectExplorerService(
+                ctx, new ReferenceQueryService(ctx, Access(ctx), _db.OrgContext, NullLogger<ReferenceQueryService>.Instance),
+                Access(ctx), NullLogger<ObjectExplorerService>.Instance);
+            var rows = await explorer.ListReleasesAsync(includeProjectBuilds: true);
+            rows.Any(r => r.Id == releaseId).Should().Be(
+                expected, $"user {userId} (siteAdmin={siteAdmin}) on a {visibility} solution");
+        }
+    }
+
     // ── Environment-update axis (issue #657) ────────────────────────────
 
     /// <summary>Stamps <c>ManagesUpdates</c> on an existing membership row.</summary>
@@ -1074,5 +1309,158 @@ public sealed class ProjectAccessTests : IDisposable
         {
             (await Access(ctx).GetSnapshotAsync()).CanUseEnvironmentOps.Should().BeFalse();
         }
+    }
+
+    // ── Threading (#1724) ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task Access_checks_read_the_caller_on_the_callers_synchronization_context()
+    {
+        // The sidebar runs these checks while a page renders on the server, and the
+        // render reads HttpContext.User on the renderer's context at the same time.
+        // A continuation that left that context read the caller (directly, and in
+        // each query's tenant filter) concurrently with the render, which is how a
+        // 404 page became a 500. Every read has to stay on the caller's context.
+        var projectId = await SeedProjectAsync();
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        await GrantUpdateFlagAsync(teamId, TeamMemberUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, teamId);
+        ActAs(TeamMemberUserId);
+        var recorder = new ContextCheckingOrganizationContext(_db.OrgContext);
+
+        await Microsoft.AspNetCore.Components.Dispatcher.CreateDefault().InvokeAsync(async () =>
+        {
+            await using var ctx = _db.NewContext(recorder);
+            var access = new ProjectAccess(ctx, recorder);
+            (await access.GetSnapshotAsync()).CanUseEnvironmentOps.Should().BeTrue();
+            (await access.CanViewAsync(projectId)).Should().BeTrue();
+            (await access.CanManageAsync(projectId, OwnerUserId)).Should().BeTrue();
+            (await access.CanManageEnvironmentUpdatesAsync(projectId)).Should().BeTrue();
+        });
+
+        recorder.Reads.Should().BeGreaterThan(0);
+        recorder.OffContextReads.Should().BeEmpty();
+    }
+
+    // ── Where "Can schedule upgrades" counts (org setting) ──────────────
+
+    private async Task GrantUpgradesAsync(int teamId, int userId)
+    {
+        await using var ctx = _db.NewContext();
+        var member = await ctx.TeamMembers.FirstAsync(m => m.TeamId == teamId && m.UserId == userId);
+        member.ManagesUpdates = true;
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task SetUpgradeScopeAsAdminAsync(UpgradePermissionScope scope)
+    {
+        var previous = _db.OrgContext.CurrentUserId;
+        var previousSiteAdmin = _db.OrgContext.IsSiteAdmin;
+        ActAs(AdminUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationAdminService(ctx).SetUpgradePermissionScopeAsync(scope);
+        }
+        ActAs(previous, previousSiteAdmin);
+    }
+
+    /// <summary>Asks both forms, the per-project check and the list predicate, and insists they agree.</summary>
+    private async Task<bool> CanScheduleUpgradesAsAsync(int projectId, int userId)
+    {
+        ActAs(userId);
+        await using var ctx = _db.NewContext();
+        var access = Access(ctx);
+        var can = await access.CanManageEnvironmentUpdatesAsync(projectId);
+        var snapshot = await access.GetSnapshotAsync();
+        var listed = await ctx.OeProjects.AsNoTracking()
+            .Where(ProjectAccess.UpdateOpsProjectPredicate(snapshot))
+            .AnyAsync(p => p.Id == projectId);
+        listed.Should().Be(can, $"the list form has to agree with CanManageEnvironmentUpdatesAsync for user {userId}");
+        return can;
+    }
+
+    [Theory]
+    [InlineData(UpgradePermissionScope.AssignedTeams)]
+    [InlineData(UpgradePermissionScope.ManagedSolutions)]
+    public async Task Upgrade_scope_matrix(UpgradePermissionScope scope)
+    {
+        var ops = await SeedTeamAsync("Operations", TeamMemberUserId);
+        var other = await SeedTeamAsync("Development", OtherTeamUserId, PlainUserId);
+        await GrantUpgradesAsync(ops, TeamMemberUserId);
+
+        var publicProject = await SeedProjectAsync("CRONUS Public");
+        var opsReadOnly = await SeedProjectAsync("CRONUS Ops");
+        var otherReadOnly = await SeedProjectAsync("CRONUS Dev");
+        var otherPrivate = await SeedProjectAsync("CRONUS Private");
+        await SetAccessAsOwnerAsync(opsReadOnly, ProjectVisibility.ReadOnly, ops);
+        await SetAccessAsOwnerAsync(otherReadOnly, ProjectVisibility.ReadOnly, other);
+        await SetAccessAsOwnerAsync(otherPrivate, ProjectVisibility.Private, other);
+        await SetUpgradeScopeAsAdminAsync(scope);
+
+        var wide = scope == UpgradePermissionScope.ManagedSolutions;
+
+        (await CanScheduleUpgradesAsAsync(publicProject, TeamMemberUserId)).Should()
+            .Be(wide, "a Public solution has no teams, so only the wider scope reaches it");
+        (await CanScheduleUpgradesAsAsync(opsReadOnly, TeamMemberUserId)).Should()
+            .BeTrue("the grant is on a team assigned to it");
+        (await CanScheduleUpgradesAsAsync(otherReadOnly, TeamMemberUserId)).Should()
+            .BeFalse("a Read-only solution of another team is not one she may manage");
+        (await CanScheduleUpgradesAsAsync(otherPrivate, TeamMemberUserId)).Should()
+            .BeFalse("a Private solution of another team is not one she may manage");
+
+        // Without the grant, no scope lets anyone in - not even on a solution they manage.
+        (await CanScheduleUpgradesAsAsync(publicProject, PlainUserId)).Should().BeFalse();
+        (await CanScheduleUpgradesAsAsync(otherReadOnly, PlainUserId)).Should().BeFalse();
+
+        // Admins act everywhere whichever scope is chosen.
+        (await CanScheduleUpgradesAsAsync(otherPrivate, AdminUserId)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The wider scope follows manage, and owning a solution is manage - so an owner
+    /// holding the grant on some team reaches their own Private solution of another team.
+    /// </summary>
+    [Theory]
+    [InlineData(UpgradePermissionScope.AssignedTeams, false)]
+    [InlineData(UpgradePermissionScope.ManagedSolutions, true)]
+    public async Task Upgrade_scope_reaches_the_owners_own_solution_only_when_wide(UpgradePermissionScope scope, bool expected)
+    {
+        var ops = await SeedTeamAsync("Operations", OwnerUserId);
+        var other = await SeedTeamAsync("Development", OtherTeamUserId);
+        await GrantUpgradesAsync(ops, OwnerUserId);
+        var owned = await SeedProjectAsync("CRONUS Owned");
+        await SetAccessAsOwnerAsync(owned, ProjectVisibility.Private, other);
+        await SetUpgradeScopeAsAdminAsync(scope);
+
+        (await CanScheduleUpgradesAsAsync(owned, OwnerUserId)).Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task Upgrade_scope_defaults_to_assigned_teams_and_round_trips()
+    {
+        ActAs(AdminUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await _db.NewOrganizationAdminService(ctx).GetUpgradePermissionScopeAsync())
+                .Should().Be(UpgradePermissionScope.AssignedTeams);
+        }
+
+        await SetUpgradeScopeAsAdminAsync(UpgradePermissionScope.ManagedSolutions);
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await _db.NewOrganizationAdminService(ctx).GetUpgradePermissionScopeAsync())
+                .Should().Be(UpgradePermissionScope.ManagedSolutions);
+        }
+    }
+
+    [Fact]
+    public async Task Upgrade_scope_refuses_a_value_that_is_not_a_level()
+    {
+        ActAs(AdminUserId);
+        await using var ctx = _db.NewContext();
+        var act = () => _db.NewOrganizationAdminService(ctx).SetUpgradePermissionScopeAsync((UpgradePermissionScope)42);
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("UpgradePermissionScope");
     }
 }

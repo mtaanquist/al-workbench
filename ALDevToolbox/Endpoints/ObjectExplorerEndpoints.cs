@@ -124,7 +124,10 @@ internal static class ObjectExplorerEndpoints
         // release id; reuses the same FolderZip / AppFiles + SourceZips
         // form shape so the upload-building helpers come for free.
         // Same 1 GB cap — a late-landing partner DVD is rare but possible.
-        app.MapPost("/admin/object-explorer/release/{releaseId:int}/modules", async (
+        // Posts to .../modules/upload, not .../modules: that address is the
+        // AdminReleaseModules page, and Razor component endpoints accept POST
+        // too, so sharing it made every upload an AmbiguousMatchException.
+        app.MapPost("/admin/object-explorer/release/{releaseId:int}/modules/upload", async (
             int releaseId,
             HttpContext ctx,
             ReleaseImportRequestService imports,
@@ -137,19 +140,15 @@ internal static class ObjectExplorerEndpoints
 
             try
             {
-                var summary = await imports.AmendAsync(
+                // Queued on the import worker (#1549); the page says how it went.
+                await imports.AmendAsync(
                     releaseId,
                     ToUpload(form.Files.GetFile("FolderZip")),
                     ToUploads(form, "AppFiles"),
                     ToUploads(form, "SourceZips"),
                     ct);
 
-                ctx.Response.Redirect(
-                    $"/admin/object-explorer/release/{releaseId}/modules"
-                    + $"?ok=amended"
-                    + $"&modules={summary.ModulesImported}"
-                    + $"&skipped={summary.ModulesSkipped}"
-                    + $"&refs={summary.ReferencesImported}");
+                ctx.Response.Redirect($"/admin/object-explorer/release/{releaseId}/modules?ok=queued");
             }
             catch (PlanValidationException ex)
             {
@@ -280,6 +279,7 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
+            ILoggerFactory loggers,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
@@ -315,6 +315,17 @@ internal static class ObjectExplorerEndpoints
             {
                 RedirectManage(ctx, id, "Retry", CannotRebuild);
             }
+            // Anything else (the wipe's command timeout, a failed insert) lands on the
+            // manage page rather than the generic error page. An error after the reopen
+            // has normally failed the release again inside RetryAsync; one before it
+            // leaves the release as it was. A request the browser abandoned has nobody
+            // to redirect, so that one is left to propagate (#1632).
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                loggers.CreateLogger("ALDevToolbox.Endpoints.ObjectExplorerEndpoints")
+                    .LogError(ex, "Retry of release {ReleaseId} could not be queued.", id);
+                RedirectManage(ctx, id, "Retry", RetryNotQueued);
+            }
         })
         .RequireObjectExplorerAuthoring()
         .WithMetadata(new RequestSizeLimitAttribute(MaxUploadBytes))
@@ -335,15 +346,16 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ProjectService projects,
             ReleaseImportService importer,
-            PersistedImportJobs persistedJobs,
+            ReleaseImportRequestService requests,
             ProjectBuildImporter projectBuilds,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
 
-            var origin = await persistedJobs.GetLatestForReleaseAsync(id, ct);
-            if (origin is not { Kind: "project_build", ProjectId: int projectId })
+            // A release hidden by the solution-visibility fence gets this answer
+            // too, so the refusal confirms nothing about another team's build.
+            if (await requests.FindSymbolRecoveryProjectAsync(id, ct) is not int projectId)
             {
                 RedirectManage(ctx, id, "Symbols", "This release isn't a solution build, so there's nothing to recover.");
                 return;
@@ -414,37 +426,48 @@ internal static class ObjectExplorerEndpoints
         app.MapPost("/admin/object-explorer/{id:int}/backfill-system-references", async (
             int id,
             HttpContext ctx,
+            ReleaseManagementService management,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            // Another org's id and a Private solution's release the caller can't
+            // see both read as missing, and answer the same 404 (#1430).
+            try
+            {
+                if (!await management.EnsureBackfillableAsync(id, ct))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
+            }
+            catch (PlanValidationException ex)
+            {
+                var first = ex.Errors.First();
+                RedirectManage(ctx, id, first.Key, first.Value);
+                return;
+            }
             var source = new ReleaseImportSource.Backfill();
             await imports.EnqueueImportAsync(id, source, storeSymbolReference: false, ct);
             ctx.Response.Redirect($"/admin/object-explorer/release/{id}/manage?ok=backfill-queued");
         }).RequireObjectExplorerAuthoring();
 
-        // Bulk variant: enqueue a backfill for every ready, non-deleted release
+        // Bulk variant: queue a backfill for every ready, non-deleted release
         // in the org — the "I don't want to reimport my whole catalogue" path.
+        // The jobs are fed to the queue in the background, never awaited here:
+        // a catalogue is hours of work for the one import worker (#1542).
         app.MapPost("/admin/object-explorer/backfill-system-references-all", async (
             HttpContext ctx,
-            AppDbContext db,
+            ReleaseManagementService management,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            // Query-filtered to the caller's org; no cross-tenant enqueue.
-            var releaseIds = await db.OeReleases.AsNoTracking()
-                .Where(r => r.Status == "ready" && r.DeletedAt == null)
-                .Select(r => r.Id)
-                .ToListAsync(ct);
-            foreach (var rid in releaseIds)
-            {
-                var source = new ReleaseImportSource.Backfill();
-                await imports.EnqueueImportAsync(rid, source, storeSymbolReference: false, ct);
-            }
-            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={releaseIds.Count}");
+            var releaseIds = await management.ListBackfillableReleaseIdsAsync(ct);
+            var result = await imports.QueueBackfillAllAsync(releaseIds, ct);
+            ctx.Response.Redirect($"/admin/object-explorer?ok=backfill-all-queued&id={result.Queued}&skipped={result.Skipped}");
         }).RequireObjectExplorerAuthoring();
 
         app.MapPost("/admin/object-explorer/{id:int}/restore", async (
@@ -549,6 +572,8 @@ internal static class ObjectExplorerEndpoints
 
     private const string CannotRebuild =
         "Only someone who can manage this solution can build it again.";
+
+    private const string RetryNotQueued = "The retry could not be queued. Try again.";
 
     private static void RedirectManage(HttpContext ctx, int releaseId, string errKey, string message)
     {

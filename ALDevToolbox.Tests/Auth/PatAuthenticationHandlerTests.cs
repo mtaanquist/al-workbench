@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using ALDevToolbox.Services.Email;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using ALDevToolbox.Domain.Entities;
@@ -46,18 +48,41 @@ public sealed class PatAuthenticationHandlerTests : IDisposable
         return user;
     }
 
-    private async Task<PatAuthenticationHandler> NewHandlerAsync(HttpContext httpContext)
+    private async Task<PatAuthenticationHandler> NewHandlerAsync(
+        HttpContext httpContext, ALDevToolbox.Services.Operations.MaintenanceModeState? maintenance = null)
     {
         var ctx = _db.NewContext();
-        var service = new PersonalAccessTokenService(ctx, _clock, NullLogger<PersonalAccessTokenService>.Instance);
+        var service = new PersonalAccessTokenService(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
 
         var optionsMonitor = new TestOptionsMonitor<AuthenticationSchemeOptions>(new AuthenticationSchemeOptions());
         var handler = new PatAuthenticationHandler(
-            optionsMonitor, NullLoggerFactory.Instance, UrlEncoder.Default, service);
+            optionsMonitor, NullLoggerFactory.Instance, UrlEncoder.Default, service, maintenance);
         await handler.InitializeAsync(
             new AuthenticationScheme(PatAuthenticationHandler.AuthenticationScheme, displayName: null, handlerType: typeof(PatAuthenticationHandler)),
             httpContext);
         return handler;
+    }
+
+    [Fact]
+    public async Task During_a_restore_a_token_is_left_unvalidated_and_its_last_use_unwritten()
+    {
+        var user = await SeedUserAsync();
+        IssuedToken issued;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = new PersonalAccessTokenService(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
+            issued = await svc.IssueAsync(user.Id, user.OrganizationId, "cursor", expiresAt: null);
+        }
+        var maintenance = new ALDevToolbox.Services.Operations.MaintenanceModeState();
+        maintenance.Enter("Restoring backup test.dump");
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Headers["Authorization"] = "Bearer " + issued.Plaintext;
+
+        var result = await (await NewHandlerAsync(httpContext, maintenance)).AuthenticateAsync();
+
+        result.None.Should().BeTrue("the request is left anonymous for the maintenance page (#1571)");
+        await using var check = _db.NewContext();
+        check.PersonalAccessTokens.Single(t => t.Id == issued.Id).LastUsedAt.Should().BeNull();
     }
 
     [Fact]
@@ -67,7 +92,7 @@ public sealed class PatAuthenticationHandlerTests : IDisposable
         IssuedToken issued;
         await using (var ctx = _db.NewContext())
         {
-            var svc = new PersonalAccessTokenService(ctx, _clock, NullLogger<PersonalAccessTokenService>.Instance);
+            var svc = new PersonalAccessTokenService(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
             issued = await svc.IssueAsync(user.Id, user.OrganizationId, "cursor", expiresAt: null);
         }
 
@@ -94,7 +119,7 @@ public sealed class PatAuthenticationHandlerTests : IDisposable
         IssuedToken issued;
         await using (var ctx = _db.NewContext())
         {
-            var svc = new PersonalAccessTokenService(ctx, _clock, NullLogger<PersonalAccessTokenService>.Instance);
+            var svc = new PersonalAccessTokenService(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
             issued = await svc.IssueAsync(user.Id, user.OrganizationId, "cursor", expiresAt: null);
         }
 
@@ -152,7 +177,7 @@ public sealed class PatAuthenticationHandlerTests : IDisposable
         IssuedToken issued;
         await using (var ctx = _db.NewContext())
         {
-            var svc = new PersonalAccessTokenService(ctx, _clock, NullLogger<PersonalAccessTokenService>.Instance);
+            var svc = new PersonalAccessTokenService(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
             issued = await svc.IssueAsync(user.Id, user.OrganizationId, "cursor", expiresAt: null);
         }
         var tampered = issued.Plaintext[..^4] + "ZZZZ";
@@ -174,7 +199,7 @@ public sealed class PatAuthenticationHandlerTests : IDisposable
         IssuedToken issued;
         await using (var ctx = _db.NewContext())
         {
-            var svc = new PersonalAccessTokenService(ctx, _clock, NullLogger<PersonalAccessTokenService>.Instance);
+            var svc = new PersonalAccessTokenService(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
             issued = await svc.IssueAsync(user.Id, user.OrganizationId, "cursor", expiresAt: null);
             await svc.RevokeAsync(issued.Id);
         }

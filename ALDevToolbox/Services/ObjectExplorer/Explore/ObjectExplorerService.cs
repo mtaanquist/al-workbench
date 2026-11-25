@@ -54,8 +54,8 @@ public class ObjectExplorerService
         var releaseId = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId)
             .Select(m => (int?)m.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct);
     }
 
     private async Task<bool> ObjectVisibleAsync(long objectId, CancellationToken ct)
@@ -63,8 +63,8 @@ public class ObjectExplorerService
         var releaseId = await _db.OeModuleObjects.AsNoTracking()
             .Where(o => o.Id == objectId)
             .Select(o => (int?)o.Module!.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct);
     }
 
     private async Task<bool> SymbolVisibleAsync(long symbolId, CancellationToken ct)
@@ -72,8 +72,8 @@ public class ObjectExplorerService
         var releaseId = await _db.OeModuleSymbols.AsNoTracking()
             .Where(sym => sym.Id == symbolId)
             .Select(sym => (int?)sym.Object!.Module!.ReleaseId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        return releaseId is null || await ReleaseVisibleAsync(releaseId.Value, ct);
     }
 
     // ── Releases ────────────────────────────────────────────────────────
@@ -161,13 +161,12 @@ public class ObjectExplorerService
     /// <summary>
     /// The newest ready build's Release for each pipeline — the one exception to
     /// "project builds stay out of the Object Explorer" (see
-    /// <see cref="ListReleasesAsync"/>): the Third-party tab on
+    /// <see cref="ListReleasesAsync"/>): the Solutions tab on
     /// <c>/object-explorer</c> shows the latest ready build per pipeline so a
     /// pipeline's current objects are findable without going through the
     /// Artifacts tool first. Older builds stay Artifacts-only. One row per
     /// pipeline, <see cref="ReleaseListItem.PipelineName"/> and
-    /// <see cref="ReleaseListItem.ProjectName"/> filled for the card's context
-    /// line. See <c>.design/artifacts.md</c>.
+    /// <see cref="ReleaseListItem.ProjectName"/> filled for the tab's table. See <c>.design/artifacts.md</c>.
     /// </summary>
     public async Task<List<ReleaseListItem>> ListLatestPipelineBuildReleasesAsync(CancellationToken ct = default)
     {
@@ -210,7 +209,15 @@ public class ObjectExplorerService
                 PipelineName: b.Pipeline!.Name))
             .ToListAsync(ct);
 
-        rows.Sort((a, b) => string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase));
+        // Pipeline, then id, break ties so two pipelines of one solution keep one
+        // order: list_releases cuts this list at a limit.
+        rows.Sort((a, b) =>
+        {
+            var byProject = string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase);
+            if (byProject != 0) return byProject;
+            var byPipeline = string.Compare(a.PipelineName, b.PipelineName, StringComparison.OrdinalIgnoreCase);
+            return byPipeline != 0 ? byPipeline : a.Id.CompareTo(b.Id);
+        });
         return rows;
     }
 
@@ -227,74 +234,11 @@ public class ObjectExplorerService
     /// the caller cannot see it. See <c>.design/artifacts.md</c>.
     /// </para>
     /// </summary>
-    public async Task<List<ReleaseListItem>> ListBuildCompareCandidatesAsync(int releaseId, CancellationToken ct = default)
-    {
-        if (!await ReleaseVisibleAsync(releaseId, ct)) return [];
-        var own = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ReleaseId == releaseId)
-            .OrderBy(b => b.Id)
-            .Select(b => new { b.ProjectId, b.PipelineId })
-            .FirstOrDefaultAsync(ct);
-        if (own is null) return [];
+    public Task<List<ReleaseListItem>> ListBuildCompareCandidatesAsync(int releaseId, CancellationToken ct = default)
+        => BuildCompareCandidates.ListAsync(_db, _access, releaseId, ct);
 
-        var snapshot = await _access.GetSnapshotAsync(ct);
-        var visibleRelease = _access.VisibleReleasePredicate(snapshot);
-        var rows = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == own.ProjectId
-                        && b.ReleaseId != null
-                        && b.ReleaseId != releaseId
-                        && b.Status == ProjectBuildStatus.Ready
-                        && b.Release!.Status == "ready"
-                        && b.Release!.DeletedAt == null
-                        // A deleted pipeline's builds go with it, as on the Pipelines pages.
-                        && (b.Pipeline == null || b.Pipeline.DeletedAt == null))
-            .Where(OeProjectBuild.HasIndexedObjects)
-            .Where(b => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId))
-            .OrderBy(b => own.PipelineId != null && b.PipelineId == own.PipelineId ? 0 : 1)
-            .ThenByDescending(b => b.StartedAt)
-            .ThenByDescending(b => b.Id)
-            .Take(BuildCompareCandidateCap)
-            .Select(b => new
-            {
-                BuildId = b.Id,
-                b.BcTarget,
-                PipelineName = b.Pipeline != null ? b.Pipeline.Name : null,
-                Item = new ReleaseListItem(
-                    b.Release!.Id, b.Release.Label, b.Release.Kind, b.Release.Status,
-                    b.Release.BcVersion, b.Release.ParentReleaseId,
-                    ParentLabel: b.Release.ParentRelease != null ? b.Release.ParentRelease.Label : null,
-                    Publisher: b.Release.Publisher,
-                    ProjectName: b.Project!.Name,
-                    ImportedAt: b.Release.ImportedAt,
-                    SourceFileCount: b.Release.SourceFileCount,
-                    SourceContentLength: b.Release.SourceContentLength,
-                    DeletedAt: b.Release.DeletedAt,
-                    StatusMessage: b.Release.StatusMessage,
-                    PipelineName: b.Pipeline != null ? b.Pipeline.Name : null,
-                    IsPrerelease: b.Release.IsPrerelease),
-            })
-            .ToListAsync(ct);
-
-        return rows
-            .Select(r => r.Item with { Label = BuildCompareLabel(r.BuildId, r.BcTarget, r.PipelineName, r.Item.BcVersion) })
-            .ToList();
-    }
-
-    /// <summary>
-    /// How many builds the compare picker offers. A busy solution has hundreds;
-    /// the recent ones are the ones anyone compares against, and the picker is a
-    /// plain dropdown.
-    /// </summary>
-    internal const int BuildCompareCandidateCap = 50;
-
-    private static string BuildCompareLabel(int buildId, string bcTarget, string? pipelineName, string? bcVersion)
-    {
-        var label = bcTarget == ProjectBuildTarget.Current
-            ? $"Build #{buildId}"
-            : $"{ProjectBuildTarget.Label(bcTarget)} preview build #{buildId}";
-        if (!string.IsNullOrWhiteSpace(pipelineName)) label += $" of {pipelineName}";
-        return string.IsNullOrWhiteSpace(bcVersion) ? label : $"{label} on BC {bcVersion}";
-    }
+    /// <summary>How many builds the compare picker offers; see <see cref="BuildCompareCandidates.Cap"/>.</summary>
+    internal const int BuildCompareCandidateCap = BuildCompareCandidates.Cap;
 
     /// <summary>
     /// Returns the Release header plus a denormalised module count for the
@@ -605,9 +549,9 @@ public class ObjectExplorerService
                         && o.Kind == kind
                         && EF.Functions.ILike(o.Name, name, "\\"))
             .Select(o => (long?)o.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (id is null) return null;
-        return await GetObjectAsync(id.Value, ct).ConfigureAwait(false);
+        return await GetObjectAsync(id.Value, ct);
     }
 
     /// <summary>
@@ -644,7 +588,7 @@ public class ObjectExplorerService
                 SourceFilePath = o.SourceFile != null ? o.SourceFile.Path : null,
                 o.LineNumber,
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (header is null) return null;
 
         var symbols = await _db.OeModuleSymbols.AsNoTracking()
@@ -652,7 +596,7 @@ public class ObjectExplorerService
             .OrderBy(s => s.LineNumber).ThenBy(s => s.Name)
             .Select(s => new ObjectSymbolRow(
                 s.Id, s.Kind, s.Name, s.Signature, s.ReturnType, s.FieldId, s.LineNumber, s.Doc))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // For interface targets, attach the implementing codeunits so
         // MCP agents calling get_object_outline on an interface get the
@@ -714,7 +658,7 @@ public class ObjectExplorerService
                 OwnerKind = s.Object.Kind,
                 SourceFileId = s.Object.SourceFileId,
             })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (row is null || row.SourceFileId is null) return null;
 
         // Fallback for legacy rows: take the next symbol's line on the
@@ -731,14 +675,14 @@ public class ObjectExplorerService
                 .Where(s => s.ObjectId == row.OwnerId && s.LineNumber > row.LineNumber)
                 .OrderBy(s => s.LineNumber)
                 .Select(s => (int?)s.LineNumber)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             endLine = nextLine is int n ? n - 1 : int.MaxValue;
         }
 
         var fileContent = await _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.Id == row.SourceFileId)
             .Select(f => f.FileContent!.Content)
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (fileContent is null) return null;
 
         // SplitLines normalises line endings (the previous raw Split('\n') left
@@ -801,7 +745,7 @@ public class ObjectExplorerService
                 s.LineNumber,
                 s.EndLine,
             })
-            .SingleOrDefaultAsync(ct).ConfigureAwait(false);
+            .SingleOrDefaultAsync(ct);
         if (symbol is null) return null;
 
         // Primary indexed seek via ix_oe_module_references_source_symbol.
@@ -812,7 +756,7 @@ public class ObjectExplorerService
             .Select(r => new ProcedureCall(
                 r.Id, r.TargetAppId, r.TargetObjectKind, r.TargetObjectId, r.TargetObjectName,
                 r.TargetMemberName, r.TargetMemberKind, r.ReferenceKind, r.LineNumber, r.ColumnNumber))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         if (direct.Count > 0 || symbol.EndLine is null) return direct;
 
         // Lazy-backfill fallback: rows from pre-#181 ingests don't carry
@@ -832,7 +776,7 @@ public class ObjectExplorerService
             .Select(r => new ProcedureCall(
                 r.Id, r.TargetAppId, r.TargetObjectKind, r.TargetObjectId, r.TargetObjectName,
                 r.TargetMemberName, r.TargetMemberKind, r.ReferenceKind, r.LineNumber, r.ColumnNumber))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
     }
 
     /// <summary>
@@ -882,6 +826,11 @@ public class ObjectExplorerService
         var row = await _db.OeReleases.AsNoTracking()
             .Where(visible)
             .Where(r => r.Label == label && r.DeletedAt == null)
+            // Labels are not unique: a failed import and its retry share one. Prefer
+            // a ready release, then the newest, so a label never lands on one that
+            // cannot be searched while a working one exists (#1344).
+            .OrderByDescending(r => r.Status == "ready")
+            .ThenByDescending(r => r.Id)
             .Select(r => new { r.Id })
             .FirstOrDefaultAsync(ct);
         if (row is null)
@@ -908,17 +857,6 @@ public class ObjectExplorerService
             throw new McpException($"Symbol id {symbolId} doesn't exist. Call get_object_outline to see the current ids for an object.");
         }
     }
-
-    /// <summary>
-    /// Body-bearing symbol kinds — what counts as a "procedure" the
-    /// forward-edge tools can read source for. Mirrors the kinds the
-    /// procedure walker pushes a scope frame for.
-    /// </summary>
-    private static readonly HashSet<string> BodyBearingKinds = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "procedure", "local_procedure", "internal_procedure", "protected_procedure",
-        "trigger", "event_publisher", "event_subscriber",
-    };
 
     /// <summary>
     /// Resolves a procedure / trigger to its <c>oe_module_symbols.id</c>
@@ -961,7 +899,7 @@ public class ObjectExplorerService
             .Select(s => new { s.Id, s.Kind, s.LineNumber })
             .ToListAsync(ct);
 
-        var bodied = candidates.Where(c => BodyBearingKinds.Contains(c.Kind)).ToList();
+        var bodied = candidates.Where(c => ProcedureKinds.IsProcedureLike(c.Kind)).ToList();
         if (bodied.Count == 0)
         {
             throw new McpException($"No procedure or trigger named '{procName}' on {ownerKind} '{objectName}' in release {releaseLabelOrId}. Call get_object_outline to see what this object exposes.");
@@ -975,16 +913,24 @@ public class ObjectExplorerService
 
     /// <summary>
     /// The full per-module row the <c>list_release_modules</c> MCP tool
-    /// returns, capped at <paramref name="maxResults"/>. Distinct from
+    /// returns, at most <paramref name="maxResults"/> rows ordered by name. The
+    /// caller asks for one past its cap so it can tell the agent more were left
+    /// out (#1344). <paramref name="namePattern"/> is an optional case-insensitive
+    /// substring of the module name. Distinct from
     /// <see cref="ListModuleSummariesAsync"/>, which is the three-column form
     /// the search-filter dropdown needs. The release must already have come
     /// from <see cref="ResolveReleaseAsync"/>.
     /// </summary>
     public async Task<List<McpReleaseModuleRow>> ListReleaseModulesForMcpAsync(
-        int releaseId, int maxResults, CancellationToken ct = default)
+        int releaseId, int maxResults, string? namePattern = null, CancellationToken ct = default)
     {
-        return await _db.OeModules.AsNoTracking()
-            .Where(m => m.ReleaseId == releaseId)
+        var query = _db.OeModules.AsNoTracking().Where(m => m.ReleaseId == releaseId);
+        if (!string.IsNullOrWhiteSpace(namePattern))
+        {
+            var pattern = namePattern.Trim().ToLower();
+            query = query.Where(m => m.Name.ToLower().Contains(pattern));
+        }
+        return await query
             .OrderBy(m => m.Name)
             .Take(maxResults)
             .Select(m => new McpReleaseModuleRow(

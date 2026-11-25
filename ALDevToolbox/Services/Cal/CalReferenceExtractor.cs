@@ -89,7 +89,7 @@ public static class CalReferenceExtractor
             {
                 if (tok.Kind == CalTokenKind.Identifier
                     && StaticReceiverKinds.TryGetValue(tok.Text, out var staticKind)
-                    && TryEmitStaticObjectRef(t, k, staticKind, refs))
+                    && TryEmitStaticObjectRef(t, k, staticKind, refs, sysRefs))
                 {
                     k += 2; // consume `::` and the object name together
                     continue;
@@ -240,7 +240,8 @@ public static class CalReferenceExtractor
     /// <c>Rec</c> field and emit a field_access for a field that doesn't
     /// exist (issue #713).</para>
     /// </summary>
-    private static bool TryEmitStaticObjectRef(List<CalToken> t, int k, string kind, List<CalRef> refs)
+    private static bool TryEmitStaticObjectRef(
+        List<CalToken> t, int k, string kind, List<CalRef> refs, List<CalRef> sysRefs)
     {
         var name = Peek(t, k + 2);
         if (name.Kind is CalTokenKind.Identifier or CalTokenKind.QuotedIdentifier)
@@ -248,6 +249,7 @@ public static class CalReferenceExtractor
             // The id isn't in the source; the import resolves it from the name.
             refs.Add(new CalRef(name.Line, name.Column, kind, null, null, null,
                 "property_object", name.Text));
+            EmitStaticDispatch(t, k, kind, null, name.Text, sysRefs);
             return true;
         }
         if (name.Kind == CalTokenKind.Number && int.TryParse(name.Text, out var id))
@@ -255,9 +257,30 @@ public static class CalReferenceExtractor
             // Numeric literal (CODEUNIT::80) — resolvable by id like every
             // other C/AL reference, so the name post-pass fills it in.
             refs.Add(new CalRef(name.Line, name.Column, kind, id, null, null, "property_object"));
+            EmitStaticDispatch(t, k, kind, id, null, sysRefs);
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// <c>PAGE.RUNMODAL(PAGE::"Customer List",Cust)</c>: when the literal at
+    /// <paramref name="k"/> is the first argument of a method on the static
+    /// dispatcher of the same kind, record the call as a system reference on
+    /// the object it names, as the AL walker does for <c>Page.RunModal</c>.
+    /// </summary>
+    private static void EmitStaticDispatch(
+        List<CalToken> t, int k, string kind, int? id, string? name, List<CalRef> sysRefs)
+    {
+        if (k < 4) return;
+        var lparen = t[k - 1];
+        var method = t[k - 2];
+        var dot = t[k - 3];
+        var dispatcher = t[k - 4];
+        if (lparen.Kind != CalTokenKind.LParen || dot.Kind != CalTokenKind.Dot) return;
+        if (method.Kind != CalTokenKind.Identifier || dispatcher.Kind != CalTokenKind.Identifier) return;
+        if (!string.Equals(dispatcher.Text, t[k].Text, StringComparison.OrdinalIgnoreCase)) return;
+        sysRefs.Add(new CalRef(method.Line, method.Column, kind, id, method.Text, "system", "method_call", name));
     }
 
     private static CalTypeRef? ResolveHead(CalToken head, CalExtractScope scope)

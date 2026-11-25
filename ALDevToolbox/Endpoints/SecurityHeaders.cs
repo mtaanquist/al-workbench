@@ -64,13 +64,21 @@ internal static class SecurityHeaders
     {
         app.Use(async (ctx, next) =>
         {
-            var headers = ctx.Response.Headers;
-            headers["X-Content-Type-Options"] = "nosniff";
-            headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
-            headers["X-Frame-Options"] = "DENY";
-            headers[ReportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy"] = Policy;
+            Apply(ctx.Response.Headers);
             await next();
         });
         return app;
+    }
+
+    /// <summary>
+    /// Sets the headers on a response. Also for a middleware that clears a
+    /// half-built response and writes its own (the maintenance page, #1599).
+    /// </summary>
+    internal static void Apply(IHeaderDictionary headers)
+    {
+        headers["X-Content-Type-Options"] = "nosniff";
+        headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+        headers["X-Frame-Options"] = "DENY";
+        headers[ReportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy"] = Policy;
     }
 }

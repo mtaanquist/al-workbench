@@ -113,7 +113,8 @@ public sealed class WorkspaceZipBuilder
                 FolderPath: string.Empty,
                 TenantId: plan.TenantId,
                 FolderStyle: folderStyle);
-            WriteString(archive, $"{rootFolder}/{rootFolder}.code-workspace",
+            var codeWorkspaceFile = $"{rootFolder}.code-workspace";
+            WriteString(archive, $"{rootFolder}/{codeWorkspaceFile}",
                 BuildCodeWorkspace(
                     orgConfig.Settings.CodeWorkspaceJson,
                     template.CodeWorkspaceJson,
@@ -128,8 +129,10 @@ public sealed class WorkspaceZipBuilder
                 Folder: e.Path,
                 Publisher: e.Publisher,
                 IdRangeFrom: e.IdRangeFrom,
-                IdRangeTo: e.IdRangeTo)).ToList();
-            WriteString(archive, $"{rootFolder}/{WorkspaceConfigService.FileName}", _config.BuildWorkspace(plan, identities));
+                IdRangeTo: e.IdRangeTo,
+                SourceRepository: e.SourceRepository,
+                SourceCommit: e.SourceCommit)).ToList();
+            WriteString(archive, $"{rootFolder}/{WorkspaceConfigService.FileName}", _config.BuildWorkspace(plan, identities, codeWorkspaceFile));
             fileCount++;
         }
 
@@ -173,7 +176,9 @@ public sealed class WorkspaceZipBuilder
                 .Select(d => new EmittableDependency(
                     RefExtensionPath: null,
                     RefModuleKey: null,
-                    LitId: d.DepId,
+                    // Written in the usual 8-4-4-4-12 form whatever form was
+                    // posted ({...} or 32 digits both parse) (#1615).
+                    LitId: Guid.TryParse(d.DepId, out var depId) ? depId.ToString("D") : d.DepId,
                     LitName: d.DepName,
                     LitPublisher: d.DepPublisher,
                     LitVersion: d.DepVersion))
@@ -247,10 +252,9 @@ public sealed class WorkspaceZipBuilder
             // for the same reason sibling mode suppresses them.
             if (sibling is null && includeWorkspaceRootFiles)
             {
-                // The New Extension form's publisher is user-editable and is
-                // what this extension's app.json carries, so {{publisher}} in
-                // the root files resolves to the same value rather than to the
-                // org default the workspace flow uses.
+                // {{publisher}} in the root files resolves to the publisher this
+                // extension's app.json carries: the organisation's, settled by
+                // GenerationService before the plan gets here.
                 fileCount += WriteOrgFiles(
                     archive, folderName, includedFiles, standaloneAsWorkspacePlan, template, plan.Publisher,
                     orgConfig.Settings.NamingFolderStyle, ct);
@@ -280,7 +284,7 @@ public sealed class WorkspaceZipBuilder
             if (sibling is not null && sibling.ExistingFolders.Count > 0)
             {
                 var siblingFolderStyle = orgConfig.Settings.NamingFolderStyle;
-                var workspaceFile = $"{CustomerNaming.Apply(sibling.WorkspaceName, siblingFolderStyle)}.code-workspace";
+                var workspaceFile = sibling.CodeWorkspaceFileNameFor(siblingFolderStyle);
                 var existing = sibling.ExistingFolders.ToList();
                 existing.Add(folderName);
 
@@ -339,7 +343,8 @@ public sealed class WorkspaceZipBuilder
                         // even if the organisation's policy changes later.
                         _config.BuildWorkspace(
                             sibling.SavedPlan with { ExtensionPrefix = sibling.ExtensionPrefix ?? string.Empty },
-                            identities));
+                            identities,
+                            workspaceFile));
                     fileCount++;
                 }
             }
@@ -558,8 +563,10 @@ public sealed class WorkspaceZipBuilder
     /// reference shape is set. Intra-workspace refs lock onto the
     /// freshly-generated GUIDs of the in-this-build extensions so AL's
     /// dependency graph resolves at compile time. Module-key refs work the
-    /// same way when the target module was selected for this workspace,
-    /// otherwise they fall back to the catalogue's stored dep identifiers.
+    /// same way when the target module was selected for this workspace;
+    /// when it was not, the dependency is left out (there is no catalogue
+    /// fallback - .design/generation-engine.md). Template save refuses a
+    /// module key that names no module, so only an unticked one is dropped.
     /// Module-cloned extensions also get an implicit dependency on every
     /// required template extension so a Document Capture clone depends on
     /// Core without the template author having to spell it out.
@@ -613,8 +620,10 @@ public sealed class WorkspaceZipBuilder
                     if (!emitted.Add(target.Id)) continue;
                     array.Add(BuildDepNode(target.Id.ToString(), target.Name, target.Publisher, "0.0.0.1"));
                 }
-                // else: the validator should have caught this; skip silently
-                // to avoid emitting a placeholder GUID that won't compile.
+                // else: the module exists but was not ticked for this
+                // workspace, so there is no app to depend on. Dropped, as
+                // .design/generation-engine.md specifies, rather than emit a
+                // placeholder GUID that won't compile.
             }
             else if (dep.LitId is not null)
             {
@@ -897,6 +906,64 @@ public sealed class WorkspaceZipBuilder
         }
         return SerializeIndented(root);
     }
+
+    /// <summary>
+    /// Swaps the extension folders listed in a generated <c>.code-workspace</c>
+    /// file: each folder in <paramref name="remove"/> leaves the list and the
+    /// root's <c>files.exclude</c>, and each in <paramref name="add"/> goes in
+    /// just before the workspace-root entry and is hidden under it, the way a
+    /// generated workspace lists its own. Migrate Repositories uses it to point
+    /// the template's file at the extensions moved in (#1700). Null when the
+    /// file is not a JSON object with a <c>folders</c> list.
+    /// </summary>
+    internal static string? ReplaceExtensionFolders(string json, IReadOnlyCollection<string> remove, IReadOnlyList<string> add)
+    {
+        JsonNode? parsed;
+        try
+        {
+            parsed = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        if (parsed is not JsonObject root || root["folders"] is not JsonArray folders) return null;
+
+        static string? PathOf(JsonNode? node) =>
+            node is JsonObject o && o["path"] is JsonValue v && v.TryGetValue<string>(out var path) ? path : null;
+
+        var removing = new HashSet<string>(remove, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in folders.Where(f => PathOf(f) is { } p && removing.Contains(p)).ToList())
+        {
+            folders.Remove(entry);
+        }
+        if (root["settings"] is JsonObject settings && settings["files.exclude"] is JsonObject exclude)
+        {
+            foreach (var key in exclude.Select(p => p.Key).Where(removing.Contains).ToList())
+            {
+                exclude.Remove(key);
+            }
+        }
+
+        var adding = add
+            .Where(a => !folders.Any(f => string.Equals(PathOf(f), a, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var rootEntry = folders.FirstOrDefault(f => PathOf(f) == ".");
+        var at = rootEntry is null ? folders.Count : folders.IndexOf(rootEntry);
+        foreach (var folder in adding)
+        {
+            folders.Insert(at++, new JsonObject { ["path"] = folder });
+        }
+        if (rootEntry is not null) ExcludeExtensionFoldersFromRoot(root, adding);
+        return SerializeIndented(root);
+    }
+
+    /// <summary>Writes <paramref name="node"/> the way every generated JSON file is written: two-space indents, no needless escaping.</summary>
+    internal static string WriteJson(JsonNode node) => SerializeIndented(node);
 
     /// <summary>
     /// Display name of the workspace-root entry appended to the

@@ -104,8 +104,97 @@ and `/healthz` / `/readyz` keep going.
 Verify: post-restore, `/readyz` is 200 and `/site-admin/audit` shows the
 *Restore* entry. Non-SiteAdmin sign-in works.
 
-If the restore fails part-way, the database is in an indeterminate state —
-restore the most recent pre-restore backup to roll back, then investigate.
+Then restart the container when you can. Any import or build that was still in
+progress when the backup was taken comes back from the dump looking as if it
+is running, with nothing behind it. Startup marks those as interrupted (and
+resumes URL imports), as it does after any restart; until then they keep
+showing as running. Deployments the backup caught in progress do not wait for
+the restart: within a minute of the site reopening they are marked as failed,
+and whoever started them is told to deploy the build again.
+
+### Before anything is dropped
+
+The restore first checks the file: it must be the size it was when it was
+taken, and `pg_restore` must be able to read it from start to end. A file that
+is cut short, damaged part-way, not a backup at all, or taken by a newer
+PostgreSQL is refused at this point; the backups page says so, nothing has
+changed and the app stays open. The check costs one extra read of the file.
+
+Once the site is closed, the restore stops background work from starting and
+waits up to a minute for imports, builds and background sweeps that are
+already running, and for any database command that is still in progress,
+including one started by a click on an open page. If one is still running
+after that, the restore is refused, the site reopens and nothing has changed.
+The message names what was still running (an import, a deployment, the
+nightly Object Explorer clean-up, ...): wait until it has finished and try
+again. A download from
+off-site storage counts too: if one is running, let it finish before you
+restore. One started while a restore runs waits until the restore is over.
+Imports, builds and
+solution scans that were only waiting in line are dropped when the restore
+completes, because they belong to the database it replaced; start them again
+afterwards if they are still needed. A build or backfill that was already
+waiting when the backup was taken comes back from the dump still marked as
+waiting, so it can only be started again after the restart described above.
+
+While the site is closed, anyone other than a site administrator who clicks
+on a page they already had open is taken to the maintenance page, and
+anything still trying to read or save on their behalf gets an error instead
+of reaching the database. Pages left open that refresh themselves show errors
+until the site reopens; a reload fixes them. Assistants connected over OAuth
+or an access token get the maintenance response and retry later.
+
+Site administrators keep the site administration pages. Elsewhere in the app
+they can look but not save until the restore is over. Saving a setting on a
+site administration page while a restore runs is not held back, and can
+collide with the restore: leave those pages alone until it has finished.
+
+What it cannot catch is a file that reads cleanly but that the database then
+refuses part-way through loading it. That is the case below.
+
+### If the restore fails after the drop
+
+The old database is already gone, so the app stays in maintenance mode instead
+of reopening on an empty or half-loaded database. The delivery, environment
+refresh and upgrade workers stand down while it is on, so nothing is published
+to a customer environment from that state.
+
+The backups page still lists every backup file and says the restore failed.
+Restore the pre-restore backup from step 1 (or another known-good one) from
+there; maintenance mode lifts when that restore completes. The app remembers
+the backup list from before the failure, including per-tenant snapshots, and
+puts it back with that restore. Then investigate the failure in the logs.
+
+Off-site storage settings live in the database. If the failure left it empty,
+they are gone with everything else, so to pull a backup back from the bucket
+re-enter them at `/site-admin/settings/offsite` first. Downloads from the
+bucket on the backups page work while the site is held closed like this, and
+the downloaded backup then appears in the list ready to restore.
+
+### Restarting the container instead
+
+Maintenance mode, and the remembered backup list, live in the app process. A
+restart drops both and the app opens to everyone on whatever the database
+holds. It also restarts the nightly backup and its retention clean-up, which
+will start replacing good backups with copies of the broken database: restore
+a good backup straight away after a restart. Restart only when one of these is
+true:
+
+- You have lost your SiteAdmin session. Sign-in is blocked while maintenance
+  mode is on.
+- Every backup you try fails to restore. Nothing else lifts maintenance mode.
+- The backups page itself errors because the failed restore left no tables to
+  read. Startup recreates them.
+
+After the restart, sign in with:
+
+- an account from the dump, if the restore got far enough to load users; or
+- the bootstrap admin, which startup creates only when the users table is
+  empty and both `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` are
+  set. If you have to add or change them, run `docker compose up -d`, not
+  `docker compose restart`: a restart keeps the old environment.
+
+Then restore from the backups page as above.
 
 ## Off-site (S3-compatible) backups
 
@@ -166,6 +255,19 @@ redirected to login) and the encrypted SMTP password becomes unreadable.
    uses the freshly-encrypted value.
 4. Audit log entries that captured the encrypted SMTP password before the
    loss stay redacted; they were already redacted at write time.
+5. If off-site backups are configured: the `app-keys` volume also holds
+   `deployment-id`, the id every off-site backup is stamped with, and
+   restarting creates a new one. Until it is carried over, every backup
+   this installation uploaded before the loss is refused as "created by
+   a different deployment", and retention stops pruning them. Put the
+   old file back if you have a copy. If not, read the old id from any
+   pre-loss object's metadata in your storage console
+   (`x-amz-meta-deployment-id` on S3, `deploymentid` on Azure), write it
+   as the only line of `deployment-id.former` in the same directory, and
+   restart. That file holds one id; retention never deletes that
+   installation's backups, and **Site administration → Backup & storage →
+   Whole site** shows it with a **Remove** button. See
+   [offsite-backups.md](offsite-backups.md).
 
 Verify: `/healthz` returns 200 after the restart; sending a test email from
 `/site-admin/settings` succeeds.

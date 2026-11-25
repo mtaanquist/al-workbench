@@ -280,6 +280,10 @@ public sealed class EmailOutbox
     /// everything still waiting, and how much went out in the last day. Bodies
     /// are never read here — an operator needs to know that a reset link is
     /// stuck, not what the link is.
+    /// <para>It reads every organisation's recipients and subjects and has no
+    /// SiteAdmin check of its own (the outbox is also used before sign-in, so it
+    /// takes no organisation context): the SiteAdmin role on the page that calls
+    /// it is the only gate. A new caller must carry that role itself.</para>
     /// </summary>
     public async Task<EmailOutboxSnapshot> SnapshotAsync(int limit = 100, CancellationToken ct = default)
     {

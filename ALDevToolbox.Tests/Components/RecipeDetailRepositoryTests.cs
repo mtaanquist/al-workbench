@@ -41,7 +41,11 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
     private const string OrgLogin = "cronus-dk";
     private const string Repo = "cronus-dk/solution-a";
     private const string BaseSha = "base-commit-sha";
-    private const string Branch = "aldt/recipe-doc-attachments";
+    // The fake matches routes by path prefix, so a NotFound on this root answers
+    // "no such branch" for every recipe branch, old-style names included, unless a
+    // test registers a longer route for one.
+    private const string BranchRoot = "aldt/recipe-";
+    private static string BranchFor(int recipeId) => $"aldt/recipe-{recipeId}-doc-attachments";
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -59,6 +63,7 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
         _ctx.Services.AddSingleton<IMemoryCache>(new MemoryCache(Options.Create(new MemoryCacheOptions())));
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddScoped<RecipeService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddSingleton<MarkdownRenderer>();
         _ctx.Services.AddDataProtection();
@@ -143,7 +148,7 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
             // consultant has to send on.
             cut.FindAll(".confirm-dialog").Should().BeEmpty();
             var alert = cut.Find(".alert--success");
-            alert.TextContent.Should().Contain("Pull request #11").And.Contain(Repo).And.Contain(Branch);
+            alert.TextContent.Should().Contain("Pull request #11").And.Contain(Repo).And.Contain(BranchFor(recipeId));
             alert.QuerySelector("a")!.GetAttribute("href")
                 .Should().Be($"https://github.com/{Repo}/pull/11");
         });
@@ -201,13 +206,10 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
     /// </summary>
     private async Task<FakeGitHubApi> ReadyAsync()
     {
-        using (var rsa = RSA.Create(2048))
-        {
-            await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
-                AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
-                ClientSecret: "s3cr3t", ClearClientSecret: false,
-                PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
-        }
+        await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
+            AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
+            ClientSecret: "s3cr3t", ClearClientSecret: false,
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
 
         await using (var ctx = _db.NewContext())
         {
@@ -236,7 +238,7 @@ public sealed class RecipeDetailRepositoryTests : IDisposable
                 FakeGitHubApi.InstallationRepositoriesJson(Repo))
            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Repo))
            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, "[]")
-           .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}", HttpStatusCode.NotFound)
+           .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{BranchRoot}", HttpStatusCode.NotFound)
            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/main", HttpStatusCode.OK,
                 $"{{\"ref\":\"refs/heads/main\",\"object\":{{\"sha\":\"{BaseSha}\"}}}}")
            .On(HttpMethod.Get, $"/repos/{Repo}/git/commits/{BaseSha}", HttpStatusCode.OK,

@@ -29,7 +29,7 @@ namespace ALDevToolbox.Tests.Components;
 /// dialog enforces (the Production acknowledgement, the schedule, the secret warning)
 /// still stands. Nothing here releases: Business Central is never reached.</para>
 /// </summary>
-public sealed class PipelineBuildsReleaseTests : IDisposable
+public sealed class PipelineBuildsReleaseTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -55,6 +55,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped(sp => _db.NewQuotaGuard(sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>()));
         _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         // The Build button's service. Nothing here builds, so only what it keeps
@@ -95,10 +96,13 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         _db.OrgContext.CurrentUserId = OwnerUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -318,6 +322,8 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         // replaces the handlers a Find just read; a stale one throws before anything is
         // sent, so the pair is retried until it lands on the current render.
         editor.WaitForAssertion(() => editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString()));
+        // The sandbox has no delivery window, so a Business Central update is the choice (#1471).
+        editor.WaitForAssertion(() => editor.Find("#rpe-schedule").Change(BcDeploymentSchedule.NextMinorUpdate));
         editor.WaitForAssertion(() => editor.Find(".page-head .btn--primary").Click());
 
         // Saving carries on to deploying the build it was set up for.

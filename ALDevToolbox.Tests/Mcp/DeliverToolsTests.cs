@@ -65,7 +65,7 @@ public sealed class DeliverToolsTests : IDisposable
         var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
             NullLogger<ProjectDiscoveryService>.Instance);
         return new DeliverTools(
-            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance),
+            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), _db.NewQuotaGuard(ctx), NullLogger<ProjectService>.Instance),
             new ProjectCustomerInfoService(ctx, _db.OrgContext, access, NullLogger<ProjectCustomerInfoService>.Instance),
             connections,
             new UpgradeFleetService(ctx, _db.OrgContext, access, new EnvironmentRefreshQueue(),
@@ -143,7 +143,7 @@ public sealed class DeliverToolsTests : IDisposable
     public async Task List_environments_lists_every_visible_environment_with_its_freshness()
     {
         await using var ctx = _db.NewContext();
-        var rows = await NewTools(ctx).ListEnvironmentsAsync();
+        var rows = (await NewTools(ctx).ListEnvironmentsAsync()).Rows;
 
         rows.Select(r => (r.SolutionName, r.Name)).Should().BeEquivalentTo(new[]
         {
@@ -166,21 +166,38 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        (await tools.ListEnvironmentsAsync(type: "sandbox")).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(type: "sandbox")).Rows.Select(r => r.EnvironmentId)
             .Should().Equal(_seed.DenmarkSandbox);
-        (await tools.ListEnvironmentsAsync(status: "Upgrading")).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(status: "Upgrading")).Rows.Select(r => r.EnvironmentId)
             .Should().Equal(_seed.SwedenProduction);
-        (await tools.ListEnvironmentsAsync(version: "25")).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(version: "25")).Rows.Select(r => r.EnvironmentId)
             .Should().Equal(_seed.DenmarkProduction);
-        (await tools.ListEnvironmentsAsync(version: "26.1")).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(version: "26.1")).Rows.Select(r => r.EnvironmentId)
             .Should().Equal(_seed.DenmarkSandbox);
-        (await tools.ListEnvironmentsAsync(storageOver: 0.8)).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(storageOver: 0.8)).Rows.Select(r => r.EnvironmentId)
             .Should().BeEquivalentTo([_seed.DenmarkProduction, _seed.DenmarkSandbox],
                 "the quota is the tenant's, so both of its environments are over it");
-        (await tools.ListEnvironmentsAsync(nextUpdateBefore: "2026-11-01")).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(nextUpdateBefore: "2026-11-01")).Rows.Select(r => r.EnvironmentId)
             .Should().Equal(_seed.DenmarkProduction);
-        (await tools.ListEnvironmentsAsync(solution: "CRONUS Sweden")).Select(r => r.EnvironmentId)
+        (await tools.ListEnvironmentsAsync(solution: "CRONUS Sweden")).Rows.Select(r => r.EnvironmentId)
             .Should().Equal(_seed.SwedenProduction);
+    }
+
+    [Fact]
+    public async Task List_environments_stops_at_the_limit_and_says_so()
+    {
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        var cut = await tools.ListEnvironmentsAsync(limit: 2);
+        cut.Rows.Select(r => r.SolutionName).Should().Equal("CRONUS Denmark", "CRONUS Denmark");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 2 environments").And.Contain("solution");
+
+        var whole = await tools.ListEnvironmentsAsync(limit: 3);
+        whole.Rows.Should().HaveCount(3);
+        whole.Truncated.Should().BeFalse();
+        whole.Note.Should().BeNull();
     }
 
     [Fact]
@@ -210,15 +227,72 @@ public sealed class DeliverToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Get_environment_leaves_Microsofts_apps_out_unless_asked()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeEnvironmentApps.Add(NewApp(_seed.DenmarkProduction, Guid.NewGuid(), "Base Application", "Microsoft", "25.3.1.0"));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        var ours = await tools.GetEnvironmentAsync(_seed.DenmarkProduction);
+        ours.InstalledApps.Should().HaveCount(2).And.NotContain(a => a.Publisher == "Microsoft");
+        ours.MicrosoftAppsLeftOut.Should().Be(1);
+
+        var everything = await tools.GetEnvironmentAsync(_seed.DenmarkProduction, includeMicrosoftApps: true);
+        everything.InstalledApps.Should().HaveCount(3).And.Contain(a => a.Name == "Base Application");
+        everything.MicrosoftAppsLeftOut.Should().Be(0);
+    }
+
+    [Fact]
     public async Task List_environment_history_is_newest_first()
     {
         await using var ctx = _db.NewContext();
-        var history = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+        var answer = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+        var history = answer.Rows;
 
         history.Select(h => h.Action).Should().Equal("RunNow", "PushDateToLatest", "PushDateToLatest");
         history[0].RequestedBy.Should().Be("Viewer");
         history[2].Status.Should().Be("Pending");
         history[2].IsBooking.Should().BeTrue();
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task List_environment_history_cuts_long_failure_reasons_and_stays_within_the_answer_budget()
+    {
+        // #1576: a failed line carries Business Central's whole reason. Fifty of them
+        // used to run past what an assistant client accepts in one answer.
+        var now = DateTime.UtcNow;
+        await using (var seed = _db.NewContext())
+        {
+            for (var i = 0; i < 50; i++)
+            {
+                var failed = NewAction(_seed.Denmark, _seed.DenmarkProduction, UpgradeActionKind.RunNow,
+                    UpgradeActionStatus.Failed, now.AddMinutes(i), now.AddMinutes(i));
+                failed.Outcome = "The update wasn't started. Reason given at the time: " + new string('x', 3000);
+                seed.OeEnvironmentUpgradeActions.Add(failed);
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var answer = await NewTools(ctx).ListEnvironmentHistoryAsync(_seed.DenmarkProduction);
+
+        answer.Rows.Should().NotBeEmpty();
+        answer.Rows.Should().OnlyContain(r => r.Outcome == null || r.Outcome.Length < 500);
+        answer.Rows[0].Outcome.Should().Contain("History page");
+        var json = System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions);
+        json.Length.Should().BeLessThan(25_000);
+        // Even cut, fifty failure lines overrun the budget, so the budget - not the
+        // fifty-line cap - stops the list, and the answer must say so.
+        answer.Rows.Count.Should().BeLessThan(50);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("History page");
     }
 
     [Fact]
@@ -239,7 +313,7 @@ public sealed class DeliverToolsTests : IDisposable
     public async Task List_upgrades_groups_by_solution_and_says_where_the_caller_may_act()
     {
         await using var ctx = _db.NewContext();
-        var groups = await NewTools(ctx).ListUpgradesAsync();
+        var groups = (await NewTools(ctx).ListUpgradesAsync()).Solutions;
 
         groups.Select(g => g.SolutionName).Should().Equal("CRONUS Denmark", "CRONUS Sweden");
         var denmark = groups[0];
@@ -250,13 +324,36 @@ public sealed class DeliverToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task List_upgrades_narrows_by_solution_type_and_date_and_stops_at_the_limit()
+    {
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        (await tools.ListUpgradesAsync(solution: "CRONUS Sweden")).Solutions
+            .Should().ContainSingle().Which.SolutionName.Should().Be("CRONUS Sweden");
+        (await tools.ListUpgradesAsync(type: "sandbox")).Solutions.SelectMany(g => g.Environments)
+            .Select(e => e.EnvironmentId).Should().Equal(_seed.DenmarkSandbox);
+        (await tools.ListUpgradesAsync(nextUpdateBefore: "2026-11-01")).Solutions.SelectMany(g => g.Environments)
+            .Select(e => e.EnvironmentId).Should().Equal(_seed.DenmarkProduction);
+
+        var cut = await tools.ListUpgradesAsync(limit: 1);
+        cut.Solutions.Should().ContainSingle().Which.Environments.Select(e => e.Name).Should().Equal("Production");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 1 environments").And.Contain("more of CRONUS Denmark's",
+            "the cut fell inside Denmark's group, which would otherwise read as complete");
+        (await tools.ListUpgradesAsync(limit: 2)).Note.Should().NotContain("more of",
+            "a cut on a solution boundary leaves every listed group whole");
+        (await tools.ListUpgradesAsync()).Truncated.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task List_upgrades_needs_the_environment_updates_permission()
     {
         ActAs(OutsiderId);
         await using var ctx = _db.NewContext();
         var act = () => NewTools(ctx).ListUpgradesAsync();
 
-        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("environment updates");
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("Can schedule upgrades");
     }
 
     // ── Planned upgrades ────────────────────────────────────────────────
@@ -303,6 +400,37 @@ public sealed class DeliverToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Get_upgrade_narrows_by_state_and_solution_and_stops_at_the_limit()
+    {
+        var id = await SeedUpgradeAsync("26.0 in October 2026", "26.0", closed: false,
+            _seed.DenmarkProduction, _seed.SwedenProduction);
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        (await tools.GetUpgradeAsync(id, state: "running")).Environments.Select(e => e.EnvironmentId)
+            .Should().Equal(_seed.SwedenProduction);
+        (await tools.GetUpgradeAsync(id, solution: "denmark")).Environments.Select(e => e.EnvironmentId)
+            .Should().Equal(_seed.DenmarkProduction);
+        (await tools.GetUpgradeAsync(id, solution: _seed.Sweden.ToString())).Environments.Select(e => e.EnvironmentId)
+            .Should().Equal(_seed.SwedenProduction); // a solution id works as it does on the other tools
+
+        var cut = await tools.GetUpgradeAsync(id, limit: 1);
+        cut.Environments.Should().ContainSingle();
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 1 of 2");
+        cut.Upgrade.EnvironmentCount.Should().Be(2, "the header still counts the whole upgrade");
+
+        var act = () => tools.GetUpgradeAsync(id, state: "Exploded");
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("Checked");
+        // Enum.TryParse takes both of these, and neither names a state (#1527).
+        foreach (var notAState in new[] { "3", "Planned,Failed" })
+        {
+            var refused = () => tools.GetUpgradeAsync(id, state: notAState);
+            (await refused.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("is not an upgrade state");
+        }
+    }
+
+    [Fact]
     public async Task Get_upgrade_answers_an_unknown_id_as_not_found()
     {
         await using var ctx = _db.NewContext();
@@ -322,22 +450,22 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        (await tools.ListPlannedUpgradesAsync()).Select(u => u.UpgradeId).Should().Equal(open);
-        var all = await tools.ListPlannedUpgradesAsync(includeArchived: true);
+        (await tools.ListPlannedUpgradesAsync()).Rows.Select(u => u.UpgradeId).Should().Equal(open);
+        var all = (await tools.ListPlannedUpgradesAsync(includeArchived: true)).Rows;
         all.Select(u => u.UpgradeId).Should().Equal(open, done);
         all[1].Status.Should().Be("Done");
         all[1].ClosedBy.Should().Be("Viewer");
         all[0].EnvironmentCount.Should().Be(1, "the Private solution's line is not counted");
         all[0].Counts.Should().Be(new UpgradeStateCounts(1, 0, 0, 0, 0, 0, 0));
 
-        (await tools.ListPlannedUpgradesAsync(search: "OCTOBER")).Select(u => u.UpgradeId)
+        (await tools.ListPlannedUpgradesAsync(search: "OCTOBER")).Rows.Select(u => u.UpgradeId)
             .Should().Equal([open], "the open list is searched case-insensitively too");
-        (await tools.ListPlannedUpgradesAsync(search: "june")).Should().BeEmpty(
+        (await tools.ListPlannedUpgradesAsync(search: "june")).Rows.Should().BeEmpty(
             "without includeArchived the done upgrade is not offered");
 
-        (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "june")).Select(u => u.UpgradeId)
+        (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "june")).Rows.Select(u => u.UpgradeId)
             .Should().Equal(done);
-        (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "26.0")).Select(u => u.UpgradeId)
+        (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "26.0")).Rows.Select(u => u.UpgradeId)
             .Should().Equal(open);
     }
 
@@ -350,9 +478,9 @@ public sealed class DeliverToolsTests : IDisposable
         var tools = NewTools(ctx);
 
         (await ((Func<Task>)(() => tools.ListPlannedUpgradesAsync())).Should().ThrowAsync<McpException>())
-            .Which.Message.Should().Contain("environment updates");
+            .Which.Message.Should().Contain("Can schedule upgrades");
         (await ((Func<Task>)(() => tools.GetUpgradeAsync(id))).Should().ThrowAsync<McpException>())
-            .Which.Message.Should().Contain("environment updates");
+            .Which.Message.Should().Contain("Can schedule upgrades");
     }
 
     // ── list_recent_deliveries ──────────────────────────────────────────
@@ -363,16 +491,31 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        var all = await tools.ListRecentDeliveriesAsync();
+        var all = (await tools.ListRecentDeliveriesAsync()).Rows;
         all.Select(d => d.SolutionName).Should().Equal("CRONUS Sweden", "CRONUS Denmark");
         all.Single(d => d.Status == ProjectDeliveryStatus.Deployed).Apps.Should().BeEmpty();
 
-        var failed = await tools.ListRecentDeliveriesAsync(status: "failed");
+        var failed = (await tools.ListRecentDeliveriesAsync(status: "failed")).Rows;
         failed.Should().ContainSingle();
         failed[0].FailureMessage.Should().Be("The app did not install.");
         failed[0].Apps.Should().ContainSingle(a => a.Status == ProjectDeliveryResultStatus.Failed);
 
-        (await tools.ListRecentDeliveriesAsync(since: "2099-01-01")).Should().BeEmpty();
+        (await tools.ListRecentDeliveriesAsync(since: "2099-01-01")).Rows.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task List_recent_deliveries_narrows_by_solution_and_stops_at_the_limit()
+    {
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        (await tools.ListRecentDeliveriesAsync(solution: "CRONUS Denmark")).Rows
+            .Should().OnlyContain(d => d.SolutionId == _seed.Denmark).And.NotBeEmpty();
+
+        var cut = await tools.ListRecentDeliveriesAsync(limit: 1);
+        cut.Rows.Select(d => d.SolutionName).Should().Equal("CRONUS Sweden");
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("first 1 deployments");
     }
 
     [Fact]
@@ -415,7 +558,7 @@ public sealed class DeliverToolsTests : IDisposable
         var tools = NewTools(ctx);
 
         var bySolution = await tools.ListCustomerKnowledgeAsync(solution: "CRONUS Denmark");
-        bySolution.People.Should().ContainSingle(p => p.PersonName == "Anne Hansen" && p.Role == "Consultant");
+        bySolution.People.Should().ContainSingle(p => p.PersonName == "Anne Hansen" && p.Roles.SequenceEqual(new[] { "Consultant" }));
         bySolution.Notes.Should().Be("Month-end is busy.");
 
         var byPerson = await tools.ListCustomerKnowledgeAsync(person: "anne");
@@ -442,17 +585,17 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        var catalogue = await tools.ListCustomerModulesAsync();
+        var catalogue = (await tools.ListCustomerModulesAsync()).Rows;
         catalogue.Should().ContainSingle(m => m.Module == "CRONUS Payroll" && m.SolutionId == null);
 
-        var holders = await tools.ListCustomerModulesAsync(module: "cronus payroll");
+        var holders = (await tools.ListCustomerModulesAsync(module: "cronus payroll")).Rows;
         holders.Should().ContainSingle();
         holders[0].SolutionName.Should().Be("CRONUS Denmark");
         holders[0].Version.Should().Be("3.1.0.0");
         holders[0].Source.Should().Be("business_central");
         holders[0].ReadAt.Should().NotBeNull();
 
-        var denmark = await tools.ListCustomerModulesAsync(solution: "CRONUS Denmark");
+        var denmark = (await tools.ListCustomerModulesAsync(solution: "CRONUS Denmark")).Rows;
         denmark.Should().ContainSingle(m => m.Module == "CRONUS Payroll" && m.EnvironmentName == "Production");
     }
 
@@ -480,7 +623,7 @@ public sealed class DeliverToolsTests : IDisposable
         }
 
         await using var ctx = _db.NewContext();
-        var holders = await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll");
+        var holders = (await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll")).Rows;
 
         holders.Should().HaveCount(2);
         var norwayRow = holders.Single(h => h.SolutionName == "CRONUS Norway");
@@ -493,6 +636,37 @@ public sealed class DeliverToolsTests : IDisposable
         denmarkRow.EnvironmentName.Should().Be("Production");
     }
 
+    [Fact]
+    public async Task List_customer_modules_by_module_is_capped_with_a_note_naming_solution()
+    {
+        // #1601: a common ISV module across a few hundred online solutions ran past
+        // what an assistant client accepts in one answer.
+        await using (var seed = _db.NewContext())
+        {
+            var payroll = await seed.CustomerModules.SingleAsync(m => m.Name == "CRONUS Payroll");
+            for (var i = 0; i < DeliverTools.ModuleHolderCap + 10; i++)
+            {
+                var customer = NewProject($"CRONUS Branch {i:000}", ProjectVisibility.Public, null, 2_000_000 + i);
+                customer.HostingType = ProjectHostingType.OurCloud;
+                seed.OeProjects.Add(customer);
+                await seed.SaveChangesAsync();
+                seed.OeProjectModules.Add(new OeProjectModule
+                {
+                    OrganizationId = TestDb.DefaultOrgId, ProjectId = customer.Id, ModuleId = payroll.Id,
+                    Version = "2.0", CreatedAt = DateTime.UtcNow,
+                });
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var answer = await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll");
+
+        answer.Rows.Count.Should().BeLessThanOrEqualTo(DeliverTools.ModuleHolderCap);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("Pass solution");
+    }
+
     // ── The Private solution is absent everywhere ───────────────────────
 
     [Fact]
@@ -501,11 +675,11 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        (await tools.ListEnvironmentsAsync(includeDeleted: true)).Should().NotContain(r => r.SolutionId == _seed.Secret);
-        (await tools.ListUpgradesAsync()).Should().NotContain(g => g.SolutionId == _seed.Secret);
-        (await tools.ListRecentDeliveriesAsync()).Should().NotContain(d => d.SolutionId == _seed.Secret);
+        (await tools.ListEnvironmentsAsync(includeDeleted: true)).Rows.Should().NotContain(r => r.SolutionId == _seed.Secret);
+        (await tools.ListUpgradesAsync()).Solutions.Should().NotContain(g => g.SolutionId == _seed.Secret);
+        (await tools.ListRecentDeliveriesAsync()).Rows.Should().NotContain(d => d.SolutionId == _seed.Secret);
         (await tools.ListCustomerKnowledgeAsync(person: "anne")).People.Should().NotContain(p => p.SolutionId == _seed.Secret);
-        (await tools.ListCustomerModulesAsync(module: "CRONUS Payroll")).Should().NotContain(m => m.SolutionId == _seed.Secret);
+        (await tools.ListCustomerModulesAsync(module: "CRONUS Payroll")).Rows.Should().NotContain(m => m.SolutionId == _seed.Secret);
 
         foreach (var read in new Func<Task>[]
                  {
@@ -527,8 +701,8 @@ public sealed class DeliverToolsTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewTools(ctx);
 
-        (await tools.ListEnvironmentsAsync()).Should().Contain(r => r.SolutionId == _seed.Secret);
-        (await tools.ListRecentDeliveriesAsync()).Should().Contain(d => d.SolutionId == _seed.Secret);
+        (await tools.ListEnvironmentsAsync()).Rows.Should().Contain(r => r.SolutionId == _seed.Secret);
+        (await tools.ListRecentDeliveriesAsync()).Rows.Should().Contain(d => d.SolutionId == _seed.Secret);
         (await tools.ListCustomerContactsAsync("CRONUS Secret")).Contacts.Should().ContainSingle();
     }
 
@@ -629,9 +803,9 @@ public sealed class DeliverToolsTests : IDisposable
                 Name = "Hidden Person", Email = "hidden@cronus.example", CreatedAt = now,
             });
         ctx.OeProjectPeople.AddRange(
-            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = denmark.Id, UserId = AnneId, Role = ProjectPersonRole.Consultant, Areas = "finance", CreatedAt = now },
-            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = sweden.Id, UserId = AnneId, Role = ProjectPersonRole.Developer, CreatedAt = now },
-            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = secret.Id, UserId = AnneId, Role = ProjectPersonRole.Architect, CreatedAt = now });
+            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = denmark.Id, UserId = AnneId, Roles = [ProjectPersonRole.Consultant], Areas = "finance", CreatedAt = now },
+            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = sweden.Id, UserId = AnneId, Roles = [ProjectPersonRole.Developer], CreatedAt = now },
+            new OeProjectPerson { OrganizationId = TestDb.DefaultOrgId, ProjectId = secret.Id, UserId = AnneId, Roles = [ProjectPersonRole.Architect], CreatedAt = now });
         ctx.OeProjectIntegrations.Add(new OeProjectIntegration
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = denmark.Id, Name = "Webshop",

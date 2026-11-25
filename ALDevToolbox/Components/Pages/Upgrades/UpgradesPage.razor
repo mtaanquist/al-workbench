@@ -1,7 +1,7 @@
 @page "/upgrades"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
 @rendermode InteractiveServer
-@implements IDisposable
+@implements IAsyncDisposable
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService Actions
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentUpgradeService Upgrades
@@ -12,6 +12,7 @@
 @inject ILogger<UpgradesPage> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using ALDevToolbox.Components.Shared
 @using static ALDevToolbox.Components.Shared.FleetRowState
 @using ALDevToolbox.Domain.ValueObjects
@@ -144,7 +145,7 @@
         {
             <div class="card">
                 <EmptyState Icon="lock" Title="You don't have access to Upgrades">
-                    <Text>Changing a solution's update date acts on its live Business Central environment. Access to Upgrades is granted per team. Ask an administrator to add environment updates to one of your teams.</Text>
+                    <Text>Changing a solution's update date acts on its live Business Central environment. Ask an administrator to tick "Can schedule upgrades" on your membership of a team.</Text>
                     <Action>
                         <a class="btn" href="/">
                             <Icon Name="house" Width="15" Height="15" />
@@ -290,6 +291,12 @@
                                 @onclick="() => ConfirmSelectVersionAsync()">
                             <Icon Name="tag" Width="15" Height="15" Css="menu__icon" />
                             <span>Change the next version...</span>
+                        </button>
+                        <button type="button" class="menu__item" role="menuitem" disabled="@ActionsDisabled"
+                                title="Choose how often AppSource apps update on the selected environments"
+                                @onclick="OpenAppCadenceAsync">
+                            <Icon Name="package" Width="15" Height="15" Css="menu__icon" />
+                            <span>Set AppSource cadence...</span>
                         </button>
                     </RowActions>
                 </div>
@@ -591,7 +598,7 @@
         {
             <p class="upg-legend">
                 <Icon Name="lock" Width="13" Height="13" />
-                <span>Rows with a padlock belong to a team you're not on, so you can't change their dates.</span>
+                <span>You can't schedule upgrades for the solutions of rows with a padlock, so you can't change their dates. An admin can change that.</span>
             </p>
         }
         }
@@ -602,6 +609,10 @@
    one, and the two row-menu confirms. *@
 <NewUpgradeDialog @ref="_newUpgrade" Versions="_offeredVersions" OnCreated="OnUpgradeCreated" />
 <AddToUpgradeDialog @ref="_addToUpgrade" Versions="_offeredVersions" OnAdded="OnAddedToUpgradeAsync" />
+
+@* The AppSource cadence for every ticked environment: its own preview and result, since
+   it writes a setting rather than moving an update. *@
+<BulkAppCadenceDialog @ref="_appCadence" />
 
 @* Mark done names what is still unchecked before anything moves (PageUpgrade.dc.html,
    the "Mark done" confirm): marking done is never a blind click. *@
@@ -700,13 +711,17 @@
     protected override async Task OnParametersSetAsync()
     {
         if (_denied || !_initialised) return;
+        // Only when the address changed. Blazor runs this once more as the first load
+        // ends, and re-reading then put the box back to the address's search, wiping
+        // whatever had been typed while the page was still loading (#1750).
+        if (QueryKey == _readQuery) return;
         var was = _view;
         ReadQuery();
         if (_view != was && Running)
         {
             // The tabs are held during a run, but the address can still change (back, a
-            // typed link). The run is using the circuit's database context, so the switch
-            // waits for it to end rather than reading alongside it.
+            // typed link). The run owns the Fleet view's rows and is using the circuit's
+            // database context, so the switch waits for it to end.
             _view = was;
             _viewChangePending = true;
             return;
@@ -716,16 +731,24 @@
         else if (_view == UpgradesView.Fleet && _rows is not null) ApplyFilters();
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        _gone.Cancel();
         StopPolling();
-        _searchDebounce.Dispose();
+        _searchDebounce?.Dispose();
         _watch.Dispose();
+        // Cancels the reads on Gone too, and waits for a tick that had already fired, so
+        // leaving the page means nothing of its is still on its way to the database.
+        await _calls.LeaveAsync();
     }
+
+    /// <summary>The address's filters as last read into the page, so a pass that changes none of them changes nothing.</summary>
+    private (string?, string?, string?, string?) _readQuery;
+
+    private (string?, string?, string?, string?) QueryKey => (ViewName, Query, TypeFilter, WaitingFilter);
 
     private void ReadQuery()
     {
+        _readQuery = QueryKey;
         _view = ParseView(ViewName);
         _search = (Query ?? string.Empty).Trim();
         _type = (TypeFilter ?? string.Empty).Trim();
@@ -799,12 +822,15 @@
     /// <summary>How long the search box waits for typing to stop before it filters. Tests set it to zero.</summary>
     internal static TimeSpan SearchDebounce { get; set; } = TimeSpan.FromMilliseconds(200);
 
-    private readonly Debouncer _searchDebounce = new(SearchDebounce);
+    // Made on the first keystroke rather than with the page, because the clock is
+    // injected after the fields are set; a test moves that clock instead of waiting.
+    private Debouncer? _searchDebounce;
+    private Debouncer SearchDebouncer => _searchDebounce ??= new(SearchDebounce, Clock);
 
     // The box is bound to _search as it is typed, untrimmed - trimming it here would
     // eat the space between two words. The table follows once typing pauses.
     private void OnSearchInput() =>
-        _searchDebounce.Trigger(() => InvokeAsync(() =>
+        SearchDebouncer.Trigger(() => InvokeAsync(() =>
         {
             ApplyFilters();
             StateHasChanged();
@@ -812,7 +838,7 @@
 
     private void OnSearchCommitted(ChangeEventArgs e)
     {
-        _searchDebounce.Cancel();
+        _searchDebounce?.Cancel();
         ApplyFilters();
         GoToFilters(_type, _onlyWaiting);
     }
@@ -832,8 +858,12 @@
         Nav.NavigateTo("/upgrades?" + string.Join("&", parts));
     }
 
-    private async Task LoadAsync() =>
+    private async Task LoadAsync()
+    {
+        // A view read still out is older than this one, and must not put its rows back.
+        _viewLoads++;
         ShowLoaded(await Fleet.ListFleetAsync(), await Actions.ListPendingAsync());
+    }
 
     /// <summary>
     /// The same read as <see cref="LoadAsync"/>, on a DI scope of its own, for the poll:
@@ -848,15 +878,18 @@
         List<UpgradeActionRow> pending;
         await using (var scope = ScopeFactory.CreateAsyncScope())
         {
-            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: _gone.Token);
-            pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync(_gone.Token);
+            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: Gone);
+            pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync(Gone);
         }
-        if (_gone.IsCancellationRequested || PollPaused) return;
+        if (Gone.IsCancellationRequested || PollPaused) return;
         ShowLoaded(fleet, pending);
     }
 
+    /// <summary>The poll and watch ticks under way, so leaving the page can cancel them and wait.</summary>
+    private readonly PageCalls _calls = new();
+
     /// <summary>Cancelled when the page goes, so a read on a scope of its own stops with it.</summary>
-    private readonly CancellationTokenSource _gone = new();
+    private CancellationToken Gone => _calls.Token;
 
     private void ShowLoaded(List<UpgradeFleetRow> all, List<UpgradeActionRow> pending)
     {
@@ -979,6 +1012,19 @@
     private Task ConfirmSelectVersionAsync(UpgradeFleetRow? only = null) =>
         _runner?.ConfirmSelectVersionAsync(Target(only)) ?? Task.CompletedTask;
 
+    private BulkAppCadenceDialog? _appCadence;
+
+    /// <summary>
+    /// The AppSource cadence for every ticked row, on screen or not; the dialog names each
+    /// one before it writes. The selection is left as it is afterwards, as after a run: the
+    /// team often follows a cadence change with another move on the same customers.
+    /// </summary>
+    private Task OpenAppCadenceAsync()
+    {
+        var rows = SelectedRows();
+        return rows.Count == 0 || _appCadence is null ? Task.CompletedTask : _appCadence.OpenAsync(rows);
+    }
+
     /// <summary>A run owns the table while it lasts: no refresh poll, and no old summary.</summary>
     private void OnRunStarted()
     {
@@ -1034,7 +1080,12 @@
     }
 
     /// <summary>Re-reads the fleet now, for someone who doesn't want to wait for the next poll.</summary>
-    private async Task ReloadNowAsync() => await LoadAsync();
+    private async Task ReloadNowAsync()
+    {
+        await LoadAsync();
+        // The page is current again, so a warning that it may be stale no longer holds.
+        if (_notice?.Text == LiveUpdatesStopped) _notice = null;
+    }
 
     // ── Polling while a refresh is outstanding ──────────────────────────
     //
@@ -1047,7 +1098,7 @@
     // answered by then isn't going to, and a page left open overnight must not poll
     // forever.
 
-    private System.Threading.Timer? _poll;
+    private ITimer? _poll;
     private DateTime _pollUntilUtc;
 
     private static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(20);
@@ -1056,10 +1107,12 @@
     private void StartPolling()
     {
         StopPolling();
+        // A load that comes back after the page has gone must not leave a timer behind.
+        if (_calls.IsGone) return;
         // "Refresh restarts it": a watch that gave up may join again on the reload.
         _watch.ForgetStopped();
-        _pollUntilUtc = DateTime.UtcNow.Add(PollFor);
-        _poll = new System.Threading.Timer(_ => _ = PollTickAsync(), null, PollEvery, PollEvery);
+        _pollUntilUtc = Clock.GetUtcNow().UtcDateTime.Add(PollFor);
+        _poll = Clock.CreateTimer(_ => _ = _calls.Track(PollTickAsync()), null, PollEvery, PollEvery);
     }
 
     private void StopPolling()
@@ -1070,11 +1123,14 @@
 
     /// <summary>Never while a batch is mid-flight or a dialog is open: those own the table.</summary>
     private bool PollPaused =>
-        Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
+        Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true || _appCadence?.IsOpen == true;
+
+    internal const string LiveUpdatesStopped =
+        "Live updates stopped, so this page may be out of date.";
 
     private async Task PollTickAsync()
     {
-        if (DateTime.UtcNow > _pollUntilUtc)
+        if (_calls.IsGone || Clock.GetUtcNow().UtcDateTime > _pollUntilUtc)
         {
             StopPolling();
             return;
@@ -1084,7 +1140,7 @@
         {
             await InvokeAsync(async () =>
             {
-                if (PollPaused) return;
+                if (_calls.IsGone || PollPaused) return;
                 await LoadOnOwnScopeAsync();
                 StateHasChanged();
             });
@@ -1093,15 +1149,26 @@
         {
             StopPolling();
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
         {
             StopPolling();
         }
         catch (Exception ex)
         {
-            // A failed poll is not worth breaking the page over; stop asking.
+            // A failed poll is not worth breaking the page over; stop asking, and say so,
+            // or the page goes quietly stale (#1755).
             Log.LogWarning(ex, "The upgrades page stopped polling for refreshed environments.");
             StopPolling();
+            if (_calls.IsGone) return;
+            try
+            {
+                await InvokeAsync(() =>
+                {
+                    _notice = new UpgradeNotice(LiveUpdatesStopped, "warn", ShowReloadNow: true);
+                    StateHasChanged();
+                });
+            }
+            catch (ObjectDisposedException) { /* the page went while we were saying so */ }
         }
     }
 
@@ -1118,7 +1185,7 @@
 
     protected override void OnInitialized()
     {
-        _watch = new UpdateWatch(Connection, Log, InvokeAsync,
+        _watch = new UpdateWatch(Connection, Log, work => _calls.Track(InvokeAsync(work)),
             // Paused off the Fleet view too: its rows are the fleet's, and leaving the view
             // stops the watch (a tick already on its way must not read under another view).
             paused: () => Running || _denied || DialogOpen || _view != UpgradesView.Fleet,
@@ -1152,7 +1219,7 @@
     /// refresh poll must not read alongside them.
     /// </summary>
     private bool DialogOpen => _runner?.IsDialogOpen == true
-        || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
+        || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true || _appCadence?.IsOpen == true;
 
     // ── Bookings, the activity feed, and cancelling ─────────────────────
 
@@ -1219,9 +1286,9 @@
         {
             await using var scope = ScopeFactory.CreateAsyncScope();
             feed = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>()
-                .ListEnvironmentActivityAsync(projectId, environmentId, _gone.Token);
+                .ListEnvironmentActivityAsync(projectId, environmentId, Gone);
         }
-        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        catch (OperationCanceledException) when (Gone.IsCancellationRequested)
         {
             return; // the page went while the read was out
         }

@@ -4,6 +4,7 @@ using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Backups;
+using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Workers;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
@@ -141,7 +142,7 @@ public sealed class OffsiteRestoreJobsTests
         // Empty provider: GetRequiredService<OffsiteBackupService>() throws.
         var services = new ServiceCollection().BuildServiceProvider();
         var worker = new OffsiteRestoreWorker(
-            jobs, services, NullLogger<OffsiteRestoreWorker>.Instance, new WorkerHeartbeatRegistry());
+            jobs, services, NullLogger<OffsiteRestoreWorker>.Instance, new WorkerHeartbeatRegistry(), new MaintenanceModeState());
 
         var first = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, "k1", "f1.dump");
         var second = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, "k2", "f2.dump");

@@ -189,6 +189,7 @@
                                                             <label class="field__label">Module key</label>
                                                             <input class="input" type="text" placeholder="e.g. system-application"
                                                                    @bind="dep.RefModuleKey" @bind:event="oninput" />
+                                                            <FieldError Field="@($"{depKey}.Module")" Errors="Errors" />
                                                         </div>
                                                         break;
                                                     default:

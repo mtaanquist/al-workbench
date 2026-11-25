@@ -49,16 +49,16 @@ public sealed class BuildFreshnessService
         var pipeline = await _db.OePipelines.AsNoTracking()
             .Where(p => p.Id == pipelineId && p.DeletedAt == null)
             .Select(p => new PipelineKey(p.Id, p.ProjectId, p.Branch, false))
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         if (pipeline is null) return null;
-        await _access.EnsureCanViewAsync(pipeline.ProjectId, ct).ConfigureAwait(false);
+        await _access.EnsureCanViewAsync(pipeline.ProjectId, ct);
         var ownerId = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == pipeline.ProjectId)
             .Select(p => p.CreatedByUserId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        var canBuild = await _access.CanManageAsync(pipeline.ProjectId, ownerId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        var canBuild = await _access.CanManageAsync(pipeline.ProjectId, ownerId, ct);
 
-        return (await ComputeAsync([pipeline with { CanBuild = canBuild }], ct).ConfigureAwait(false))[0];
+        return (await ComputeAsync([pipeline with { CanBuild = canBuild }], ct))[0];
     }
 
     /// <summary>
@@ -69,7 +69,7 @@ public sealed class BuildFreshnessService
     /// </summary>
     public async Task<List<PipelineFreshness>> ListAsync(CancellationToken ct = default)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var manageable = ProjectAccess.ManageProjectPredicate(snapshot);
         var pipelines = await _db.OePipelines.AsNoTracking()
@@ -77,8 +77,8 @@ public sealed class BuildFreshnessService
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new PipelineKey(p.Id, p.ProjectId, p.Branch,
                 _db.OeProjects.Where(manageable).Any(m => m.Id == p.ProjectId)))
-            .ToListAsync(ct).ConfigureAwait(false);
-        return pipelines.Count == 0 ? [] : await ComputeAsync(pipelines, ct).ConfigureAwait(false);
+            .ToListAsync(ct);
+        return pipelines.Count == 0 ? [] : await ComputeAsync(pipelines, ct);
     }
 
     private sealed record PipelineKey(int Id, int ProjectId, string? Branch, bool CanBuild);
@@ -93,7 +93,7 @@ public sealed class BuildFreshnessService
             .Where(r => projectIds.Contains(r.ProjectId))
             .OrderBy(r => r.Id)
             .Select(r => new { r.Id, r.ProjectId, r.DisplayName, r.Provider, r.Url })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
         var repositoryIds = repositories.Select(r => r.Id).ToList();
 
         // The last successful build of each pipeline, and the commit it pinned in
@@ -108,13 +108,13 @@ public sealed class BuildFreshnessService
                     .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
                     .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.StartedAt, b.FinishedAt })
                     .First())
-                .ToListAsync(ct).ConfigureAwait(false))
+                .ToListAsync(ct))
             .ToDictionary(b => b.PipelineId);
         var lastBuildIds = lastBuilds.Values.Select(b => b.Id).ToList();
         var pinned = await _db.OeProjectBuildRepoCommits.AsNoTracking()
             .Where(c => lastBuildIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
             .Select(c => new { c.ProjectBuildId, RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash, c.CommittedAt })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Builds of these pipelines still queued or running against the current
         // version: one that already covers a repository's new head means the branch
@@ -124,14 +124,14 @@ public sealed class BuildFreshnessService
             .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
             .Where(ProjectBuildImporter.BlocksManualBuild)
             .Select(b => new ActiveBuild(b.PipelineId!.Value, b.Branch, b.HeadSha, b.HeadRepositoryId, b.StartedAt))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Only the branches a pipeline watches: its own, or the repository's default.
         var namedBranches = pipelines.Where(p => p.Branch is not null).Select(p => p.Branch!).Distinct().ToList();
         var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
             .Where(h => repositoryIds.Contains(h.ProjectRepositoryId)
                         && ((h.IsDefaultBranch && h.DeletedAt == null) || namedBranches.Contains(h.Branch)))
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         // Only pull requests that merged after the oldest commit any of these builds
         // pinned: nothing earlier can be "merged since" for any of them.
@@ -143,7 +143,7 @@ public sealed class BuildFreshnessService
             ? []
             : await _db.OeRepositoryMergedPullRequests.AsNoTracking()
                 .Where(m => repositoryIds.Contains(m.ProjectRepositoryId) && m.MergedAt > after)
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct);
 
         var answers = new List<PipelineFreshness>(pipelines.Count);
         foreach (var pipeline in pipelines)

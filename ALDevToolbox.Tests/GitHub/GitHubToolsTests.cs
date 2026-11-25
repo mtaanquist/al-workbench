@@ -129,6 +129,40 @@ public sealed class GitHubToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task The_list_narrows_by_search_and_says_when_the_limit_cut_it()
+    {
+        await ReadyAsync();
+        var names = new[] { $"{OrgLogin}/shop-a", $"{OrgLogin}/shop-b", $"{OrgLogin}/other" };
+        var (tools, ctx) = NewTools(ListableApi(granted: names, visible: names));
+        await using var _ = ctx;
+
+        var searched = await tools.ListRepositoriesAsync(search: "SHOP");
+        searched.Repositories.Select(r => r.FullName).Should().Equal($"{OrgLogin}/shop-a", $"{OrgLogin}/shop-b");
+        searched.Truncated.Should().BeFalse();
+
+        var cut = await tools.ListRepositoriesAsync(limit: 1);
+        cut.Repositories.Should().ContainSingle();
+        cut.Truncated.Should().BeTrue();
+        cut.Note.Should().Contain("1 of 3");
+    }
+
+    [Fact]
+    public async Task A_search_says_when_github_had_more_repositories_than_were_read()
+    {
+        await ReadyAsync();
+        // Every page comes back full, so the listing stops at its last page with more to read.
+        var names = Enumerable.Range(1, 100).Select(i => $"{OrgLogin}/shop-{i:000}").ToArray();
+        var (tools, ctx) = NewTools(ListableApi(granted: names, visible: names));
+        await using var _ = ctx;
+
+        var result = await tools.ListRepositoriesAsync(search: "no-such-repository");
+
+        result.Repositories.Should().BeEmpty();
+        result.Truncated.Should().BeTrue("a search that found nothing has not looked everywhere (#1527)");
+        result.Note.Should().Contain("more repositories on GitHub than this server reads");
+    }
+
+    [Fact]
     public async Task An_unlinked_caller_is_offered_nothing_and_told_what_to_connect()
     {
         await ConfigureDeploymentAsync();
@@ -260,13 +294,66 @@ public sealed class GitHubToolsTests : IDisposable
         var (tools, ctx) = NewTools(api);
         await using var _ = ctx;
 
-        var files = await tools.ListTranslationFilesAsync(Repo);
+        var answer = await tools.ListTranslationFilesAsync(Repo);
+        var files = answer.Rows;
 
         files.Select(f => f.Path).Should().Equal(
             "Translations/App.nb-NO.xlf", SourcePath, FilePath);
         files[0].Folder.Should().BeEmpty("a single-app repository has no extension folder to name");
         files[1].IsSource.Should().BeTrue();
         files[2].Language.Should().Be("da-DK");
+        answer.Truncated.Should().BeFalse();
+        answer.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Folder_narrows_the_translation_files_to_one_extension()
+    {
+        await ReadyAsync();
+        var (tools, ctx) = NewTools(ReadableApi(TreeJson(
+            (FilePath, "blob"),
+            (SourcePath, "blob"),
+            ("Translations/App.nb-NO.xlf", "blob"))));
+        await using var _ = ctx;
+
+        var answer = await tools.ListTranslationFilesAsync(Repo, folder: "paymentimport");
+
+        answer.Rows.Select(f => f.Path).Should().Equal(SourcePath, FilePath);
+    }
+
+    [Fact]
+    public async Task A_workspace_with_many_translation_files_is_capped_with_a_note_naming_folder()
+    {
+        // #1601: 20 extensions in 12 languages ran past the answer budget.
+        await ReadyAsync();
+        var entries = Enumerable.Range(1, 20)
+            .SelectMany(e => new[] { "da-DK", "de-DE", "fr-FR", "nl-NL", "sv-SE", "nb-NO", "fi-FI", "es-ES", "it-IT", "pl-PL", "cs-CZ", "en-GB" }
+                .Select(l => ($"CronusExtension{e:00}/Translations/CronusExtension{e:00}.{l}.xlf", "blob")))
+            .ToArray();
+        var (tools, ctx) = NewTools(ReadableApi(TreeJson(entries)));
+        await using var _ = ctx;
+
+        var answer = await tools.ListTranslationFilesAsync(Repo);
+
+        answer.Rows.Count.Should().BeLessThanOrEqualTo(GitHubTools.TranslationFileCap);
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("Pass folder");
+        System.Text.Json.JsonSerializer.Serialize(answer.Rows, ModelContextProtocol.McpJsonUtilities.DefaultOptions)
+            .Length.Should().BeLessThan(25_000);
+    }
+
+    [Fact]
+    public async Task A_tree_github_cut_short_says_the_list_may_be_incomplete()
+    {
+        await ReadyAsync();
+        var (tools, ctx) = NewTools(ReadableApi(TreeJson((FilePath, "blob")).Replace("\"truncated\":false", "\"truncated\":true")));
+        await using var _ = ctx;
+
+        var answer = await tools.ListTranslationFilesAsync(Repo);
+
+        answer.Rows.Should().ContainSingle();
+        answer.Truncated.Should().BeTrue();
+        answer.Note.Should().Contain("may be missing");
     }
 
     [Fact]
@@ -389,6 +476,28 @@ public sealed class GitHubToolsTests : IDisposable
         (await act.Should().ThrowAsync<McpException>())
             .Which.Message.Should().Contain(AmountId).And.Contain("more than once");
         api.Calls.Should().NotContain(c => c.StartsWith("PUT", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Danish")]
+    [InlineData("da_DK")]
+    [InlineData("../da-DK")]
+    [InlineData("da-DK/../../x")]
+    [InlineData("da DK")]
+    public async Task A_target_language_that_is_not_a_language_tag_is_refused_before_github_is_asked_anything(string language)
+    {
+        // #1576: the language goes into the file name and the XLIFF target-language.
+        await ReadyAsync();
+        var api = WritableApi();
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var act = () => tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, language, [new TranslationUnitEditInput(AmountId, "Beloeb")]);
+
+        (await act.Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("language tag such as da-DK");
+        api.Calls.Should().BeEmpty();
     }
 
     [Fact]
@@ -520,6 +629,38 @@ public sealed class GitHubToolsTests : IDisposable
         written.Should().Contain("<target state=\"translated\">Bogfort</target>");
     }
 
+    [Fact]
+    public async Task After_the_pull_request_was_merged_a_new_round_builds_on_main_not_the_kept_branch()
+    {
+        // #1329: the first round was merged and its branch kept, as GitHub does
+        // by default. The string with PostedId was added on main since, so the
+        // branch's copy does not have it. Reading the branch refused every edit
+        // to it as "no strings with these ids".
+        await ReadyAsync();
+        var stale = GeneratedXliff.Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal);
+        FakeGitHubApi api = null!;
+        api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/aldt/translate-da-DK", HttpStatusCode.OK,
+                "{\"ref\":\"refs/heads/aldt/translate-da-DK\",\"object\":{\"sha\":\"merged-branch-head\"}}")
+            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", HttpStatusCode.OK, FakeGitHubApi.ShaJson(BaseSha))
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", request =>
+                request.RequestUri!.Query.Contains("ref=aldt", StringComparison.Ordinal)
+                    && !api.Calls.Any(c => c.StartsWith("PATCH", StringComparison.Ordinal))
+                    ? (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, stale, "stale-branch-sha"))
+                    : (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, LoadedSha)));
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var result = await tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, "da-DK", [new TranslationUnitEditInput(PostedId, "Bogfoert igen", "translated")]);
+
+        result.IsNewPullRequest.Should().BeTrue("the merged pull request is done; this round gets its own");
+        BodyOf(api, "PATCH", "/git/refs/heads/").Should().Contain($"\"sha\":\"{BaseSha}\"",
+            "the kept branch is moved onto main before the write");
+        BodyOf(api, "PUT", "/contents/").Should().Contain($"\"sha\":\"{LoadedSha}\"");
+        WrittenXml(api).Should().Contain("<target state=\"translated\">Bogfoert igen</target>");
+    }
+
     // --- helpers ------------------------------------------------------------
 
     private (GitHubTools Tools, ALDevToolbox.Data.AppDbContext Context) NewTools(FakeGitHubApi api)
@@ -534,7 +675,7 @@ public sealed class GitHubToolsTests : IDisposable
             _db.NewGitHubTranslationService(ctx, client, access),
             new ALDevToolbox.Services.Templates.TemplateService(
                 ctx, NullLogger<ALDevToolbox.Services.Templates.TemplateService>.Instance, _db.OrgContext,
-                new ALDevToolbox.Services.Templates.FolderTreeHydrator(ctx)),
+                new ALDevToolbox.Services.Templates.FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx)),
             NullLogger<GitHubTools>.Instance);
         return (tools, ctx);
     }
@@ -659,11 +800,10 @@ public sealed class GitHubToolsTests : IDisposable
 
     private async Task ConfigureDeploymentAsync()
     {
-        using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
             AppId: "123456", AppSlug: "al-workbench", ClientId: "Iv1.cronus",
             ClientSecret: "s3cr3t", ClearClientSecret: false,
-            PrivateKeyPem: rsa.ExportRSAPrivateKeyPem(), ClearPrivateKey: false));
+            PrivateKeyPem: TestKeys.GitHubAppPem, ClearPrivateKey: false));
     }
 
     private async Task ConnectOrganisationAsync()

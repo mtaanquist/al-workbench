@@ -323,7 +323,7 @@ public sealed class NavMenuTests : IDisposable
     {
         _auth.SetAuthorized("admin@example.com");
         _auth.SetRoles("Admin");
-        _orgCtx.CurrentOrganizationId = 1;
+        _orgCtx.CurrentOrganizationId = TestDb.DefaultOrgId;
         _orgCtx.IsSystemOrganization = false;
 
         var cut = _ctx.Render<NavMenu>();
@@ -354,7 +354,7 @@ public sealed class NavMenuTests : IDisposable
     {
         _auth.SetAuthorized("siteadmin@example.com");
         _auth.SetRoles("Admin", HttpOrganizationContext.SiteAdminRole);
-        _orgCtx.CurrentOrganizationId = 1;
+        _orgCtx.CurrentOrganizationId = TestDb.DefaultOrgId;
         _orgCtx.IsSystemOrganization = false;
 
         var cut = _ctx.Render<NavMenu>();
@@ -384,7 +384,7 @@ public sealed class NavMenuTests : IDisposable
     {
         _auth.SetAuthorized("admin@example.com");
         _auth.SetRoles("Admin");
-        _orgCtx.CurrentOrganizationId = 1;
+        _orgCtx.CurrentOrganizationId = TestDb.DefaultOrgId;
         _orgCtx.IsSystemOrganization = false;
 
         var cut = _ctx.Render<NavMenu>();
@@ -398,7 +398,7 @@ public sealed class NavMenuTests : IDisposable
     {
         _auth.SetAuthorized("admin@example.com");
         _auth.SetRoles("Admin");
-        _orgCtx.CurrentOrganizationId = 1;
+        _orgCtx.CurrentOrganizationId = TestDb.DefaultOrgId;
         _orgCtx.IsSystemOrganization = false;
         _singleTenant.Enabled = true;
 
@@ -413,7 +413,7 @@ public sealed class NavMenuTests : IDisposable
     {
         _auth.SetAuthorized("bootstrap@example.com");
         _auth.SetRoles("Admin", HttpOrganizationContext.SiteAdminRole);
-        _orgCtx.CurrentOrganizationId = 1;
+        _orgCtx.CurrentOrganizationId = TestDb.SystemOrgId;
         _orgCtx.IsSystemOrganization = true;
 
         var cut = _ctx.Render<NavMenu>();

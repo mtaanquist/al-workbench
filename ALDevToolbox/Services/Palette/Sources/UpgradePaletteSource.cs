@@ -71,7 +71,7 @@ public sealed class UpgradePaletteSource : IPaletteSource
     public async Task<bool> IsAvailableAsync(ClaimsPrincipal user, CancellationToken ct)
     {
         if (user?.Identity?.IsAuthenticated != true) return false;
-        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var snapshot = await _access.GetSnapshotAsync(ct);
         return snapshot.CanUseEnvironmentOps;
     }
 
@@ -87,7 +87,7 @@ public sealed class UpgradePaletteSource : IPaletteSource
             .ThenByDescending(u => u.CreatedAt)
             .Take(MaxUpgradesScanned)
             .Select(u => new { u.Id, u.Name, u.TargetVersion, IsClosed = u.ClosedAt != null })
-            .ToListAsync(ct).ConfigureAwait(false);
+            .ToListAsync(ct);
 
         var kept = PaletteRanking.Rank(query, rows.Select(r => new PaletteCandidate(
                 "upgrade",
@@ -101,7 +101,7 @@ public sealed class UpgradePaletteSource : IPaletteSource
         var openIds = rows.Where(r => !r.IsClosed).Select(r => $"/upgrades/{r.Id}").ToHashSet();
         if (!kept.Any(c => openIds.Contains(c.Href))) return kept;
 
-        var open = (await _upgrades.ListOpenAsync(ct).ConfigureAwait(false))
+        var open = (await _upgrades.ListOpenAsync(ct))
             .ToDictionary(u => $"/upgrades/{u.Id}");
         return kept
             .Select(c => open.TryGetValue(c.Href, out var u)

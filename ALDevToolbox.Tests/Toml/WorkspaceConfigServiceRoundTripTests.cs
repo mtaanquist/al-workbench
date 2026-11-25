@@ -38,7 +38,8 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
             CoreIdRangeTo: 80999,
             IncludeExamples: false,
             SelectedExtensionPaths: new List<string> { "Hotfix", "Reports" },
-            SelectedModuleKeys: new List<string> { "payments", "warehouse" });
+            SelectedModuleKeys: new List<string> { "payments", "warehouse" },
+            TenantId: "7d3a1f5e-2b4c-4e8a-9f61-0c2d3e4f5a6b");
 
         var identities = new List<WorkspaceExtensionIdentity>
         {
@@ -69,6 +70,12 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
         parsed.Workspace.IncludeExamples.Should().Be(plan.IncludeExamples);
         parsed.Workspace.SelectedExtensionPaths.Should().Equal(plan.SelectedExtensionPaths);
         parsed.Workspace.SelectedModuleKeys.Should().Equal(plan.SelectedModuleKeys);
+        parsed.Workspace.TenantId.Should().Be(plan.TenantId);
+        // The whole record too, so a field added to the plan later is caught
+        // if it is left out of the file - but only once the plan above sets it
+        // to a non-default value. An unset optional field round-trips as its
+        // default either way, which is how TenantId went unchecked (#1440).
+        parsed.Workspace.Should().BeEquivalentTo(plan, o => o.WithStrictOrdering());
 
         parsed.Extensions.Should().HaveCount(2);
         parsed.Extensions.Should().BeEquivalentTo(identities);
@@ -173,6 +180,82 @@ public sealed class WorkspaceConfigServiceRoundTripTests : IDisposable
         parsed.Workspace!.ShortName.Should().BeEmpty();
         parsed.Workspace.EffectiveShortName.Should().Be("CRONUS A/S");
     }
+
+    /// <summary>
+    /// #1615: the settings record the name the <c>.code-workspace</c> file was
+    /// written under, so an extension added after the folder style changed
+    /// rewrites that file instead of adding a second one.
+    /// </summary>
+    [Fact]
+    public async Task The_code_workspace_file_name_round_trips()
+    {
+        await SeedTemplateAsync("runtime-15");
+        using var buildCtx = _db.NewContext();
+        var toml = new WorkspaceConfigService(buildCtx)
+            .BuildWorkspace(MinimalPlan(), Array.Empty<WorkspaceExtensionIdentity>(), "CronusAS.code-workspace");
+
+        toml.Should().Contain("code_workspace = \"CronusAS.code-workspace\"");
+        await using var ctx = _db.NewContext();
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.CodeWorkspaceFileName.Should().Be("CronusAS.code-workspace");
+    }
+
+    [Fact]
+    public async Task A_config_written_before_the_file_name_was_recorded_reads_it_as_unknown()
+    {
+        await SeedTemplateAsync("runtime-15");
+        using var buildCtx = _db.NewContext();
+        var toml = new WorkspaceConfigService(buildCtx)
+            .BuildWorkspace(MinimalPlan(), Array.Empty<WorkspaceExtensionIdentity>());
+
+        await using var ctx = _db.NewContext();
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.CodeWorkspaceFileName.Should().BeNull();
+    }
+
+    /// <summary>
+    /// The name is written back as a path in a ZIP and in a repository, so a
+    /// hand-edited value that is anything but a plain file name at the root is
+    /// ignored, and the name is derived as for an older file.
+    /// </summary>
+    [Theory]
+    [InlineData("../evil.code-workspace")]
+    [InlineData("sub/CronusAS.code-workspace")]
+    [InlineData("sub\\CronusAS.code-workspace")]
+    [InlineData("C:CronusAS.code-workspace")]
+    [InlineData(".code-workspace")]
+    [InlineData("CronusAS.json")]
+    [InlineData("Cronus|AS.code-workspace")]
+    [InlineData("Cronus?AS.code-workspace")]
+    [InlineData("Cronus\"AS.code-workspace")]
+    [InlineData("Cronus\u0001AS.code-workspace")]
+    public async Task A_saved_file_name_that_is_not_a_plain_file_name_is_ignored(string saved)
+    {
+        await SeedTemplateAsync("runtime-15");
+        using var buildCtx = _db.NewContext();
+        var toml = new WorkspaceConfigService(buildCtx)
+            .BuildWorkspace(MinimalPlan(), Array.Empty<WorkspaceExtensionIdentity>(), saved);
+
+        await using var ctx = _db.NewContext();
+        var parsed = await new WorkspaceConfigService(ctx).ParseAsync(toml);
+
+        parsed.CodeWorkspaceFileName.Should().BeNull();
+    }
+
+    private static ProjectPlan MinimalPlan() => new(
+        TemplateKey: "runtime-15",
+        WorkspaceName: "CRONUS A/S",
+        ShortName: null,
+        ExtensionPrefix: "CRO",
+        Brief: "", Description: "",
+        ApplicationVersion: "24.0.0.0",
+        RuntimeVersion: "15.2",
+        CoreIdRangeFrom: 80000, CoreIdRangeTo: 80999,
+        IncludeExamples: true,
+        SelectedExtensionPaths: Array.Empty<string>(),
+        SelectedModuleKeys: Array.Empty<string>());
 
     private async Task SeedTemplateAsync(string key)
     {

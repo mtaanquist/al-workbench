@@ -17,13 +17,17 @@ public sealed class LicenceExpiryScheduler : PolledScheduler
     private readonly IServiceProvider _services;
     private readonly ILogger<LicenceExpiryScheduler> _logger;
 
-    public LicenceExpiryScheduler(IServiceProvider services, ILogger<LicenceExpiryScheduler> logger, WorkerHeartbeatRegistry heartbeats)
+    public LicenceExpiryScheduler(IServiceProvider services, ILogger<LicenceExpiryScheduler> logger, WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build it by hand keep compiling; production DI
+        // always supplies the singleton, so the base skips its ticks during a restore.
+        Operations.MaintenanceModeState? maintenance = null)
         : base(logger, heartbeats, nameof(LicenceExpiryScheduler),
             pollInterval: TimeSpan.FromHours(1),
             // One read per organisation and a notification now and then.
             maxActiveDuration: TimeSpan.FromMinutes(10),
             maxIdleSilence: TimeSpan.FromHours(2),
-            disableEnvVar: DisableEnvVar)
+            disableEnvVar: DisableEnvVar,
+            maintenance: maintenance)
     {
         _services = services;
         _logger = logger;

@@ -164,7 +164,7 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var qs = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"/signup?err=invalid&field={Uri.EscapeDataString(qs.Key)}&msg={Uri.EscapeDataString(qs.Value)}");
+                ctx.Response.Redirect($"/signup?err=invalid&field={Uri.EscapeDataString(qs.Key)}&reason={FormErrorReasons.CodeFor(qs.Value)}");
             }
         });
 
@@ -331,7 +331,7 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var qs = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"/signup/details?err=invalid&field={Uri.EscapeDataString(qs.Key)}&msg={Uri.EscapeDataString(qs.Value)}");
+                ctx.Response.Redirect($"/signup/details?err=invalid&field={Uri.EscapeDataString(qs.Key)}&reason={FormErrorReasons.CodeFor(qs.Value)}");
             }
         });
 
@@ -408,7 +408,7 @@ internal static class AccountAuthEndpoints
                     // pinned to the typed email.
                     var user = await db.Users.IgnoreQueryFilters()
                         .FirstAsync(u => u.Email == addr.Trim().ToLowerInvariant(), ct);
-                    var url = $"{publicOrigin.For(ctx)}/auth/login/magic/consume?token={Uri.EscapeDataString(token)}";
+                    var url = $"{publicOrigin.For(ctx)}/login/magic/confirm?token={Uri.EscapeDataString(token)}";
                     var content = await MagicLinkEmail.RenderAsync(emailRenderer, user.DisplayName, url, ct);
                     await email.SendAsync(user.Email, content, EmailPurpose.MagicLink, ct);
                 }
@@ -420,14 +420,31 @@ internal static class AccountAuthEndpoints
             ctx.Response.Redirect("/login/magic?ok=1");
         });
 
-        app.MapGet("/auth/login/magic/consume", async (
+        // Links sent before #1500 point here. A GET must never spend the token
+        // (mail scanners and link previews fetch links before the person
+        // clicks), so it only forwards to the confirmation page. Safe to drop
+        // once those links have expired; they last 15 minutes.
+        app.MapGet("/auth/login/magic/consume", (HttpContext ctx) =>
+        {
+            var token = ctx.Request.Query["token"].ToString();
+            ctx.Response.Redirect(string.IsNullOrEmpty(token)
+                ? "/login/magic"
+                : $"/login/magic/confirm?token={Uri.EscapeDataString(token)}");
+        });
+
+        // /auth/login/magic/consume — the confirmation page's Sign in button.
+        // Spends the single-use token and signs the person in.
+        app.MapPost("/auth/login/magic/consume", async (
             HttpContext ctx,
             PasswordResetService passwordReset,
+            IAntiforgery antiforgery,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("MagicLogin");
-            var token = ctx.Request.Query["token"].ToString();
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var token = form["Token"].ToString();
             if (string.IsNullOrEmpty(token))
             {
                 ctx.Response.Redirect("/login/magic");
@@ -442,8 +459,10 @@ internal static class AccountAuthEndpoints
             }
             catch (PlanValidationException ex)
             {
-                var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"/login/magic?err=invalid&msg={Uri.EscapeDataString(first.Value)}");
+                var reason = ex.Errors.FirstOrDefault().Value == PasswordResetService.MicrosoftOnlyMessage
+                    ? MagicLinkReasons.MicrosoftOnly
+                    : MagicLinkReasons.InvalidLink;
+                ctx.Response.Redirect($"/login/magic?err={reason}");
             }
         });
 
@@ -477,7 +496,7 @@ internal static class AccountAuthEndpoints
             {
                 var first = ex.Errors.FirstOrDefault();
                 ctx.Response.Redirect(
-                    $"/accept-invite?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}");
+                    $"/accept-invite?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&reason={FormErrorReasons.CodeFor(first.Value)}");
             }
         });
 
@@ -500,8 +519,14 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect(
-                    $"/reset-password?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}");
+                // Sent as codes alone: the page renders its own copy for each,
+                // so the card can't be made to say anything by editing the URL.
+                var query = first.Key != "Token"
+                    ? $"err={Uri.EscapeDataString(first.Key)}&reason={FormErrorReasons.CodeFor(first.Value)}"
+                    : first.Value == PasswordResetService.MicrosoftOnlyMessage
+                        ? $"err={ResetPasswordReasons.MicrosoftOnly}"
+                        : $"err={ResetPasswordReasons.InvalidLink}";
+                ctx.Response.Redirect($"/reset-password?token={Uri.EscapeDataString(token)}&{query}");
             }
         });
 
@@ -514,25 +539,27 @@ internal static class AccountAuthEndpoints
             try
             {
                 await accounts.ChangePasswordAsync(org.CurrentUserId!.Value,
-                    form["CurrentPassword"].ToString(), form["NewPassword"].ToString(), ct);
+                    form["CurrentPassword"].ToString(), form["NewPassword"].ToString(), ResolveIp(ctx), ct);
                 // The change invalidates every cookie issued before it (#675),
                 // including this one — re-issue it so the user who just changed
                 // their own password isn't signed out along with everyone else.
                 // Same session: keep its method and strong moment exactly as
                 // they were (typing the current password proves nothing new),
                 // but a fresh signed_in_at so this cookie survives the cut the
-                // change just made. The stamps are mirrored on ctx.User as claims.
+                // change just made. The stamps are mirrored on ctx.User as claims,
+                // and are rewritten from the new properties so the sign-in claim
+                // an open page compares against is the fresh one too (#1567).
                 var props = PersistentSignIn(ctx,
                     StepUpAuth.Method(ctx.User) ?? SignInMethod.Password,
                     StepUpAuth.StrongAuthAt(ctx.User),
                     signedInAt: clock.GetUtcNow().UtcDateTime);
-                await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, props);
+                await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, WithStampsFrom(ctx.User, props), props);
                 ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=password");
             }
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization();
 
@@ -549,18 +576,32 @@ internal static class AccountAuthEndpoints
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.ReasonQuery}={FormErrorReasons.CodeFor(first.Value)}");
             }
         }).RequireAuthorization();
 
         // --- Admin-initiated email change: user-side confirmation -----------
 
-        app.MapGet("/auth/account/email-change/confirm", async (
-            HttpContext ctx, UserAdministrationService users, IEmailService email, EmailRenderer emailRenderer,
-            ILoggerFactory loggerFactory, CancellationToken ct) =>
+        // The confirmation link sent to the new address opens a page with a
+        // button, which posts here: a GET that spent the token let a mail
+        // scanner opening links at click time make the change, and sign the
+        // person out everywhere, before they got there (#1544). Links mailed
+        // before the page existed point at the GET below, which only forwards
+        // to the page. No sign-in: the token is the proof.
+        app.MapGet("/auth/account/email-change/confirm", (HttpContext ctx) =>
         {
-            var logger = loggerFactory.CreateLogger("EmailChange");
             var token = ctx.Request.Query["token"].ToString();
+            ctx.Response.Redirect($"{RouteConstants.EmailChangeConfirm}?token={Uri.EscapeDataString(token)}");
+        });
+
+        app.MapPost("/auth/account/email-change/confirm", async (
+            HttpContext ctx, UserAdministrationService users, IEmailService email, EmailRenderer emailRenderer,
+            IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var logger = loggerFactory.CreateLogger("EmailChange");
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var token = form["Token"].ToString();
             var change = await users.ConfirmEmailChangeAsync(token, ct);
             if (change.Outcome == EmailChangeConfirmOutcome.NotYet)
             {

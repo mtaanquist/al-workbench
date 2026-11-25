@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using OpenIddict.Abstractions;
 using OpenIddict.Server;
+using Microsoft.AspNetCore;
 using static OpenIddict.Server.OpenIddictServerEvents;
 
 namespace ALDevToolbox.Services.OAuth;
@@ -49,14 +50,39 @@ namespace ALDevToolbox.Services.OAuth;
 /// <see href="https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#client-id-metadata-documents">MCP CIMD spec</see>,
 /// and either creates the application via
 /// <see cref="IOpenIddictApplicationManager"/> or updates the existing row.
-/// Always re-fetching is what lets us survive the issuer rotating its JWKS
-/// or amending its <c>redirect_uris</c> without an admin intervention:
-/// /authorize is rare (once per consent grant) so the extra HTTPS GET is
-/// affordable, and a stale JWKS would otherwise break every refresh attempt
-/// until someone deleted the application row by hand.
+/// Re-fetching is what lets us survive the issuer rotating its JWKS or
+/// amending its <c>redirect_uris</c> without an admin intervention, and a
+/// stale JWKS would otherwise break every refresh attempt until someone
+/// deleted the application row by hand.
+/// </para>
+///
+/// <para>
+/// The request is anonymous, so each fetch is also a way for anyone to make
+/// this server dial a URL and write a row (#1336). Two things bound that: a
+/// row refreshed within <see cref="RefreshInterval"/> is used as it is, with
+/// no fetch (which also covers the consent form posting the same request
+/// back), and every fetch spends a permit from <see cref="CimdFetchLimiter"/>,
+/// the same per-IP budget <c>/oauth/register</c> has.
+/// </para>
+///
+/// <para>
+/// It also runs on the token endpoint, for one thing only: a
+/// <c>private_key_jwt</c> client signs every token request, including the
+/// hourly refresh, with a key from its <c>jwks_uri</c>. When the client rotates
+/// that key, the stored set no longer holds it and OpenIddict refuses the
+/// assertion, which used to drop the connector until the person approved it
+/// again (#1576). So before OpenIddict validates the assertion, a stale row's
+/// key set is re-read from the <c>jwks_uri</c> it was registered with - at most
+/// once per <see cref="RefreshInterval"/>, on the same per-IP budget, and a
+/// failed attempt waits out the same interval before the next. Nothing
+/// else about the client changes there, and a failed re-read leaves the stored
+/// keys in place, so an outage at the client's end does not refuse a request
+/// its old key could still sign.
 /// </para>
 /// </summary>
-public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthorizationRequestContext>
+public sealed class CimdClientResolver :
+    IOpenIddictServerHandler<ValidateAuthorizationRequestContext>,
+    IOpenIddictServerHandler<ValidateTokenRequestContext>
 {
     /// <summary>
     /// Application-property key (and its value for CIMD rows) recording how a
@@ -72,17 +98,35 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
     private static readonly TimeSpan FetchTimeout = TimeSpan.FromSeconds(5);
     private const int MaxBodyBytes = 64 * 1024;
 
+    /// <summary>Application property stamped on every create or refresh from a document.</summary>
+    public const string RefreshedAtProperty = "refreshed_at";
+
+    /// <summary>How long a document-registered row is used without fetching its document again.</summary>
+    public static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(10);
+
+    /// <summary>Application property stamped when the token endpoint re-reads a client's key set.</summary>
+    public const string JwksRefreshedAtProperty = "jwks_refreshed_at";
+
+    /// <summary>Application property holding the <c>jwks_uri</c> a <c>private_key_jwt</c> client registered with.</summary>
+    public const string JwksUriProperty = "jwks_uri";
+
     private readonly IOpenIddictApplicationManager _applications;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly CimdFetchLimiter _fetchLimiter;
+    private readonly TimeProvider _clock;
     private readonly ILogger<CimdClientResolver> _logger;
 
     public CimdClientResolver(
         IOpenIddictApplicationManager applications,
         IHttpClientFactory httpClientFactory,
+        CimdFetchLimiter fetchLimiter,
+        TimeProvider clock,
         ILogger<CimdClientResolver> logger)
     {
         _applications = applications;
         _httpClientFactory = httpClientFactory;
+        _fetchLimiter = fetchLimiter;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -93,6 +137,52 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
         if (string.IsNullOrEmpty(clientId)) return;
         if (!Uri.TryCreate(clientId, UriKind.Absolute, out var url)) return;
         if (!string.Equals(url.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)) return;
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var existing = await _applications.FindByClientIdAsync(clientId, context.CancellationToken);
+
+        // Only ever overwrite a row that we ourselves created from a CIMD
+        // document. A DCR- or admin-registered client that happens to use a
+        // URL-shaped client_id must NOT be silently rewritten from an
+        // attacker-controllable metadata document — that would let whoever can
+        // serve (or transiently spoof) that URL replace its redirect_uris,
+        // JWKS, and client type. Checked before the fetch, so such a request
+        // never makes us dial the URL at all.
+        if (existing is not null)
+        {
+            var properties = await _applications.GetPropertiesAsync(existing, context.CancellationToken);
+            var isCimdRow = properties.TryGetValue(RegistrationSourceProperty, out var source)
+                            && source.ValueKind == JsonValueKind.String
+                            && string.Equals(source.GetString(), CimdRegistrationSource, StringComparison.Ordinal);
+            if (!isCimdRow)
+            {
+                _logger.LogWarning(
+                    "Refusing to overwrite client {ClientId} from a CIMD document — it was registered through another channel.",
+                    clientId);
+                context.Reject(
+                    error: OpenIddictConstants.Errors.InvalidClient,
+                    description: "A client with this id is already registered through another channel.");
+                return;
+            }
+            if (properties.TryGetValue(RefreshedAtProperty, out var refreshed)
+                && refreshed.ValueKind == JsonValueKind.String
+                && refreshed.TryGetDateTime(out var refreshedAt)
+                && now - refreshedAt.ToUniversalTime() < RefreshInterval)
+            {
+                // Recently fetched: use the row as it stands.
+                return;
+            }
+        }
+
+        var ip = context.Transaction.GetHttpRequest()?.HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (!_fetchLimiter.TryAcquire(ip))
+        {
+            _logger.LogWarning("CIMD fetch for {ClientId} refused: too many from {Ip}.", clientId, ip);
+            context.Reject(
+                error: OpenIddictConstants.Errors.TemporarilyUnavailable,
+                description: "Too many client metadata requests. Try again in a few minutes.");
+            return;
+        }
 
         CimdMetadata? metadata;
         try
@@ -211,7 +301,7 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
                     descriptor.Properties["token_endpoint_auth_signing_alg"] =
                         JsonSerializer.SerializeToElement(metadata.TokenEndpointAuthSigningAlg);
                 }
-                descriptor.Properties["jwks_uri"] = JsonSerializer.SerializeToElement(metadata.JwksUri);
+                descriptor.Properties[JwksUriProperty] = JsonSerializer.SerializeToElement(metadata.JwksUri);
                 break;
 
             default:
@@ -245,41 +335,12 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
             return;
         }
         descriptor.Properties[RegistrationSourceProperty] = JsonSerializer.SerializeToElement(CimdRegistrationSource);
-        descriptor.Properties["registered_at"] = JsonSerializer.SerializeToElement(DateTime.UtcNow);
+        descriptor.Properties["registered_at"] = JsonSerializer.SerializeToElement(now);
+        descriptor.Properties[RefreshedAtProperty] = JsonSerializer.SerializeToElement(now);
         descriptor.Properties["token_endpoint_auth_method"] = JsonSerializer.SerializeToElement(authMethod);
         if (!string.IsNullOrWhiteSpace(metadata.ClientUri))
         {
             descriptor.Properties["client_uri"] = JsonSerializer.SerializeToElement(metadata.ClientUri);
-        }
-
-        // Re-fetch every time so the issuer can rotate its JWKS or amend its
-        // redirect_uris without an admin nuking the application row. The
-        // earlier short-circuit on existence is gone; we always create or
-        // update from the freshly-fetched document.
-        var existing = await _applications.FindByClientIdAsync(clientId, context.CancellationToken);
-
-        // Only ever overwrite a row that we ourselves created from a CIMD
-        // document. A DCR- or admin-registered client that happens to use a
-        // URL-shaped client_id must NOT be silently rewritten from an
-        // attacker-controllable metadata document — that would let whoever can
-        // serve (or transiently spoof) that URL replace its redirect_uris,
-        // JWKS, and client type.
-        if (existing is not null)
-        {
-            var properties = await _applications.GetPropertiesAsync(existing, context.CancellationToken);
-            var isCimdRow = properties.TryGetValue(RegistrationSourceProperty, out var source)
-                            && source.ValueKind == JsonValueKind.String
-                            && string.Equals(source.GetString(), CimdRegistrationSource, StringComparison.Ordinal);
-            if (!isCimdRow)
-            {
-                _logger.LogWarning(
-                    "Refusing to overwrite client {ClientId} from a CIMD document — it was registered through another channel.",
-                    clientId);
-                context.Reject(
-                    error: OpenIddictConstants.Errors.InvalidClient,
-                    description: "A client with this id is already registered through another channel.");
-                return;
-            }
         }
 
         try
@@ -307,6 +368,123 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
             _logger.LogInformation(ex, "CIMD client {ClientId} changed concurrently — using whichever row landed.", clientId);
         }
     }
+
+    /// <summary>
+    /// Token endpoint: re-reads a stale <c>private_key_jwt</c> client's key set before
+    /// OpenIddict validates its assertion. See the class remarks.
+    /// </summary>
+    public async ValueTask HandleAsync(ValidateTokenRequestContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var assertion = context.Request.ClientAssertion;
+        if (string.IsNullOrEmpty(assertion)) return;
+
+        // RFC 7523 makes client_id optional beside an assertion, whose iss then
+        // names the client. Read without validating: it only picks which row to
+        // look at, and the keys come from that row's own jwks_uri, never the request.
+        var clientId = context.ClientId;
+        if (string.IsNullOrEmpty(clientId))
+        {
+            try
+            {
+                clientId = new Microsoft.IdentityModel.JsonWebTokens.JsonWebToken(assertion).Issuer;
+            }
+            catch (Exception ex) when (ex is ArgumentException or SecurityTokenMalformedException)
+            {
+                return;
+            }
+        }
+        if (!Uri.TryCreate(clientId, UriKind.Absolute, out var url)
+            || !string.Equals(url.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var application = await _applications.FindByClientIdAsync(clientId, context.CancellationToken);
+        if (application is null) return;
+        var properties = await _applications.GetPropertiesAsync(application, context.CancellationToken);
+        if (!IsString(properties, RegistrationSourceProperty, CimdRegistrationSource)) return;
+        if (!properties.TryGetValue(JwksUriProperty, out var jwksValue)
+            || jwksValue.ValueKind != JsonValueKind.String
+            || !Uri.TryCreate(jwksValue.GetString(), UriKind.Absolute, out var jwksUrl)
+            || !string.Equals(jwksUrl.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Whichever read was newer - the document on /oauth/authorize, or the key
+        // set here - counts: both brought the keys up to date.
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var lastRead = new[] { Timestamp(properties, RefreshedAtProperty), Timestamp(properties, JwksRefreshedAtProperty) }.Max();
+        if (lastRead is { } read && now - read < RefreshInterval) return;
+
+        // One attempt per client per interval, successful or not: a failed read
+        // stamps nothing on the row, so this is what stops a client whose jwks_uri
+        // is down (or anyone naming it with a junk assertion) from causing a fetch
+        // on every token request.
+        if (!_fetchLimiter.TryClaimKeySetRefresh(clientId, now, RefreshInterval)) return;
+
+        var ip = context.Transaction.GetHttpRequest()?.HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (!_fetchLimiter.TryAcquire(ip))
+        {
+            // No fetch was made, so hand the slot back for the client's own next request.
+            _fetchLimiter.ReleaseKeySetRefresh(clientId, now);
+            _logger.LogWarning("JWKS refresh for {ClientId} skipped: too many fetches from {Ip}.", clientId, ip);
+            return;
+        }
+
+        JsonWebKeySet keys;
+        try
+        {
+            keys = await FetchJwksAsync(jwksUrl, context.CancellationToken);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            // The caller went away, which says nothing about the jwks_uri. Hand the
+            // slot back: otherwise a junk assertion and a dropped connection would
+            // hold off the client's own re-read for the whole interval.
+            _fetchLimiter.ReleaseKeySetRefresh(clientId, now);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "JWKS refresh for {ClientId} from {JwksUri} failed; keeping the stored keys.", clientId, jwksUrl);
+            return;
+        }
+        if (keys.Keys.Count == 0)
+        {
+            _logger.LogWarning("JWKS refresh for {ClientId}: {JwksUri} held no keys; keeping the stored keys.", clientId, jwksUrl);
+            return;
+        }
+
+        var descriptor = new OpenIddictApplicationDescriptor();
+        await _applications.PopulateAsync(descriptor, application, context.CancellationToken);
+        descriptor.JsonWebKeySet = keys;
+        descriptor.Properties[JwksRefreshedAtProperty] = JsonSerializer.SerializeToElement(now);
+        try
+        {
+            await _applications.UpdateAsync(application, descriptor, context.CancellationToken);
+            _logger.LogInformation("Refreshed the key set of CIMD client {ClientId} ({KeyCount} keys) on a token request.",
+                clientId, keys.Keys.Count);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A parallel request refreshed the same row first; theirs is as good.
+            _logger.LogInformation(ex, "CIMD client {ClientId} changed concurrently during a key refresh.", clientId);
+        }
+    }
+
+    private static bool IsString(IReadOnlyDictionary<string, JsonElement> properties, string key, string expected) =>
+        properties.TryGetValue(key, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && string.Equals(value.GetString(), expected, StringComparison.Ordinal);
+
+    private static DateTime? Timestamp(IReadOnlyDictionary<string, JsonElement> properties, string key) =>
+        properties.TryGetValue(key, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && value.TryGetDateTime(out var at)
+            ? at.ToUniversalTime()
+            : null;
 
     private Task<CimdMetadata?> FetchMetadataAsync(Uri url, CancellationToken cancellationToken) =>
         FetchJsonAsync<CimdMetadata>(url, cancellationToken);

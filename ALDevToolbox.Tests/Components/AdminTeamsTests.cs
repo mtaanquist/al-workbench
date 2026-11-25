@@ -35,7 +35,7 @@ public sealed class AdminTeamsTests : IDisposable
                 OrganizationId = TestDb.DefaultOrgId,
                 Email = "admin@example.com",
                 PasswordHash = "x",
-                DisplayName = "Admin",
+                DisplayName = "Rita Reviewer",
                 Role = UserRole.Admin,
                 Status = UserStatus.Active,
                 CreatedAt = DateTime.UtcNow,
@@ -132,8 +132,10 @@ public sealed class AdminTeamsTests : IDisposable
             cut.FindAll("tbody tr").Should().HaveCount(2);
             // A team with no manager says so rather than showing a bare 0, and a
             // managed team names its manager rather than counting them.
-            cut.Markup.Should().Contain("No manager yet");
-            cut.Markup.Should().Contain("Admin");
+            var managedBy = cut.FindAll("tbody tr")
+                .ToDictionary(r => r.QuerySelector("td a")!.TextContent.Trim(), r => r.QuerySelectorAll("td")[2].TextContent.Trim());
+            managedBy["Nordics"].Should().Be("Rita Reviewer");
+            managedBy["Benelux"].Should().Be("No manager yet");
         });
     }
 

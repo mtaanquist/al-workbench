@@ -23,7 +23,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// for their status and their JSON body, because <c>UseStatusCodePagesWithReExecute</c>
 /// would otherwise turn a bare 4xx into an HTML page the gateway cannot read.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GatewayEndpointTests : IDisposable
 {
     // No PUBLIC_BASE_URL in the test host, so the audience is the request's own origin.

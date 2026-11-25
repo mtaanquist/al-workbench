@@ -1,10 +1,8 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.Entities;
-using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Routing;
 
@@ -20,25 +18,24 @@ namespace ALDevToolbox.Tests.Routing;
 /// in step. Every case runs as a signed-in Admin + SiteAdmin so the auth guard on
 /// each page (deliberately mirroring the page it forwards to) doesn't swallow the
 /// redirect under test. See issue #700 for why these are kept rather than deleted.
+///
+/// <para>The cases share one host (#1536); each signs in an admin of its own,
+/// because sign-in is rate limited per address.</para>
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
-public sealed class LegacyRedirectTests : IDisposable
+public sealed class LegacyRedirectTests : IClassFixture<SharedEndpointHost>
 {
-    private const string AdminEmail = "legacy-admin@cronus.test";
     private const string AdminPassword = "correct-horse-battery-staple";
 
-    private readonly TestDb _db = new();
+    private readonly SharedEndpointHost _host;
+    private readonly TestDb _db;
     private readonly EndpointFactory _factory;
+    private readonly string _adminEmail = SharedEndpointHost.UniqueEmail("legacy-admin");
 
-    public LegacyRedirectTests()
+    public LegacyRedirectTests(SharedEndpointHost host)
     {
-        _factory = new EndpointFactory(_db);
-    }
-
-    public void Dispose()
-    {
-        _factory.Dispose();
-        _db.Dispose();
+        _host = host;
+        _db = host.Db;
+        _factory = host.Factory;
     }
 
     [Theory]
@@ -68,6 +65,11 @@ public sealed class LegacyRedirectTests : IDisposable
     // Alias endpoints (LegacyRedirectEndpoints.cs).
     [InlineData("/projects/extension", "/templates/extension")]
     [InlineData("/projects/extension?template=demo", "/templates/extension?template=demo")]
+    // Projects became Solutions. /projects/extension above is the generator alias,
+    // which the int constraint on /projects/{id} has to leave alone.
+    [InlineData("/projects", "/solutions")]
+    [InlineData("/projects/new", "/solutions/new")]
+    [InlineData("/projects/12", "/solutions/12")]
     [InlineData("/snippets", "/cookbook")]
     [InlineData("/snippets/suggest", "/cookbook/suggest")]
     [InlineData("/snippets/12", "/cookbook/12")]
@@ -75,6 +77,7 @@ public sealed class LegacyRedirectTests : IDisposable
     [InlineData("/admin/snippets/new", "/admin/cookbook/new")]
     [InlineData("/admin/snippets/12", "/admin/cookbook/12")]
     [InlineData("/admin/snippets/suggestions", "/admin/cookbook/suggestions")]
+    [InlineData("/admin/snippets/suggestions?focus=5", "/admin/cookbook/suggestions?focus=5")]
     [InlineData("/api/snippets/12/download", "/api/cookbook/12/download")]
     [InlineData("/releases", "/pipelines/deployments")]
     [InlineData("/releases/12", "/pipelines/deployments/12")]
@@ -104,10 +107,9 @@ public sealed class LegacyRedirectTests : IDisposable
         seed.Users.Add(new User
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Email = AdminEmail,
+            Email = _adminEmail,
             DisplayName = "Legacy Admin",
-            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System)
-                .HashPassword(AdminPassword),
+            PasswordHash = _host.HashPassword(AdminPassword),
             Role = UserRole.Admin,
             IsSiteAdmin = true,
             Status = UserStatus.Active,
@@ -116,7 +118,7 @@ public sealed class LegacyRedirectTests : IDisposable
         await seed.SaveChangesAsync();
     }
 
-    private static async Task SignInAsync(HttpClient client)
+    private async Task SignInAsync(HttpClient client)
     {
         using var form = await client.GetAsync("/login");
         form.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -126,7 +128,7 @@ public sealed class LegacyRedirectTests : IDisposable
 
         using var response = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new[]
         {
-            new KeyValuePair<string, string>("Email", AdminEmail),
+            new KeyValuePair<string, string>("Email", _adminEmail),
             new KeyValuePair<string, string>("Password", AdminPassword),
             new KeyValuePair<string, string>("__RequestVerificationToken", token.Groups[1].Value),
         }));

@@ -16,6 +16,7 @@ public sealed class BcEnvironmentStatusTests
     [InlineData("Active", BcEnvironmentReadiness.Ready)]
     [InlineData("active", BcEnvironmentReadiness.Ready)]
     [InlineData("Upgrading", BcEnvironmentReadiness.Busy)]
+    [InlineData("Updating", BcEnvironmentReadiness.Busy)]
     [InlineData("Preparing", BcEnvironmentReadiness.Busy)]
     [InlineData("SoftDeleted", BcEnvironmentReadiness.Deleting)]
     [InlineData("UpgradingFailed", BcEnvironmentReadiness.Failed)]
@@ -119,6 +120,8 @@ public sealed class BcEnvironmentStatusTests
     /// "Upgrading" is what Business Central reports while a platform update runs. The
     /// Upgrades page watches rows in exactly that state (#982), so it must read as an
     /// update in progress - and draw as one - rather than as a state nobody recognises.
+    /// It must also be treated as one: a status the screen calls mid-update that still
+    /// let a deployment through is the contradiction #1429 found.
     /// </summary>
     [Theory]
     [InlineData("Upgrading")]
@@ -131,5 +134,8 @@ public sealed class BcEnvironmentStatusTests
             null, null, null, null, null, null, null, CanAct: true);
         ALDevToolbox.Components.Shared.FleetRowState.RowState(row).Should().Be("is-running");
         ALDevToolbox.Components.Shared.FleetRowState.StatusIcon(row).Should().Be("clock");
+        BcEnvironmentStatus.Classify(status).Should().Be(BcEnvironmentReadiness.Busy);
+        BcEnvironmentStatus.CanPublish(status).Should().BeFalse("a deployment must wait for the update");
+        EnvironmentUpgradeLineState.IsUpdating(status, null).Should().BeTrue();
     }
 }

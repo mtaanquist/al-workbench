@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using ALDevToolbox.Services.Email;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Account;
@@ -40,7 +42,7 @@ public sealed class PersonalAccessTokenServiceTests : IDisposable
     }
 
     private PersonalAccessTokenService NewService(Data.AppDbContext ctx) =>
-        new(ctx, _clock, NullLogger<PersonalAccessTokenService>.Instance);
+        new(ctx, _clock, new CapturingEmailService(), new EmailRenderer(new ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance), NullLogger<PersonalAccessTokenService>.Instance);
 
     [Fact]
     public async Task Issue_returns_plaintext_and_persists_only_hash()

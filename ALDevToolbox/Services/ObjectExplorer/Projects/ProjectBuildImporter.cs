@@ -28,6 +28,9 @@ public sealed class ProjectBuildImporter
     /// <summary>Why a build of a disabled pipeline is refused (#1131).</summary>
     public const string DisabledRefusal = "This pipeline is disabled. Enable it to build.";
 
+    /// <summary>Why a build of a deleted pipeline cannot be run again.</summary>
+    public const string DeletedPipelineRefusal = "This build's pipeline was deleted, so it can't be run again.";
+
     private readonly ReleaseImportService _importer;
     private readonly ReleaseManagementService _management;
     private readonly ProjectBuildQueue _queue;
@@ -160,7 +163,7 @@ public sealed class ProjectBuildImporter
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ReleaseId == releaseId)
             .Select(b => new { b.Id, b.PipelineId, b.ProjectId })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
         var solutionId = build?.ProjectId ?? projectId;
         var solution = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == solutionId && p.DeletedAt == null)
@@ -171,8 +174,8 @@ public sealed class ProjectBuildImporter
                 // Only a confirmed repository is cloned, so only its host needs a credential.
                 Providers = p.Repositories.Where(r => r.AccessConfirmedAt != null).Select(r => r.Provider).Distinct().ToList(),
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        await _access.EnsureCanManageAsync(solutionId, solution?.CreatedByUserId, ct).ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct);
+        await _access.EnsureCanManageAsync(solutionId, solution?.CreatedByUserId, ct);
 
         if (solution is null || solution.Providers.Count == 0)
         {
@@ -186,31 +189,34 @@ public sealed class ProjectBuildImporter
         var missing = new List<string>();
         foreach (var provider in solution.Providers.OrderBy(p => p))
         {
-            if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
+            if ((await _credentials.ResolveAsync(provider, ct)).Count == 0)
             {
                 missing.Add(CloneCredentialResolver.NothingToCloneWith(provider));
             }
         }
         if (missing.Count > 0) throw Refuse(string.Join(" ", missing));
 
-        // A rebuild is a build by hand, so a disabled pipeline refuses it like Build does (#1131).
-        if (build is { PipelineId: { } disabledCheckId }
-            && await _db.OePipelines.AsNoTracking()
-                .AnyAsync(p => p.Id == disabledCheckId && p.DisabledAt != null, ct).ConfigureAwait(false))
+        // A rebuild is a build by hand, so a disabled or deleted pipeline refuses it like
+        // Build does (#1131, #1335).
+        if (build is { PipelineId: { } stateCheckId })
         {
-            throw Refuse(DisabledRefusal);
+            var pipeline = await _db.OePipelines.AsNoTracking()
+                .Where(p => p.Id == stateCheckId && p.DeletedAt == null)
+                .Select(p => new { Disabled = p.DisabledAt != null })
+                .FirstOrDefaultAsync(ct);
+            if (pipeline is null) throw Refuse(DeletedPipelineRefusal);
+            if (pipeline.Disabled) throw Refuse(DisabledRefusal);
         }
 
         var tx = build is { PipelineId: { } lockedPipelineId }
-            ? await LockPipelineForManualBuildAsync(lockedPipelineId, ct).ConfigureAwait(false)
-            : await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+            ? await LockPipelineForManualBuildAsync(lockedPipelineId, ct)
+            : await _db.Database.BeginTransactionAsync(ct);
         try
         {
             if (build is { PipelineId: { } pipelineId }
                 && await _db.OeProjectBuilds.AsNoTracking()
                     .Where(b => b.PipelineId == pipelineId && b.Id != build.Id)
-                    .AnyAsync(BlocksManualBuild, ct)
-                    .ConfigureAwait(false))
+                    .AnyAsync(BlocksManualBuild, ct))
             {
                 throw Refuse("Another build of this pipeline is running. Wait for it to finish, then try again.");
             }
@@ -219,26 +225,30 @@ public sealed class ProjectBuildImporter
             // maintenance job on the same release, would otherwise run beside this one now
             // that builds and imports have workers of their own (#1137).
             await _db.Database.ExecuteSqlAsync(
-                $"SELECT pg_advisory_xact_lock({RebuildLockClass}, {releaseId})", ct).ConfigureAwait(false);
+                $"SELECT pg_advisory_xact_lock({RebuildLockClass}, {releaseId})", ct);
             if (await _db.OeImportJobs.AsNoTracking()
-                    .AnyAsync(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"), ct)
-                    .ConfigureAwait(false))
+                    .AnyAsync(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"), ct))
             {
                 throw Refuse("This build is already being worked on. Wait for that to finish, then try again.");
             }
 
             if (build is not null)
             {
+                // The last attempt's pickup time goes with it (#1551). Its finish time
+                // stays: BuildAsync reads a set FinishedAt as "not a first run", which is
+                // what keeps a Retry from being held to the automation settings, and the
+                // pages show a finish only once the build has finished again.
                 await _db.OeProjectBuilds
                     .Where(b => b.Id == build.Id)
-                    .ExecuteUpdateAsync(u => u.SetProperty(b => b.Status, ProjectBuildStatus.Queued), ct)
-                    .ConfigureAwait(false);
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(b => b.Status, ProjectBuildStatus.Queued)
+                        .SetProperty(b => b.BuildingStartedAt, (DateTime?)null), ct);
             }
             return tx;
         }
         catch
         {
-            await tx.DisposeAsync().ConfigureAwait(false);
+            await tx.DisposeAsync();
             throw;
         }
 
@@ -267,16 +277,16 @@ public sealed class ProjectBuildImporter
     private async Task<IDbContextTransaction> LockPipelineForManualBuildAsync(
         int pipelineId, CancellationToken ct)
     {
-        var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        var tx = await _db.Database.BeginTransactionAsync(ct);
         try
         {
             await _db.Database.ExecuteSqlAsync(
-                $"SELECT pg_advisory_xact_lock({ManualBuildLockClass}, {pipelineId})", ct).ConfigureAwait(false);
+                $"SELECT pg_advisory_xact_lock({ManualBuildLockClass}, {pipelineId})", ct);
             return tx;
         }
         catch
         {
-            await tx.DisposeAsync().ConfigureAwait(false);
+            await tx.DisposeAsync();
             throw;
         }
     }
@@ -299,14 +309,15 @@ public sealed class ProjectBuildImporter
                 // Only a confirmed repository is cloned, so only its host needs a credential.
                 Providers = p.Project.Repositories.Where(r => r.AccessConfirmedAt != null).Select(r => r.Provider).Distinct().ToList(),
             })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Pipeline"] = "This pipeline no longer exists.",
             });
 
-        // Only the owner or an org Admin may trigger a build. See .design/artifacts.md.
-        await _access.EnsureCanManageAsync(pipeline.ProjectId, pipeline.OwnerId, ct).ConfigureAwait(false);
+        // Only someone who may manage the solution (its owner, an Admin, everyone on a
+        // Public one, or its teams) may trigger a build. See .design/artifacts.md.
+        await _access.EnsureCanManageAsync(pipeline.ProjectId, pipeline.OwnerId, ct);
 
         // A disabled pipeline builds nothing, whoever or whatever asks (#1131).
         if (pipeline.DisabledAt is not null)
@@ -349,7 +360,7 @@ public sealed class ProjectBuildImporter
             var missing = new List<string>();
             foreach (var provider in pipeline.Providers.OrderBy(p => p))
             {
-                if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
+                if ((await _credentials.ResolveAsync(provider, ct)).Count == 0)
                 {
                     missing.Add(trigger == ProjectBuildTrigger.Push
                         ? NothingToCloneWithOnPush(provider)
@@ -371,13 +382,12 @@ public sealed class ProjectBuildImporter
         // a plain read, so a manual build checks and inserts under a lock on its
         // pipeline, held until the build row is committed (#1119).
         await using var manualBuildLock = trigger == ProjectBuildTrigger.Manual
-            ? await LockPipelineForManualBuildAsync(pipelineId, ct).ConfigureAwait(false)
+            ? await LockPipelineForManualBuildAsync(pipelineId, ct)
             : null;
         if (trigger == ProjectBuildTrigger.Manual
             && await _db.OeProjectBuilds.AsNoTracking()
                 .Where(b => b.PipelineId == pipelineId)
-                .AnyAsync(BlocksManualBuild, ct)
-                .ConfigureAwait(false))
+                .AnyAsync(BlocksManualBuild, ct))
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -401,18 +411,17 @@ public sealed class ProjectBuildImporter
                     && b.Trigger == ProjectBuildTrigger.Push
                     && b.Status == ProjectBuildStatus.Queued
                     && b.Release != null && b.Release.Status == "ingesting");
-            if (await waiting.CountAsync(ct).ConfigureAwait(false) >= MaxWaitingPushBuilds)
+            if (await waiting.CountAsync(ct) >= MaxWaitingPushBuilds)
             {
                 var newest = await waiting.AsNoTracking()
                     .OrderByDescending(b => b.Id)
                     .Select(b => new { b.Id, b.ReleaseId })
-                    .FirstAsync(ct).ConfigureAwait(false);
+                    .FirstAsync(ct);
                 var moved = await _db.OeProjectBuilds
                     .Where(b => b.Id == newest.Id && b.Status == ProjectBuildStatus.Queued)
                     .ExecuteUpdateAsync(u => u
                         .SetProperty(b => b.HeadSha, pushed.Sha)
-                        .SetProperty(b => b.HeadRepositoryId, pushed.RepositoryId), ct)
-                    .ConfigureAwait(false);
+                        .SetProperty(b => b.HeadRepositoryId, pushed.RepositoryId), ct);
                 if (moved == 1)
                 {
                     _logger.LogInformation(
@@ -435,7 +444,7 @@ public sealed class ProjectBuildImporter
             ParentReleaseId: null,
             ApplicationVersionId: null,
             ProjectName: pipeline.ProjectName);
-        var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+        var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
 
         // The first-class build row, linked to its pipeline and the release it
         // produces (the Object Explorer hook). The worker flips its status
@@ -468,12 +477,12 @@ public sealed class ProjectBuildImporter
             HeadRepositoryId = head?.RepositoryId,
             StartedAt = now,
         });
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a project build");
         var source = new ReleaseImportSource.ProjectBuild(pipeline.ProjectId);
-        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
-        if (manualBuildLock is not null) await manualBuildLock.CommitAsync(ct).ConfigureAwait(false);
+        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct);
+        if (manualBuildLock is not null) await manualBuildLock.CommitAsync(ct);
         _queue.Enqueue(new ReleaseImportJob(
             releaseId, identity, source, StoreSymbolReference: false, jobRowId,
             ProjectBuildOrder.For(pipelineId, bcTarget, trigger)));
@@ -504,14 +513,14 @@ public sealed class ProjectBuildImporter
     {
         try
         {
-            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            await _management.ClearIngestedDataAsync(releaseId, ct);
             var build = await _db.OeProjectBuilds.AsNoTracking()
                 .Where(b => b.ReleaseId == releaseId)
                 .Select(b => new { b.PipelineId, b.BcTarget })
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                .FirstOrDefaultAsync(ct);
             var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a rebuild");
             var source = new ReleaseImportSource.ProjectBuild(projectId);
-            var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+            var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct);
             _queue.Enqueue(new ReleaseImportJob(
                 releaseId, identity, source, StoreSymbolReference: false, jobRowId,
                 ProjectBuildOrder.For(build?.PipelineId, build?.BcTarget, ProjectBuildTrigger.Manual)));
@@ -521,7 +530,7 @@ public sealed class ProjectBuildImporter
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not queue the rebuild of release {ReleaseId}; failing it so it does not block the pipeline.", releaseId);
-            await FailUnqueuedRebuildAsync(releaseId).ConfigureAwait(false);
+            await FailUnqueuedRebuildAsync(releaseId);
             throw;
         }
     }
@@ -537,16 +546,14 @@ public sealed class ProjectBuildImporter
                 .ExecuteUpdateAsync(u => u
                     .SetProperty(r => r.Status, "failed")
                     .SetProperty(r => r.StatusMessage, RebuildNotQueuedMessage)
-                    .SetProperty(r => r.UpdatedAt, now), CancellationToken.None)
-                .ConfigureAwait(false);
+                    .SetProperty(r => r.UpdatedAt, now), CancellationToken.None);
             await _db.OeProjectBuilds
                 .Where(b => b.ReleaseId == releaseId
                     && (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building))
                 .ExecuteUpdateAsync(u => u
                     .SetProperty(b => b.Status, ProjectBuildStatus.Failed)
                     .SetProperty(b => b.FailureMessage, RebuildNotQueuedMessage)
-                    .SetProperty(b => b.FinishedAt, now), CancellationToken.None)
-                .ConfigureAwait(false);
+                    .SetProperty(b => b.FinishedAt, now), CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -600,7 +607,7 @@ public sealed class ProjectBuildImporter
         var project = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId && p.DeletedAt == null)
             .Select(p => new { p.Id, p.Name })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            .FirstOrDefaultAsync(ct)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Project"] = "This solution no longer exists.",
@@ -612,7 +619,7 @@ public sealed class ProjectBuildImporter
             ParentReleaseId: null,
             ApplicationVersionId: null,
             ProjectName: project.Name);
-        var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+        var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
 
         var orgId = _orgContext.CurrentOrganizationId
             ?? throw new InvalidOperationException("No organization in scope when queuing a pull-request build.");
@@ -636,7 +643,7 @@ public sealed class ProjectBuildImporter
             StartedAt = _clock.GetUtcNow().UtcDateTime,
         };
         _db.OeProjectBuilds.Add(build);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await _db.SaveChangesAsync(ct);
 
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a pull-request build");
         var source = new ReleaseImportSource.PullRequestBuild(

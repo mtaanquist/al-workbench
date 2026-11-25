@@ -1,3 +1,4 @@
+using ALDevToolbox.Tests.Infrastructure;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 
@@ -10,7 +11,7 @@ namespace ALDevToolbox.Tests.Builders;
 /// </summary>
 public static class RecipeBuilder
 {
-    public const int DefaultOrganizationId = 1;
+    public const int DefaultOrganizationId = TestDb.DefaultOrgId;
 
     public static Recipe Default(
         string title = "Test Recipe",

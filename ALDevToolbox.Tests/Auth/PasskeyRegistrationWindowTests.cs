@@ -18,7 +18,6 @@ namespace ALDevToolbox.Tests.Auth;
 /// because a passkey outlives the session that adds it. Its own class because
 /// it boots the app on a clock the test moves.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class PasskeyRegistrationWindowTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
@@ -31,10 +30,10 @@ public sealed class PasskeyRegistrationWindowTests : IDisposable
     {
         _factory = new EndpointFactory(_db,
             services => services.AddSingleton<TimeProvider>(_clock),
-            new Dictionary<string, string?>
+            settings: new Dictionary<string, string?>
             {
-                ["Auth__WebAuthn__RpId"] = "localhost",
-                ["Auth__WebAuthn__OriginsCsv"] = "https://localhost",
+                ["Auth:WebAuthn:RpId"] = "localhost",
+                ["Auth:WebAuthn:OriginsCsv"] = "https://localhost",
             });
     }
 

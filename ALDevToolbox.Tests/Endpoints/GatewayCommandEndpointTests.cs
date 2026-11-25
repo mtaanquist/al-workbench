@@ -24,7 +24,6 @@ namespace ALDevToolbox.Tests.Endpoints;
 /// long-poll timeout is shortened through the <see cref="GatewayCommandSignal"/>
 /// singleton so the empty case does not take 30 seconds.
 /// </summary>
-[Collection(EndpointFactoryCollection.Name)]
 public sealed class GatewayCommandEndpointTests : IDisposable
 {
     // No PUBLIC_BASE_URL in the test host, so the audience is the request's own origin.

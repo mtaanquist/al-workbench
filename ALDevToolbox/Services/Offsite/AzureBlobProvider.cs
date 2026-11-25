@@ -105,10 +105,13 @@ public sealed class AzureBlobProvider : IOffsiteStorageProvider
         return MapMetadataFromAzure(properties.Value.Metadata);
     }
 
-    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct)
+    public async Task<bool> ExistsAsync(string key, CancellationToken ct) =>
+        // The SDK maps a 404 to false and throws for anything else.
+        (await _container.GetBlobClient(key).ExistsAsync(ct)).Value;
+
+    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct)
     {
-        if (maxObjects < 1) maxObjects = 1;
-        var results = new List<OffsiteStorageObject>(capacity: Math.Min(maxObjects, 256));
+        var results = new List<OffsiteStorageObject>();
         if (topLevelOnly)
         {
             // The hierarchy listing returns the blobs directly under the prefix
@@ -121,7 +124,6 @@ public sealed class AzureBlobProvider : IOffsiteStorageProvider
                     item.Blob.Name,
                     item.Blob.Properties.ContentLength ?? 0,
                     (item.Blob.Properties.LastModified ?? default).UtcDateTime));
-                if (results.Count >= maxObjects) break;
             }
             return results;
         }
@@ -132,7 +134,6 @@ public sealed class AzureBlobProvider : IOffsiteStorageProvider
                 item.Name,
                 item.Properties.ContentLength ?? 0,
                 (item.Properties.LastModified ?? default).UtcDateTime));
-            if (results.Count >= maxObjects) break;
         }
         return results;
     }

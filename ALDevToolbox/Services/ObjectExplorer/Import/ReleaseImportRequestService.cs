@@ -44,6 +44,12 @@ public sealed record ReleaseImportSubmission(
     public bool IsCalImport => CalTxtFile is { Length: > 0 };
 }
 
+/// <summary>
+/// What the bulk system-reference backfill queued, and how many releases it left
+/// alone because a backfill was already queued, running, or done since they changed.
+/// </summary>
+public sealed record BackfillQueueResult(int Queued, int Skipped);
+
 /// <summary>Everything the "retry a failed import" form carries.</summary>
 public sealed record ReleaseRetrySubmission(
     string DvdUrl,
@@ -106,6 +112,9 @@ public sealed class ReleaseImportRequestService
     private readonly PersistedImportJobs _persistedJobs;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectBuildImporter _projectBuilds;
+    private readonly ProjectAccess _access;
+    private readonly IHostApplicationLifetime _lifetime;
+    private readonly ILogger<ReleaseImportRequestService> _logger;
 
     public ReleaseImportRequestService(
         ReleaseImportService importer,
@@ -114,7 +123,10 @@ public sealed class ReleaseImportRequestService
         ReleaseImportQueue queue,
         PersistedImportJobs persistedJobs,
         IOrganizationContext orgContext,
-        ProjectBuildImporter projectBuilds)
+        ProjectBuildImporter projectBuilds,
+        ProjectAccess access,
+        IHostApplicationLifetime lifetime,
+        ILogger<ReleaseImportRequestService> logger)
     {
         _importer = importer;
         _management = management;
@@ -123,6 +135,9 @@ public sealed class ReleaseImportRequestService
         _persistedJobs = persistedJobs;
         _orgContext = orgContext;
         _projectBuilds = projectBuilds;
+        _access = access;
+        _lifetime = lifetime;
+        _logger = logger;
     }
 
     /// <summary>
@@ -184,33 +199,33 @@ public sealed class ReleaseImportRequestService
         // ── Legacy C/AL TXT: stage to disk, queue, ingest in bg ────
         if (isCalImport)
         {
-            var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var tempPath = await TryStageAsync(releaseId, submission.CalTxtFile!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            var source = new ReleaseImportSource.CalTxt(tempPath, calEncoding);
-            await EnqueueImportAsync(releaseId, source, storeSymbolReference: false, ct).ConfigureAwait(false);
-            return new ReleaseImportOutcome.Queued(releaseId);
+            var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
+            return await StageAndQueueNewAsync(
+                releaseId,
+                new PendingUpload(submission.CalTxtFile!, CalTxtTempPrefix, ".txt", "C/AL file"),
+                path => new ReleaseImportSource.CalTxt(path!, calEncoding),
+                storeSymbolReference: false, ct);
         }
 
         // ── URL download: queue, ingest in the background ──────────
         if (dvdUrl.Length > 0)
         {
-            await _dvdDownloader.ValidateUrlForQueueAsync(dvdUrl, ct).ConfigureAwait(false);
-            var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var source = new ReleaseImportSource.Url(dvdUrl);
-            await EnqueueImportAsync(releaseId, source, storeSymbolReference, ct).ConfigureAwait(false);
-            return new ReleaseImportOutcome.Queued(releaseId);
+            await _dvdDownloader.ValidateUrlForQueueAsync(dvdUrl, ct);
+            var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
+            return await StageAndQueueNewAsync(
+                releaseId, upload: null, _ => new ReleaseImportSource.Url(dvdUrl),
+                storeSymbolReference, ct);
         }
 
         // ── Folder-ZIP upload: stage to disk, queue, ingest in bg ──
         if (folderZip is not null)
         {
-            var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var tempPath = await TryStageAsync(releaseId, folderZip, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            var source = new ReleaseImportSource.StagedZip(tempPath, IsDvd: false);
-            await EnqueueImportAsync(releaseId, source, storeSymbolReference, ct).ConfigureAwait(false);
-            return new ReleaseImportOutcome.Queued(releaseId);
+            var releaseId = await _importer.BeginReleaseAsync(metadata, ct);
+            return await StageAndQueueNewAsync(
+                releaseId,
+                new PendingUpload(folderZip, FolderZipTempPrefix, ".zip", "ZIP"),
+                path => new ReleaseImportSource.StagedZip(path!, IsDvd: false),
+                storeSymbolReference, ct);
         }
 
         // ── Individual files: small/fast, stays synchronous ────────
@@ -228,7 +243,7 @@ public sealed class ReleaseImportRequestService
                 ProjectName: projectName,
                 StoreSymbolReference: storeSymbolReference);
 
-            var summary = await _importer.ImportReleaseAsync(request, ct).ConfigureAwait(false);
+            var summary = await _importer.ImportReleaseAsync(request, ct);
             return new ReleaseImportOutcome.Imported(summary);
         }
         finally
@@ -238,14 +253,16 @@ public sealed class ReleaseImportRequestService
     }
 
     /// <summary>
-    /// Amends modules into an existing release (#216) from the same upload
+    /// Queues more modules for an existing release (#216) from the same upload
     /// shapes the import form accepts: a folder ZIP, or individual <c>.app</c>
-    /// files with their paired <c>.Source.zip</c>s. Synchronous — the streams
-    /// are consumed in-request, and the staged ZIP is deleted before returning.
-    /// Throws <see cref="PlanValidationException"/> when nothing was picked, or
-    /// when the importer refuses the amend.
+    /// files with their paired <c>.Source.zip</c>s. The release is flipped to
+    /// <c>ingesting</c>, the files are staged to one temp ZIP, and the amend runs on
+    /// the import worker like a DVD import, inside the one-heavy-import gate (#1549,
+    /// #1602). Throws <see cref="PlanValidationException"/> when nothing was picked,
+    /// when two source ZIPs pair with the same app, when the release cannot take an
+    /// amend, or when the upload cannot be staged; the release is left as it was.
     /// </summary>
-    public async Task<ReleaseImportSummary> AmendAsync(
+    public async Task<ReleaseImportOutcome> AmendAsync(
         int releaseId,
         UploadedFile? folderZipFile,
         IReadOnlyList<UploadedFile> appFileUploads,
@@ -255,40 +272,101 @@ public sealed class ReleaseImportRequestService
         var folderZip = folderZipFile is { Length: > 0 } fz ? fz : null;
         var appFiles = appFileUploads.Where(f => f.Length > 0).ToArray();
 
-        if (folderZipFile is null && appFiles.Length == 0)
+        if (folderZip is null && appFiles.Length == 0)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["AppFiles"] = "Pick a folder ZIP or at least one .app file before submitting.",
             });
         }
+        // Paired before anything changes, so a clash is refused with the release untouched.
+        var pairs = folderZip is null ? PairIndividualFiles(appFiles, sourceZips) : null;
 
-        var openedStreams = new List<Stream>();
-        ZipArchive? folderArchive = null;
-        string? tempFolderZipPath = null;
+        // From the flip on the release reads as importing; until the job row says so,
+        // this tracker tells a build waiting on it that someone is (#1180).
+        using var tracking = _importer.Ingests.Track(releaseId);
+        await _importer.BeginAmendAsync(releaseId, ct);
+
+        string? stagedPath = null;
+        long? jobRowId = null;
         try
         {
-            List<AppFileUpload> uploads;
-            if (folderZip is not null)
+            try
             {
-                (uploads, folderArchive, tempFolderZipPath) =
-                    await BuildUploadsFromFolderZipAsync(folderZip, openedStreams, ct).ConfigureAwait(false);
+                stagedPath = pairs is null
+                    ? await StageUploadToTempAsync(folderZip!, AddModulesTempPrefix, ".zip", ct)
+                    : await StagePairsToTempZipAsync(pairs, ct);
             }
-            else
+            catch (IOException ex)
             {
-                uploads = BuildUploadsFromIndividualFiles(appFiles, sourceZips, openedStreams);
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    ["AppFiles"] = "Could not save the upload on the server: " + ex.Message,
+                });
             }
 
-            return await _importer.AmendReleaseAsync(releaseId, uploads, ct).ConfigureAwait(false);
+            var source = new ReleaseImportSource.AddModules(stagedPath);
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing modules for a release");
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct);
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId.Value),
+                ct);
+            _logger.LogInformation("Queued {Count} module upload(s) for release {ReleaseId}.", pairs?.Count ?? 1, releaseId);
+            return new ReleaseImportOutcome.Queued(releaseId);
         }
-        finally
+        catch (Exception ex)
         {
-            DisposeAll(openedStreams);
-            folderArchive?.Dispose();
-            if (tempFolderZipPath is not null && File.Exists(tempFolderZipPath))
+            _logger.LogWarning(ex, "Adding modules to release {ReleaseId} stopped before it was queued; handing it back.", releaseId);
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, AddModulesNotQueuedMessage);
+            await _importer.RestoreAmendedReleaseAsync(releaseId);
+            throw;
+        }
+    }
+
+    /// <summary>Temp-file prefix for the uploads of an Add modules job (#1549).</summary>
+    public const string AddModulesTempPrefix = "oe-amend-";
+
+    private const string AddModulesNotQueuedMessage =
+        "The upload stopped before it was queued, so nothing was added. Add the modules again.";
+
+    /// <summary>
+    /// Writes individually picked <c>.app</c> files and their paired source ZIPs into
+    /// one temp ZIP, one folder per app, so the worker pairs them exactly as they were
+    /// paired here. Stored, not compressed: both are ZIPs already.
+    /// </summary>
+    private static async Task<string> StagePairsToTempZipAsync(
+        IReadOnlyList<(UploadedFile App, UploadedFile? Source)> pairs, CancellationToken ct)
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), AddModulesTempPrefix + Guid.NewGuid().ToString("N") + ".zip");
+        try
+        {
+            await using var fs = File.Create(tempPath);
+            using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+            for (var i = 0; i < pairs.Count; i++)
             {
-                try { File.Delete(tempFolderZipPath); } catch { /* swallow */ }
+                var (app, source) = pairs[i];
+                var appName = Path.GetFileName(app.FileName);
+                await CopyIntoAsync(zip, $"{i:D3}/{appName}", app, ct);
+                if (source is not null)
+                {
+                    var sourceName = Path.GetFileNameWithoutExtension(appName) + ".Source.zip";
+                    await CopyIntoAsync(zip, $"{i:D3}/{sourceName}", source, ct);
+                }
             }
+        }
+        catch
+        {
+            try { File.Delete(tempPath); } catch { /* swallow */ }
+            throw;
+        }
+        return tempPath;
+
+        static async Task CopyIntoAsync(ZipArchive zip, string name, UploadedFile file, CancellationToken ct)
+        {
+            var entry = zip.CreateEntry(name, CompressionLevel.NoCompression);
+            await using var to = entry.Open();
+            await using var from = file.OpenRead();
+            await from.CopyToAsync(to, ct);
         }
     }
 
@@ -305,7 +383,13 @@ public sealed class ReleaseImportRequestService
     public async Task<ReleaseImportOutcome> RetryAsync(
         int releaseId, ReleaseRetrySubmission submission, CancellationToken ct = default)
     {
-        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct).ConfigureAwait(false);
+        // A release the solution-visibility fence hides is answered exactly as an
+        // unknown id: its saved source is read and then discarded, so there is
+        // nothing to reuse, and the reopen reads the release and answers not
+        // found. Asked first and always, so the two run the same queries.
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct);
+        var latest = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct);
+        var origin = visible ? latest : null;
 
         // Project builds re-run from the project id alone — no URL, no
         // re-upload. Reopen the release, wipe the previous attempt's modules,
@@ -324,13 +408,13 @@ public sealed class ReleaseImportRequestService
             // The release reads as importing from the reopen on, before its job is
             // queued: a build polling it must not take it for abandoned (#1180).
             using var rebuilding = _importer.Ingests.Track(releaseId);
-            await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false))
+            await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct))
             {
-                await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
-                await rebuild.CommitAsync(ct).ConfigureAwait(false);
+                await _importer.ReopenForRebuildAsync(releaseId, ct);
+                await rebuild.CommitAsync(ct);
             }
             // Wipes the previous attempt first, and fails the build if it cannot queue it.
-            await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
+            await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
 
@@ -361,6 +445,12 @@ public sealed class ReleaseImportRequestService
                 // was queued with, the same one a restart resumes from (#1222).
                 artifactUrl = originalArtifactUrl;
             }
+            else if (origin is null || origin.Kind is not ("url" or "bc_artifact" or "staged_zip" or "cal_txt"))
+            {
+                // No saved source at all (#1338): the manage page offers only
+                // the URL field here, so ask for exactly that.
+                throw RetryValidation("Paste the DVD's download URL to retry.");
+            }
             else
             {
                 throw RetryValidation(
@@ -370,7 +460,7 @@ public sealed class ReleaseImportRequestService
         }
         if (urlToUse is not null)
         {
-            await _dvdDownloader.ValidateUrlForQueueAsync(urlToUse, ct).ConfigureAwait(false);
+            await _dvdDownloader.ValidateUrlForQueueAsync(urlToUse, ct);
         }
 
         // Flip failed → ingesting (validates state) and wipe the previous
@@ -379,37 +469,154 @@ public sealed class ReleaseImportRequestService
         // the job is queued only after it: until then nothing else says the release
         // is being worked on, so a build polling it would take it for abandoned (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
-        await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
-        await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+        await _importer.ReopenForRetryAsync(releaseId, visible, ct);
 
-        ReleaseImportSource source;
-        if (artifactUrl is not null)
+        // From the reopen on the release reads as importing, but nothing works on it
+        // until its job is queued. Anything that stops the steps below (leaving the
+        // page during the long wipe, which cancels the request; the wipe's command
+        // timeout; a failed insert) fails it again rather than leave it stuck until a
+        // restart (#1612). The module DELETE is one statement, so cut off it rolls back
+        // and the earlier attempt's modules stay; a failure after it (the blob reclaim,
+        // staging, the job row) leaves them already removed. Either way the next Retry
+        // starts by wiping again.
+        string? stagedPath = null;
+        long? jobRowId = null;
+        try
         {
-            source = new ReleaseImportSource.BcArtifact(artifactUrl);
-        }
-        else if (urlToUse is not null)
-        {
-            source = new ReleaseImportSource.Url(urlToUse);
-        }
-        else if (hasFolderZip)
-        {
-            var tempPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
-            // otherwise honour the original staged flag (defaults to the
-            // whole-archive / workspace walk).
-            var isDvd = origin?.Kind == "url" || (origin?.StagedIsDvd ?? false);
-            source = new ReleaseImportSource.StagedZip(tempPath, isDvd);
-        }
-        else
-        {
-            var tempPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
-            if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
-            source = new ReleaseImportSource.CalTxt(tempPath, submission.CalEncoding);
-        }
+            await _management.ClearIngestedDataAsync(releaseId, ct);
 
-        await EnqueueImportAsync(releaseId, source, submission.StoreSymbolReference, ct).ConfigureAwait(false);
-        return new ReleaseImportOutcome.Queued(releaseId);
+            ReleaseImportSource source;
+            if (artifactUrl is not null)
+            {
+                source = new ReleaseImportSource.BcArtifact(artifactUrl);
+            }
+            else if (urlToUse is not null)
+            {
+                source = new ReleaseImportSource.Url(urlToUse);
+            }
+            else if (hasFolderZip)
+            {
+                stagedPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+                // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
+                // otherwise honour the original staged flag (defaults to the
+                // whole-archive / workspace walk).
+                var isDvd = origin?.Kind == "url" || (origin?.StagedIsDvd ?? false);
+                source = new ReleaseImportSource.StagedZip(stagedPath, isDvd);
+            }
+            else
+            {
+                stagedPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+                source = new ReleaseImportSource.CalTxt(stagedPath, submission.CalEncoding);
+            }
+
+            // EnqueueImportAsync's two steps, inline so a row written but never queued
+            // (the request ended while the queue was full) can be failed below.
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, submission.StoreSymbolReference, ct);
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, submission.StoreSymbolReference, jobRowId.Value),
+                ct);
+            return new ReleaseImportOutcome.Queued(releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Retry of release {ReleaseId} stopped before its import was queued; failing it again.", releaseId);
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, ReleaseImportService.RetryNotQueuedMessage);
+            await _importer.FailUnqueuedRetryAsync(releaseId);
+            throw;
+        }
+    }
+
+    /// <summary>An upload a new import stages to disk before queuing, and how to name it.</summary>
+    private sealed record PendingUpload(UploadedFile File, string Prefix, string Extension, string FailedNoun);
+
+    /// <summary>
+    /// The steps a new queued import takes after <see cref="ReleaseImportService.BeginReleaseAsync"/>
+    /// committed its release as <c>ingesting</c>: stage the upload (if any), write the job
+    /// row, enqueue. Anything that stops them (the tab closed during a long copy, which
+    /// cancels the request; a full queue the request gave up waiting on; a failed insert)
+    /// fails the release, as a Retry does, rather than leave it importing with nothing
+    /// behind it until the next restart (#1632).
+    /// </summary>
+    private async Task<ReleaseImportOutcome> StageAndQueueNewAsync(
+        int releaseId,
+        PendingUpload? upload,
+        Func<string?, ReleaseImportSource> sourceFor,
+        bool storeSymbolReference,
+        CancellationToken ct)
+    {
+        string? stagedPath = null;
+        long? jobRowId = null;
+        try
+        {
+            if (upload is not null)
+            {
+                stagedPath = await TryStageAsync(releaseId, upload.File, upload.Prefix, upload.Extension, upload.FailedNoun, ct);
+                if (stagedPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
+            }
+            var source = sourceFor(stagedPath);
+
+            // EnqueueImportAsync's two steps, inline so a row written but never queued
+            // can be failed below.
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
+            jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct);
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId.Value),
+                ct);
+            return new ReleaseImportOutcome.Queued(releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Import of release {ReleaseId} stopped before it was queued; failing it.", releaseId);
+            // A written job row keeps the origin, so Retry can re-run it.
+            var retryable = jobRowId is not null;
+            var message = retryable ? ReleaseImportService.ImportNotQueuedRetryMessage : ReleaseImportService.ImportNotQueuedMessage;
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath, message);
+            await _importer.FailUnqueuedImportAsync(releaseId, retryable);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// What an import or Retry that stopped before its job was queued leaves behind,
+    /// besides the release itself: a <c>queued</c> row with no job behind it would be
+    /// resumed at the next start, wiping the release first, even after a later import
+    /// has filled it; and no job will open the staged upload, so it would sit in the
+    /// temp folder until the next start. Never throws, so the caller rethrows the
+    /// error that got it here.
+    /// </summary>
+    private async Task CleanUpUnqueuedAsync(int releaseId, long? jobRowId, string? stagedPath, string message)
+    {
+        if (jobRowId is long rowId)
+        {
+            try
+            {
+                await _persistedJobs.FailUnqueuedAsync(rowId, message);
+            }
+            catch (Exception rowEx)
+            {
+                _logger.LogError(rowEx, "Could not fail import job row {JobRowId} of release {ReleaseId}.", rowId, releaseId);
+            }
+        }
+        if (stagedPath is not null)
+        {
+            try { File.Delete(stagedPath); } catch { /* swallow */ }
+        }
+    }
+
+    /// <summary>
+    /// The solution whose build produced <paramref name="releaseId"/>, for the
+    /// manual-symbols recovery, or null when the release is not a solution build.
+    /// A release the solution-visibility fence hides also answers null, after the
+    /// same read, so the refusal does not confirm that the id exists.
+    /// </summary>
+    public async Task<int?> FindSymbolRecoveryProjectAsync(int releaseId, CancellationToken ct = default)
+    {
+        var visible = await _access.IsReleaseVisibleAsync(releaseId, ct);
+        var origin = await _persistedJobs.GetLatestForReleaseAsync(releaseId, ct);
+        return visible && origin is { Kind: "project_build", ProjectId: int projectId } ? projectId : null;
     }
 
     /// <summary>
@@ -429,10 +636,66 @@ public sealed class ReleaseImportRequestService
         CancellationToken ct = default)
     {
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a release import");
-        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct).ConfigureAwait(false);
-        await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId),
-            ct).ConfigureAwait(false);
+        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference, ct);
+        try
+        {
+            await _queue.EnqueueAsync(
+                new ReleaseImportJob(releaseId, identity, source, storeSymbolReference, jobRowId),
+                ct);
+        }
+        catch
+        {
+            // A row nothing will feed would block the bulk backfill for this release
+            // until the next restart (#1578, OEI2-3); fail it instead.
+            await CleanUpUnqueuedAsync(releaseId, jobRowId, stagedPath: null,
+                "The request ended before this was queued, so it never ran. Try again.");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Queues a system-reference backfill for each of <paramref name="releaseIds"/>
+    /// without waiting for room on the queue, and says how many it queued and how
+    /// many it skipped because a backfill was already queued or running for them.
+    ///
+    /// <para>The import queue holds sixteen jobs and has one worker, and a backfill
+    /// takes minutes on a Business Central release, so writing a whole catalogue to
+    /// it from the request held the request for hours, and every other import waited
+    /// behind it (#1542). Instead the durable <c>queued</c> rows are written here, in
+    /// one transaction (<see cref="PersistedImportJobs.CreateBackfillsAsync"/>), and
+    /// the in-memory jobs are handed to the same background feeder the startup resume
+    /// uses. It feeds them paced (<see cref="ReleaseImportQueue.EnqueuePacedAsync"/>),
+    /// one waiting at a time, so an import submitted during the run is not stuck
+    /// behind a full queue of backfills. The feeder runs until shutdown, not until the
+    /// request ends, so closing the tab loses nothing; rows it has not fed by then are
+    /// queued again on the next start.</para>
+    ///
+    /// <para>A release that already has a backfill queued or running is skipped:
+    /// that run re-extracts the same stored source, so a second click adds nothing
+    /// but another hour on the queue. So is one whose backfill already ran since it
+    /// last changed, which a second click during a run would otherwise queue again
+    /// (#1578). A queued row from before this process started or the last restore
+    /// is failed and replaced, since nothing feeds it.</para>
+    /// </summary>
+    public async Task<BackfillQueueResult> QueueBackfillAllAsync(IReadOnlyList<int> releaseIds, CancellationToken ct = default)
+    {
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a system-reference backfill");
+        // Before the rows are written, so a restore from here on drops the feed (#1538).
+        var epoch = _queue.Epoch;
+        var rows = await _persistedJobs.CreateBackfillsAsync(releaseIds, identity, _queue.FedSinceUtc, ct);
+        var source = new ReleaseImportSource.Backfill();
+        var jobs = rows
+            .Select(r => new ReleaseImportJob(r.ReleaseId, identity, source, StoreSymbolReference: false, r.JobRowId))
+            .ToList();
+        if (jobs.Count > 0)
+        {
+            _ = ResumedImportJobs.EnqueueAllAsync(_queue, jobs, _logger, "system-reference backfill", _lifetime.ApplicationStopping, paced: true, epoch: epoch);
+        }
+        var skipped = releaseIds.Distinct().Count() - jobs.Count;
+        _logger.LogInformation(
+            "Queued {Count} system-reference backfill(s), skipping {Skipped} already queued or done.",
+            jobs.Count, skipped);
+        return new BackfillQueueResult(jobs.Count, skipped);
     }
 
     /// <summary>Field-keyed (<c>Retry</c>) validation error for the retry path's inline messages.</summary>
@@ -457,11 +720,11 @@ public sealed class ReleaseImportRequestService
     {
         try
         {
-            return await StageUploadToTempAsync(file, prefix, extension, ct).ConfigureAwait(false);
+            return await StageUploadToTempAsync(file, prefix, extension, ct);
         }
         catch (IOException ex)
         {
-            await _importer.MarkFailedAsync(releaseId, $"Could not stage the uploaded {failedNoun} to disk: " + ex.Message, ct).ConfigureAwait(false);
+            await _importer.MarkFailedAsync(releaseId, $"Could not stage the uploaded {failedNoun} to disk: " + ex.Message, ct);
             return null;
         }
     }
@@ -476,26 +739,20 @@ public sealed class ReleaseImportRequestService
         UploadedFile file, string prefix, string extension, CancellationToken ct)
     {
         var tempPath = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N") + extension);
-        await using var fs = File.Create(tempPath);
-        await using var src = file.OpenRead();
-        await src.CopyToAsync(fs, ct).ConfigureAwait(false);
+        try
+        {
+            await using var fs = File.Create(tempPath);
+            await using var src = file.OpenRead();
+            await src.CopyToAsync(fs, ct);
+        }
+        catch
+        {
+            // A half-written copy has no job to delete it, so it would sit in the
+            // temp folder until the next start. The file is closed by now.
+            try { File.Delete(tempPath); } catch { /* swallow */ }
+            throw;
+        }
         return tempPath;
-    }
-
-    /// <summary>
-    /// Stages the uploaded folder ZIP to a temp file and walks every
-    /// <c>.app</c> entry — the synchronous amend path (#216) consumes the entry
-    /// streams in-request, so it gets the archive + temp path back to dispose.
-    /// </summary>
-    private static async Task<(List<AppFileUpload> Uploads, ZipArchive Archive, string TempPath)>
-        BuildUploadsFromFolderZipAsync(
-            UploadedFile folderZip,
-            List<Stream> openedStreams,
-            CancellationToken ct)
-    {
-        var tempPath = await StageUploadToTempAsync(folderZip, FolderZipTempPrefix, ".zip", ct).ConfigureAwait(false);
-        var (uploads, archive) = ReleaseZipStaging.OpenStagedZip(tempPath, isDvd: false, openedStreams);
-        return (uploads, archive, tempPath);
     }
 
     // ── Individual-file path (legacy / partner extensions) ─────────────
@@ -505,31 +762,64 @@ public sealed class ReleaseImportRequestService
         IReadOnlyList<UploadedFile> sourceZipFiles,
         List<Stream> openedStreams)
     {
-        var sourceZips = sourceZipFiles.Where(f => f.Length > 0).ToArray();
-        var sourceByBasename = sourceZips.ToDictionary(
-            f => Path.GetFileNameWithoutExtension(f.FileName).Replace(".Source", "", StringComparison.OrdinalIgnoreCase),
-            f => f,
-            StringComparer.OrdinalIgnoreCase);
-
         var uploads = new List<AppFileUpload>(appFiles.Count);
-        foreach (var af in appFiles)
+        foreach (var (app, source) in PairIndividualFiles(appFiles, sourceZipFiles))
         {
-            var appStream = af.OpenRead();
+            var appStream = app.OpenRead();
             openedStreams.Add(appStream);
             Stream? sourceStream = null;
+            if (source is not null)
+            {
+                sourceStream = source.OpenRead();
+                openedStreams.Add(sourceStream);
+            }
+            uploads.Add(new AppFileUpload(app.FileName, appStream, sourceStream));
+        }
+        return uploads;
+    }
+
+    /// <summary>
+    /// Pairs each picked <c>.app</c> with the source ZIP named after it, if one was
+    /// picked. Throws <see cref="PlanValidationException"/> keyed <c>SourceZips</c>
+    /// when two source ZIPs would pair with the same app.
+    /// </summary>
+    private static List<(UploadedFile App, UploadedFile? Source)> PairIndividualFiles(
+        IReadOnlyList<UploadedFile> appFiles,
+        IReadOnlyList<UploadedFile> sourceZipFiles)
+    {
+        var sourceZips = sourceZipFiles.Where(f => f.Length > 0).ToArray();
+        static string Stem(UploadedFile f) =>
+            Path.GetFileNameWithoutExtension(f.FileName).Replace(".Source", "", StringComparison.OrdinalIgnoreCase);
+        // Two source ZIPs that pair with the same .app ("CRONUS App.Source.zip" and
+        // "CRONUS App.zip", or names differing only in case) are a mistake the person
+        // can fix, not a crash (#1549).
+        var clash = sourceZips.GroupBy(Stem, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (clash is not null)
+        {
+            var names = clash.Select(f => $"'{f.FileName}'").ToList();
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["SourceZips"] = $"{string.Join(" and ", names)} are both source for the same app. Pick only one of them.",
+            });
+        }
+        var sourceByBasename = sourceZips.ToDictionary(Stem, f => f, StringComparer.OrdinalIgnoreCase);
+
+        var pairs = new List<(UploadedFile App, UploadedFile? Source)>(appFiles.Count);
+        foreach (var af in appFiles)
+        {
+            UploadedFile? source = null;
             var stem = Path.GetFileNameWithoutExtension(af.FileName);
             foreach (var key in EnumeratePossibleSourceKeys(stem))
             {
                 if (sourceByBasename.TryGetValue(key, out var match))
                 {
-                    sourceStream = match.OpenRead();
-                    openedStreams.Add(sourceStream);
+                    source = match;
                     break;
                 }
             }
-            uploads.Add(new AppFileUpload(af.FileName, appStream, sourceStream));
+            pairs.Add((af, source));
         }
-        return uploads;
+        return pairs;
     }
 
     /// <summary>

@@ -29,6 +29,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.RequestedBy).HasColumnName("requested_by").HasMaxLength(320).IsRequired();
         entity.Property(e => e.RequestedAt).HasColumnName("requested_at").IsRequired();
         entity.Property(e => e.ExecuteAfter).HasColumnName("execute_after").IsRequired();
+        // Which window chose execute_after, so the worker can hold a booked install to it
+        // when its turn comes (#1539). Text, like kind and status.
+        entity.Property(e => e.ScheduledByWindow).HasColumnName("scheduled_by_window")
+            .HasConversion<string>().HasMaxLength(20);
         entity.Property(e => e.SentAt).HasColumnName("sent_at");
         entity.Property(e => e.Outcome).HasColumnName("outcome");
         entity.Property(e => e.CancelledByUserId).HasColumnName("cancelled_by_user_id");
@@ -49,6 +53,12 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.BcOperationId).HasColumnName("package_bc_operation_id");
         // An accepted install nobody saw finish, still to be asked about once (#1002).
         entity.Property(e => e.ConfirmationDue).HasColumnName("package_confirmation_due");
+        // How a started platform update ended, and when it was last asked about (#1711).
+        entity.Property(e => e.UpdateResult).HasColumnName("update_result")
+            .HasConversion<string>().HasMaxLength(20);
+        entity.Property(e => e.UpdateCheckedAt).HasColumnName("update_checked_at");
+        // Booked by the workbench itself (the date move after a finished update), not a person.
+        entity.Property(e => e.Automatic).HasColumnName("automatic").HasDefaultValue(false);
         // A booked AppSource update (#1001): the app's name for the lists, and the
         // prerequisites the person agreed to, which the worker holds Business Central to.
         entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);
@@ -109,5 +119,12 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // The worker's due-scan (status-scoped).
         entity.HasIndex(e => new { e.Status, e.ExecuteAfter })
             .HasDatabaseName("ix_oe_env_upgrade_actions_status_due");
+        // The worker's follow-scan: sent starts whose update has not been seen to end.
+        // Partial, so it leaves out every other kind and every settled start; starts that
+        // aged out unsettled (and those sent before #1711) stay in it, which the scan's
+        // sent_at range skips past.
+        entity.HasIndex(e => e.SentAt)
+            .HasDatabaseName("ix_oe_env_upgrade_actions_follow")
+            .HasFilter("kind = 'RunNow' AND status = 'Sent' AND update_result IS NULL");
     }
 }

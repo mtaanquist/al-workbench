@@ -1,0 +1,109 @@
+@page "/site-admin/settings/logs"
+@attribute [Authorize(Roles = HttpOrganizationContext.SiteAdminRole)]
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services
+@using ALDevToolbox.Services.Logging
+@using ALDevToolbox.Services.Operations
+@inject SystemSettingsService Settings
+@inject StoredLogService Logs
+
+<PageTitle>Logs · Site administration · AL Workbench</PageTitle>
+
+@*
+    How long the logs on /site-admin/logs are kept and which lines are kept. Both
+    apply when saved, with no restart. The aside shows what the stored lines cost in
+    disk, which is the number that should decide these settings.
+*@
+
+<SiteAdminSettingsPage ActiveTab="SiteAdminSettingsPage.Tab.Logs">
+    <Alerts>
+        <SettingsBanner Message="@Message" Ok="@Ok" SavedText="Log settings saved." />
+    </Alerts>
+    <Body>
+        @if (_view is null)
+        {
+            <div class="loading-block"><span class="spinner"></span><span>Loading...</span></div>
+        }
+        else
+        {
+            <form method="post" action="/site-admin/settings/logs/save" id="settings-logs-form">
+                <AntiforgeryToken />
+                <div class="setting-list">
+                    <SettingRow Name="Lines to keep"
+                                Hint="Which log lines are saved so you can read them on the Logs page. Errors only keeps the least; everything keeps the most and is the most useful when something goes wrong.">
+                        <SelectBox>
+                            <select class="select" name="LogMinimumLevel" aria-label="Lines to keep">
+                                @foreach (var level in SystemSettingsService.StoredLogLevels)
+                                {
+                                    <option value="@level" selected="@(_view.MinimumLevel == level)">@LevelLabel(level)</option>
+                                }
+                            </select>
+                        </SelectBox>
+                    </SettingRow>
+                    <SettingRow Name="Keep logs for"
+                                Hint="Older lines are deleted once an hour.">
+                        <span class="u-row">
+                            <input class="input input--num" type="number" name="LogRetentionDays"
+                                   min="@StoredLogBuffer.MinRetentionDays" max="@StoredLogBuffer.MaxRetentionDays" step="1" required
+                                   style="width: 92px" aria-label="Days to keep logs"
+                                   value="@_view.RetentionDays" />
+                            <span class="form-actions__note">
+                                Days, from @StoredLogBuffer.MinRetentionDays to @StoredLogBuffer.MaxRetentionDays.
+                            </span>
+                        </span>
+                    </SettingRow>
+                </div>
+            </form>
+        }
+    </Body>
+    <Foot>
+        @if (_view is not null)
+        {
+            <button type="submit" form="settings-logs-form" class="btn btn--primary">
+                <Icon Name="save" Width="16" Height="16" />
+                <span>Save changes</span>
+            </button>
+        }
+    </Foot>
+    <Aside>
+        <SettingsAside UpdatedAt="@_view?.UpdatedAt">
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    Stored logs take up <strong>@FormatSize(_sizeBytes)</strong> right now.
+                    They are left out of backups, so they never make a backup bigger.
+                </span>
+            </Alert>
+            <a class="btn btn--sm" href="/site-admin/logs">
+                <Icon Name="scroll-text" Width="14" Height="14" />
+                <span>Read the logs</span>
+            </a>
+        </SettingsAside>
+    </Aside>
+</SiteAdminSettingsPage>
+
+@code {
+    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
+
+    private StoredLogSettingsView? _view;
+    private long _sizeBytes;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _view = await Settings.GetStoredLogSettingsAsync();
+        _sizeBytes = await Logs.TableSizeBytesAsync();
+    }
+
+    internal static string LevelLabel(LogLevel level) => level switch
+    {
+        LogLevel.Information => "Everything",
+        LogLevel.Warning => "Warnings and errors",
+        LogLevel.Error => "Errors only",
+        _ => "Nothing - don't keep logs",
+    };
+
+    internal static string FormatSize(long bytes) =>
+        bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):N1} GB" :
+        bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):N0} MB" :
+        $"{Math.Max(1, bytes / 1024):N0} KB";
+}

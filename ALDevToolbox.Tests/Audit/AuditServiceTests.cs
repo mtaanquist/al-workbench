@@ -118,6 +118,60 @@ public sealed class AuditServiceTests : IDisposable
         nextOfThird.Should().BeNull("nothing after the most recent");
     }
 
+    /// <summary>
+    /// "_" and "%" typed into "Changed by" match themselves, not any character
+    /// (#1550): j_doe@ must not list jxdoe@, and a lone % must not list everything.
+    /// </summary>
+    [Fact]
+    public async Task The_changed_by_filter_takes_wildcard_characters_literally()
+    {
+        var ts = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.AuditLog.AddRange(
+                NewEntry(ts, TestDb.DefaultOrgId, "j_doe@cronus.example"),
+                NewEntry(ts, TestDb.DefaultOrgId, "jxdoe@cronus.example"),
+                NewEntry(ts, TestDb.DefaultOrgId, "100%@cronus.example"));
+            await ctx.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+
+        async Task<IEnumerable<string>> ByAsync(string actor) =>
+            (await NewService().GetPagedAsync(new AuditFilter(null, null, null, actor, null, null), 0, 50)).Items.Select(r => r.ChangedBy);
+
+        (await ByAsync("j_doe")).Should().Equal("j_doe@cronus.example");
+        (await ByAsync("%")).Should().Equal("100%@cronus.example");
+        (await ByAsync("JXDOE")).Should().Equal(["jxdoe@cronus.example"], "the match is still case-insensitive");
+    }
+
+    /// <summary>
+    /// Rows written before system writes were named say "unknown" but read as "System"
+    /// or "Not signed in", so searching for what is on screen finds them.
+    /// </summary>
+    [Fact]
+    public async Task The_changed_by_filter_finds_old_rows_by_the_label_they_are_shown_with()
+    {
+        var ts = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.AuditLog.AddRange(
+                NewEntry(ts, TestDb.DefaultOrgId, "unknown", AuditEntityType.Backup),
+                NewEntry(ts, TestDb.DefaultOrgId, "unknown", AuditEntityType.SignupRequest),
+                NewEntry(ts, TestDb.DefaultOrgId, "System (BackupScheduler)", AuditEntityType.Backup),
+                NewEntry(ts, TestDb.DefaultOrgId, "anna@cronus.example", AuditEntityType.Backup));
+            await ctx.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+
+        async Task<IEnumerable<string>> ByAsync(string actor) =>
+            (await NewService().GetPagedAsync(new AuditFilter(null, null, null, actor, null, null), 0, 50))
+                .Items.Select(AuditActor.Display);
+
+        (await ByAsync("system")).Should().BeEquivalentTo("System", "System (BackupScheduler)");
+        (await ByAsync("Not signed")).Should().BeEquivalentTo("Not signed in");
+        (await ByAsync("anna")).Should().BeEquivalentTo("anna@cronus.example");
+    }
+
     private AuditService NewService() => new(_db.NewContextFactory(), _db.OrgContext);
 
     private async Task SeedAuditRowsAsync()

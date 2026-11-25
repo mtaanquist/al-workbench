@@ -44,9 +44,9 @@ internal static class AdminUserEndpoints
             {
                 try
                 {
-                    // Fence category 4 (explicitly scoped lookup): the approval above already refused
-                    // any request outside the admin's own org, so this re-read is in-org.
-                    var req = await db.SignupRequests.IgnoreQueryFilters()
+                    // The approval above already refused any request outside the admin's own
+                    // org, so the tenant filter is all this re-read needs.
+                    var req = await db.SignupRequests.AsNoTracking()
                         .Include(r => r.User).Include(r => r.Organization)
                         .FirstAsync(r => r.Id == id, ct);
                     if (req.User is not null && req.Organization is not null)
@@ -72,9 +72,9 @@ internal static class AdminUserEndpoints
         {
             var logger = loggerFactory.CreateLogger("AdminUsers");
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            // Fence category 4 (explicitly scoped lookup): only the email address is read here;
-            // the reject call below refuses any request outside the admin's own org.
-            var req = await db.SignupRequests.IgnoreQueryFilters()
+            // Read inside the tenant filter: the admin's own org's request or nothing. The
+            // reject call below re-checks the org, and its refusal is what the admin sees.
+            var req = await db.SignupRequests.AsNoTracking()
                 .Include(r => r.User).Include(r => r.Organization)
                 .FirstOrDefaultAsync(r => r.Id == id, ct);
             var requesterEmail = req?.User?.Email;
@@ -103,19 +103,8 @@ internal static class AdminUserEndpoints
             ctx.Response.Redirect(RouteConstants.AdminUsers);
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 
-        app.MapPost("/admin/users/{id:int}/disable", async (
-            int id, HttpContext ctx, UserAdministrationService users, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
-        {
-            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            try { await users.DisableUserAsync(id, org.CurrentOrganizationId!.Value, ct); }
-            catch (PlanValidationException ex)
-            {
-                var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Value)}");
-                return;
-            }
-            ctx.Response.Redirect(RouteConstants.AdminUsers);
-        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
+        // No POST /admin/users/{id}/disable: the Users page disables inside its
+        // circuit, after a confirmation that says what stops working (#1544).
 
         app.MapPost("/admin/users/{id:int}/enable", async (
             int id, HttpContext ctx, UserAdministrationService users, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
@@ -322,7 +311,7 @@ internal static class AdminUserEndpoints
                 await displayZone.EnsureLoadedAsync(ct);
                 var confirmableFrom = FormatEmailTime(displayZone, request.ConfirmableFrom);
                 var expiresAt = FormatEmailTime(displayZone, request.ExpiresAt);
-                var confirmUrl = $"{origin}/auth/account/email-change/confirm?token={Uri.EscapeDataString(request.ConfirmToken)}";
+                var confirmUrl = $"{origin}/account/email-change/confirm?token={Uri.EscapeDataString(request.ConfirmToken)}";
                 var confirm = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, request.DisplayName, confirmUrl,
                     confirmableFrom, expiresAt, ct);
                 await email.SendAsync(request.NewEmail, confirm, EmailPurpose.EmailChangeConfirmation, ct);

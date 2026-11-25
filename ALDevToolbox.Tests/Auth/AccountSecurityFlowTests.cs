@@ -59,23 +59,13 @@ public sealed class AccountSecurityFlowTests : IDisposable
     [Fact]
     public async Task CompleteMfa_stamps_last_login_and_records_success()
     {
-        var orgId = TestDb.DefaultOrgId;
-        await using (var seed = _db.NewContext())
-        {
-            seed.Users.Add(new User
-            {
-                Id = 5010, OrganizationId = orgId, Email = "mfa2@example.com",
-                PasswordHash = "x", DisplayName = "M2",
-                Role = UserRole.User, Status = UserStatus.Active, TotpEnabled = true,
-                CreatedAt = _clock.GetUtcNow().UtcDateTime,
-            });
-            await seed.SaveChangesAsync();
-        }
+        var userId = await SeedMfaUserAsync("mfa2@example.com");
         await using (var ctx = _db.NewContext())
         {
             var auth = NewAuth(ctx);
-            var user = await auth.CompleteMfaAsync(5010, "127.0.0.1");
-            user.LastLoginAt.Should().NotBeNull();
+            var (user, refused) = await auth.CompleteMfaAsync(userId, _clock.GetUtcNow().UtcDateTime, "127.0.0.1");
+            refused.Should().BeNull();
+            user!.LastLoginAt.Should().NotBeNull();
         }
         await using var read = _db.NewContext();
         var attempt = await read.LoginAttempts.IgnoreQueryFilters()
@@ -84,28 +74,56 @@ public sealed class AccountSecurityFlowTests : IDisposable
         attempt.Succeeded.Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData("reset", "invalid")]
+    [InlineData("disabled", "disabled")]
+    public async Task A_half_finished_sign_in_from_before_a_change_cannot_finish_after_it(string change, string refusal)
+    {
+        // The password leg ran, then the owner reset the password (or an admin
+        // disabled the account); the second factor arriving afterwards must not
+        // mint a session newer than the reset's cut-off (#1614).
+        var userId = await SeedMfaUserAsync($"mfa-{change}@example.com");
+        var pendingIssuedAt = _clock.GetUtcNow().UtcDateTime;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId);
+            row.CredentialsChangedAt = _clock.GetUtcNow().UtcDateTime;
+            if (change == "disabled") row.Status = UserStatus.Disabled;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var act = _db.NewContext();
+        var (user, refused) = await NewAuth(act).CompleteMfaAsync(userId, pendingIssuedAt, "127.0.0.1");
+
+        user.Should().BeNull();
+        refused.Should().Be(refusal);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).LastLoginAt.Should().BeNull();
+    }
+
     [Fact]
     public async Task Mfa_is_not_throttled_below_the_cap()
     {
-        await SeedMfaUserAsync(5300, "mfathrottle1@example.com");
+        var userId = await SeedMfaUserAsync("mfathrottle1@example.com");
         await using var ctx = _db.NewContext();
         var auth = NewAuth(ctx);
 
         // Every attempt up to the cap goes ahead (and, unreleased, stands as a failure).
         for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
-            (await auth.TryReserveMfaAttemptAsync(5300, "127.0.0.1", default)).Should().NotBeNull();
+            (await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default)).Should().NotBeNull();
     }
 
     [Fact]
     public async Task Mfa_is_throttled_after_the_cap_of_failures()
     {
-        await SeedMfaUserAsync(5310, "mfathrottle2@example.com");
+        var userId = await SeedMfaUserAsync("mfathrottle2@example.com");
         await using (var ctx = _db.NewContext())
         {
             var auth = NewAuth(ctx);
             for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
-                await auth.TryReserveMfaAttemptAsync(5310, "127.0.0.1", default);
-            (await auth.TryReserveMfaAttemptAsync(5310, "127.0.0.1", default))
+                await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default);
+            (await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default))
                 .Should().BeNull("MaxMfaAttempts consecutive failures locks the second factor");
         }
 
@@ -118,28 +136,28 @@ public sealed class AccountSecurityFlowTests : IDisposable
     [Fact]
     public async Task Mfa_throttle_clears_after_a_successful_attempt()
     {
-        await SeedMfaUserAsync(5320, "mfathrottle3@example.com");
+        var userId = await SeedMfaUserAsync("mfathrottle3@example.com");
         await using var ctx = _db.NewContext();
         var auth = NewAuth(ctx);
         for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
-            await auth.TryReserveMfaAttemptAsync(5320, "127.0.0.1", default);
-        (await auth.TryReserveMfaAttemptAsync(5320, "127.0.0.1", default)).Should().BeNull();
+            await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default);
+        (await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default)).Should().BeNull();
 
         // A success (e.g. finally entering the right code) breaks the failure
         // streak, so the account isn't stuck locked.
         _clock.Advance(TimeSpan.FromSeconds(1));
-        await auth.CompleteMfaAsync(5320, "127.0.0.1", default);
-        (await auth.TryReserveMfaAttemptAsync(5320, "127.0.0.1", default)).Should().NotBeNull();
+        await auth.CompleteMfaAsync(userId, _clock.GetUtcNow().UtcDateTime, "127.0.0.1", default);
+        (await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default)).Should().NotBeNull();
     }
 
     [Fact]
     public async Task A_released_attempt_is_not_counted_as_a_failure()
     {
-        await SeedMfaUserAsync(5330, "mfathrottle4@example.com");
+        var userId = await SeedMfaUserAsync("mfathrottle4@example.com");
         await using (var ctx = _db.NewContext())
         {
             var auth = NewAuth(ctx);
-            var attempt = await auth.TryReserveMfaAttemptAsync(5330, "127.0.0.1", default);
+            var attempt = await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default);
             await auth.ReleaseMfaAttemptAsync(attempt!.Value, default);
         }
 
@@ -153,13 +171,13 @@ public sealed class AccountSecurityFlowTests : IDisposable
     {
         // Each guess a request of its own, all in flight at once (#1208).
         // Checking before writing let every one of them read a count of zero.
-        await SeedMfaUserAsync(5340, "mfathrottle5@example.com");
+        var userId = await SeedMfaUserAsync("mfathrottle5@example.com");
         const int guesses = 25;
 
         var attempts = await Task.WhenAll(Enumerable.Range(0, guesses).Select(async _ =>
         {
             await using var ctx = _db.NewContext();
-            return await NewAuth(ctx).TryReserveMfaAttemptAsync(5340, "127.0.0.1", default);
+            return await NewAuth(ctx).TryReserveMfaAttemptAsync(userId, "127.0.0.1", default);
         }));
 
         attempts.Count(a => a is not null).Should().BeLessThanOrEqualTo(AuthService.MaxMfaAttempts);
@@ -171,20 +189,20 @@ public sealed class AccountSecurityFlowTests : IDisposable
         // Issuing either link records a success row; that used to end the
         // run of failures, so someone with the password could interleave
         // requests and keep guessing (#1259).
-        await SeedMfaUserAsync(5350, "mfathrottle6@example.com");
+        var userId = await SeedMfaUserAsync("mfathrottle6@example.com");
         await using var ctx = _db.NewContext();
         var auth = NewAuth(ctx);
         var resets = new PasswordResetService(ctx, auth, _clock, _db.OpenIddictTokens);
         for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
-            await auth.TryReserveMfaAttemptAsync(5350, "127.0.0.1", default);
+            await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default);
 
         _clock.Advance(TimeSpan.FromSeconds(1));
         (await resets.CreatePasswordResetTokenAsync("mfathrottle6@example.com", "127.0.0.1")).Should().NotBeNull();
-        (await auth.TryReserveMfaAttemptAsync(5350, "127.0.0.1", default)).Should().BeNull();
+        (await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default)).Should().BeNull();
 
         _clock.Advance(TimeSpan.FromSeconds(1));
         (await resets.CreateMagicLoginTokenAsync("mfathrottle6@example.com", "127.0.0.1")).Should().NotBeNull();
-        (await auth.TryReserveMfaAttemptAsync(5350, "127.0.0.1", default)).Should().BeNull();
+        (await auth.TryReserveMfaAttemptAsync(userId, "127.0.0.1", default)).Should().BeNull();
     }
 
     [Fact]
@@ -230,17 +248,24 @@ public sealed class AccountSecurityFlowTests : IDisposable
         outcome.Should().Be(LoginOutcome.RateLimited);
     }
 
-    private async Task SeedMfaUserAsync(int id, string email)
+    /// <summary>
+    /// Seeds a user with two-step sign-in on and returns the id the database gave
+    /// it. Hand-picked ids skipped the identity sequence, so a later insert could
+    /// collide with one, and the ids had to be kept apart by hand.
+    /// </summary>
+    private async Task<int> SeedMfaUserAsync(string email)
     {
         await using var seed = _db.NewContext();
-        seed.Users.Add(new User
+        var user = new User
         {
-            Id = id, OrganizationId = TestDb.DefaultOrgId, Email = email,
+            OrganizationId = TestDb.DefaultOrgId, Email = email,
             PasswordHash = "x", DisplayName = "MFA", Role = UserRole.User,
             Status = UserStatus.Active, TotpEnabled = true,
             CreatedAt = _clock.GetUtcNow().UtcDateTime,
-        });
+        };
+        seed.Users.Add(user);
         await seed.SaveChangesAsync();
+        return user.Id;
     }
 
     [Fact]
@@ -258,6 +283,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
                     CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 5400;
         string token;
         await using (var ctx = _db.NewContext())
         {
@@ -298,6 +324,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
                     CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 5450;
         string firstToken, secondToken;
         await using (var ctx = _db.NewContext())
         {
@@ -334,9 +361,10 @@ public sealed class AccountSecurityFlowTests : IDisposable
                 CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.CurrentUserId = 5500;
         await using var ctx = _db.NewContext();
         var act = () => NewUserAdmin(ctx).RequestEmailChangeAsync(5500, "fresh@example.com", orgId, 5500);
-        await act.Should().ThrowAsync<PlanValidationException>();
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("NewEmail");
     }
 
     [Fact]

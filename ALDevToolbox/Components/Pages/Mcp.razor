@@ -12,10 +12,12 @@
 @inject IHttpContextAccessor Http
 @inject IJSRuntime JS
 @inject NavigationManager Nav
+@inject ALDevToolbox.Endpoints.PublicOrigin Origin
 @inject ILogger<Mcp> Logger
 @inject IOrganizationContext OrgContext
 @inject PersonalAccessTokenService Pats
 @inject ALDevToolbox.Services.OAuth.OAuthConsentService Consents
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 
 <PageTitle>MCP · AL Workbench</PageTitle>
 
@@ -75,10 +77,7 @@
     }
     else
     {
-        @* steps--wide (divergence 72): this list's bodies are a two-up card
-           row, a token field and JSON config, not prose. The reading measure
-           stays on .step__text, where it belongs. *@
-        <SetupSteps Wide="true">
+        <SetupSteps>
             @* Step 1 is a fork, not a stage. The two cards used to point at the
                same URL and only the token half continued into steps 2 and 3, so
                a Claude-web reader picked "permission screen", landed on the same
@@ -240,7 +239,7 @@
             <summary>
                 <span class="u-row">
                     <Icon Name="chevron-right" Width="15" Height="15" Css="mcp-tools__caret" />
-                    <span>What your assistant can do - @McpToolCatalog.All.Count tools across @McpToolCatalog.Groups.Count areas</span>
+                    <span>What your assistant can do - @_offered.Count tools across @OfferedGroups.Count areas</span>
                 </span>
             </summary>
             <div class="mcp-tools__body">
@@ -249,7 +248,7 @@
                     tool for what you asked. Tools marked <strong>Changes something</strong>
                     can create or update data here; everything else only looks things up.
                 </p>
-                @foreach (var group in McpToolCatalog.Groups)
+                @foreach (var group in OfferedGroups)
                 {
                     <h3 class="mcp-tools__group">@group</h3>
                     <table class="data-table">
@@ -257,7 +256,7 @@
                             <tr><th>What it does</th><th>Tool</th></tr>
                         </thead>
                         <tbody>
-                            @foreach (var tool in McpToolCatalog.InGroup(group))
+                            @foreach (var tool in _offered.Where(t => t.Group == group))
                             {
                                 <tr>
                                     <td>
@@ -352,8 +351,35 @@
     /// </summary>
     private const string TokenPlaceholder = "aldt_pat_...";
 
+    // Cascaded by CascadingAuthenticationState. The signed-in principal carries
+    // the organisation's switched-off tools, so the filter below costs no query.
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
+
+    /// <summary>
+    /// The tools the assistant is actually offered. A tool switched off under
+    /// Administration -> Tools (or site-wide) is left out of what the assistant
+    /// receives (#1245), so listing it here sent people asking for something the
+    /// assistant could not do (#1344). The full list is only what is left when no
+    /// auth state cascades (a test host rendering the page bare). On a real page the
+    /// cascaded task has already completed, so the filter at the top of
+    /// OnInitializedAsync runs before the first render and the full list never shows.
+    /// </summary>
+    private IReadOnlyList<McpToolDescriptor> _offered = McpToolCatalog.All;
+
+    private List<string> OfferedGroups =>
+        McpToolCatalog.Groups.Where(g => _offered.Any(t => t.Group == g)).ToList();
+
     protected override async Task OnInitializedAsync()
     {
+        if (AuthStateTask is not null)
+        {
+            var user = (await AuthStateTask).User;
+            _offered = McpToolCatalog.All
+                .Where(t => t.Tool is { } key ? Tools.IsEnabled(key, user)
+                    : t.AnyOf is not { } anyOf || anyOf.Any(k => Tools.IsEnabled(k, user)))
+                .ToList();
+        }
+
         var userId = OrgContext.CurrentUserId;
         if (userId is null) return;
 
@@ -379,14 +405,17 @@
         var ctx = Http.HttpContext;
         if (ctx is not null)
         {
-            _serverUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}/mcp";
+            // PUBLIC_BASE_URL wins over the request host: behind a proxy that does
+            // not forward the public scheme or host, the request names an address
+            // the reader's assistant cannot reach (#1547).
+            _serverUrl = Origin.For(ctx) + "/mcp";
         }
         else
         {
             // OnInitialized after the SSR pass - fall back to the URL the
             // page itself is on so the snippet still has a sensible default.
             var uri = new Uri(Nav.Uri);
-            _serverUrl = $"{uri.Scheme}://{uri.Authority}/mcp";
+            _serverUrl = (Origin.Configured ?? $"{uri.Scheme}://{uri.Authority}") + "/mcp";
         }
     }
 

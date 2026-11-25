@@ -5,6 +5,7 @@ using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol;
 
@@ -27,6 +28,7 @@ public sealed class ProjectService
     private readonly ProjectDiscoveryService _discovery;
     private readonly GitHubAccessService _gitHubAccess;
     private readonly RepositoryReadProbe _readProbe;
+    private readonly StorageQuotaGuard _quotaGuard;
     private readonly ILogger<ProjectService> _logger;
 
     public ProjectService(
@@ -36,6 +38,7 @@ public sealed class ProjectService
         ProjectDiscoveryService discovery,
         GitHubAccessService gitHubAccess,
         RepositoryReadProbe readProbe,
+        StorageQuotaGuard quotaGuard,
         ILogger<ProjectService> logger)
     {
         _db = db;
@@ -44,6 +47,7 @@ public sealed class ProjectService
         _discovery = discovery;
         _gitHubAccess = gitHubAccess;
         _readProbe = readProbe;
+        _quotaGuard = quotaGuard;
         _logger = logger;
     }
 
@@ -51,8 +55,8 @@ public sealed class ProjectService
         ?? throw new InvalidOperationException("No organization in scope; project mutation called outside an authenticated request.");
 
     /// <summary>
-    /// True when the current user may manage <paramref name="projectId"/> (owner or
-    /// org Admin / SiteAdmin) — for the UI to hide Build/Add/Delete affordances.
+    /// True when the current user may manage <paramref name="projectId"/> (owner,
+    /// org Admin / SiteAdmin, everyone on a Public one, or its teams) — for the UI to hide Build/Add/Delete affordances.
     /// Returns false when the project no longer exists.
     /// </summary>
     public async Task<bool> CanManageAsync(int projectId, CancellationToken ct = default)
@@ -953,21 +957,48 @@ public sealed class ProjectService
         var orgId = RequireOrganizationId();
         ArgumentNullException.ThrowIfNull(teamIds);
 
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
-            ?? throw Validation("Visibility", "This solution no longer exists.");
-
         // Changing who may see a solution is governance, not work on it: the same set
         // as deleting it, and for the same reason a team grant never included delete.
         // Under the old model manage was owner-and-admins here anyway; now that a
         // Public solution is managed by everyone, leaving this on manage would let
         // anybody re-govern it - lock a shared solution to a team of their own, or
-        // open a narrowed one back up. See .design/teams-and-visibility.md.
-        if (!await _access.CanDeleteAsync(project.CreatedByUserId, ct))
+        // open a narrowed one back up. See .design/teams-and-visibility.md. Asked
+        // before the locks below, so a refused caller never queues behind a writer.
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => new { p.CreatedByUserId })
+            .FirstOrDefaultAsync(ct)
+            ?? throw Validation("Visibility", "This solution no longer exists.");
+        if (!await _access.CanDeleteAsync(ownerId.CreatedByUserId, ct))
         {
             throw new ProjectAccessDeniedException(
                 "Only the solution's owner or an organisation admin can change who may see it.");
         }
+
+        // A team delete checks "is it the only team" and then deletes; without a lock it
+        // and this save could each pass and leave the solution non-Public with no team
+        // (#1603). Teams, then the solution, in the order TeamService takes them: a delete
+        // waits for this save and then checks what it left, and this save, waiting for a
+        // delete, then finds the team gone and says so. Raw SQL, approved for #1603 like
+        // ModuleService's lock: it skips the query filter, so each statement names the
+        // organisation itself. The teams being kept or added FOR KEY SHARE, which is what
+        // linking them takes anyway; the solution FOR NO KEY UPDATE, as the admin guard
+        // (#1337), so a row that only references it is not held up.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+        var lockedTeamIds = teamIds.Distinct().Order().ToArray();
+        if (lockedTeamIds.Length > 0)
+        {
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT 1 FROM teams WHERE id = ANY({lockedTeamIds}) AND organization_id = {orgId} ORDER BY id FOR KEY SHARE", ct);
+        }
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM oe_projects WHERE id = {projectId} AND organization_id = {orgId} FOR NO KEY UPDATE", ct);
+
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
+            ?? throw Validation("Visibility", "This solution no longer exists.");
 
         var (_, wanted) = await ValidateAccessAsync(new ProjectAccessSettings(visibility, teamIds), ct);
 
@@ -995,6 +1026,7 @@ public sealed class ProjectService
         project.Visibility = visibility;
         project.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
 
         _logger.LogInformation("Set project {ProjectId} visibility to {Visibility} with {TeamCount} team(s).",
             projectId, visibility, wanted.Count);
@@ -1069,6 +1101,9 @@ public sealed class ProjectService
     {
         var orgId = RequireOrganizationId();
         ArgumentNullException.ThrowIfNull(uploads);
+        // Symbol packages are stored blobs like any upload, so an organisation over its
+        // quota can't add more (#1580).
+        await _quotaGuard.EnsureCanWriteAsync(ct);
 
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)

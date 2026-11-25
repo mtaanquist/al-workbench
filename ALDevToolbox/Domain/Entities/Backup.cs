@@ -55,4 +55,12 @@ public class Backup
 
     /// <summary>The S3 object key under which the backup was uploaded, or null when not uploaded.</summary>
     public string? OffsiteObjectKey { get; set; }
+
+    /// <summary>
+    /// Set on a dump downloaded with Recover: the id of the other installation
+    /// that made it. Restoring such a row is only allowed on a fresh
+    /// installation, and it is the restore, not the download, that makes this
+    /// installation take over the other one's backups (#1322).
+    /// </summary>
+    public string? RecoveredFromDeploymentId { get; set; }
 }

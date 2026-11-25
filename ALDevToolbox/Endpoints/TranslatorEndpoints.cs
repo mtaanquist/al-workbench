@@ -94,12 +94,20 @@ internal static class TranslatorEndpoints
             // (#1268, L48). Never let a memory hiccup fail the download. Not
             // tied to the request's token: the client may hang up as soon as
             // the file has arrived, and that is no reason to stop learning.
+            // The editor also says which of those edits are new since its last
+            // save (#1343): saving in place or exporting leaves every edit in the
+            // overlay, so the overlay alone would teach the same units again on
+            // every save. Without the list, every edit is learned.
             try
             {
                 var edited = edits
                     .Where(e => !string.IsNullOrEmpty(e.Value.Target))
                     .Select(e => e.Key)
                     .ToHashSet(StringComparer.Ordinal);
+                if (ParseLearn(form["Learn"].ToString()) is { } learn)
+                {
+                    edited.IntersectWith(learn);
+                }
                 await memory.LearnFromXliffAsync(result, unitIds: edited,
                     ct: ctx.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
             }
@@ -206,6 +214,17 @@ internal static class TranslatorEndpoints
             edits[prop.Name] = new TargetEdit(target, string.IsNullOrEmpty(state) ? null : state);
         }
         return edits;
+    }
+
+    /// <summary>
+    /// Parses the list of unit ids to learn from: a JSON array of strings, or
+    /// <see langword="null"/> when the field was not sent at all.
+    /// </summary>
+    private static HashSet<string>? ParseLearn(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        var ids = JsonSerializer.Deserialize<List<string>>(json) ?? [];
+        return ids.ToHashSet(StringComparer.Ordinal);
     }
 
     /// <summary>Strips path separators and control characters so the download name is safe.</summary>

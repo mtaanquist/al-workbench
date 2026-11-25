@@ -132,7 +132,7 @@ public sealed class ModuleServiceFolderTests : IDisposable
     }
 
     private ModuleService NewService(ALDevToolbox.Data.AppDbContext ctx) =>
-        new(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx));
+        new(ctx, NullLogger<ModuleService>.Instance, _db.OrgContext, new FolderTreeHydrator(ctx), _db.NewQuotaGuard(ctx));
 
     private static ModuleInput ModuleInputFor(string key, IReadOnlyList<FolderAuthoring> folders) =>
         new(

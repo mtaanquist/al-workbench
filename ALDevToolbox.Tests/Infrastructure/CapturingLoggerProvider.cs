@@ -22,11 +22,15 @@ public sealed class CapturingLoggerProvider : ILoggerProvider
 
     public ILogger CreateLogger(string categoryName) => new Capturing(_entries);
 
-    /// <summary>Everything logged at Error or above, newest last, one per line.</summary>
-    public string ErrorsForFailureMessage()
+    /// <summary>
+    /// Everything logged at <paramref name="minimum"/> (Error by default) or above,
+    /// newest last, one per line. Pass Warning for code that catches a failure and
+    /// carries on, which usually says so at Warning.
+    /// </summary>
+    public string ErrorsForFailureMessage(LogLevel minimum = LogLevel.Error)
     {
-        var errors = _entries.Where(e => e.Level >= LogLevel.Error).ToList();
-        if (errors.Count == 0) return "(nothing was logged at Error level)";
+        var errors = _entries.Where(e => e.Level >= minimum).ToList();
+        if (errors.Count == 0) return $"(nothing was logged at {minimum} level or above)";
         return string.Join("\n", errors.Select(e =>
             e.Error is null ? $"  {e.Level}: {e.Message}" : $"  {e.Level}: {e.Message}\n    {e.Error}"));
     }

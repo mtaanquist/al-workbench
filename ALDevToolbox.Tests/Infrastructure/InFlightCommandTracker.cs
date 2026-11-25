@@ -41,6 +41,34 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
     /// </summary>
     public int Total => Volatile.Read(ref _total);
 
+    /// <summary>What each counted command or opening connection is, for the timeout message.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<object, string> _open = new();
+
+    /// <summary>
+    /// The commands and connection opens still counted, one per line, so a
+    /// settle timeout can name the query it waited on.
+    /// </summary>
+    public string DescribeInFlight() =>
+        string.Join(Environment.NewLine, _open.Values.Select(v => "  " + v));
+
+    private void Enter(DbCommand command)
+    {
+        _open[command] = command.CommandText.ReplaceLineEndings(" ");
+        Enter();
+    }
+
+    private void Enter(DbConnection connection)
+    {
+        _open[connection] = "(opening a connection)";
+        Enter();
+    }
+
+    private void Leave(object key)
+    {
+        _open.TryRemove(key, out _);
+        Leave();
+    }
+
     private void Enter()
     {
         Interlocked.Increment(ref _inFlight);
@@ -61,7 +89,7 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
     public override InterceptionResult<DbDataReader> ReaderExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
     {
-        Enter();
+        Enter(command);
         return base.ReaderExecuting(command, eventData, result);
     }
 
@@ -69,7 +97,7 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
         CancellationToken cancellationToken = default)
     {
-        Enter();
+        Enter(command);
         return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
     }
 
@@ -78,7 +106,7 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
     public override InterceptionResult<object> ScalarExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<object> result)
     {
-        Enter();
+        Enter(command);
         return base.ScalarExecuting(command, eventData, result);
     }
 
@@ -86,13 +114,13 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
         DbCommand command, CommandEventData eventData, InterceptionResult<object> result,
         CancellationToken cancellationToken = default)
     {
-        Enter();
+        Enter(command);
         return base.ScalarExecutingAsync(command, eventData, result, cancellationToken);
     }
 
     public override object? ScalarExecuted(DbCommand command, CommandExecutedEventData eventData, object? result)
     {
-        Leave();
+        Leave(command);
         return base.ScalarExecuted(command, eventData, result);
     }
 
@@ -100,14 +128,14 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
         DbCommand command, CommandExecutedEventData eventData, object? result,
         CancellationToken cancellationToken = default)
     {
-        Leave();
+        Leave(command);
         return base.ScalarExecutedAsync(command, eventData, result, cancellationToken);
     }
 
     public override InterceptionResult<int> NonQueryExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<int> result)
     {
-        Enter();
+        Enter(command);
         return base.NonQueryExecuting(command, eventData, result);
     }
 
@@ -115,13 +143,13 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
         DbCommand command, CommandEventData eventData, InterceptionResult<int> result,
         CancellationToken cancellationToken = default)
     {
-        Enter();
+        Enter(command);
         return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
     }
 
     public override int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)
     {
-        Leave();
+        Leave(command);
         return base.NonQueryExecuted(command, eventData, result);
     }
 
@@ -129,28 +157,45 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
         DbCommand command, CommandExecutedEventData eventData, int result,
         CancellationToken cancellationToken = default)
     {
-        Leave();
+        Leave(command);
         return base.NonQueryExecutedAsync(command, eventData, result, cancellationToken);
     }
 
     public override InterceptionResult DataReaderDisposing(
         DbCommand command, DataReaderDisposingEventData eventData, InterceptionResult result)
     {
-        Leave();
+        Leave(command);
         return base.DataReaderDisposing(command, eventData, result);
     }
 
     public override void CommandFailed(DbCommand command, CommandErrorEventData eventData)
     {
-        Leave();
+        Leave(command);
         base.CommandFailed(command, eventData);
     }
 
     public override Task CommandFailedAsync(
         DbCommand command, CommandErrorEventData eventData, CancellationToken cancellationToken = default)
     {
-        Leave();
+        Leave(command);
         return base.CommandFailedAsync(command, eventData, cancellationToken);
+    }
+
+    // A command cancelled through its token raises CommandCanceled, not
+    // CommandFailed. Without these, every query a page cancelled on dispose (an
+    // auto-refresh, a debounced search) stayed counted for ever, and teardown sat
+    // on the full ten-second settle timeout waiting for it (#1552, TEST-7).
+    public override void CommandCanceled(DbCommand command, CommandEndEventData eventData)
+    {
+        Leave(command);
+        base.CommandCanceled(command, eventData);
+    }
+
+    public override Task CommandCanceledAsync(
+        DbCommand command, CommandEndEventData eventData, CancellationToken cancellationToken = default)
+    {
+        Leave(command);
+        return base.CommandCanceledAsync(command, eventData, cancellationToken);
     }
 
     // A connection that is still opening is just as unsafe to close as one
@@ -161,7 +206,7 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
     public InterceptionResult ConnectionOpening(
         DbConnection connection, ConnectionEventData eventData, InterceptionResult result)
     {
-        Enter();
+        Enter(connection);
         return result;
     }
 
@@ -169,25 +214,37 @@ public sealed class InFlightCommandTracker : DbCommandInterceptor, IDbConnection
         DbConnection connection, ConnectionEventData eventData, InterceptionResult result,
         CancellationToken cancellationToken = default)
     {
-        Enter();
+        Enter(connection);
         return ValueTask.FromResult(result);
     }
 
-    public void ConnectionOpened(DbConnection connection, ConnectionEndEventData eventData) => Leave();
+    public void ConnectionOpened(DbConnection connection, ConnectionEndEventData eventData) => Leave(connection);
 
     public Task ConnectionOpenedAsync(
         DbConnection connection, ConnectionEndEventData eventData, CancellationToken cancellationToken = default)
     {
-        Leave();
+        Leave(connection);
         return Task.CompletedTask;
     }
 
-    public void ConnectionFailed(DbConnection connection, ConnectionErrorEventData eventData) => Leave();
+    public void ConnectionFailed(DbConnection connection, ConnectionErrorEventData eventData) => Leave(connection);
 
     public Task ConnectionFailedAsync(
         DbConnection connection, ConnectionErrorEventData eventData, CancellationToken cancellationToken = default)
     {
-        Leave();
+        Leave(connection);
+        return Task.CompletedTask;
+    }
+
+    // An open cancelled through its token raises ConnectionCanceled, not
+    // ConnectionFailed: a page that polls on its own scope and is torn down
+    // mid-open left every such open counted (#1552, TEST-7).
+    public void ConnectionCanceled(DbConnection connection, ConnectionEndEventData eventData) => Leave(connection);
+
+    public Task ConnectionCanceledAsync(
+        DbConnection connection, ConnectionEndEventData eventData, CancellationToken cancellationToken = default)
+    {
+        Leave(connection);
         return Task.CompletedTask;
     }
 

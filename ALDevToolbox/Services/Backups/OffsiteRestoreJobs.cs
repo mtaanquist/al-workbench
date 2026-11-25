@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Workers;
 
 namespace ALDevToolbox.Services.Backups;
@@ -47,7 +48,8 @@ public sealed record OffsiteRestoreJob(
     long? TotalBytes,
     OffsiteRestoreJobStatus Status,
     string? Error,
-    int? BackupId);
+    int? BackupId,
+    bool RecoverFromAnotherInstallation = false);
 
 /// <summary>
 /// Process-local job tracker for off-site restore downloads. Holds the
@@ -86,9 +88,12 @@ public sealed class OffsiteRestoreJobs
     /// <summary>
     /// Registers a new job and enqueues it for the worker. Returns the
     /// freshly-minted id so the endpoint can redirect to a page that
-    /// knows which job to poll.
+    /// knows which job to poll. <paramref name="recoverFromAnotherInstallation"/>
+    /// carries the SiteAdmin's confirmation that a whole-database dump made by
+    /// another installation is being restored to rebuild it (#1322); the
+    /// download re-checks that this installation is still fresh.
     /// </summary>
-    public Guid Enqueue(OffsiteRestoreJobKind kind, string objectKey, string fileName)
+    public Guid Enqueue(OffsiteRestoreJobKind kind, string objectKey, string fileName, bool recoverFromAnotherInstallation = false)
     {
         EvictOldTerminal();
 
@@ -116,7 +121,8 @@ public sealed class OffsiteRestoreJobs
             TotalBytes: null,
             Status: OffsiteRestoreJobStatus.Pending,
             Error: null,
-            BackupId: null);
+            BackupId: null,
+            RecoverFromAnotherInstallation: recoverFromAnotherInstallation);
         _jobs[id] = job;
         if (!_queue.Writer.TryWrite(id))
         {
@@ -211,6 +217,21 @@ public sealed class OffsiteRestoreJobs
 /// and runs each download in a scoped <see cref="OffsiteBackupService"/>.
 /// Sequential by design — concurrent multi-gigabyte downloads to the
 /// same volume would just thrash disk.
+///
+/// <para>
+/// A download is a background job like any other across a restore (#1579,
+/// #1597): started while the site is open it is counted while it downloads,
+/// so a restore waits for it (and refuses if it does not finish); one picked
+/// up while a restore is running waits until the site reopens. The count is
+/// released once the file is on disk, before the final insert waits for the
+/// backup lock: a restore that began meanwhile holds that lock while it waits
+/// for the count, so the restore goes ahead and the row lands after it. The exception is a site held
+/// closed after a failed restore, where pulling a good backup from the bucket
+/// is how the SiteAdmin recovers: then the download runs, uncounted so it
+/// does not hold up the restore that follows. Either way it is given the
+/// database (<see cref="MaintenanceModeState.AllowDatabase"/>), and its final
+/// insert takes the backup lock, so the row cannot land inside a restore.
+/// </para>
 /// </summary>
 public sealed class OffsiteRestoreWorker : BackgroundService
 {
@@ -218,16 +239,22 @@ public sealed class OffsiteRestoreWorker : BackgroundService
     private readonly IServiceProvider _services;
     private readonly ILogger<OffsiteRestoreWorker> _logger;
     private readonly WorkerHeartbeat _heartbeat;
+    private readonly MaintenanceModeState _maintenance;
+
+    /// <summary>How often a download waiting for a restore to finish checks again.</summary>
+    internal TimeSpan MaintenancePollInterval { get; init; } = TimeSpan.FromSeconds(1);
 
     public OffsiteRestoreWorker(
         OffsiteRestoreJobs jobs,
         IServiceProvider services,
         ILogger<OffsiteRestoreWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        MaintenanceModeState maintenance)
     {
         _jobs = jobs;
         _services = services;
         _logger = logger;
+        _maintenance = maintenance;
         // Queue-driven; downloads can be large (multi-GB pg_dump archives) and
         // network-bound. 4-hour active ceiling lets a real restore complete
         // even on a slow link while still flagging a hung connection.
@@ -238,6 +265,8 @@ public sealed class OffsiteRestoreWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        using var actor = AuditActor.EnterBackground(nameof(OffsiteRestoreWorker));
+        using var logScope = Logging.WorkerLogScope.Enter(nameof(OffsiteRestoreWorker));
         await foreach (var jobId in _jobs.Reader.ReadAllAsync(stoppingToken))
         {
             _heartbeat.BeginActive();
@@ -269,6 +298,54 @@ public sealed class OffsiteRestoreWorker : BackgroundService
         var job = _jobs.Get(jobId);
         if (job is null) return;
 
+        var counted = await WaitForDatabaseAsync(jobId, stoppingToken);
+        // Released early, once the file is on disk (see DownloadAsync), or at the
+        // end; whichever comes first, and only once.
+        var released = counted ? 0 : 1;
+        void ReleaseJob()
+        {
+            if (Interlocked.Exchange(ref released, 1) == 0) _maintenance.EndJob(nameof(OffsiteRestoreWorker));
+        }
+        try
+        {
+            await RunCountedAsync(jobId, job, ReleaseJob, stoppingToken);
+        }
+        finally
+        {
+            ReleaseJob();
+        }
+    }
+
+    /// <summary>
+    /// Claims a job slot while the site is open (true). While a restore runs,
+    /// waits for the site to reopen; while it is held closed after a failed
+    /// restore, goes ahead uncounted (false). See the class remarks.
+    /// </summary>
+    private async Task<bool> WaitForDatabaseAsync(Guid jobId, CancellationToken stoppingToken)
+    {
+        var logged = false;
+        while (true)
+        {
+            if (_maintenance.TryBeginJob(nameof(OffsiteRestoreWorker))) return true;
+            if (_maintenance.IsHeldAfterFailedRestore) return false;
+            if (!logged)
+            {
+                _logger.LogInformation(
+                    "Off-site restore job {JobId} is waiting for the restore in progress to finish.", jobId);
+                logged = true;
+            }
+            await Task.Delay(MaintenancePollInterval, stoppingToken);
+        }
+    }
+
+    private async Task RunCountedAsync(Guid jobId, OffsiteRestoreJob job, Action releaseJob, CancellationToken stoppingToken)
+    {
+        // Counted, or let through on purpose by WaitForDatabaseAsync: either way
+        // the database guard must not refuse this job's commands (#1597),
+        // including the final insert after the count is released. Taken inside
+        // this method, so it ends with the job; the download starts no detached
+        // work that could keep it.
+        using var allowDatabase = _maintenance.AllowDatabase();
         await using var scope = _services.CreateAsyncScope();
         var offsite = scope.ServiceProvider.GetRequiredService<OffsiteBackupService>();
 
@@ -279,8 +356,8 @@ public sealed class OffsiteRestoreWorker : BackgroundService
                 _jobs.ReportProgress(jobId, tuple.BytesDownloaded, tuple.TotalBytes));
             var backupId = job.Kind switch
             {
-                OffsiteRestoreJobKind.WholeDb => await offsite.DownloadAsync(job.ObjectKey, progress, stoppingToken),
-                OffsiteRestoreJobKind.PerTenant => await offsite.DownloadPerTenantAsync(job.ObjectKey, progress, stoppingToken),
+                OffsiteRestoreJobKind.WholeDb => await offsite.DownloadAsync(job.ObjectKey, progress, job.RecoverFromAnotherInstallation, stoppingToken, releaseJob),
+                OffsiteRestoreJobKind.PerTenant => await offsite.DownloadPerTenantAsync(job.ObjectKey, progress, stoppingToken, releaseJob),
                 _ => throw new InvalidOperationException($"Unknown off-site restore job kind: {job.Kind}"),
             };
             _jobs.MarkCompleted(jobId, backupId);

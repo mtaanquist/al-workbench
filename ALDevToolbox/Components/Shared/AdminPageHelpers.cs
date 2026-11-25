@@ -131,6 +131,9 @@ public static class AdminPageHelpers
         AuditEntityType.ProjectEnvironment => "Environment setting",
         AuditEntityType.ProjectLicense => "Licence file",
         AuditEntityType.GitHubRepository => "GitHub repository",
+        // British spelling, as everywhere else a reader sees it.
+        AuditEntityType.Organization => "Organisation",
+        AuditEntityType.SealedLink => "Sealed link",
         // "Gateway" itself falls through - the enum name is already the word.
         AuditEntityType.GatewayRegistrationCode => "Gateway registration code",
         _ => type.ToString(),

@@ -27,7 +27,11 @@ namespace ALDevToolbox.Tests.Components;
 /// glyph for state, and the row's commands - history first - in one trailing menu
 /// rather than as buttons inside data cells, which is what #805 got wrong.</para>
 /// </summary>
-public sealed class UpgradesPageTests : IDisposable
+// UpgradesPage.SearchDebounce is a static the page reads when it is built: the classes
+// that render the page share one collection so that one class's wait never reaches
+// another's page mid-test.
+[Collection("UpgradesPage.SearchDebounce")]
+public sealed class UpgradesPageTests : IAsyncDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
@@ -84,12 +88,15 @@ public sealed class UpgradesPageTests : IDisposable
         _db.OrgContext.CurrentUserId = AdminUserId;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         // A test that set a real wait must not hand it to a page in another test class.
         UpgradesPage.SearchDebounce = TimeSpan.Zero;
+        // The page may still be reading when the test returns; "Component tests over
+        // a database" in the tests README has why it is torn down in this order.
+        await _ctx.Renderer.DisposeAsync();
         _db.WaitForQueriesToSettle();
-        _ctx.Dispose();
+        await _ctx.DisposeAsync();
         _db.Dispose();
     }
 
@@ -134,12 +141,82 @@ public sealed class UpgradesPageTests : IDisposable
         return _ctx.Render<UpgradesPage>();
     }
 
+    /// <summary>
+    /// The page with its row on screen and its first load finished. The row alone is not
+    /// enough: it can be drawn while the first load is still reading the planned upgrades
+    /// on the page's own context (a query that completes without yielding moves the
+    /// page's first render past the fleet read), and a test that then uses that context,
+    /// or clicks something that does, meets it busy (#1565). The Archive tab's count is
+    /// the last thing that load reads, so once it is drawn the page is quiet.
+    /// </summary>
     private IRenderedComponent<UpgradesPage> RenderWithOneRow()
     {
         var cut = RenderFleet();
-        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(1));
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(1);
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Contains("Archive"))
+                .QuerySelector(".pill-tab__count").Should().NotBeNull("the first load is not finished until the archive is counted");
+        });
         return cut;
     }
+
+    /// <summary>
+    /// "Set AppSource cadence..." lives in the bar's More menu beside Move dates, and its
+    /// preview sorts the ticked rows by what would change: the one already on the chosen
+    /// cadence is folded away as skipped rather than listed with the rest.
+    /// </summary>
+    [Fact]
+    public async Task The_cadence_command_previews_the_ticked_rows_and_skips_the_ones_already_set()
+    {
+        await SeedOneEnvironmentAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var project = await ctx.OeProjects.SingleAsync();
+            ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = project.Id,
+                Name = "Sandbox",
+                Type = "Sandbox",
+                ApplicationFamily = "BusinessCentral",
+                Status = "Active",
+                Version = "27.5.12345.0",
+                FetchedAt = DateTime.UtcNow,
+                AppSourceAppsUpdateCadence = BcAppUpdateCadence.DuringMajorUpgrade,
+            });
+            var production = await ctx.OeProjectEnvironments.SingleAsync(e => e.Name == "Production");
+            production.AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default;
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("thead .data-table__col-check input").Change(true);
+            CadenceCommand(cut).HasAttribute("disabled").Should().BeFalse();
+        });
+        cut.WaitForAssertion(() =>
+        {
+            CadenceCommand(cut).Click();
+            cut.Find("#bac-cadence").Should().NotBeNull();
+        });
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#bac-cadence").Change(BcAppUpdateCadence.DuringMajorUpgrade);
+            cut.Find(".bac-count").TextContent.Should().Contain("1 environment will change");
+        });
+
+        var heads = cut.FindAll(".bac-group__head").Select(h => h.TextContent.Trim()).ToList();
+        heads.Should().HaveCount(2);
+        heads[0].Should().EndWith("(1)").And.Contain("→");
+        heads[1].Should().StartWith("Skipped - already on this cadence");
+    }
+
+    private static AngleSharp.Dom.IElement CadenceCommand(IRenderedComponent<UpgradesPage> cut) =>
+        cut.FindAll(".cmdbar .ra__menu .menu__item").First(i => i.TextContent.Trim() == "Set AppSource cadence...");
 
     /// <summary>
     /// The page exists to move update dates, and a deleted environment's date cannot be
@@ -399,6 +476,36 @@ public sealed class UpgradesPageTests : IDisposable
     }
 
     /// <summary>
+    /// A parameter pass that changes nothing in the address keeps what was typed. Blazor
+    /// makes one as the first load ends, and it used to put the box back to the
+    /// address's empty search, so anything typed while the page was still loading was
+    /// wiped (#1750). Re-rendering with the same parameters makes that pass on demand.
+    /// </summary>
+    [Fact]
+    public async Task A_pass_that_changes_nothing_in_the_address_keeps_what_was_typed()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2);
+            cut.FindAll(".pill-tab").Single(t => t.TextContent.Contains("Archive"))
+                .QuerySelector(".pill-tab__count").Should().NotBeNull("the first load is not finished until the archive is counted");
+        });
+        cut.Find(".cmdbar__search input").Input("CRONUS ");
+
+        cut.Render();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("CRONUS ");
+            cut.FindAll(".data-table tbody tr").Should().ContainSingle();
+        });
+    }
+
+    /// <summary>
     /// The table waits for typing to pause instead of redrawing per keystroke, and the
     /// box keeps the latest text throughout.
     /// </summary>
@@ -408,6 +515,10 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
         UpgradesPage.SearchDebounce = TimeSpan.FromMilliseconds(300);
+        // The wait runs on this clock, so the pause is one the test makes, not one the
+        // machine's load decides.
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
 
         var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
@@ -415,10 +526,15 @@ public sealed class UpgradesPageTests : IDisposable
         cut.Find(".cmdbar__search input").Input("f");
         cut.Find(".cmdbar__search input").Input("fa");
         cut.Find(".cmdbar__search input").Input("fab");
-
+        // The last keystroke has been handled, so its wait is set, once the box shows it.
         cut.WaitForAssertion(() =>
             cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab"));
+        clock.PendingTimers.Should().Be(1, "each keystroke drops the wait of the one before");
+        clock.Advance(TimeSpan.FromMilliseconds(299));
+        clock.PendingTimers.Should().Be(1, "the typing has not paused for the whole wait yet");
+        cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the table waits for the typing to pause");
 
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");
@@ -426,6 +542,72 @@ public sealed class UpgradesPageTests : IDisposable
             rows[0].QuerySelector("td.upg-customer a")!.TextContent.Should().Be("Fabrikam Norway");
         }, TimeSpan.FromSeconds(5));
         cut.Find(".cmdbar__search input").GetAttribute("value").Should().Be("fab");
+    }
+
+    /// <summary>
+    /// After a refresh the page re-reads on its own clock, so the answers that come in
+    /// show up without a reload, and the re-reading stops once its few minutes are up.
+    /// </summary>
+    [Fact]
+    public async Task After_a_refresh_the_table_re_reads_on_the_page_clock_and_then_stops()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().ContainSingle());
+        cut.WaitForAssertion(() => BarButton(cut, "Refresh").Click());
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(1, "the refresh sets the re-read going"));
+
+        await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
+        clock.Advance(TimeSpan.FromSeconds(20));
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2),
+            TimeSpan.FromSeconds(5));
+
+        clock.Advance(TimeSpan.FromMinutes(3));
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(0, "a page left open must not re-read forever"));
+    }
+
+    /// <summary>
+    /// A re-read that fails stops the re-reading, and says so with a way to reload,
+    /// rather than leaving the table quietly stale (#1755).
+    /// </summary>
+    [Fact]
+    public async Task A_failed_re_read_says_the_page_may_be_out_of_date_and_offers_a_reload()
+    {
+        await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        _ctx.Services.AddSingleton<TimeProvider>(clock);
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().ContainSingle());
+        cut.WaitForAssertion(() => BarButton(cut, "Refresh").Click());
+        cut.WaitForAssertion(() => clock.PendingTimers.Should().Be(1, "the refresh sets the re-read going"));
+
+        await using (var db = _db.NewContext())
+        {
+            // The next re-read cannot find the environments.
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_environments RENAME TO oe_project_environments_gone");
+        }
+        clock.Advance(TimeSpan.FromSeconds(20));
+
+        cut.WaitForAssertion(() =>
+        {
+            var notice = cut.Find(".upg-notice");
+            notice.TextContent.Should().Contain("Live updates stopped, so this page may be out of date.");
+            notice.QuerySelectorAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Reload now");
+        }, TimeSpan.FromSeconds(5));
+        clock.PendingTimers.Should().Be(0, "a failed re-read stops the re-reading");
+
+        // Once the page can read again, Reload now brings it up to date and the warning goes.
+        await using (var db = _db.NewContext())
+        {
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE oe_project_environments_gone RENAME TO oe_project_environments");
+        }
+        cut.Find(".upg-notice button").Click();
+        cut.WaitForAssertion(() => cut.FindAll(".upg-notice").Should().BeEmpty(), TimeSpan.FromSeconds(5));
+        cut.FindAll(".data-table tbody tr").Should().ContainSingle();
     }
 
     // ── The solution's short name (#966) ───────────────────────────────
