@@ -249,15 +249,34 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_restart_group_tier_that_may_not_restart_is_refused()
+    public async Task A_restart_group_tier_that_may_not_restart_refuses_the_restart_not_the_import()
     {
         await SetPolicyAsync(bc02Allow: ["inventory"]);
 
-        var act = () => UploadAsync("CRONUS.bclicense", Licence);
+        var act = () => UploadAsync("CRONUS.bclicense", Licence, restart: true);
 
         var refused = await act.Should().ThrowAsync<PlanValidationException>();
-        refused.Which.Errors["environment"].Should().Contain("CRONUS-BC02 / BC250 may not be restarted");
+        refused.Which.Errors["environment"].Should().Contain("do not allow restarting CRONUS-BC02 / BC250");
         await NothingSentAsync();
+
+        // Business Central picks up the licence without a restart, so the import alone goes.
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await using var ctx = _db.NewContext();
+        (await ctx.GatewayCommands.CountAsync()).Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_command_says_whether_to_restart(bool restart)
+    {
+        await SetPolicyAsync();
+
+        await UploadAsync("CRONUS.bclicense", Licence, restart);
+
+        await using var ctx = _db.NewContext();
+        var command = await ctx.GatewayCommands.SingleAsync();
+        JsonNode.Parse(command.ParametersJson)![GatewayImportLicenceParameters.RestartParameter]!.GetValue<bool>().Should().Be(restart);
     }
 
     [Fact]
@@ -266,7 +285,7 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         await SetPolicyAsync();
         await LinkAnotherSolutionAsync(_bc02);
 
-        var act = () => UploadAsync("CRONUS.bclicense", Licence);
+        var act = () => UploadAsync("CRONUS.bclicense", Licence, restart: true);
 
         var refused = await act.Should().ThrowAsync<PlanValidationException>();
         refused.Which.Errors["environment"].Should().StartWith("This import would restart service tiers that another Solution also uses, and sign out its users.")
@@ -282,10 +301,22 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         await SetPolicyAsync(target: GatewayLicenceTargets.Tenant);
         await LinkAnotherSolutionAsync(_bc02);
 
-        var act = () => UploadAsync("CRONUS.bclicense", Licence);
+        var act = () => UploadAsync("CRONUS.bclicense", Licence, restart: true);
 
         await act.Should().ThrowAsync<PlanValidationException>();
         await NothingSentAsync();
+    }
+
+    [Fact]
+    public async Task An_import_without_a_restart_does_not_need_the_other_solutions_tiers()
+    {
+        await SetPolicyAsync();
+        await LinkAnotherSolutionAsync(_bc02);
+
+        await UploadAsync("CRONUS.bclicense", Licence);
+
+        await using var ctx = _db.NewContext();
+        (await ctx.GatewayCommands.CountAsync()).Should().Be(1);
     }
 
     [Fact]
@@ -294,7 +325,7 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         await SetPolicyAsync(shared: true);
         await LinkAnotherSolutionAsync(_bc02);
 
-        await UploadAsync("CRONUS.bclicense", Licence);
+        await UploadAsync("CRONUS.bclicense", Licence, restart: true);
 
         await using var ctx = _db.NewContext();
         (await ctx.GatewayCommands.CountAsync()).Should().Be(1);
@@ -345,7 +376,8 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var plan = await Service(ctx).GetImportPlanAsync(_environmentId);
 
-        plan!.Refusal.Should().Be(
+        plan!.Refusal.Should().BeNull("the import alone still goes");
+        plan.RestartRefusal.Should().Be(
             "This import would restart service tiers (CRONUS-BC01 / BC250, CRONUS-BC02 / BC250) that another Solution also uses, and sign out its users. "
             + "Ask the customer's IT to allow shared restarts for this database in the gateway's settings file (shared_restart), or to give each Solution its own service tiers, then try again.");
     }
@@ -391,6 +423,27 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
 
         view!.LastUpload!.State.Should().Be(LicenceImportState.Failed);
         view.LastUpload.Message.Should().Contain("The license file is not valid.");
+    }
+
+    [Theory]
+    [InlineData(true, LicenceImportState.Imported)]
+    [InlineData(false, LicenceImportState.ImportedWithProblems)]
+    public async Task An_import_without_a_restart_reads_as_imported(bool refreshed, LicenceImportState expected)
+    {
+        await SetPolicyAsync();
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await FinishCommandAsync(GatewayCommandStatus.Succeeded, null, new GatewayImportLicenceResult
+        {
+            Target = "NavDatabase",
+            Imported = true,
+            Refreshed = refreshed,
+        });
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.State.Should().Be(expected);
+        if (!refreshed) view.LastUpload.Message.Should().NotContain("restarted", "nothing was asked to restart");
     }
 
     [Fact]
@@ -570,10 +623,10 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         (await check.OeProjectLicenses.SingleAsync()).GatewayCommandId.Should().Be(command.Id);
     }
 
-    private async Task<int> UploadAsync(string fileName, byte[] content)
+    private async Task<int> UploadAsync(string fileName, byte[] content, bool restart = false)
     {
         await using var ctx = _db.NewContext();
-        return await Service(ctx).UploadAndImportAsync(_environmentId, fileName, content);
+        return await Service(ctx).UploadAndImportAsync(_environmentId, fileName, content, restart);
     }
 
     private async Task NothingSentAsync()

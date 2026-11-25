@@ -2394,8 +2394,10 @@
         StateHasChanged();
         try
         {
-            await Write(() => Licences.UploadAndImportAsync(Id, chosen.FileName, chosen.Bytes));
-            _settingDone = $"{chosen.FileName} was sent to the gateway. It imports the licence, then restarts the service tiers; the Licence card shows how it went.";
+            await Write(() => Licences.UploadAndImportAsync(Id, chosen.FileName, chosen.Bytes, chosen.Restart));
+            _settingDone = chosen.Restart
+                ? $"{chosen.FileName} was sent to the gateway. It imports the licence, then restarts the service tiers; the Licence card shows how it went."
+                : $"{chosen.FileName} was sent to the gateway. It imports the licence; the Licence card shows how it went.";
         }
         catch (PlanValidationException ex)
         {

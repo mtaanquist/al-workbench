@@ -83,8 +83,12 @@ public sealed record OnPremisesLicenceView(InstalledLicence? Installed, LicenceU
 /// <param name="ImportTier">The tier that imports it, <c>SERVER / INSTANCE</c>.</param>
 /// <param name="Version">The importing tier's Business Central version; null when not known.</param>
 /// <param name="Format">The format it imports, <c>.flf</c> or <c>.bclicense</c>; null when the version is not known.</param>
-/// <param name="Restart">The tiers that restart afterwards; null when the environment is not linked.</param>
+/// <param name="Restart">The tiers that restart afterwards when the person asks for it; null when the environment is not linked.</param>
 /// <param name="Refusal">Why a licence cannot be imported here at all; null when it can.</param>
+/// <param name="RestartRefusal">
+/// Why the service tiers cannot be restarted after the import; null when they can. Holds
+/// only the restart back: the import alone may still go ahead.
+/// </param>
 public sealed record LicenceImportPlan(
     string? LicenceTarget,
     string Where,
@@ -92,7 +96,8 @@ public sealed record LicenceImportPlan(
     Version? Version,
     string? Format,
     RestartGroupPlan? Restart,
-    string? Refusal);
+    string? Refusal,
+    string? RestartRefusal = null);
 
 /// <summary>A licence file to hand back to the person downloading it.</summary>
 public sealed record LicenceDownload(string FileName, byte[] Content);
@@ -237,16 +242,21 @@ public sealed class OnPremisesLicenceService
 
     /// <summary>
     /// Stores the licence file and queues its import on the environment's service tiers:
-    /// the gateway imports it on the publishing tier, restarts the restart group and reads
-    /// the tiers again. Returns the upload's id.
+    /// the gateway imports it on the publishing tier, restarts the restart group when
+    /// <paramref name="restart"/> asks for it, and reads the tiers again. Returns the upload's id.
     /// </summary>
+    /// <param name="restart">
+    /// Restart the service tiers after the import. Off unless the person asks: Business
+    /// Central picks up a licence imported this way without one, and a restart signs
+    /// everyone out. Only a restart needs the restart group's permissions.
+    /// </param>
     /// <exception cref="ProjectAccessDeniedException">The person may not manage the Solution.</exception>
     /// <exception cref="PlanValidationException">
     /// Keyed <c>file</c> for the file itself (empty, too large, not a licence, or the wrong
     /// format for the tier's version) and <c>environment</c> for anything about where it goes.
     /// Nothing is stored or sent.
     /// </exception>
-    public async Task<int> UploadAndImportAsync(int environmentId, string fileName, byte[] content, CancellationToken ct = default)
+    public async Task<int> UploadAndImportAsync(int environmentId, string fileName, byte[] content, bool restart = false, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(content);
         var orgId = _orgContext.CurrentOrganizationId
@@ -268,6 +278,7 @@ public sealed class OnPremisesLicenceService
         var facts = await OnPremisesDeployFacts.LoadAsync(_db, environmentId, ct)
             ?? throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = "That environment no longer exists." });
         var plan = await PlanAsync(facts, forDialog: false, ct);
+        var refusal = restart ? plan.Refusal ?? plan.RestartRefusal : plan.Refusal;
 
         var name = Path.GetFileName((fileName ?? string.Empty).Trim());
         var errors = new Dictionary<string, string>();
@@ -291,9 +302,9 @@ public sealed class OnPremisesLicenceService
         {
             errors["file"] = format;
         }
-        if (plan.Refusal is not null)
+        if (refusal is not null)
         {
-            errors["environment"] = plan.Refusal;
+            errors["environment"] = refusal;
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
@@ -307,6 +318,7 @@ public sealed class OnPremisesLicenceService
             Instance = instance,
             Tenant = tenant,
             LicenceTarget = target,
+            Restart = restart,
         };
         var userId = _orgContext.CurrentUserId;
         var now = Now;
@@ -412,7 +424,29 @@ public sealed class OnPremisesLicenceService
         var restart = await RestartGroupPlan.LoadAsync(_db, facts, ct);
 
         var refusal = Refusal();
-        return new LicenceImportPlan(target, where, tierName, version, format, restart, refusal);
+        var restartRefusal = refusal is null ? RestartRefusal() : null;
+        return new LicenceImportPlan(target, where, tierName, version, format, restart, refusal, restartRefusal);
+
+        string? RestartRefusal()
+        {
+            IReadOnlyList<GatewayPolicyTier> group = database is { Restart.Count: > 0 }
+                ? database.Restart
+                : [new GatewayPolicyTier { Machine = machine, Instance = instance }];
+            var notRestartable = group
+                .Where(g => facts.Policy!.Instances.FirstOrDefault(i => Same(i.Machine, g.Machine) && Same(i.Name, g.Instance)) is not { } p
+                            || !p.Allow.Contains(RestartPermission, StringComparer.OrdinalIgnoreCase))
+                .Select(g => $"{g.Machine} / {g.Instance}")
+                .ToList();
+            if (notRestartable.Count > 0)
+            {
+                return $"The customer's gateway settings do not allow restarting {string.Join(", ", notRestartable)}, so the licence can be imported but the service tiers cannot be restarted from here.";
+            }
+            // The restart would reach other Solutions' environments, which the customer's
+            // settings must say is allowed. Only AL Workbench knows which Solutions are
+            // linked where, so it is refused here and never reaches the gateway. A Tenant
+            // import is no exception: the tiers restart for every tenant on them.
+            return restart?.RefusalFor("import", forDialog);
+        }
 
         string? Refusal()
         {
@@ -474,18 +508,6 @@ public sealed class OnPremisesLicenceService
             {
                 return $"{notAllowed}: {tierName} may not act on the tenant {tenant}. Ask the customer's IT to allow it.";
             }
-            IReadOnlyList<GatewayPolicyTier> group = database is { Restart.Count: > 0 }
-                ? database.Restart
-                : [new GatewayPolicyTier { Machine = machine, Instance = instance }];
-            var notRestartable = group
-                .Where(g => facts.Policy.Instances.FirstOrDefault(i => Same(i.Machine, g.Machine) && Same(i.Name, g.Instance)) is not { } p
-                            || !p.Allow.Contains(RestartPermission, StringComparer.OrdinalIgnoreCase))
-                .Select(g => $"{g.Machine} / {g.Instance}")
-                .ToList();
-            if (notRestartable.Count > 0)
-            {
-                return $"{notAllowed}: {string.Join(", ", notRestartable)} may not be restarted, and a new licence only takes effect when the service tiers restart. Ask the customer's IT to allow it.";
-            }
             if (publishing?.State is { Length: > 0 } state && !string.Equals(state.Trim(), "Running", StringComparison.OrdinalIgnoreCase))
             {
                 return $"The gateway last read {tierName} as {BcEnvironmentStatus.StatusWord(state).ToLowerInvariant()}, so it can't import a licence. Start the service tier, then try again.";
@@ -494,11 +516,7 @@ public sealed class OnPremisesLicenceService
             {
                 return $"The Business Central version of {tierName} is not known yet, so which licence format it takes cannot be checked. Wait for the gateway's next reading, then try again.";
             }
-            // The restart would reach other Solutions' environments, which the customer's
-            // settings must say is allowed. Only AL Workbench knows which Solutions are
-            // linked where, so it is refused here and never reaches the gateway. A Tenant
-            // import is no exception: the tiers restart for every tenant on them.
-            return restart?.RefusalFor("import", forDialog);
+            return null;
         }
     }
 
@@ -538,6 +556,12 @@ public sealed class OnPremisesLicenceService
                 => (LicenceImportState.Imported, null),
             GatewayCommandStatus.Succeeded when result is { Imported: true, Restart.Restarted: true }
                 => (LicenceImportState.ImportedWithProblems, "The service tiers were restarted, but could not be read again straight away, so the licence shown here may be the old one until the gateway's next reading."),
+            // Imported without a restart, as asked: the gateway only leaves the restart out
+            // when the person did not ask for one.
+            GatewayCommandStatus.Succeeded when result is { Imported: true, Restart: null } && result.Refreshed
+                => (LicenceImportState.Imported, null),
+            GatewayCommandStatus.Succeeded when result is { Imported: true, Restart: null }
+                => (LicenceImportState.ImportedWithProblems, "The licence was imported, but the service tiers could not be read again straight away, so the licence shown here may be the old one until the gateway's next reading."),
             GatewayCommandStatus.Succeeded or GatewayCommandStatus.Failed when result is { Imported: true }
                 => (LicenceImportState.ImportedWithProblems, RestartProblem(result.Restart) ?? command.FailureMessage),
             GatewayCommandStatus.Succeeded when result is null => (LicenceImportState.Imported, null),

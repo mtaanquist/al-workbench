@@ -43,7 +43,8 @@ public sealed record PolicyRequest(
     IReadOnlyList<AppToPublish> Apps,
     bool UnpublishPrevious,
     bool StartedByAgent,
-    string SyncMode = GatewaySyncModes.Add)
+    string SyncMode = GatewaySyncModes.Add,
+    bool RestartAfterImport = true)
 {
     /// <summary>
     /// Reads the request out of a command, or says why it cannot. A parameter of the
@@ -117,6 +118,19 @@ public sealed record PolicyRequest(
             unpublish = unpublishNode.GetValue<bool>();
         }
 
+        // import-licence: restart the group afterwards. Absent means yes, as every import
+        // did before the choice existed.
+        var restartAfterImport = true;
+        if (parameters[GatewayImportLicenceParameters.RestartParameter] is { } restartNode)
+        {
+            if (restartNode.GetValueKind() is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False))
+            {
+                problem = "The command says whether to restart the service tiers in a form the gateway does not read.";
+                return null;
+            }
+            restartAfterImport = restartNode.GetValue<bool>();
+        }
+
         if (!TryText(parameters, GatewayCommandParameters.SyncMode, out var syncMode, ref problem))
         {
             return null;
@@ -135,7 +149,8 @@ public sealed record PolicyRequest(
             apps,
             unpublish,
             command.StartedByAgent,
-            syncMode);
+            syncMode,
+            restartAfterImport);
     }
 
     /// <summary>
@@ -259,8 +274,9 @@ public static class PolicyEnforcer
                 refusal = PublishingTier(database, tier, "Licences")
                     ?? Need(tier, PolicyPermission.Licence)
                     ?? (database.LicenceTarget == LicenceTarget.Tenant ? Tenant(tier, request.Tenant) : null)
-                    ?? NeedAll(group, PolicyPermission.Restart);
-                touched.AddRange(group);
+                    ?? (request.RestartAfterImport ? NeedAll(group, PolicyPermission.Restart) : null);
+                if (request.RestartAfterImport) touched.AddRange(group);
+                else touched.Add(tier);
                 break;
 
             case GatewayVerb.RestartGroup:

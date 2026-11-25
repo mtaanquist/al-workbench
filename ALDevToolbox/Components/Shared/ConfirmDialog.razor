@@ -295,10 +295,14 @@
 
         _needsFocus = false;
         // With a required word the confirm button starts disabled and cannot take
-        // focus, so the caret goes where the person has to act: the input.
+        // focus, so the caret goes where the person has to act: the input. A button
+        // the caller holds disabled cannot take focus either (a dialog still waiting
+        // for a file, say), and focusing it silently does nothing, which would leave
+        // Escape dead; Cancel takes focus instead.
         try
         {
             if (!string.IsNullOrWhiteSpace(RequireWord)) await _gateInput.FocusAsync();
+            else if (ConfirmDisabled) await _cancelButton.FocusAsync();
             else await _confirmButton.FocusAsync();
         }
         catch { /* closed again before the render landed */ }

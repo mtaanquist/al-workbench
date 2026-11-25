@@ -70,7 +70,7 @@ public sealed class ImportLicenceVerbTests : IDisposable
 
     private async Task<GatewayCommandOutcome> ImportAsync(
         string fileName = "CRONUS.flf", string asked = "NavDatabase", string? tenant = null, Version? version = null,
-        byte[]? content = null, string? sha = null, string machine = "CRONUS-BC01", CancellationToken ct = default)
+        byte[]? content = null, string? sha = null, string machine = "CRONUS-BC01", bool restart = true, CancellationToken ct = default)
     {
         var bytes = content ?? "CRONUS licence"u8.ToArray();
         var path = Path.Combine(_scratch.Path, fileName);
@@ -79,7 +79,7 @@ public sealed class ImportLicenceVerbTests : IDisposable
         {
             Id = 1369,
             Verb = GatewayVerb.ImportLicence,
-            Parameters = new GatewayImportLicenceParameters { Machine = machine, Instance = "BC140", Tenant = tenant, LicenceTarget = asked }.ToParameters(),
+            Parameters = new GatewayImportLicenceParameters { Machine = machine, Instance = "BC140", Tenant = tenant, LicenceTarget = asked, Restart = restart }.ToParameters(),
             SecondsLeft = 900,
             Files = [new GatewayCommandFileMessage { Id = 9, Name = fileName, Sha256 = sha ?? Convert.ToHexStringLower(SHA256.HashData(bytes)), Size = bytes.Length }],
         };
@@ -118,6 +118,34 @@ public sealed class ImportLicenceVerbTests : IDisposable
         result.Restart!.Restarted.Should().BeTrue();
         result.Refreshed.Should().BeTrue();
         _progress.Should().Contain("Restarted CRONUS-BC01 / BC140.").And.Contain("Read the service tiers again, so AL Workbench shows the new licence.");
+    }
+
+    [Fact]
+    public async Task Without_a_restart_it_imports_then_reads_the_tiers_again()
+    {
+        var outcome = await ImportAsync(restart: false);
+
+        outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
+        _server.Timeline.Should().Equal(
+            "import-licence NavDatabase default CRONUS.flf",
+            "refresh CRONUS-BC01 / BC140",
+            "refresh CRONUS-BC02 / BC140");
+        var result = Result(outcome);
+        result.Imported.Should().BeTrue();
+        result.Restart.Should().BeNull("nothing was asked to restart");
+        result.Refreshed.Should().BeTrue();
+        _progress.Should().Contain(p => p.Contains("were not restarted, as asked"));
+    }
+
+    [Fact]
+    public async Task Without_a_restart_the_group_does_not_need_restart()
+    {
+        _policy = new TextPolicy(Policy(bc02Allow: """["inventory"]"""));
+
+        var outcome = await ImportAsync(restart: false);
+
+        outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
+        _server.Timeline.Should().NotContain(t => t.StartsWith("stop") || t.StartsWith("start"));
     }
 
     [Fact]
