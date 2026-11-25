@@ -18,8 +18,38 @@
 @inject TimeProvider Clock
 
 <ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="@HeadIcon"
-               ConfirmDisabled="@(_plan is null || _plan.Refusal is not null || (NeedsAck && !_ack))">
+               ConfirmDisabled="@(_plan is null || _plan.Refusal is not null || (NeedsAck && !_ack) || (_booking && WhenError is not null))">
     <div class="tier-dialog">
+    @if (_booking && _groupTierCount > 1)
+    {
+        <div class="field">
+            <label class="field__label" for="tier-booking-what">What to restart</label>
+            <SelectBox>
+                <select id="tier-booking-what" class="select" value="@_action" @onchange="e => ChooseAsync(Enum.Parse<ServiceTierAction>((string)e.Value!))">
+                    <option value="@ServiceTierAction.Restart">Only @_tierName</option>
+                    <option value="@ServiceTierAction.RestartAll">@RestartAllLabel(_groupTierCount)</option>
+                </select>
+            </SelectBox>
+        </div>
+    }
+    @if (_booking && _plan is { Refusal: null })
+    {
+        <div class="field">
+            <label class="field__label" for="tier-booking-when">When</label>
+            <input id="tier-booking-when" type="datetime-local" class="input" required
+                   min="@LocalText(Clock.GetUtcNow().UtcDateTime + OnPremisesTierActionService.MinBookingAhead)"
+                   max="@LocalText(Clock.GetUtcNow().UtcDateTime + OnPremisesTierActionService.MaxBookingAhead)"
+                   @bind="_runAtLocal" @bind:event="oninput" />
+            @if (WhenError is { } whenError)
+            {
+                <FieldError Message="@whenError" />
+            }
+            else
+            {
+                <span class="field__hint">@WhenHint</span>
+            }
+        </div>
+    }
     @if (_planError is { } planError)
     {
         <Alert Tone="AlertTone.Danger"><span>@planError</span></Alert>
@@ -46,7 +76,16 @@
             }
         </ul>
 
-        @if (_plan.SignsPeopleOut)
+        @if (_booking)
+        {
+            <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="tier-dialog__alert">
+                <div class="tier-dialog__warn">
+                    <p>@AfterSentence(_plan)</p>
+                    <p>You'll be told if it doesn't go through.</p>
+                </div>
+            </Alert>
+        }
+        else if (_plan.SignsPeopleOut)
         {
             <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="tier-dialog__alert">
                 <div class="tier-dialog__warn">
@@ -75,6 +114,110 @@
     private bool _ack;
     private ServiceTierAction _action;
 
+    // Booking a restart for later (#1788).
+    private bool _booking;
+    private int _environmentId;
+    private string _tierName = string.Empty;
+    private int _groupTierCount;
+    private DateTime _runAtLocal;
+    private TimeZoneInfo _zone = TimeZoneInfo.Utc;
+    private string? _changeHours;
+
+    private string WhenHint => _zone == TimeZoneInfo.Utc
+        // An older gateway does not say its time zone, so its hours cannot be put in UTC here.
+        ? (_changeHours is { } utcHours ? $"The customer allows changes from {utcHours.Replace("-", " to ")} on their server's clock, which may not be UTC. " : "") + "Time in UTC."
+        : (_changeHours is { } hours ? $"The customer allows changes from {hours.Replace("-", " to ")}. " : "") + $"Time on the customer's server ({_zone.StandardName}).";
+
+    /// <summary>The server's rules for the time, mirrored so the person sees them by the field; the server checks them again.</summary>
+    private string? WhenError
+    {
+        get
+        {
+            if (_plan is null) return null;
+            var utc = ToUtc(_runAtLocal);
+            var now = Clock.GetUtcNow().UtcDateTime;
+            if (utc < now + OnPremisesTierActionService.MinBookingAhead) return "Pick a time at least a few minutes from now. To restart now, use Restart.";
+            if (utc > now + OnPremisesTierActionService.MaxBookingAhead) return "Pick a time within the next 30 days.";
+            if (_zone != TimeZoneInfo.Utc && OnPremisesTierActionService.ChangeHours.Parse(_changeHours) is { } hours
+                && !hours.Contains(TimeOnly.FromDateTime(_runAtLocal)))
+            {
+                return $"The customer allows changes only from {hours.StartText} to {hours.EndText}. Pick a time in that window.";
+            }
+            return null;
+        }
+    }
+
+    private string LocalText(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, _zone).ToString("yyyy-MM-ddTHH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
+    private DateTime ToUtc(DateTime local)
+    {
+        var wall = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+        // A wall time that does not exist (the hour the clocks skip): an hour later does.
+        return _zone.IsInvalidTime(wall) ? TimeZoneInfo.ConvertTimeToUtc(wall.AddHours(1), _zone) : TimeZoneInfo.ConvertTimeToUtc(wall, _zone);
+    }
+
+    /// <summary>
+    /// Asks the person when to restart the environment's service tier (or every tier on its
+    /// database), and to confirm. The time, UTC, and what to restart; null when they cancelled.
+    /// The caller books it (OnPremisesTierActionService.BookAsync), which checks it all again.
+    /// </summary>
+    public async Task<(ServiceTierAction Action, DateTime RunAtUtc)?> OpenBookingAsync(int environmentId, string tierName, int groupTierCount)
+    {
+        if (_confirm is null) return null;
+        _booking = true;
+        _environmentId = environmentId;
+        _tierName = tierName;
+        _groupTierCount = groupTierCount;
+        _action = ServiceTierAction.Restart;
+        _plan = null;
+        _planError = null;
+        _ack = false;
+        StateHasChanged();
+        var opening = _confirm.OpenAsync($"Restart {tierName} later", "", "Book restart", "");
+        await LoadBookingPlanAsync(setTime: true);
+        var confirmed = await opening;
+        _booking = false;
+        if (!confirmed) return null;
+        var utc = ToUtc(_runAtLocal);
+        return (_action, utc);
+    }
+
+    private async Task ChooseAsync(ServiceTierAction action)
+    {
+        _action = action;
+        _ack = false;
+        await LoadBookingPlanAsync(setTime: false);
+    }
+
+    private async Task LoadBookingPlanAsync(bool setTime)
+    {
+        _plan = null;
+        _planError = null;
+        StateHasChanged();
+        try
+        {
+            var booking = await TierActions.GetBookingPlanAsync(_environmentId, _action);
+            if (booking is null)
+            {
+                _planError = "This environment is no longer linked to a service tier.";
+            }
+            else
+            {
+                _plan = booking.Plan;
+                _changeHours = booking.ChangeHours;
+                _zone = booking.TimeZone is { } id ? ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UpdateWindow.ResolveTimeZone(id) : TimeZoneInfo.Utc;
+                if (setTime) _runAtLocal = TimeZoneInfo.ConvertTimeFromUtc(booking.DefaultRunAt, _zone);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogWarning(ex, "Reading the booking plan for environment {EnvironmentId} failed.", _environmentId);
+            _planError = "Couldn't read the service tier. Close this and try again.";
+        }
+        StateHasChanged();
+    }
+
     /// <summary>Production asks again before anyone is signed out, as a Production deployment does.</summary>
     private bool NeedsAck => _plan is { IsProduction: true, SignsPeopleOut: true, Refusal: null };
 
@@ -87,6 +230,7 @@
     public async Task<bool> OpenAsync(int environmentId, string environmentName, string tierName, int groupTierCount, ServiceTierAction action)
     {
         if (_confirm is null) return false;
+        _booking = false;
         _action = action;
         _plan = null;
         _planError = null;

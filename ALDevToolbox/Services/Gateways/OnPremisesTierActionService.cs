@@ -41,6 +41,8 @@ public sealed record ServiceTierActionChoice(ServiceTierAction Action, string? U
 /// when that is newer than the last inventory, else the inventory's word. Null when not read.
 /// </param>
 /// <param name="StateFromAction">True when <paramref name="State"/> comes from the last action rather than the inventory.</param>
+/// <param name="Booked">Restarts booked for later and not yet run, soonest first (#1788).</param>
+/// <param name="BookingUnavailable">Why a restart cannot be booked; null when it can.</param>
 /// <param name="SharedRefusal">
 /// The <c>shared_restart</c> refusal, said once above the buttons when it holds them back;
 /// null when it does not apply. The choices it holds back carry no reason of their own.
@@ -53,7 +55,9 @@ public sealed record ServiceTierActionsView(
     UpgradeActionRow? Latest,
     string? State = null,
     bool StateFromAction = false,
-    string? SharedRefusal = null)
+    string? SharedRefusal = null,
+    IReadOnlyList<ServiceTierBooking>? Booked = null,
+    string? BookingUnavailable = null)
 {
     /// <summary>True while the newest action is still waiting for the gateway or running.</summary>
     public bool InFlight => Latest?.TierProgress is not null;
@@ -115,7 +119,7 @@ public sealed record ServiceTierActionPlan(
 /// stop on that tier alone. Starting a stopped tier signs nobody out, so it is not held to
 /// it. Runs under the query filter throughout; no <c>IgnoreQueryFilters()</c>.</para>
 /// </summary>
-public sealed class OnPremisesTierActionService
+public sealed partial class OnPremisesTierActionService
 {
     /// <summary>The permission every tier acted on needs in the customer's gateway settings.</summary>
     public const string ServiceControlPermission = "service_control";
@@ -196,7 +200,10 @@ public sealed class OnPremisesTierActionService
         {
             choices = choices.Select(c => IsSharedRefusal(c.Unavailable) ? c with { Unavailable = string.Empty } : c).ToList();
         }
-        return new ServiceTierActionsView(canManage, facts.TierName, group?.Tiers.Count ?? 1, choices, latest, state, fromAction, shared);
+        var booked = await BookingsAsync(environmentId, ct);
+        var bookingUnavailable = Refusal(ServiceTierAction.Restart, facts, group, tier, pending, forDialog: true, booking: true);
+        return new ServiceTierActionsView(canManage, facts.TierName, group?.Tiers.Count ?? 1, choices, latest, state, fromAction, shared,
+            booked, bookingUnavailable);
     }
 
     /// <summary>
@@ -247,13 +254,21 @@ public sealed class OnPremisesTierActionService
             throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = refusal });
         }
 
-        var (verb, kind, words) = action switch
-        {
-            ServiceTierAction.Restart => (GatewayVerb.RestartInstance, UpgradeActionKind.RestartServiceTier, "Restart service tier"),
-            ServiceTierAction.RestartAll => (GatewayVerb.RestartGroup, UpgradeActionKind.RestartServiceTiers, "Restart all service tiers on the database"),
-            ServiceTierAction.Stop => (GatewayVerb.StopInstance, UpgradeActionKind.StopServiceTier, "Stop service tier"),
-            _ => (GatewayVerb.StartInstance, UpgradeActionKind.StartServiceTier, "Start service tier"),
-        };
+        return await SendAsync(orgId, env, facts, plan, action, bookedRowId: null, ct);
+    }
+
+    /// <summary>
+    /// Queues <paramref name="action"/>'s command and writes its history line and audit row,
+    /// together, under the gateway's lock. A booked restart (<paramref name="bookedRowId"/>)
+    /// has its line already and is stamped sent instead. Throws
+    /// <see cref="PlanValidationException"/> keyed <c>environment</c>, or for a booked restart
+    /// keyed <c>busy</c> when something else is working on the tiers.
+    /// </summary>
+    private async Task<int> SendAsync(int orgId, EnvironmentRow env, OnPremisesDeployFacts facts, ServiceTierActionPlan plan,
+        ServiceTierAction action, int? bookedRowId, CancellationToken ct)
+    {
+        var environmentId = facts.EnvironmentId;
+        var (verb, kind, words) = Describe(action);
         // The command names the environment's own tier; for the group the gateway finds the
         // rest in its own settings, never in the command.
         var parameters = new GatewayServiceTierParameters { Machine = facts.Machine!, Instance = facts.InstanceName! }.ToParameters();
@@ -273,11 +288,25 @@ public sealed class OnPremisesTierActionService
                 // One request per gateway at a time gets past here, and only after the one
                 // before it committed: two people pressing Restart at once send one restart,
                 // and the second is told what is already running.
-                await _db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock({TierActionLockClass}, {gatewayId})", ct);
+                await LockTierActionsAsync(gatewayId, ct);
                 var busy = Busy(plan.Tiers, await GroupTiersAsync(facts, ct), await PendingAsync(facts, ct));
                 if (busy is not null)
                 {
-                    throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = busy });
+                    // A booking tells "wait" from "refused" by the key; a person reads the sentence either way.
+                    throw new PlanValidationException(new Dictionary<string, string> { [bookedRowId is null ? "environment" : BusyKey] = busy });
+                }
+
+                OeEnvironmentUpgradeAction? booked = null;
+                if (bookedRowId is { } bookedId)
+                {
+                    // Claimed under the lock: a cancel or a second run that got here first wins.
+                    booked = await _db.OeEnvironmentUpgradeActions
+                        .FirstOrDefaultAsync(a => a.Id == bookedId && a.EnvironmentId == environmentId
+                                                  && a.Status == UpgradeActionStatus.Pending && a.SentAt == null, ct)
+                        ?? throw new PlanValidationException(new Dictionary<string, string>
+                        {
+                            ["environment"] = "That booked restart has already run or been cancelled.",
+                        });
                 }
 
                 try
@@ -292,21 +321,31 @@ public sealed class OnPremisesTierActionService
                         ["environment"] = string.Join(" ", ex.Errors.Values) + " Nothing was sent.",
                     });
                 }
-                row = new OeEnvironmentUpgradeAction
+                if (booked is not null)
                 {
-                    OrganizationId = orgId,
-                    ProjectId = env.ProjectId,
-                    EnvironmentId = environmentId,
-                    Kind = kind,
-                    Status = UpgradeActionStatus.Sent,
-                    RequestedByUserId = userId,
-                    RequestedBy = actor,
-                    RequestedAt = now,
-                    ExecuteAfter = now,
-                    SentAt = now,
-                    GatewayCommandId = commandId,
-                };
-                _db.OeEnvironmentUpgradeActions.Add(row);
+                    booked.Status = UpgradeActionStatus.Sent;
+                    booked.SentAt = now;
+                    booked.GatewayCommandId = commandId;
+                    row = booked;
+                }
+                else
+                {
+                    row = new OeEnvironmentUpgradeAction
+                    {
+                        OrganizationId = orgId,
+                        ProjectId = env.ProjectId,
+                        EnvironmentId = environmentId,
+                        Kind = kind,
+                        Status = UpgradeActionStatus.Sent,
+                        RequestedByUserId = userId,
+                        RequestedBy = actor,
+                        RequestedAt = now,
+                        ExecuteAfter = now,
+                        SentAt = now,
+                        GatewayCommandId = commandId,
+                    };
+                    _db.OeEnvironmentUpgradeActions.Add(row);
+                }
                 // The history table is itself a log and is not audited row by row; the act that
                 // reaches the customer's server is, as ProjectConnectionService's writes are.
                 _db.AuditLog.Add(new AuditLogEntry
@@ -321,7 +360,7 @@ public sealed class OnPremisesTierActionService
                     EntityName = env.Name,
                     SnapshotJson = JsonSerializer.Serialize(new Dictionary<string, object?>
                     {
-                        ["Action"] = words,
+                        ["Action"] = booked is null ? words : words + " (booked)",
                         ["Project"] = plan.SolutionName,
                         ["Name"] = env.Name,
                         ["ServiceTier"] = facts.TierName,
@@ -349,6 +388,26 @@ public sealed class OnPremisesTierActionService
         return row.Id;
     }
 
+    /// <summary>
+    /// Takes the gateway's tier-action lock for the rest of the transaction: sending and
+    /// booking both decide under it, so two people at once end with one restart or one
+    /// booking. Keyed on the id of a gateway already read through the query filter; reads
+    /// and writes no rows.
+    /// </summary>
+    private Task LockTierActionsAsync(int gatewayId, CancellationToken ct) =>
+        _db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock({TierActionLockClass}, {gatewayId})", ct);
+
+    /// <summary>The <see cref="PlanValidationException"/> key for "something else is working on these tiers": try again later.</summary>
+    internal const string BusyKey = "busy";
+
+    private static (GatewayVerb Verb, UpgradeActionKind Kind, string Words) Describe(ServiceTierAction action) => action switch
+    {
+        ServiceTierAction.Restart => (GatewayVerb.RestartInstance, UpgradeActionKind.RestartServiceTier, "Restart service tier"),
+        ServiceTierAction.RestartAll => (GatewayVerb.RestartGroup, UpgradeActionKind.RestartServiceTiers, "Restart all service tiers on the database"),
+        ServiceTierAction.Stop => (GatewayVerb.StopInstance, UpgradeActionKind.StopServiceTier, "Stop service tier"),
+        _ => (GatewayVerb.StartInstance, UpgradeActionKind.StartServiceTier, "Start service tier"),
+    };
+
     private sealed record EnvironmentRow(int ProjectId, string Name, int? CreatedBy, string ProjectName);
 
     /// <summary>A command on the gateway that stops, starts or restarts tiers and has not finished.</summary>
@@ -361,7 +420,7 @@ public sealed class OnPremisesTierActionService
             .FirstOrDefaultAsync(ct);
 
     private async Task<ServiceTierActionPlan> PlanAsync(EnvironmentRow env, OnPremisesDeployFacts facts, ServiceTierAction action,
-        bool forDialog, CancellationToken ct)
+        bool forDialog, CancellationToken ct, bool booking = false)
     {
         var group = await RestartGroupPlan.LoadAsync(_db, facts, ct);
         var tier = await RestartGroupPlan.LoadForTierAsync(_db, facts, ct);
@@ -386,7 +445,7 @@ public sealed class OnPremisesTierActionService
             OneByOne: action == ServiceTierAction.RestartAll && group?.OneByOne == true,
             action == ServiceTierAction.RestartAll ? group?.MissingFromGroup ?? [] : [],
             sessions,
-            Refusal(action, facts, group, tier, pending, forDialog),
+            Refusal(action, facts, group, tier, pending, forDialog, booking),
             otherProduction,
             ownProduction);
     }
@@ -426,7 +485,7 @@ public sealed class OnPremisesTierActionService
     /// gateway would refuse, so the first thing said is the first thing to fix.
     /// </summary>
     private string? Refusal(ServiceTierAction action, OnPremisesDeployFacts facts, RestartGroupPlan? group, RestartGroupPlan? tier,
-        IReadOnlyList<PendingCommand> pending, bool forDialog)
+        IReadOnlyList<PendingCommand> pending, bool forDialog, bool booking = false)
     {
         var notAllowed = OnPremisesDeployFacts.NotAllowed;
         if (facts.EnvironmentUnlinked)
@@ -474,7 +533,8 @@ public sealed class OnPremisesTierActionService
         {
             return $"{notAllowed}: {string.Join(", ", notControllable)} may not be stopped, started or restarted from AL Workbench. Ask the customer's IT to allow it.";
         }
-        if (Busy(touched, group?.Tiers ?? [facts.TierName], pending) is { } busy)
+        // A booking is for later: what runs now is asked about when it is due.
+        if (!booking && Busy(touched, group?.Tiers ?? [facts.TierName], pending) is { } busy)
         {
             return busy;
         }
@@ -629,8 +689,12 @@ public sealed class OnPremisesTierActionService
         var a = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(x => x.ProjectId == projectId && x.EnvironmentId == environmentId
                         && (x.Kind == UpgradeActionKind.RestartServiceTier || x.Kind == UpgradeActionKind.RestartServiceTiers
-                            || x.Kind == UpgradeActionKind.StopServiceTier || x.Kind == UpgradeActionKind.StartServiceTier))
-            .OrderByDescending(x => x.RequestedAt).ThenByDescending(x => x.Id)
+                            || x.Kind == UpgradeActionKind.StopServiceTier || x.Kind == UpgradeActionKind.StartServiceTier)
+                        // A booking still waiting for its time is listed as booked, not as the latest action.
+                        && !(x.Status == UpgradeActionStatus.Pending && x.SentAt == null))
+            // By when it was sent: a booking runs hours after it was made, and the one
+            // running now must be the latest, or the card would offer actions mid-restart.
+            .OrderByDescending(x => x.SentAt ?? x.RequestedAt).ThenByDescending(x => x.Id)
             .Select(x => new
             {
                 x.Id, x.ProjectId, x.EnvironmentId, x.Kind, x.Status, x.RequestedBy, x.RequestedAt, x.ExecuteAfter,

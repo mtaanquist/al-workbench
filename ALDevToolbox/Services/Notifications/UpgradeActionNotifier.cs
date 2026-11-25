@@ -208,6 +208,8 @@ public sealed class UpgradeActionNotifier
         UpgradeActionKind.UploadApp => $"Install {appName ?? "an app"}",
         UpgradeActionKind.UpdateApp => targetVersion is null ? $"Update {appName ?? "an app"}" : $"Update {appName ?? "an app"} to {targetVersion}",
         UpgradeActionKind.SelectVersion => targetVersion is null ? "Set the next version" : $"Set the next version to {targetVersion}",
+        UpgradeActionKind.RestartServiceTier => "Booked service tier restart",
+        UpgradeActionKind.RestartServiceTiers => "Booked restart of every service tier on the database",
         _ => "Scheduled change",
     };
 }

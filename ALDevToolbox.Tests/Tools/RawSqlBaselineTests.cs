@@ -80,8 +80,8 @@ public sealed class RawSqlBaselineTests
             "Inserts a seen token id stamped with the organisation and gateway of a credential already resolved from its signed token; reads no rows.",
             new() { ["TryRecordTokenAsync"] = 1 }),
         ["ALDevToolbox/Services/Gateways/OnPremisesTierActionService.cs"] = new(
-            "An advisory lock keyed on the id of a gateway already read through the filter; reads and writes no rows.",
-            new() { ["RequestAsync"] = 1 }),
+            "An advisory lock keyed on the id of a gateway already read through the filter; reads and writes no rows. One helper, taken by both sending a tier action and booking one (#1788).",
+            new() { ["LockTierActionsAsync"] = 1 }),
         ["ALDevToolbox/Services/GitHub/GitHubAccessService.cs"] = new(
             "An advisory lock keyed on the user id of a token row already read through the filter; reads and writes no rows.",
             new() { ["ResolveTokenForAsync"] = 1 }),

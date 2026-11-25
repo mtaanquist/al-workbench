@@ -1958,6 +1958,52 @@ release workflow has a Windows job that publishes the gateway self-contained sin
 running version with its SHA-256. The contracts carry a minimum supported gateway version; an older
 gateway is refused with a message saying to update. "Versions and updates" below has the detail.
 
+### Booking a restart for later, as built (#1788)
+
+**Who and where.** The same consultant, who has agreed with the customer that the tier restarts
+tonight. Beside the restart buttons the Service tier card offers **Restart later...**, which opens
+the same confirmation with a time picker and, when the restart group has more than one tier, a
+choice between the tier alone and every tier on its database. Only a restart can be booked; stop
+and start stay immediate. A booking is listed on the card ("Booked: Restart of CRONUS-BC01 / BC250
+at ...") with **Run now** and **Cancel booking**, and in Workbench history as "Will restart the
+service tier" until it runs. One booking per environment at a time; cancel it to book another.
+
+**The time is the customer's server's.** The gateway now reports its computer's time zone with its
+settings (`GatewayPolicyReport.timeZone`, the Windows id); an older gateway does not, and the picker
+then reads UTC and says so. The picker starts at the next opening of the tier's `change_hours`, or
+the next full hour when there are none. **A time outside `change_hours` is refused when booked**,
+not when it runs and nobody is watching; the gateway still checks again when the command arrives.
+A booking is for at least two minutes and at most 30 days ahead.
+
+**Storage.** A booking is an `oe_environment_upgrade_actions` row (`RestartServiceTier` or
+`RestartServiceTiers`), `Pending`, with `execute_after` set to the time and no command. No
+migration. `ServiceTierActionOutcome` leaves a row with no command and no sent time as it is, so a
+booking that has not been sent, was cancelled, or was refused when due reads from its own row; the
+card's latest action skips bookings still waiting.
+
+**Running it.** `ServiceTierBookingWorker` (a `PolledScheduler`, every 30 seconds per organisation,
+opt out with `DISABLE_SERVICE_TIER_BOOKINGS=1`) sends each due booking as the person who booked it,
+in the organisation's ambient scope with their user id, through the same path as an immediate
+restart (`OnPremisesTierActionService.RunBookingAsync` into `SendAsync`), so the gateway, its
+settings, the shared rule and whether they may still manage the Solution are all asked again. The
+booking row itself becomes the sent action (its command id and sent time stamped under the gateway's
+lock, which a cancel takes too, so a cancel and a send cannot both win). Something else still
+working on the tiers (a deployment, a licence import) makes it wait for the next sweep. The worker
+never sends one more than two hours past its time, whatever kept it (the worker off, the app down for
+a deploy), nor one whose booker's account is disabled; anything else refuses it, recorded on the row
+as failed with the reason. Run now takes the same path as the person pressing it, behind the same
+confirmation as an immediate restart (who is signed in, and the Production tick), and says plainly
+when the booking has already run or been cancelled. The time field mirrors the server's rules (two
+minutes to 30 days ahead, inside every restarted tier's change hours when the gateway reports its
+time zone) and holds the button with the reason beside it.
+
+**Telling the person.** A booking refused when due, or one the gateway later failed or let expire
+(`SettleFailedBookingsAsync`: booked rows sent in the last two days whose command failed, marked
+failed once), notifies the person who booked it through `UpgradeActionNotifier`, as other booked
+actions do. A success sends nothing. Booking, cancelling and sending are each audited on the
+environment. There is no MCP write tool for tier actions, so none for bookings either;
+`list_environment_history` shows them.
+
 ### The Windows service, as built (#1362)
 
 The frame: it registers, keeps its key, heartbeats, polls, downloads and checks files, and reports.

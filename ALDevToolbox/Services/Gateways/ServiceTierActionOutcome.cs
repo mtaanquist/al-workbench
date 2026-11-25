@@ -71,6 +71,9 @@ public static class ServiceTierActionOutcome
         return rows.Select(r =>
             {
                 if (!r.IsServiceTierAction) return r;
+                // A booked restart that has not been sent (still waiting, cancelled, or refused
+                // when it came due) has no command; its own row says how it stands.
+                if (r.GatewayCommandId is null && r.SentAt is null) return r;
                 var command = r.GatewayCommandId is { } id ? commands.GetValueOrDefault(id) : null;
                 return Apply(r, command) with { TierDatabase = DatabaseOf(command, instances) };
             })

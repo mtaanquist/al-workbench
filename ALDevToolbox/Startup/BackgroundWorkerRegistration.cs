@@ -37,6 +37,9 @@ public static class BackgroundWorkerRegistration
         // clears spent gateway request tokens and tells Admins when a gateway goes
         // offline or comes back. See .design/on-prem-gateway.md.
         services.AddHostedService<ALDevToolbox.Services.Gateways.GatewayCommandSweep>();
+        // Sends service tier restarts booked for later when they come due, and tells the
+        // person who booked one when it did not go through (#1788).
+        services.AddHostedService<ALDevToolbox.Services.Gateways.ServiceTierBookingWorker>();
         // Follows on-premises deployments once their run has handed them to a gateway
         // command: copies its progress into the deployment and finishes it when the
         // command ends. See .design/on-prem-gateway.md.
