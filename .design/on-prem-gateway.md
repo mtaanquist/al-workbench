@@ -1987,10 +1987,15 @@ in the organisation's ambient scope with their user id, through the same path as
 restart (`OnPremisesTierActionService.RunBookingAsync` into `SendAsync`), so the gateway, its
 settings, the shared rule and whether they may still manage the Solution are all asked again. The
 booking row itself becomes the sent action (its command id and sent time stamped under the gateway's
-lock, so a cancel and a send cannot both win). Something else still working on the tiers (a
-deployment, a licence import) makes it wait for the next sweep, up to two hours past its time;
-anything else refuses it, recorded on the row as failed with the reason. Run now takes the same path
-as the person pressing it.
+lock, which a cancel takes too, so a cancel and a send cannot both win). Something else still
+working on the tiers (a deployment, a licence import) makes it wait for the next sweep. The worker
+never sends one more than two hours past its time, whatever kept it (the worker off, the app down for
+a deploy), nor one whose booker's account is disabled; anything else refuses it, recorded on the row
+as failed with the reason. Run now takes the same path as the person pressing it, behind the same
+confirmation as an immediate restart (who is signed in, and the Production tick), and says plainly
+when the booking has already run or been cancelled. The time field mirrors the server's rules (two
+minutes to 30 days ahead, inside every restarted tier's change hours when the gateway reports its
+time zone) and holds the button with the reason beside it.
 
 **Telling the person.** A booking refused when due, or one the gateway later failed or let expire
 (`SettleFailedBookingsAsync`: booked rows sent in the last two days whose command failed, marked

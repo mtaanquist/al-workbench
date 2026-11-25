@@ -18,7 +18,7 @@
 @inject TimeProvider Clock
 
 <ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="@HeadIcon"
-               ConfirmDisabled="@(_plan is null || _plan.Refusal is not null || (NeedsAck && !_ack))">
+               ConfirmDisabled="@(_plan is null || _plan.Refusal is not null || (NeedsAck && !_ack) || (_booking && WhenError is not null))">
     <div class="tier-dialog">
     @if (_booking && _groupTierCount > 1)
     {
@@ -35,8 +35,17 @@
         <div class="field">
             <label class="field__label" for="tier-booking-when">When</label>
             <input id="tier-booking-when" type="datetime-local" class="input" required
+                   min="@LocalText(Clock.GetUtcNow().UtcDateTime + OnPremisesTierActionService.MinBookingAhead)"
+                   max="@LocalText(Clock.GetUtcNow().UtcDateTime + OnPremisesTierActionService.MaxBookingAhead)"
                    @bind="_runAtLocal" @bind:event="oninput" />
-            <span class="field__hint">@WhenHint</span>
+            @if (WhenError is { } whenError)
+            {
+                <FieldError Message="@whenError" />
+            }
+            else
+            {
+                <span class="field__hint">@WhenHint</span>
+            }
         </div>
     }
     @if (_planError is { } planError)
@@ -112,8 +121,39 @@
     private TimeZoneInfo _zone = TimeZoneInfo.Utc;
     private string? _changeHours;
 
-    private string WhenHint => (_changeHours is { } hours ? $"The customer allows changes from {hours.Replace("-", " to ")}. " : "")
-        + (_zone == TimeZoneInfo.Utc ? "Time in UTC." : $"Time on the customer's server ({_zone.StandardName}).");
+    private string WhenHint => _zone == TimeZoneInfo.Utc
+        // An older gateway does not say its time zone, so its hours cannot be put in UTC here.
+        ? (_changeHours is { } utcHours ? $"The customer allows changes from {utcHours.Replace("-", " to ")} on their server's clock, which may not be UTC. " : "") + "Time in UTC."
+        : (_changeHours is { } hours ? $"The customer allows changes from {hours.Replace("-", " to ")}. " : "") + $"Time on the customer's server ({_zone.StandardName}).";
+
+    /// <summary>The server's rules for the time, mirrored so the person sees them by the field; the server checks them again.</summary>
+    private string? WhenError
+    {
+        get
+        {
+            if (_plan is null) return null;
+            var utc = ToUtc(_runAtLocal);
+            var now = Clock.GetUtcNow().UtcDateTime;
+            if (utc < now + OnPremisesTierActionService.MinBookingAhead) return "Pick a time at least a few minutes from now. To restart now, use Restart.";
+            if (utc > now + OnPremisesTierActionService.MaxBookingAhead) return "Pick a time within the next 30 days.";
+            if (_zone != TimeZoneInfo.Utc && OnPremisesTierActionService.ChangeHours.Parse(_changeHours) is { } hours
+                && !hours.Contains(TimeOnly.FromDateTime(_runAtLocal)))
+            {
+                return $"The customer allows changes only from {hours.StartText} to {hours.EndText}. Pick a time in that window.";
+            }
+            return null;
+        }
+    }
+
+    private string LocalText(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, _zone).ToString("yyyy-MM-ddTHH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
+    private DateTime ToUtc(DateTime local)
+    {
+        var wall = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+        // A wall time that does not exist (the hour the clocks skip): an hour later does.
+        return _zone.IsInvalidTime(wall) ? TimeZoneInfo.ConvertTimeToUtc(wall.AddHours(1), _zone) : TimeZoneInfo.ConvertTimeToUtc(wall, _zone);
+    }
 
     /// <summary>
     /// Asks the person when to restart the environment's service tier (or every tier on its
@@ -137,17 +177,7 @@
         var confirmed = await opening;
         _booking = false;
         if (!confirmed) return null;
-        var wall = DateTime.SpecifyKind(_runAtLocal, DateTimeKind.Unspecified);
-        DateTime utc;
-        try
-        {
-            utc = TimeZoneInfo.ConvertTimeToUtc(wall, _zone);
-        }
-        catch (ArgumentException)
-        {
-            // A wall time that does not exist (the hour the clocks skip): an hour later does.
-            utc = TimeZoneInfo.ConvertTimeToUtc(wall.AddHours(1), _zone);
-        }
+        var utc = ToUtc(_runAtLocal);
         return (_action, utc);
     }
 

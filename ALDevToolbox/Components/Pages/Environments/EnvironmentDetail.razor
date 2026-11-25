@@ -2535,13 +2535,25 @@
             "The restart is booked. It's listed on the Service tier card until it runs, and you'll be told if it doesn't go through.");
     }
 
-    private Task RunBookingAsync(int actionId) => TierBookingWriteAsync(
-        async () =>
-        {
-            _bookingBusy = actionId;
-            await TierActions.RunBookingAsync(actionId, byWorker: false);
-        },
-        "The booked restart was sent to the gateway. The Service tier card shows how it goes.");
+    /// <summary>
+    /// Runs a booked restart early, behind the same confirmation as an immediate restart:
+    /// who is signed in, and on Production the tick, because it now happens before the agreed time.
+    /// </summary>
+    private async Task RunBookingAsync(int actionId)
+    {
+        if (_tierActionDialog is null || _tierActions is null || _tierActionBusy is not null) return;
+        var booked = _tierActions.Booked?.FirstOrDefault(b => b.Id == actionId);
+        if (booked is null) return;
+        var confirmed = await _tierActionDialog.OpenAsync(Id, Row.EnvironmentName, _tierActions.TierName, _tierActions.GroupTierCount, booked.Action);
+        if (!confirmed) return;
+        await TierBookingWriteAsync(
+            async () =>
+            {
+                _bookingBusy = actionId;
+                await TierActions.RunBookingAsync(actionId, byWorker: false);
+            },
+            "The booked restart was sent to the gateway. The Service tier card shows how it goes.");
+    }
 
     private Task CancelBookingAsync(int actionId) => TierBookingWriteAsync(
         async () =>

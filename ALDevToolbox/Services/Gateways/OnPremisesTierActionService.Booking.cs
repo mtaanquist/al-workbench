@@ -119,8 +119,11 @@ public sealed partial class OnPremisesTierActionService
             throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = refusal.Replace(" Nothing was sent.", string.Empty, StringComparison.Ordinal) });
         }
         // Refused now rather than when it comes due, when nobody is watching.
-        if (GatewayZone(facts) is { } zone && ChangeHoursFor(facts, plan.Tiers) is { } hours
-            && !hours.Contains(TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(runAtUtc, zone))))
+        // Every tier it touches, not only the first: a group whose tiers set different
+        // hours would otherwise be accepted now and refused when it comes due.
+        if (GatewayZone(facts) is { } zone
+            && AllChangeHours(facts, plan.Tiers).FirstOrDefault(h =>
+                !h.Contains(TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(runAtUtc, zone)))) is { } hours)
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -197,24 +200,40 @@ public sealed partial class OnPremisesTierActionService
         var userId = _orgContext.CurrentUserId;
         var actor = await AuditActor.ResolveAsync(_db, userId, ct);
         var now = Now;
-        var cancelled = await BookedQuery(environmentId).Where(a => a.Id == actionId)
-            .ExecuteUpdateAsync(u => u
-                .SetProperty(a => a.Status, UpgradeActionStatus.Cancelled)
-                .SetProperty(a => a.CancelledBy, actor)
-                .SetProperty(a => a.CancelledByUserId, userId)
-                .SetProperty(a => a.CancelledAt, now), ct);
-        if (cancelled == 0)
+        var gatewayId = (await OnPremisesDeployFacts.LoadAsync(_db, environmentId, ct))?.GatewayId;
+        await using (var tx = await _db.Database.BeginTransactionAsync(ct))
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = "That booked restart has already run or been cancelled." });
+            try
+            {
+                // The lock sending takes, so a cancel and a send cannot both win: whichever
+                // gets it second finds the row already claimed.
+                if (gatewayId is { } id) await LockTierActionsAsync(id, ct);
+                var cancelled = await BookedQuery(environmentId).Where(a => a.Id == actionId)
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(a => a.Status, UpgradeActionStatus.Cancelled)
+                        .SetProperty(a => a.CancelledBy, actor)
+                        .SetProperty(a => a.CancelledByUserId, userId)
+                        .SetProperty(a => a.CancelledAt, now), ct);
+                if (cancelled == 0)
+                {
+                    throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = "That booked restart has already run or been cancelled." });
+                }
+                _db.AuditLog.Add(BookingAudit(orgId, environmentId, env, actor, userId, now, new Dictionary<string, object?>
+                {
+                    ["Action"] = "Cancel booked restart",
+                    ["Project"] = env.ProjectName,
+                    ["Name"] = env.Name,
+                    ["UpgradeActionId"] = actionId,
+                }));
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+            }
+            catch
+            {
+                _db.ChangeTracker.Clear();
+                throw;
+            }
         }
-        _db.AuditLog.Add(BookingAudit(orgId, environmentId, env, actor, userId, now, new Dictionary<string, object?>
-        {
-            ["Action"] = "Cancel booked restart",
-            ["Project"] = env.ProjectName,
-            ["Name"] = env.Name,
-            ["UpgradeActionId"] = actionId,
-        }));
-        await _db.SaveChangesAsync(ct);
         _logger.LogInformation("Booked restart {ActionId} on environment {EnvironmentId} cancelled by user {UserId}.", actionId, environmentId, userId);
     }
 
@@ -237,21 +256,36 @@ public sealed partial class OnPremisesTierActionService
         var booking = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Id == actionId && a.Status == UpgradeActionStatus.Pending && a.SentAt == null
                         && (a.Kind == UpgradeActionKind.RestartServiceTier || a.Kind == UpgradeActionKind.RestartServiceTiers))
-            .Select(a => new { a.Id, a.EnvironmentId, a.Kind, a.ExecuteAfter })
+            .Select(a => new { a.Id, a.EnvironmentId, a.Kind, a.ExecuteAfter, a.RequestedByUserId })
             .FirstOrDefaultAsync(ct);
-        if (booking is null) return ServiceTierBookingRun.Gone;
+        if (booking is null)
+        {
+            if (!byWorker) throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = "That booked restart has already run or been cancelled." });
+            return ServiceTierBookingRun.Gone;
+        }
         var action = booking.Kind == UpgradeActionKind.RestartServiceTiers ? ServiceTierAction.RestartAll : ServiceTierAction.Restart;
 
         var env = await EnvironmentAsync(booking.EnvironmentId, ct);
         if (env is null)
         {
+            if (!byWorker) throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = "That environment is no longer an on-premises one." });
             return await FailBookingAsync(actionId, "The environment is no longer an on-premises one, so the restart wasn't sent.", ct);
         }
+        var overdue = Now > booking.ExecuteAfter + BookingGrace;
         if (byWorker)
         {
-            if (!await _access.CanManageAsync(env.ProjectId, env.CreatedBy, ct))
+            // A disabled account keeps its role and teams, so being able to manage the
+            // Solution is not enough on its own (#1235).
+            if (!await _db.Users.AsNoTracking().AnyAsync(u => u.Id == booking.RequestedByUserId && u.Status == UserStatus.Active, ct)
+                || !await _access.CanManageAsync(env.ProjectId, env.CreatedBy, ct))
             {
                 return await FailBookingAsync(actionId, "The person who booked this no longer manages this Solution, so the restart wasn't sent.", ct);
+            }
+            // Not sent hours late, when people may be working: the worker was off or the
+            // app was down at the booked time.
+            if (overdue)
+            {
+                return await FailBookingAsync(actionId, "AL Workbench couldn't send it within two hours of the booked time, so the restart wasn't sent. Book it again or restart now.", ct);
             }
         }
         else
@@ -262,9 +296,9 @@ public sealed partial class OnPremisesTierActionService
         var facts = await OnPremisesDeployFacts.LoadAsync(_db, booking.EnvironmentId, ct);
         if (facts is null)
         {
+            if (!byWorker) throw new PlanValidationException(new Dictionary<string, string> { ["environment"] = "That environment no longer exists." });
             return await FailBookingAsync(actionId, "The environment no longer exists, so the restart wasn't sent.", ct);
         }
-        var overdue = Now > booking.ExecuteAfter + BookingGrace;
         var plan = await PlanAsync(env, facts, action, forDialog: false, ct, booking: true);
         if (plan.Refusal is { } refusal)
         {
@@ -405,6 +439,11 @@ public sealed partial class OnPremisesTierActionService
             .FirstOrDefault(h => h is not null);
     }
 
+    private static IEnumerable<ChangeHours> AllChangeHours(OnPremisesDeployFacts facts, IReadOnlyList<string> tiers) =>
+        facts.Policy is not { } policy
+            ? []
+            : tiers.Select(t => ChangeHours.Parse(PolicyEntry(policy, t)?.ChangeHours)).OfType<ChangeHours>();
+
     private DateTime DefaultRunAt(TimeZoneInfo? zone, ChangeHours? hours)
     {
         var now = Now;
@@ -416,6 +455,8 @@ public sealed partial class OnPremisesTierActionService
         var local = TimeZoneInfo.ConvertTimeFromUtc(now, zone);
         var opening = local.Date + hours.Start.ToTimeSpan();
         if (opening <= local + MinBookingAhead) opening = opening.AddDays(1);
+        // The night the clocks go forward skips an hour; an opening inside it starts when the clocks resume.
+        if (zone.IsInvalidTime(opening)) opening = opening.AddHours(1);
         return TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(opening, DateTimeKind.Unspecified), zone);
     }
 

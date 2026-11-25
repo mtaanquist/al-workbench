@@ -686,7 +686,7 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         {
             var row = await ctx.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync();
             row.Status.Should().Be(UpgradeActionStatus.Failed);
-            row.Outcome.Should().Contain("two hours past the booked time");
+            row.Outcome.Should().Contain("two hours of the booked time");
         }
 
         // The customer's settings changed since it was booked: refused, and said so.
@@ -701,6 +701,42 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         await using var check = _db.NewContext();
         (await check.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.Id == second)).Outcome
             .Should().StartWith(OnPremisesDeployFacts.NotAllowed).And.EndWith("The restart wasn't sent.");
+    }
+
+    [Fact]
+    public async Task A_booking_the_worker_reaches_hours_late_or_whose_booker_was_disabled_is_not_sent()
+    {
+        await SetPolicyAsync();
+        var late = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(1));
+        await AtAsync(4);
+        (await RunBookingAsync(late)).Should().Be(ServiceTierBookingRun.Failed, "a restart at 10:00 instead of 22:00 is worse than none");
+
+        var disabled = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(5));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == _owner.Id).ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, UserStatus.Disabled));
+        }
+        await AtAsync(5);
+        (await RunBookingAsync(disabled)).Should().Be(ServiceTierBookingRun.Failed);
+
+        await using var check = _db.NewContext();
+        (await check.GatewayCommands.CountAsync()).Should().Be(0);
+        (await check.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.Id == late)).Outcome.Should().Contain("two hours of the booked time");
+        (await check.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.Id == disabled)).Outcome.Should().Contain("no longer manages");
+    }
+
+    [Fact]
+    public async Task Run_now_on_a_booking_already_cancelled_says_so_rather_than_reporting_it_sent()
+    {
+        await SetPolicyAsync();
+        var id = await BookAsync(ServiceTierAction.Restart, Start.UtcDateTime.AddHours(2));
+        await using (var ctx = _db.NewContext())
+        {
+            await Service(ctx).CancelBookingAsync(_environmentId, id);
+        }
+        await using var run = _db.NewContext();
+        var now = () => Service(run).RunBookingAsync(id, byWorker: false);
+        (await now.Should().ThrowAsync<PlanValidationException>()).Which.Errors["environment"].Should().Contain("already run or been cancelled");
     }
 
     [Fact]

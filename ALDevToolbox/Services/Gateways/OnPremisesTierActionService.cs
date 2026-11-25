@@ -692,7 +692,9 @@ public sealed partial class OnPremisesTierActionService
                             || x.Kind == UpgradeActionKind.StopServiceTier || x.Kind == UpgradeActionKind.StartServiceTier)
                         // A booking still waiting for its time is listed as booked, not as the latest action.
                         && !(x.Status == UpgradeActionStatus.Pending && x.SentAt == null))
-            .OrderByDescending(x => x.RequestedAt).ThenByDescending(x => x.Id)
+            // By when it was sent: a booking runs hours after it was made, and the one
+            // running now must be the latest, or the card would offer actions mid-restart.
+            .OrderByDescending(x => x.SentAt ?? x.RequestedAt).ThenByDescending(x => x.Id)
             .Select(x => new
             {
                 x.Id, x.ProjectId, x.EnvironmentId, x.Kind, x.Status, x.RequestedBy, x.RequestedAt, x.ExecuteAfter,
