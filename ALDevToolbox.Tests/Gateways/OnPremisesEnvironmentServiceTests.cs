@@ -593,6 +593,92 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Server_settings_reach_only_those_who_can_see_the_solution_and_hidden_values_stay_hidden()
+    {
+        GatewayServerSetting[] settings =
+        [
+            new() { Key = "DatabaseServer", Value = "CRONUS-SQL" },
+            new() { Key = "ClientServicesPort", Value = "7046" },
+            new() { Key = "ServicesCertificateThumbprint", Withheld = true },
+        ];
+        await ReportAsync(
+            Tier("BC250", "production", Tenant("default")) with { Settings = settings },
+            Tier("BC140", "production", Tenant("default")) with { Settings = settings },
+            Tier("BC130", "production", Tenant("default")));
+        var open = await SolutionAsync("CRONUS Danmark");
+        var secret = await SolutionAsync("CRONUS Secret", visibility: ProjectVisibility.Private);
+        var openTier = await LinkAsync(open, "BC250", "Production");
+        var secretTier = await LinkAsync(secret, "BC140", "Production");
+        var unshared = await LinkAsync(open, "BC130", "Test");
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var view = await Fleet(ctx).GetServerSettingsAsync(openTier);
+        view!.Shared.Should().BeTrue();
+        view.Settings.Select(s => (s.Key, s.Value, s.Withheld)).Should().Equal(
+            ("ClientServicesPort", "7046", false), ("DatabaseServer", "CRONUS-SQL", false),
+            ("ServicesCertificateThumbprint", (string?)null, true));
+        (await Fleet(ctx).GetServerSettingsAsync(unshared))!.Shared.Should().BeFalse("this tier's policy does not share them");
+        (await Fleet(ctx).GetServerSettingsAsync(secretTier)).Should().BeNull("a Private solution the caller is not on is not there at all");
+    }
+
+    [Fact]
+    public async Task Get_environment_gives_server_settings_only_when_asked_and_shared()
+    {
+        await ReportAsync(
+            Tier("BC250", "test", Tenant("default")) with { Settings = [new() { Key = "DatabaseServer", Value = "CRONUS-SQL" }] },
+            Tier("BC140", "test", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var shared = await LinkAsync(solution, "BC250", "Test");
+        var unshared = await LinkAsync(solution, "BC140", "Old test");
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var tools = Tools(ctx);
+        var plain = await tools.GetEnvironmentAsync(shared);
+        (plain.ServerSettingsShared, plain.ServerSettings).Should().Be(((bool?)null, (IReadOnlyList<ServerSetting>?)null), "they are a few hundred lines, so only on request");
+
+        var asked = await tools.GetEnvironmentAsync(shared, includeServerSettings: true);
+        asked.ServerSettingsShared.Should().BeTrue();
+        asked.ServerSettings.Should().Equal(new ServerSetting("DatabaseServer", "CRONUS-SQL", false));
+        asked.ServerSettingsReadAt.Should().NotBeNull();
+
+        var other = await tools.GetEnvironmentAsync(unshared, includeServerSettings: true);
+        (other.ServerSettingsShared, other.ServerSettings, other.ServerSettingsReadAt).Should().Be(((bool?)false, (IReadOnlyList<ServerSetting>?)null, (DateTime?)null));
+    }
+
+    [Fact]
+    public async Task A_tier_that_could_not_be_read_keeps_shared_settings_and_says_not_read_yet_before_the_first_read()
+    {
+        var solution = await SolutionAsync("CRONUS Danmark");
+        await ReportAsync(Tier("BC250", "test", Tenant("default")) with { Settings = [new() { Key = "DatabaseServer", Value = "CRONUS-SQL" }] });
+        var id = await LinkAsync(solution, "BC250", "Test");
+        var stillShared = new Dictionary<string, string> { [GatewayInventorySections.Settings] = "The service tier could not be read." };
+
+        // A failed read of a tier that still shares them keeps the last copy.
+        await ReportAsync(Tier("BC250", "test") with { Error = "Timed out.", Unavailable = stillShared });
+        await using (var ctx = _db.NewContext())
+        {
+            (await Fleet(ctx).GetServerSettingsAsync(id))!.Settings.Should().ContainSingle();
+        }
+
+        // A failed read of a tier that no longer shares them clears it.
+        await ReportAsync(Tier("BC250", "test") with { Error = "Timed out." });
+        await using (var ctx = _db.NewContext())
+        {
+            (await Fleet(ctx).GetServerSettingsAsync(id))!.Shared.Should().BeFalse();
+        }
+
+        // Shared again but not read yet: an empty list, not "not shared".
+        await ReportAsync(Tier("BC250", "test") with { Unavailable = stillShared });
+        await using (var ctx = _db.NewContext())
+        {
+            var view = (await Fleet(ctx).GetServerSettingsAsync(id))!;
+            (view.Shared, view.Settings.Count).Should().Be((true, 0));
+        }
+    }
+
+    [Fact]
     public async Task On_premises_tiers_are_absent_from_upgrades()
     {
         await ReportAsync(Tier("BC250", "production", Tenant("default")));

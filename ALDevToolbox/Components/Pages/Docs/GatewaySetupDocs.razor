@@ -155,7 +155,9 @@
         <li>
             Every 15 minutes, and after every operation, for each tier the settings file lets it
             read: its state, version, tenants, installed apps, number of open sessions and licence
-            details. Who is signed in only where <code>session_users</code> is allowed.
+            details. Who is signed in only where <code>session_users</code> is allowed, and every
+            server setting only where <code>server_settings</code> is allowed, with passwords and
+            keys left out.
         </li>
         <li>
             For each operation: its outcome, and its log lines, including everything your before
@@ -485,6 +487,7 @@ ALWorkbench.Gateway install</pre>
         <tbody>
             <tr><td><code>inventory</code></td><td>Read the tier's state, version, tenants, apps, number of open sessions and licence.</td></tr>
             <tr><td><code>session_users</code></td><td>Also report <em>who</em> is signed in, not only how many. That is personal data, so leave it out unless you need it.</td></tr>
+            <tr><td><code>server_settings</code></td><td>Also report every server setting, as Get-NAVServerConfiguration lists them, so consultants can read them. Read only. Settings that hold passwords, keys, tokens or connection strings are listed without their value.</td></tr>
             <tr><td><code>publish</code></td><td>Publish, synchronise, install and upgrade apps.</td></tr>
             <tr><td><code>unpublish</code></td><td>Remove an app's previous version after an upgrade.</td></tr>
             <tr><td><code>restart</code></td><td>Restart the tier as part of a deployment or a licence import.</td></tr>

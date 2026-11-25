@@ -17,7 +17,7 @@
 machine = "CHANGE-ME"
 name = "BC250"
 environment = "test"
-allow = ["inventory", "session_users", "publish", "unpublish", "restart", "service_control", "licence"]
+allow = ["inventory", "session_users", "server_settings", "publish", "unpublish", "restart", "service_control", "licence"]
 # Apps built by AL Workbench are not signed today, so deployments need this.
 allow_unsigned = true
 

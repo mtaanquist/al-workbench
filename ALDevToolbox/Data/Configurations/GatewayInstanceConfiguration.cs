@@ -34,6 +34,7 @@ internal sealed class GatewayInstanceConfiguration : IEntityTypeConfiguration<Ga
         entity.Property(e => e.PublicWebBaseUrl).HasColumnName("public_web_base_url");
         entity.Property(e => e.SessionCount).HasColumnName("session_count");
         entity.Property(e => e.SessionUsersJson).HasColumnName("session_users").HasColumnType("jsonb");
+        entity.Property(e => e.ServerSettingsJson).HasColumnName("server_settings").HasColumnType("jsonb");
         entity.Property(e => e.PowerShell).HasColumnName("powershell").HasMaxLength(10);
         entity.Property(e => e.ReadError).HasColumnName("read_error");
         entity.Property(e => e.UnavailableJson).HasColumnName("unavailable").HasColumnType("jsonb").IsRequired();

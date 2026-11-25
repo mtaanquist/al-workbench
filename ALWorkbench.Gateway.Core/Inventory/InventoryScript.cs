@@ -55,11 +55,12 @@ public static class InventoryScript
     public static readonly TimeSpan ProcessTimeout = Budget + AppsTimeout + LoadTimeout + LoadTimeout;
 
     /// <summary>The parameters for one tier. Data only; the script reads them with <c>ConvertFrom-Json</c>.</summary>
-    public static JsonObject Parameters(string instance, string moduleFolder, bool includeSessionUsers) => new()
+    public static JsonObject Parameters(string instance, string moduleFolder, bool includeSessionUsers, bool includeSettings = false) => new()
     {
         [GatewayCommandParameters.Instance] = instance,
         ["moduleFolder"] = moduleFolder,
         ["includeSessionUsers"] = includeSessionUsers,
+        ["includeSettings"] = includeSettings,
         ["sectionSeconds"] = (int)SectionTimeout.TotalSeconds,
         ["appsSeconds"] = (int)AppsTimeout.TotalSeconds,
         ["loadSeconds"] = (int)LoadTimeout.TotalSeconds,
@@ -73,6 +74,7 @@ public static class InventoryScript
         $name = [string]$Parameters.instance
         $folder = [string]$Parameters.moduleFolder
         $includeUsers = [bool]$Parameters.includeSessionUsers
+        $includeSettings = [bool]$Parameters.includeSettings
         $sectionSeconds = [int]$Parameters.sectionSeconds
         $appsSeconds = [int]$Parameters.appsSeconds
         $loadSeconds = [int]$Parameters.loadSeconds
@@ -173,6 +175,7 @@ public static class InventoryScript
             version = $null
             service = $null
             configuration = $null
+            settings = $null
             tenants = $null
             tenantsTruncated = $false
             tenantSpecificProperties = $false
@@ -209,11 +212,12 @@ public static class InventoryScript
         } @($name) $sectionSeconds
         if ($null -ne $out -and $out.Count -gt 0) { $result.service = $out[0] }
 
-        # The configuration: a fixed list of keys, never the whole file.
+        # The configuration: a fixed list of keys, and the whole list only where the
+        # policy allows server_settings (the gateway leaves the secrets out before sending).
         if (Test-Cmdlet 'Get-NAVServerConfiguration') {
             $asXml = Test-Cmdlet 'Get-NAVServerConfiguration' 'AsXml'
             $out = Invoke-Section 'configuration' {
-                param($Name, $AsXml)
+                param($Name, $AsXml, $IncludeAll)
                 $ErrorActionPreference = 'Stop'
                 $values = @{}
                 if ($AsXml) {
@@ -230,11 +234,22 @@ public static class InventoryScript
                 foreach ($key in @('DatabaseServer', 'DatabaseInstance', 'DatabaseName', 'Multitenant', 'ClientServicesPort', 'SOAPServicesPort', 'ODataServicesPort', 'ManagementServicesPort', 'DeveloperServicesPort', 'PublicWebBaseUrl')) {
                     if ($values.ContainsKey($key)) { $kept[$key] = $values[$key] } else { $kept[$key] = $null }
                 }
-                [pscustomobject]$kept
-            } @($name, $asXml) $sectionSeconds
-            if ($null -ne $out -and $out.Count -gt 0) { $result.configuration = $out[0] }
+                $all = $null
+                if ($IncludeAll) {
+                    $all = @($values.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ key = [string]$_; value = [string]$values[$_] } })
+                }
+                [pscustomobject]@{ kept = [pscustomobject]$kept; all = $all }
+            } @($name, $asXml, $includeSettings) $sectionSeconds
+            if ($null -ne $out -and $out.Count -gt 0) {
+                $result.configuration = $out[0].kept
+                if ($includeSettings) { $result.settings = $out[0].all }
+            }
+            if ($includeSettings -and $null -eq $result.settings) {
+                $unavailable['settings'] = if ($unavailable.Contains('configuration')) { $unavailable['configuration'] } else { 'The settings could not be read.' }
+            }
         } else {
             $unavailable['configuration'] = 'Get-NAVServerConfiguration is not available in this administration module.'
+            if ($includeSettings) { $unavailable['settings'] = $unavailable['configuration'] }
         }
 
         # Everything below asks the running server; a stopped tier cannot answer.

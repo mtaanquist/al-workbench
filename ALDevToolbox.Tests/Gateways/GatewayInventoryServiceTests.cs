@@ -279,6 +279,30 @@ public sealed class GatewayInventoryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Server_settings_are_kept_when_unread_and_cleared_when_no_longer_shared()
+    {
+        var gateway = await GatewayAsync();
+        GatewayServerSetting[] settings =
+        [
+            new() { Key = "SqlCommandTimeout", Value = "00:30:00" },
+            new() { Key = "DatabasePassword", Value = "leaked by an old gateway", Withheld = true },
+        ];
+        await ApplyAsync(gateway, Report(Tier("BC250") with { Settings = settings }));
+        var stored = (await RowsAsync()).Single().ServerSettingsJson!;
+        stored.Should().Contain("SqlCommandTimeout").And.Contain("00:30:00")
+            .And.NotContain("leaked", "a withheld setting is stored without its value whatever was sent");
+
+        await ApplyAsync(gateway, Report(Tier("BC250") with
+        {
+            Unavailable = new Dictionary<string, string> { [GatewayInventorySections.Settings] = "Did not answer within 120 seconds." },
+        }));
+        (await RowsAsync()).Single().ServerSettingsJson.Should().Be(stored, "settings change slowly, so a round that could not read them keeps the last");
+
+        await ApplyAsync(gateway, Report(Tier("BC250")));
+        (await RowsAsync()).Single().ServerSettingsJson.Should().BeNull("the customer's settings no longer share them");
+    }
+
+    [Fact]
     public async Task The_bc14_sample_read_by_the_gateway_is_stored_whole()
     {
         var gateway = await GatewayAsync();

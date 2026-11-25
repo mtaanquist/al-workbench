@@ -64,6 +64,14 @@ public class GatewayInstance
     /// </summary>
     public string? SessionUsersJson { get; set; }
 
+    /// <summary>
+    /// Every server setting, as JSON (a list of <c>{key, value, withheld}</c>). Only set when
+    /// the customer's policy file allows <c>server_settings</c> for this tier; the gateway
+    /// leaves secrets' values out. Kept when a report could not read the settings, cleared
+    /// by one from a tier that no longer allows them.
+    /// </summary>
+    public string? ServerSettingsJson { get; set; }
+
     /// <summary>The PowerShell the gateway read it with: <c>5.1</c> or <c>7</c>.</summary>
     public string? PowerShell { get; set; }
 

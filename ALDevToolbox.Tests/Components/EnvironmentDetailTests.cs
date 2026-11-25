@@ -1018,7 +1018,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task An_on_premises_service_tier_has_three_tabs_and_never_asks_business_central_online()
+    public async Task An_on_premises_service_tier_has_its_own_tabs_and_never_asks_business_central_online()
     {
         var (projectId, envId) = await SeedAsync();
         await using (var ctx = _db.NewContext())
@@ -1030,13 +1030,16 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         }
 
         var cut = Render(envId);
-        cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Workbench history");
+        cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Server settings", "Workbench history");
         cut.FindAll(".tag").Select(t => t.TextContent).Should().Contain("On-premises");
         cut.FindAll("button").Should().NotContain(b => b.TextContent.Contains("Copy"), "a service tier cannot be copied from here");
         // No gateway reports this tier, so its last state is not vouched for in green.
         var pill = cut.Find(".status-pill");
         pill.TextContent.Trim().Should().StartWith("Last seen");
         pill.ClassList.Should().Contain("status-pill--muted");
+
+        // A tier whose gateway does not share its settings says who can change that.
+        Render(envId, "settings").Markup.Should().Contain("The server settings aren't shared");
 
         // An address naming Business Central online's live tabs lands on Overview.
         Render(envId, "operations");

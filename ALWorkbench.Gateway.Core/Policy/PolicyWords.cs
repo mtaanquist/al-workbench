@@ -18,6 +18,8 @@ public enum PolicyPermission
     Inventory,
     /// <summary>Also report who is signed in, not only how many.</summary>
     SessionUsers,
+    /// <summary>Also report every server setting (<c>Get-NAVServerConfiguration</c>), secrets left out. Read only.</summary>
+    ServerSettings,
     /// <summary>Publish, sync, install and upgrade apps.</summary>
     Publish,
     /// <summary>Remove an app's previous version after an upgrade.</summary>
@@ -89,6 +91,7 @@ public static class PolicyWords
     {
         [PolicyPermission.Inventory] = "inventory",
         [PolicyPermission.SessionUsers] = "session_users",
+        [PolicyPermission.ServerSettings] = "server_settings",
         [PolicyPermission.Publish] = "publish",
         [PolicyPermission.Unpublish] = "unpublish",
         [PolicyPermission.Restart] = "restart",

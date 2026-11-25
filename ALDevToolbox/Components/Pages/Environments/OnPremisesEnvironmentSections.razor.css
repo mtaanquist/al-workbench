@@ -22,3 +22,6 @@
 /* Sets Stop apart from the actions that bring the tier back. */
 .onprem__action-sep { align-self: stretch; width: 1px; margin: 0 var(--space-1); background: var(--border); }
 .onprem__shared { border-top: 1px solid var(--border); }
+.onprem__counted { display: flex; align-items: center; gap: var(--space-2); }
+.onprem__filter { width: 220px; }
+.onprem__setting-value { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-xs); }

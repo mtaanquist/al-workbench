@@ -209,6 +209,7 @@ public sealed class GatewayInventoryService
             // Nothing could be read: keep the last known facts and say why.
             row.ReadError = Text(reported.Error);
             row.UnavailableJson = "{}";
+            KeepOrClearServerSettings(row, reported);
             return;
         }
 
@@ -237,6 +238,22 @@ public sealed class GatewayInventoryService
             ? null
             : JsonSerializer.Serialize(reported.SessionUsers.Where(u => !Blank(u)).Select(Text), Json);
 
+        if (reported.Settings is { } settings)
+        {
+            row.ServerSettingsJson = JsonSerializer.Serialize(
+                settings.Where(s => s is not null && !Blank(s.Key)).Select(s => new GatewayServerSetting
+                {
+                    Key = Text(s.Key)!,
+                    Value = s.Withheld ? null : Text(s.Value),
+                    Withheld = s.Withheld,
+                }),
+                Json);
+        }
+        else
+        {
+            KeepOrClearServerSettings(row, reported);
+        }
+
         // What changes slowly: kept when this report could not read it.
         if (reported.Configuration is { } configuration)
         {
@@ -259,6 +276,24 @@ public sealed class GatewayInventoryService
         if (reported.Licence is { } licence)
         {
             await ApplyLicenceAsync(orgId, row, licence, now, ct);
+        }
+    }
+
+    /// <summary>
+    /// A report that carries no settings. The gateway says so under "settings" when the tier
+    /// still shares them but they could not be read: the last copy is kept, or an empty list
+    /// stands in so the page says "not read yet" rather than "not shared". No such word
+    /// means the customer's settings no longer share them, and the copy goes.
+    /// </summary>
+    private static void KeepOrClearServerSettings(GatewayInstance row, GatewayInstanceInventory reported)
+    {
+        if (reported.Unavailable?.ContainsKey(GatewayInventorySections.Settings) == true)
+        {
+            row.ServerSettingsJson ??= "[]";
+        }
+        else
+        {
+            row.ServerSettingsJson = null;
         }
     }
 
@@ -470,6 +505,10 @@ public sealed class GatewayInventoryService
                 {
                     errors["apps"] = $"{tier} reports an app for tenant {tenant.Id} without an id and version, or with one longer than {MaxAppKeyLength} characters.";
                 }
+            }
+            if (instance.Settings is { Count: > GatewayInventoryLimits.MaxServerSettings })
+            {
+                errors["settings"] = $"{tier} reports more than {GatewayInventoryLimits.MaxServerSettings} server settings.";
             }
             if (instance.SessionUsers is { Count: > GatewayInventoryLimits.MaxSessionUsers })
             {

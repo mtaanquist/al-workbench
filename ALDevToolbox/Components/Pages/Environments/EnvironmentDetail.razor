@@ -282,6 +282,7 @@
                 @if (Row.IsOnPremises && _tab != Section.History)
                 {
                     <OnPremisesEnvironmentSections Row="Row" ShowApps="@(_tab == Section.Apps)" Apps="_onPremisesApps"
+                                                   ShowSettings="@(_tab == Section.Settings)" Settings="_serverSettings"
                                                    DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway"
                                                    CanManage="_canManage" Licence="_licence" LicenceError="@_licenceError"
                                                    UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync"
@@ -1249,10 +1250,10 @@
     /// <summary>Where to go on from an outcome the page cannot finish telling - a copy that is still running.</summary>
     private (string Href, string Text)? _settingDoneLink;
 
-    /// <summary>The tab in the address: "apps", "operations", "sessions" or "history". Absent, or anything else, is Overview.</summary>
+    /// <summary>The tab in the address: "apps", "operations", "sessions", "settings" (on premises) or "history". Absent, or anything else, is Overview.</summary>
     [Parameter] public string? OpenTab { get; set; }
 
-    private enum Section { Overview, Apps, Operations, Sessions, History }
+    private enum Section { Overview, Apps, Operations, Sessions, Settings, History }
     private Section _tab = Section.Overview;
 
     /// <summary>The environment the page last read, so a change of tab does not read it again.</summary>
@@ -1306,6 +1307,7 @@
         [
             Tab("Overview", Section.Overview),
             Tab("Apps", Section.Apps),
+            Tab("Server settings", Section.Settings),
             Tab("Workbench history", Section.History),
         ]
         :
@@ -1319,6 +1321,9 @@
 
     /// <summary>An on-premises tier's installed apps, from the gateway's report; null until read.</summary>
     private List<InstalledAppRow>? _onPremisesApps;
+
+    /// <summary>An on-premises tier's server settings, from the gateway's report; null until read.</summary>
+    private ServerSettingsView? _serverSettings;
 
     /// <summary>True for an Admin, who may open the gateway behind an on-premises tier.</summary>
     private bool _canSeeGateway;
@@ -1442,11 +1447,14 @@
             _canManage = await Read(ct => Access.CanManageAsync(Row.ProjectId, _env.CreatedByUserId, ct));
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
             _onPremisesApps = null;
+            _serverSettings = null;
             if (Row.IsOnPremises)
             {
                 // Everything an on-premises tier shows is our own mirror: read it now,
                 // the gateway is never asked from here.
                 _onPremisesApps = await Read(ct => Fleet.ListInstalledAppsAsync(Id, ct)) ?? [];
+                _serverSettings = await Read(ct => Fleet.GetServerSettingsAsync(Id, ct))
+                    ?? new ServerSettingsView(false, [], null);
                 _canSeeGateway = await Read(ct => OnPremisesLinks.CanLinkAsync(ct));
                 await LoadLicenceAsync();
                 await LoadTierActionsAsync();
@@ -1473,6 +1481,12 @@
         if (Row.IsOnPremises)
         {
             if (_tab is Section.Operations or Section.Sessions) Nav.NavigateTo(SectionHref(null), replace: true);
+            return;
+        }
+        // Server settings are an on-premises tier's: online, the address lands on Overview.
+        if (_tab == Section.Settings)
+        {
+            Nav.NavigateTo(SectionHref(null), replace: true);
             return;
         }
 
