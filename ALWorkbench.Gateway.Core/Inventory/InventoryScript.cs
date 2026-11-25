@@ -295,7 +295,7 @@ public static class InventoryScript
                     # AL Workbench mark every tenant past the limit missing each round.
                     if ($index -ge $maxTenants) { $result.tenantsTruncated = $true; break }
                     $index++
-                    $tenant = [ordered]@{ id = [string]$row.id; state = $row.state; databaseName = $row.databaseName; sessionCount = $null; apps = $null }
+                    $tenant = [ordered]@{ id = [string]$row.id; state = $row.state; databaseName = $row.databaseName; sessionCount = $null; sessionUsers = $null; apps = $null }
                     if ($hasApps) {
                         $apps = Invoke-Section ('apps:' + $tenant.id) {
                             param($Name, $Tenant, $TenantSpecific)
@@ -337,28 +337,43 @@ public static class InventoryScript
                     param($Name, $TenantIds, $PerTenant, $IncludeUsers)
                     $ErrorActionPreference = 'Stop'
                     $counts = @()
-                    $users = @{}
                     $total = 0
+                    # Who, per tenant: the tenants of one tier can belong to different customers.
+                    function Get-Names($Sessions) {
+                        $seen = @{}
+                        foreach ($s in $Sessions) { if ($s.UserID) { $seen[[string]$s.UserID] = $true } }
+                        return ,@($seen.Keys | Sort-Object)
+                    }
                     if ($PerTenant) {
                         foreach ($id in $TenantIds) {
                             $sessions = @(Get-NAVServerSession -ServerInstance $Name -Tenant $id)
-                            $counts += [pscustomobject]@{ tenant = $id; count = $sessions.Count }
+                            $names = $null
+                            if ($IncludeUsers) { $names = Get-Names $sessions }
+                            $counts += [pscustomobject]@{ tenant = $id; count = $sessions.Count; users = $names }
                             $total += $sessions.Count
-                            if ($IncludeUsers) { foreach ($s in $sessions) { if ($s.UserID) { $users[[string]$s.UserID] = $true } } }
                         }
                     } else {
                         $sessions = @(Get-NAVServerSession -ServerInstance $Name)
                         $total = $sessions.Count
-                        if ($IncludeUsers) { foreach ($s in $sessions) { if ($s.UserID) { $users[[string]$s.UserID] = $true } } }
+                        # Without -Tenant the sessions cannot be split, so they belong to a tenant
+                        # only when the tier has just the one.
+                        if ($TenantIds.Count -eq 1) {
+                            $names = $null
+                            if ($IncludeUsers) { $names = Get-Names $sessions }
+                            $counts += [pscustomobject]@{ tenant = $TenantIds[0]; count = $total; users = $names }
+                        }
                     }
-                    $names = $null
-                    if ($IncludeUsers) { $names = @($users.Keys | Sort-Object) }
-                    [pscustomobject]@{ total = $total; perTenant = $counts; users = $names }
+                    [pscustomobject]@{ total = $total; perTenant = $counts }
                 } @($name, $tenantIds, $perTenant, $includeUsers) $sectionSeconds
                 if ($null -ne $out -and $out.Count -gt 0) {
                     $result.sessions = $out[0]
                     foreach ($count in @($out[0].perTenant)) {
-                        foreach ($tenant in $tenants) { if ($tenant.id -eq $count.tenant) { $tenant.sessionCount = $count.count } }
+                        foreach ($tenant in $tenants) {
+                            if ($tenant.id -eq $count.tenant) {
+                                $tenant.sessionCount = $count.count
+                                if ($includeUsers) { $tenant.sessionUsers = @($count.users) }
+                            }
+                        }
                     }
                 }
             } else {

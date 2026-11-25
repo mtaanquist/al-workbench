@@ -196,9 +196,9 @@ public sealed class GatewayInventoryParsingTests
     {
         var sample = Sample("bc14-hybrid.json");
 
-        InventoryNormaliser.FromScriptOutput(sample, Tier("BC140")).SessionUsers
+        InventoryNormaliser.FromScriptOutput(sample, Tier("BC140")).Tenants!.Single().SessionUsers
             .Should().BeNull("BC140 allows inventory only, whatever the script returned");
-        InventoryNormaliser.FromScriptOutput(sample, Tier("BC250")).SessionUsers
+        InventoryNormaliser.FromScriptOutput(sample, Tier("BC250")).Tenants!.Single().SessionUsers
             .Should().Equal("CRONUS\\ANNA", "CRONUS\\BO", "CRONUS\\SVEN");
     }
 
@@ -697,7 +697,7 @@ public sealed class GatewayInventoryParsingTests
         tenant.Id.Should().Be("default", "a single-tenant tier has one tenant even without Get-NAVTenant");
         tenant.Apps.Should().ContainSingle().Which.Version.Should().Be("14.0.47786.0");
         inventory.SessionCount.Should().Be(2);
-        inventory.SessionUsers.Should().Equal("CRONUS\\ANNA", "CRONUS\\BO");
+        tenant.SessionUsers.Should().Equal("CRONUS\\ANNA", "CRONUS\\BO");
         inventory.Service.Should().BeNull();
         inventory.Unavailable.Should().ContainKeys("service", "apps.tenantSpecificProperties", "licence");
         inventory.Unavailable["licence"].Should().Be("Did not answer within 5 seconds.");

@@ -93,13 +93,6 @@ public sealed record GatewayInstanceInventory
     public int? SessionCount { get; init; }
 
     /// <summary>
-    /// Who has a session open. Only when the policy file allows <c>session_users</c>
-    /// for this tier (it is personal data); otherwise null and never read.
-    /// </summary>
-    [JsonPropertyName("sessionUsers")]
-    public IReadOnlyList<string>? SessionUsers { get; init; }
-
-    /// <summary>
     /// Every server setting, by Business Central's own key. Only when the policy file allows
     /// <c>server_settings</c> for this tier; otherwise null and never read. A setting that
     /// holds a secret is listed with <see cref="GatewayServerSetting.Withheld"/> and no value:
@@ -189,6 +182,14 @@ public sealed record GatewayTenantInventory
 
     [JsonPropertyName("sessionCount")]
     public int? SessionCount { get; init; }
+
+    /// <summary>
+    /// Who has a session open on this tenant, by user name. Only when the policy file allows
+    /// <c>session_users</c> for this tier (it is personal data); otherwise null and never read.
+    /// Per tenant, because the tenants of one tier can belong to different customers.
+    /// </summary>
+    [JsonPropertyName("sessionUsers")]
+    public IReadOnlyList<string>? SessionUsers { get; init; }
 
     /// <summary>
     /// The tenant's apps. Null when they are not in this post: they could not be read

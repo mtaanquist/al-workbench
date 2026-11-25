@@ -327,6 +327,50 @@ public sealed class UpgradeFleetService
     }
 
     /// <summary>
+    /// Who is signed in on an on-premises environment's tenant, as the gateway last read it
+    /// (#1787). Null when the environment is not a linked tier the caller can see. Names are
+    /// null when the customer's gateway settings do not share them (or the sessions could not
+    /// be read); the count stands on its own then.
+    /// </summary>
+    public async Task<OnPremisesSessionsView?> GetOnPremisesSessionsAsync(int environmentId, CancellationToken ct = default)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+        var tier = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.MissingSince == null && e.GatewayInstanceId != null)
+            .Where(e => _db.OeProjects.Where(visible)
+                .Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
+            .Select(e => new
+            {
+                e.GatewayInstance!.ReadAt,
+                e.GatewayInstance.MissingSince,
+                Tenant = e.GatewayInstance.Tenants
+                    // Without regard to case, as linking and the inventory compare tenant ids.
+                    .Where(t => t.MissingSince == null && e.TenantId != null && t.TenantId.ToLower() == e.TenantId.ToLower())
+                    .Select(t => new { t.SessionCount, t.SessionUsersJson })
+                    .FirstOrDefault(),
+            })
+            .FirstOrDefaultAsync(ct);
+        if (tier is null) return null;
+        if (tier.MissingSince is not null || tier.Tenant is null) return new OnPremisesSessionsView(null, null, tier.ReadAt);
+        List<string>? users = null;
+        if (tier.Tenant.SessionUsersJson is { } json)
+        {
+            try
+            {
+                users = (JsonSerializer.Deserialize<List<string?>>(json) ?? [])
+                    .OfType<string>().Where(u => u.Length > 0)
+                    .Order(StringComparer.OrdinalIgnoreCase).ToList();
+            }
+            catch (JsonException)
+            {
+                users = null;
+            }
+        }
+        return new OnPremisesSessionsView(tier.Tenant.SessionCount, users, tier.ReadAt);
+    }
+
+    /// <summary>
     /// The fleet row for one environment. Shared by the list and the single read so the
     /// two cannot disagree about what a row says; both "may act" answers stay subqueries
     /// either way.
@@ -905,6 +949,12 @@ public sealed record EnvironmentDetailRow(
 /// <param name="Settings">By key; empty when not shared or not read yet.</param>
 /// <param name="ReadAt">When the gateway last read the tier.</param>
 public sealed record ServerSettingsView(bool Shared, IReadOnlyList<ServerSettingRow> Settings, DateTime? ReadAt);
+
+/// <summary>Who is signed in on an on-premises tenant, as the gateway last read it.</summary>
+/// <param name="Count">Open sessions; null when they could not be counted.</param>
+/// <param name="Users">User names, sorted; null when not shared, empty when nobody was signed in.</param>
+/// <param name="ReadAt">When the gateway last read the tier.</param>
+public sealed record OnPremisesSessionsView(int? Count, IReadOnlyList<string>? Users, DateTime? ReadAt);
 
 /// <summary>One server setting. <paramref name="Withheld"/>: it holds a secret, so the gateway did not send its value.</summary>
 public sealed record ServerSettingRow(string Key, string? Value, bool Withheld);

@@ -1030,7 +1030,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         }
 
         var cut = Render(envId);
-        cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Server settings", "Workbench history");
+        cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Sessions", "Server settings", "Workbench history");
         cut.FindAll(".tag").Select(t => t.TextContent).Should().Contain("On-premises");
         cut.FindAll("button").Should().NotContain(b => b.TextContent.Contains("Copy"), "a service tier cannot be copied from here");
         // No gateway reports this tier, so its last state is not vouched for in green.
@@ -1040,6 +1040,8 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         // A tier whose gateway does not share its settings says who can change that.
         Render(envId, "settings").Markup.Should().Contain("The server settings aren't shared");
+        // Its Sessions tab is the gateway's report, and asks Business Central online nothing.
+        Render(envId, "sessions").Markup.Should().Contain("Sessions weren't read");
 
         // An address naming Business Central online's live tabs lands on Overview.
         Render(envId, "operations");

@@ -283,6 +283,7 @@
                 {
                     <OnPremisesEnvironmentSections Row="Row" ShowApps="@(_tab == Section.Apps)" Apps="_onPremisesApps"
                                                    ShowSettings="@(_tab == Section.Settings)" Settings="_serverSettings"
+                                                   ShowSessions="@(_tab == Section.Sessions)" Sessions="_onPremisesSessions"
                                                    DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway"
                                                    CanManage="_canManage" Licence="_licence" LicenceError="@_licenceError"
                                                    UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync"
@@ -1299,14 +1300,15 @@
     [Parameter] public TimeSpan SessionsLiveFor { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// Operations and Sessions are Business Central online's live reads, which an
-    /// on-premises service tier does not have; its apps come from the gateway's report.
+    /// Operations is Business Central online's live read, which an on-premises service tier
+    /// does not have; its apps, sessions and settings come from the gateway's report.
     /// </summary>
     private List<HeaderTabs.HeaderTabItem> SectionTabs => _env is not null && Row.IsOnPremises
         ?
         [
             Tab("Overview", Section.Overview),
             Tab("Apps", Section.Apps),
+            Tab("Sessions", Section.Sessions),
             Tab("Server settings", Section.Settings),
             Tab("Workbench history", Section.History),
         ]
@@ -1324,6 +1326,9 @@
 
     /// <summary>An on-premises tier's server settings, from the gateway's report; null until read.</summary>
     private ServerSettingsView? _serverSettings;
+
+    /// <summary>Who is signed in on an on-premises tenant, from the gateway's report; null until read.</summary>
+    private OnPremisesSessionsView? _onPremisesSessions;
 
     /// <summary>True for an Admin, who may open the gateway behind an on-premises tier.</summary>
     private bool _canSeeGateway;
@@ -1448,6 +1453,7 @@
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
             _onPremisesApps = null;
             _serverSettings = null;
+            _onPremisesSessions = null;
             if (Row.IsOnPremises)
             {
                 // Everything an on-premises tier shows is our own mirror: read it now,
@@ -1455,6 +1461,8 @@
                 _onPremisesApps = await Read(ct => Fleet.ListInstalledAppsAsync(Id, ct)) ?? [];
                 _serverSettings = await Read(ct => Fleet.GetServerSettingsAsync(Id, ct))
                     ?? new ServerSettingsView(false, [], null);
+                _onPremisesSessions = await Read(ct => Fleet.GetOnPremisesSessionsAsync(Id, ct))
+                    ?? new OnPremisesSessionsView(null, null, null);
                 _canSeeGateway = await Read(ct => OnPremisesLinks.CanLinkAsync(ct));
                 await LoadLicenceAsync();
                 await LoadTierActionsAsync();
@@ -1476,11 +1484,11 @@
             return;
         }
 
-        // An on-premises tier has no live half: Operations and Sessions are Business
-        // Central online's, so an address naming them lands on Overview.
+        // An on-premises tier has no live half: Operations is Business Central online's,
+        // so an address naming it lands on Overview. Its Sessions tab is the gateway's report.
         if (Row.IsOnPremises)
         {
-            if (_tab is Section.Operations or Section.Sessions) Nav.NavigateTo(SectionHref(null), replace: true);
+            if (_tab == Section.Operations) Nav.NavigateTo(SectionHref(null), replace: true);
             return;
         }
         // Server settings are an on-premises tier's: online, the address lands on Overview.

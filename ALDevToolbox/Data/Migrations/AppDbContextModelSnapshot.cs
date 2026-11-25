@@ -899,10 +899,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("session_count");
 
-                    b.Property<string>("SessionUsersJson")
-                        .HasColumnType("jsonb")
-                        .HasColumnName("session_users");
-
                     b.Property<int?>("SoapServicesPort")
                         .HasColumnType("integer")
                         .HasColumnName("soap_services_port");
@@ -1157,6 +1153,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<int?>("SessionCount")
                         .HasColumnType("integer")
                         .HasColumnName("session_count");
+
+                    b.Property<string>("SessionUsersJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("session_users");
 
                     b.Property<string>("State")
                         .HasColumnType("text")

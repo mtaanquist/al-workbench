@@ -33,7 +33,6 @@ internal sealed class GatewayInstanceConfiguration : IEntityTypeConfiguration<Ga
         entity.Property(e => e.DeveloperServicesPort).HasColumnName("developer_services_port");
         entity.Property(e => e.PublicWebBaseUrl).HasColumnName("public_web_base_url");
         entity.Property(e => e.SessionCount).HasColumnName("session_count");
-        entity.Property(e => e.SessionUsersJson).HasColumnName("session_users").HasColumnType("jsonb");
         entity.Property(e => e.ServerSettingsJson).HasColumnName("server_settings").HasColumnType("jsonb");
         entity.Property(e => e.PowerShell).HasColumnName("powershell").HasMaxLength(10);
         entity.Property(e => e.ReadError).HasColumnName("read_error");
@@ -81,6 +80,7 @@ internal sealed class GatewayInstanceTenantConfiguration : IEntityTypeConfigurat
         entity.Property(e => e.State).HasColumnName("state");
         entity.Property(e => e.DatabaseName).HasColumnName("database_name");
         entity.Property(e => e.SessionCount).HasColumnName("session_count");
+        entity.Property(e => e.SessionUsersJson).HasColumnName("session_users").HasColumnType("jsonb");
         entity.Property(e => e.AppsTruncated).HasColumnName("apps_truncated").IsRequired();
         entity.Property(e => e.AppsReadAt).HasColumnName("apps_read_at");
         entity.Property(e => e.ReadAt).HasColumnName("read_at").IsRequired();
