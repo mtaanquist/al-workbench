@@ -797,8 +797,15 @@ public sealed class ProjectBuildService
             // deliver beside it: its .app was compiled against something other than what
             // this build delivers, so it is checked. Transitively, because a checked
             // sibling keeps its old origin and so hides a change further down.
+            // The log names a direct dependency where one qualifies, then the others by
+            // name: apps arrive in the order the clone's folders were listed, which
+            // differs between file systems.
             var dependencyIds = DependencyClosure(app, apps);
-            var changedSibling = apps.FirstOrDefault(a =>
+            var directIds = app.Manifest.Dependencies.Select(d => NormalizeAppId(d.Id)).ToHashSet(StringComparer.Ordinal);
+            var changedSibling = apps
+                .OrderBy(a => directIds.Contains(NormalizeAppId(a.Manifest.Id)) ? 0 : 1)
+                .ThenBy(a => a.Manifest.Name, StringComparer.Ordinal)
+                .FirstOrDefault(a =>
             {
                 var siblingId = NormalizeAppId(a.Manifest.Id);
                 if (!dependencyIds.Contains(siblingId)) return false;
