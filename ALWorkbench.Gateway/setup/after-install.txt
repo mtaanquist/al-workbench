@@ -6,9 +6,12 @@ registration and its gateway.toml, and the service is running again.
 
 What is left to do after a first install
 
-1. Tell the gateway which service tiers it may manage.
-   Copy gateway.example.toml to gateway.toml in that folder and edit it as
-   administrator. Then open a command prompt with "Run as administrator" and run:
+1. Decide what the gateway may do on each service tier.
+   Setup wrote gateway.toml in that folder. It lists the Business Central service
+   tiers on this computer and lets the gateway only report on them, so they show
+   up in AL Workbench but nothing can be published or restarted yet. To allow more,
+   edit gateway.toml as administrator (gateway.example.toml explains every
+   setting), then open a command prompt with "Run as administrator" and run:
        cd "C:\Program Files\AL Workbench Gateway"
        ALWorkbench.Gateway check
    Fix anything it lists. The gateway picks up changes to gateway.toml by itself.

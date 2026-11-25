@@ -2137,8 +2137,11 @@ accepted. The setup program does nothing the commands do not: it copies the prog
 `gateway.example.toml` to `C:\Program Files\AL Workbench Gateway` (the folder is not offered as a
 choice, since the gateway refuses a folder ordinary users can change), runs `install` on a first
 install, and can take the address and a registration code and run `register` in a window that
-stays open, so the fingerprint can be read. It never installs or removes `gateway.toml`, which is
-customer IT's file. Running a newer setup over an older one stops the service, replaces the
+stays open, so the fingerprint can be read. It never replaces or removes `gateway.toml`, which is
+customer IT's file; when there is none, it runs the gateway's `init`, which writes a starter one
+(`StarterPolicy`) listing every service tier on the computer with `allow = ["inventory"]`, so the
+tiers show up in AL Workbench and can be linked to a Solution straight away, while nothing can be
+published or restarted until customer IT allows it. Running a newer setup over an older one stops the service, replaces the
 program and starts it again, keeping the registration and the key, and skips the registration
 page. Uninstalling from Settings > Apps runs `uninstall`, so the key and settings go and the logs
 stay, as at a command prompt. `release.yml` does not build it yet; that comes with #1363.
