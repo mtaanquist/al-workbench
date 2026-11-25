@@ -319,6 +319,7 @@ with "Not allowed by the customer's gateway settings".
 | --- | --- |
 | `inventory` | Read state, versions, tenants, apps, session counts and licence information |
 | `session_users` | Also report *who* is signed in, not only how many (personal data, so off unless listed) |
+| `server_settings` | Also report every server setting (`Get-NAVServerConfiguration`), read only, secrets' values left out (#1795) |
 | `publish` | Publish, sync, install and upgrade apps (`Publish-NAVApp`, `Sync-NAVApp`, `Install-NAVApp`, `Start-NAVAppDataUpgrade`) |
 | `unpublish` | Remove an app's previous version after an upgrade |
 | `restart` | Restart the tier as part of a deployment or licence import (the restart group) |
@@ -533,7 +534,14 @@ first exercised with #1365.
 gateway runs one fixed script (`InventoryScript`) through the runner and gets one JSON document
 back: the instance's state and version (`Get-NAVServerInstance`); its Windows service's state, start
 mode and account (`Win32_Service`); ten whitelisted configuration keys (database server, instance
-and name, multitenant, the five ports, the public web base URL), never the whole configuration;
+and name, multitenant, the five ports, the public web base URL), and the whole configuration only
+where the tier allows `server_settings` (#1795): every key and value, except that a key naming a
+secret (`InventoryNormaliser.IsSecret`: password, secret, token, credential, connection string,
+SAS, or ending in "key") is sent as withheld with no value, decided by the gateway before it sends
+anything. AL Workbench keeps the list on `gateway_instances.server_settings`, keeps it when a report
+says it could not read it (`unavailable["settings"]`), clears it when a report no longer carries it,
+and shows it read only on the environment page's Server settings tab and through
+`get_environment(includeServerSettings)`. Changing settings stays out of scope (#1796);
 its tenants (`Get-NAVTenant`; a single-tenant tier gets one tenant, `default`, with no cmdlet
 needed); each tenant's apps (`Get-NAVAppInfo -Tenant`, with `-TenantSpecificProperties` where the
 cmdlet has it, which adds data version and sync state); session counts per tenant

@@ -47,6 +47,8 @@
 #                    and the licence
 #   session_users    also report who is signed in (personal data: leave it out
 #                    unless you need it)
+#   server_settings  also report every server setting, read only; passwords
+#                    and keys are never sent
 #   publish          publish, synchronise, install and upgrade apps
 #   unpublish        remove an app's previous version after an upgrade
 #   restart          restart the tier as part of a deployment or licence import

@@ -18,7 +18,9 @@ namespace ALWorkbench.Gateway.Core.Inventory;
 ///
 /// <para>Session user names are kept only when the policy file allows
 /// <c>session_users</c> for the tier, whatever the script returned: the script is not
-/// asked for them otherwise, and this is the second lock on the same door.</para>
+/// asked for them otherwise, and this is the second lock on the same door. The full list
+/// of server settings is kept the same way, under <c>server_settings</c>, and a setting
+/// that holds a secret (<see cref="IsSecret"/>) never leaves with its value.</para>
 /// </summary>
 public static class InventoryNormaliser
 {
@@ -119,6 +121,7 @@ public static class InventoryNormaliser
             TenantsTruncated = tenantsCut || (tenants is not null && Bool(Text(root["tenantsTruncated"])) == true),
             SessionCount = Int(sessions?["total"]),
             SessionUsers = users,
+            Settings = tier.Allows(PolicyPermission.ServerSettings) ? Settings(root["settings"]) : null,
             Licence = Licence(root["licence"] as JsonObject),
             Unavailable = unavailable,
         };
@@ -132,6 +135,36 @@ public static class InventoryNormaliser
         return int.TryParse(major, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
             ? PolicyWords.PowerShellEditions[number >= 6 ? PowerShellEdition.PowerShell7 : PowerShellEdition.WindowsPowerShell]
             : null;
+    }
+
+    /// <summary>
+    /// A setting whose value is a secret, by its key: passwords, keys, tokens, connection
+    /// strings. Business Central's own names say so (<c>ApplicationInsightsConnectionString</c>,
+    /// <c>AzureKeyVaultClientSecret</c>), and a setting a later version adds follows the same
+    /// words. A thumbprint names a certificate and is not a secret.
+    /// </summary>
+    public static bool IsSecret(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        string[] words = ["password", "secret", "token", "credential", "connectionstring", "sas"];
+        return words.Any(w => key.Contains(w, StringComparison.OrdinalIgnoreCase))
+            || key.EndsWith("key", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IReadOnlyList<GatewayServerSetting>? Settings(JsonNode? node)
+    {
+        if (Unwrap(node) is not JsonArray array) return null;
+        var settings = new List<GatewayServerSetting>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in array)
+        {
+            if (settings.Count >= GatewayInventoryLimits.MaxServerSettings) break;
+            if (item is not JsonObject entry || Cut(Text(entry["key"])) is not { } key || !seen.Add(key)) continue;
+            settings.Add(IsSecret(key)
+                ? new GatewayServerSetting { Key = key, Withheld = true }
+                : new GatewayServerSetting { Key = key, Value = Cut(Text(entry["value"])) });
+        }
+        return settings.OrderBy(s => s.Key, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static GatewayInstanceConfiguration Configuration(JsonObject values)

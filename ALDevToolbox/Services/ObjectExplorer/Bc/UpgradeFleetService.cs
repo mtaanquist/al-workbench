@@ -5,6 +5,7 @@ using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Gateways;
 using System.Linq.Expressions;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -287,6 +288,41 @@ public sealed class UpgradeFleetService
             .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
             .Select(a => new InstalledAppRow(a.AppId, a.Name, a.Publisher, a.Version, a.FetchedAt, delivered.Contains(a.AppId)))
             .ToList();
+    }
+
+    /// <summary>
+    /// The server settings of the service tier an on-premises environment is linked to, as
+    /// the gateway last read them (#1795). The same visibility gate as
+    /// <see cref="ListInstalledAppsAsync"/>. Null when the environment is not one this caller
+    /// can see or is not linked to a tier; <see cref="ServerSettingsView.Shared"/> is false
+    /// when the customer's gateway settings do not share them (<c>server_settings</c>).
+    /// </summary>
+    public async Task<ServerSettingsView?> GetServerSettingsAsync(int environmentId, CancellationToken ct = default)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+        var tier = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.MissingSince == null && e.GatewayInstanceId != null)
+            .Where(e => _db.OeProjects.Where(visible)
+                .Any(p => p.Id == e.ProjectId && p.DeletedAt == null))
+            .Select(e => new { e.GatewayInstance!.ServerSettingsJson, e.GatewayInstance.ReadAt })
+            .FirstOrDefaultAsync(ct);
+        if (tier is null) return null;
+        if (tier.ServerSettingsJson is not { } json) return new ServerSettingsView(false, [], tier.ReadAt);
+        List<ALWorkbench.Gateway.Contracts.GatewayServerSetting> settings;
+        try
+        {
+            settings = JsonSerializer.Deserialize<List<ALWorkbench.Gateway.Contracts.GatewayServerSetting>>(json) ?? [];
+        }
+        catch (JsonException)
+        {
+            settings = [];
+        }
+        return new ServerSettingsView(true, settings
+            .Where(x => x is not null && !string.IsNullOrWhiteSpace(x.Key))
+            .Select(x => new ServerSettingRow(x.Key, x.Withheld ? null : x.Value, x.Withheld))
+            .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList(), tier.ReadAt);
     }
 
     /// <summary>
@@ -867,5 +903,14 @@ public sealed record EnvironmentDetailRow(
 /// One app from the installed-apps mirror. <paramref name="DeliveredFromWorkbench"/> is true
 /// when a delivery from this workbench has carried the app to the environment.
 /// </summary>
+/// <summary>An on-premises tier's server settings, as the gateway last read them.</summary>
+/// <param name="Shared">False when the customer's gateway settings do not share them.</param>
+/// <param name="Settings">By key; empty when not shared or not read yet.</param>
+/// <param name="ReadAt">When the gateway last read the tier.</param>
+public sealed record ServerSettingsView(bool Shared, IReadOnlyList<ServerSettingRow> Settings, DateTime? ReadAt);
+
+/// <summary>One server setting. <paramref name="Withheld"/>: it holds a secret, so the gateway did not send its value.</summary>
+public sealed record ServerSettingRow(string Key, string? Value, bool Withheld);
+
 public sealed record InstalledAppRow(
     Guid AppId, string Name, string Publisher, string Version, DateTime FetchedAt, bool DeliveredFromWorkbench);

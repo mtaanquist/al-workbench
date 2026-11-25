@@ -593,6 +593,36 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Server_settings_reach_only_those_who_can_see_the_solution_and_hidden_values_stay_hidden()
+    {
+        GatewayServerSetting[] settings =
+        [
+            new() { Key = "DatabaseServer", Value = "CRONUS-SQL" },
+            new() { Key = "ClientServicesPort", Value = "7046" },
+            new() { Key = "ServicesCertificateThumbprint", Withheld = true },
+        ];
+        await ReportAsync(
+            Tier("BC250", "production", Tenant("default")) with { Settings = settings },
+            Tier("BC140", "production", Tenant("default")) with { Settings = settings },
+            Tier("BC130", "production", Tenant("default")));
+        var open = await SolutionAsync("CRONUS Danmark");
+        var secret = await SolutionAsync("CRONUS Secret", visibility: ProjectVisibility.Private);
+        var openTier = await LinkAsync(open, "BC250", "Production");
+        var secretTier = await LinkAsync(secret, "BC140", "Production");
+        var unshared = await LinkAsync(open, "BC130", "Test");
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var view = await Fleet(ctx).GetServerSettingsAsync(openTier);
+        view!.Shared.Should().BeTrue();
+        view.Settings.Select(s => (s.Key, s.Value, s.Withheld)).Should().Equal(
+            ("ClientServicesPort", "7046", false), ("DatabaseServer", "CRONUS-SQL", false),
+            ("ServicesCertificateThumbprint", (string?)null, true));
+        (await Fleet(ctx).GetServerSettingsAsync(unshared))!.Shared.Should().BeFalse("this tier's policy does not share them");
+        (await Fleet(ctx).GetServerSettingsAsync(secretTier)).Should().BeNull("a Private solution the caller is not on is not there at all");
+    }
+
+    [Fact]
     public async Task On_premises_tiers_are_absent_from_upgrades()
     {
         await ReportAsync(Tier("BC250", "production", Tenant("default")));

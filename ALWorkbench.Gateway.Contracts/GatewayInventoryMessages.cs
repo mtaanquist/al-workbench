@@ -99,6 +99,16 @@ public sealed record GatewayInstanceInventory
     [JsonPropertyName("sessionUsers")]
     public IReadOnlyList<string>? SessionUsers { get; init; }
 
+    /// <summary>
+    /// Every server setting, by Business Central's own key. Only when the policy file allows
+    /// <c>server_settings</c> for this tier; otherwise null and never read. A setting that
+    /// holds a secret is listed with <see cref="GatewayServerSetting.Withheld"/> and no value:
+    /// the gateway never sends it. Null too when the settings could not be read, which
+    /// <c>unavailable["settings"]</c> then says.
+    /// </summary>
+    [JsonPropertyName("settings")]
+    public IReadOnlyList<GatewayServerSetting>? Settings { get; init; }
+
     [JsonPropertyName("licence")]
     public GatewayLicenceInventory? Licence { get; init; }
 
@@ -248,6 +258,9 @@ public static class GatewayInventorySections
     public const string Instance = "instance";
     public const string Service = "service";
     public const string Configuration = "configuration";
+
+    /// <summary>Every server setting, read only where the tier allows <c>server_settings</c>.</summary>
+    public const string Settings = "settings";
     public const string Tenants = "tenants";
     public const string Sessions = "sessions";
     public const string Licence = "licence";
@@ -285,6 +298,9 @@ public static class GatewayInventoryLimits
 
     public const int MaxSessionUsers = 500;
 
+    /// <summary>A Business Central server has a few hundred settings.</summary>
+    public const int MaxServerSettings = 1000;
+
     public const int MaxUnavailable = 100;
 
     /// <summary>A licence's printed information. Real ones are tens of kilobytes.</summary>
@@ -298,4 +314,20 @@ public static class GatewayInventoryLimits
     /// tier's apps over several posts; well inside <see cref="GatewayProtocol.MaxRequestBodyBytes"/>.
     /// </summary>
     public const int TargetPostBytes = 2 * 1024 * 1024;
+}
+
+/// <summary>One server setting of a tier, as <c>Get-NAVServerConfiguration</c> reports it.</summary>
+public sealed record GatewayServerSetting
+{
+    /// <summary>Business Central's own key, e.g. <c>SqlCommandTimeout</c>.</summary>
+    [JsonPropertyName("key")]
+    public string Key { get; init; } = string.Empty;
+
+    /// <summary>The value as text; null when it is empty or withheld.</summary>
+    [JsonPropertyName("value")]
+    public string? Value { get; init; }
+
+    /// <summary>The setting holds a secret, so the gateway did not send its value.</summary>
+    [JsonPropertyName("withheld")]
+    public bool Withheld { get; init; }
 }

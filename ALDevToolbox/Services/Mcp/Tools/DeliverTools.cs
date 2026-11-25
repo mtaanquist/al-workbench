@@ -185,10 +185,11 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "get_environment", ReadOnly = true)]
-    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the window our own deliveries prefer (its hours, and in days the weekdays it opens on - null days means every day; a window past midnight belongs to the day it opens), how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history (on premises, its service tier restarts, stops and starts included). For an on-premises service tier it also gives the Business Central licence the tier runs (licensee, serial number, expiry date and licensed object ranges, as the gateway last read it) and the last licence file uploaded to it in this workbench (who, when, and how its import went); licences are uploaded on the environment page, not here. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history. Microsoft's own apps (Base Application, System Application and the rest) are left out of installedApps unless includeMicrosoftApps is true; microsoftAppsLeftOut says how many were.")]
+    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the window our own deliveries prefer (its hours, and in days the weekdays it opens on - null days means every day; a window past midnight belongs to the day it opens), how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history (on premises, its service tier restarts, stops and starts included). For an on-premises service tier it also gives the Business Central licence the tier runs (licensee, serial number, expiry date and licensed object ranges, as the gateway last read it) and the last licence file uploaded to it in this workbench (who, when, and how its import went); licences are uploaded on the environment page, not here. With includeServerSettings it also gives the tier's server settings (Business Central's own keys, as Get-NAVServerConfiguration reports them; passwords and keys are withheld): serverSettingsShared is false when the customer's gateway settings do not share them. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history. Microsoft's own apps (Base Application, System Application and the rest) are left out of installedApps unless includeMicrosoftApps is true; microsoftAppsLeftOut says how many were.")]
     public async Task<EnvironmentDetail> GetEnvironmentAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         [Description("Also list the apps Microsoft publishes. Default false: the environment's version already says which Microsoft release it runs.")] bool includeMicrosoftApps = false,
+        [Description("On-premises only: also list the service tier's server settings. Default false: there are a few hundred.")] bool includeServerSettings = false,
         CancellationToken ct = default)
     {
         var row = await _fleet.GetEnvironmentAsync(environmentId, ct) ?? throw EnvironmentNotFound(environmentId);
@@ -197,6 +198,9 @@ public sealed class DeliverTools
         var history = await Guard(environmentId, () => _upgradeActions.ListEnvironmentActivityAsync(row.Fleet.ProjectId, environmentId, ct));
         var licence = row.Fleet.IsOnPremises
             ? await Guard(environmentId, () => _licences.GetViewAsync(environmentId, ct))
+            : null;
+        var settings = row.Fleet.IsOnPremises && includeServerSettings
+            ? await _fleet.GetServerSettingsAsync(environmentId, ct)
             : null;
 
         return new EnvironmentDetail(
@@ -211,7 +215,11 @@ public sealed class DeliverTools
             apps.Count == 0 ? null : apps.Max(a => a.FetchedAt),
             history.Take(RecentHistoryCount).Select(ToHistory).ToList(),
             apps.Count - listed.Count,
-            licence is null ? null : ToLicence(licence));
+            licence is null ? null : ToLicence(licence),
+            settings?.Shared,
+            settings is { Shared: true } shared
+                ? shared.Settings.Select(x => new ServerSetting(x.Key, x.Value, x.Withheld)).ToList()
+                : null);
     }
 
     private static OnPremisesLicenceDetail ToLicence(Gateways.OnPremisesLicenceView view) => new(
@@ -856,7 +864,12 @@ public sealed record EnvironmentDetail(
     DateTime? InstalledAppsReadAt,
     IReadOnlyList<EnvironmentHistoryEntry> RecentHistory,
     int MicrosoftAppsLeftOut = 0,
-    OnPremisesLicenceDetail? Licence = null);
+    OnPremisesLicenceDetail? Licence = null,
+    bool? ServerSettingsShared = null,
+    IReadOnlyList<ServerSetting>? ServerSettings = null);
+
+/// <summary>One server setting of an on-premises service tier (#1795). Withheld: it holds a secret, so no value.</summary>
+public sealed record ServerSetting(string Key, string? Value, bool Withheld);
 
 /// <summary>An on-premises service tier's licence, for <c>get_environment</c> (#1369).</summary>
 /// <param name="ExpiresOn">The expiry date (yyyy-MM-dd) as the licence states it; null when it states none or it was not read.</param>

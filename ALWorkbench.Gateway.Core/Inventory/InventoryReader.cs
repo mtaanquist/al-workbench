@@ -74,7 +74,8 @@ public sealed class PowerShellInventoryReader : IInventoryReader
         }
         var edition = PowerShellChoice.For(tier.PowerShell, install.Version);
         var word = PolicyWords.PowerShellEditions[edition];
-        var parameters = InventoryScript.Parameters(tier.Tier.Instance, install.ServiceFolder, tier.Allows(PolicyPermission.SessionUsers));
+        var parameters = InventoryScript.Parameters(tier.Tier.Instance, install.ServiceFolder,
+            tier.Allows(PolicyPermission.SessionUsers), tier.Allows(PolicyPermission.ServerSettings));
         var result = await _runner.RunAsync(InventoryScript.Operation, new PowerShellTarget(edition, install.ServiceFolder), parameters,
             InventoryScript.ProcessTimeout, progress, ct).ConfigureAwait(false);
         if (!result.Succeeded) return new RawInventory(null, result.Error, word);

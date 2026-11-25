@@ -19,7 +19,7 @@ namespace ALDevToolbox.Data.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.14")
+                .HasAnnotation("ProductVersion", "10.0.15")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
@@ -878,6 +878,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime>("ReportedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("reported_at");
+
+                    b.Property<string>("ServerSettingsJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("server_settings");
 
                     b.Property<string>("ServiceAccount")
                         .HasColumnType("text")

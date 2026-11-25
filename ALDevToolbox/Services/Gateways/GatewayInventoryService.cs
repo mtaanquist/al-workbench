@@ -237,6 +237,25 @@ public sealed class GatewayInventoryService
             ? null
             : JsonSerializer.Serialize(reported.SessionUsers.Where(u => !Blank(u)).Select(Text), Json);
 
+        // Every setting: only where the tier allows server_settings. Kept when the gateway
+        // tried and could not read them (it says so under "settings"); cleared when it did
+        // not try, which means the customer's settings no longer allow it.
+        if (reported.Settings is { } settings)
+        {
+            row.ServerSettingsJson = JsonSerializer.Serialize(
+                settings.Where(s => s is not null && !Blank(s.Key)).Select(s => new GatewayServerSetting
+                {
+                    Key = Text(s.Key)!,
+                    Value = s.Withheld ? null : Text(s.Value),
+                    Withheld = s.Withheld,
+                }),
+                Json);
+        }
+        else if (reported.Unavailable?.ContainsKey(GatewayInventorySections.Settings) != true)
+        {
+            row.ServerSettingsJson = null;
+        }
+
         // What changes slowly: kept when this report could not read it.
         if (reported.Configuration is { } configuration)
         {
@@ -470,6 +489,10 @@ public sealed class GatewayInventoryService
                 {
                     errors["apps"] = $"{tier} reports an app for tenant {tenant.Id} without an id and version, or with one longer than {MaxAppKeyLength} characters.";
                 }
+            }
+            if (instance.Settings is { Count: > GatewayInventoryLimits.MaxServerSettings })
+            {
+                errors["settings"] = $"{tier} reports more than {GatewayInventoryLimits.MaxServerSettings} server settings.";
             }
             if (instance.SessionUsers is { Count: > GatewayInventoryLimits.MaxSessionUsers })
             {

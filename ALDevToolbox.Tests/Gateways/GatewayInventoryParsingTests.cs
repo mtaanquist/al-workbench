@@ -27,7 +27,7 @@ public sealed class GatewayInventoryParsingTests
         machine = "CRONUS-BC01"
         name = "BC250"
         environment = "test"
-        allow = ["inventory", "session_users"]
+        allow = ["inventory", "session_users", "server_settings"]
 
         [[instance]]
         machine = "CRONUS-BC01"
@@ -208,6 +208,54 @@ public sealed class GatewayInventoryParsingTests
         InventoryScript.Parameters("BC140", @"C:\BC\140\Service", Tier("BC140").Allows(PolicyPermission.SessionUsers))["includeSessionUsers"]!
             .GetValue<bool>().Should().BeFalse();
         InventoryScript.Parameters("BC250", @"C:\BC\250\Service", Tier("BC250").Allows(PolicyPermission.SessionUsers))["includeSessionUsers"]!
+            .GetValue<bool>().Should().BeTrue();
+    }
+
+    [Fact]
+    public void Server_settings_are_kept_only_where_the_policy_allows_them_and_secrets_never_leave()
+    {
+        var sample = Sample("bc14-hybrid.json").AsObject();
+        sample["settings"] = new JsonArray(
+            new JsonObject { ["key"] = "SqlCommandTimeout", ["value"] = "00:30:00" },
+            new JsonObject { ["key"] = "DatabaseServer", ["value"] = "CRONUS-SQL" },
+            new JsonObject { ["key"] = "ApplicationInsightsConnectionString", ["value"] = "InstrumentationKey=abc" },
+            new JsonObject { ["key"] = "AzureKeyVaultClientSecret", ["value"] = "s3cret" },
+            new JsonObject { ["key"] = "EncryptionKey", ["value"] = "k" },
+            new JsonObject { ["key"] = "ServicesCertificateThumbprint", ["value"] = "AB12" },
+            new JsonObject { ["key"] = "sqlcommandtimeout", ["value"] = "duplicate" });
+
+        InventoryNormaliser.FromScriptOutput(sample, Tier("BC140")).Settings
+            .Should().BeNull("BC140 does not allow server_settings, whatever the script returned");
+
+        var settings = InventoryNormaliser.FromScriptOutput(sample, Tier("BC250")).Settings!;
+        settings.Select(x => x.Key).Should().Equal(
+            "ApplicationInsightsConnectionString", "AzureKeyVaultClientSecret", "DatabaseServer",
+            "EncryptionKey", "ServicesCertificateThumbprint", "SqlCommandTimeout");
+        settings.Where(x => x.Withheld).Select(x => x.Key).Should().Equal(
+            "ApplicationInsightsConnectionString", "AzureKeyVaultClientSecret", "EncryptionKey");
+        settings.Where(x => x.Withheld).Should().OnlyContain(x => x.Value == null, "a secret's value never leaves the server");
+        settings.Single(x => x.Key == "SqlCommandTimeout").Value.Should().Be("00:30:00");
+        settings.Single(x => x.Key == "ServicesCertificateThumbprint").Withheld.Should().BeFalse("a thumbprint names a certificate");
+    }
+
+    [Theory]
+    [InlineData("DatabasePassword", true)]
+    [InlineData("ClientSecret", true)]
+    [InlineData("TokenSigningKey", true)]
+    [InlineData("SasToken", true)]
+    [InlineData("ExchangeCredentials", true)]
+    [InlineData("DatabaseServer", false)]
+    [InlineData("ClientServicesPort", false)]
+    [InlineData("KeyVaultUri", false)]
+    public void A_setting_naming_a_secret_is_withheld(string key, bool secret) =>
+        InventoryNormaliser.IsSecret(key).Should().Be(secret);
+
+    [Fact]
+    public void The_script_is_asked_for_server_settings_only_where_the_policy_allows_them()
+    {
+        InventoryScript.Parameters("BC140", @"C:\BC\140\Service", false, Tier("BC140").Allows(PolicyPermission.ServerSettings))["includeSettings"]!
+            .GetValue<bool>().Should().BeFalse();
+        InventoryScript.Parameters("BC250", @"C:\BC\250\Service", false, Tier("BC250").Allows(PolicyPermission.ServerSettings))["includeSettings"]!
             .GetValue<bool>().Should().BeTrue();
     }
 

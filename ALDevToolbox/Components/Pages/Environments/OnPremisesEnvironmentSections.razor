@@ -118,6 +118,89 @@ else if (tier?.LicenceExpiresOn is { } expiresOn && expiresOn.DayNumber - Today.
 }
 
 }
+else if (ShowSettings)
+{
+    <div class="card">
+        <div class="card__head">
+            <div>
+                <h2 class="card__title onprem__counted">
+                    Server settings
+                    @if (Settings is { Shared: true, Settings.Count: > 0 })
+                    {
+                        <span class="badge">@Settings.Settings.Count</span>
+                    }
+                </h2>
+                @if (Settings is { Shared: true, Settings.Count: > 0 })
+                {
+                    <p class="card__sub">Passwords and keys are hidden.</p>
+                }
+            </div>
+            @if (Settings is { Shared: true, Settings.Count: > 0 })
+            {
+                <span class="search onprem__filter">
+                    <Icon Name="search" Width="15" Height="15" Css="search__icon" />
+                    <input class="input" type="search" placeholder="Filter settings..."
+                           aria-label="Filter settings" data-page-search aria-keyshortcuts="F3" title="Filter settings (F3)"
+                           @bind="_settingsFilter" @bind:event="oninput" />
+                </span>
+            }
+        </div>
+        @if (Settings is null)
+        {
+            <div class="card__body"><LoadingBlock Text="Loading the server settings..." /></div>
+        }
+        else if (!Settings.Shared)
+        {
+            @* The one place a caption earns its keep: the reader cannot tell why the list
+               is empty, and the fix is the customer's IT's. *@
+            <EmptyState Icon="settings" Title="The server settings aren't shared">
+                <Text>The customer's IT can share them by adding server_settings to this service tier in the gateway's settings file.</Text>
+            </EmptyState>
+        }
+        else if (Settings.Settings.Count == 0)
+        {
+            <EmptyState Icon="settings" Title="No settings read yet">
+                <Text>They appear here after the gateway's next reading.</Text>
+            </EmptyState>
+        }
+        else if (FilteredSettings is { Count: 0 })
+        {
+            <EmptyState Icon="search-x" Title="No settings match" Quiet="true">
+                <Text>Nothing is called or set to "@_settingsFilter".</Text>
+            </EmptyState>
+        }
+        else
+        {
+            <table class="data-table">
+                <thead>
+                    <tr><th scope="col">Setting</th><th scope="col">Value</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var setting in FilteredSettings)
+                    {
+                        <tr>
+                            <td>@setting.Key</td>
+                            <td class="onprem__setting-value">
+                                @if (setting.Withheld)
+                                {
+                                    <span class="u-muted">Hidden</span>
+                                }
+                                else if (string.IsNullOrEmpty(setting.Value))
+                                {
+                                    <span class="u-muted">Empty</span>
+                                }
+                                else
+                                {
+                                    @setting.Value
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+}
 else if (!ShowApps)
 {
     <div class="card">
@@ -403,6 +486,21 @@ else
 
     /// <summary>True on the Apps tab; Overview otherwise.</summary>
     [Parameter] public bool ShowApps { get; set; }
+
+    /// <summary>True on the Server settings tab.</summary>
+    [Parameter] public bool ShowSettings { get; set; }
+
+    /// <summary>The tier's server settings; null while they are read.</summary>
+    [Parameter] public ServerSettingsView? Settings { get; set; }
+
+    private string _settingsFilter = string.Empty;
+
+    /// <summary>The settings whose key or value holds the filter text.</summary>
+    private List<ServerSettingRow> FilteredSettings => Settings is null ? [] : Settings.Settings
+        .Where(s => _settingsFilter.Length == 0
+                    || s.Key.Contains(_settingsFilter.Trim(), StringComparison.OrdinalIgnoreCase)
+                    || (s.Value?.Contains(_settingsFilter.Trim(), StringComparison.OrdinalIgnoreCase) ?? false))
+        .ToList();
 
     /// <summary>The installed-apps mirror; null while it is read.</summary>
     [Parameter] public List<InstalledAppRow>? Apps { get; set; }
