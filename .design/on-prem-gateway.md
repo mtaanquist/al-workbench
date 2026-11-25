@@ -2119,6 +2119,15 @@ ask for instead of linking to a download that does not exist. The link is in the
 step when adding a gateway and in a "Download the gateway" card under the list, which also
 carries the update steps; the empty state stays short (three one-line steps and Add gateway). It is an outline button: Add gateway stays the page's one primary.
 
+**Trying a staging build.** `staging.yml` publishes the gateway from the same commit as a
+workflow artifact, never a release, and packs it as a trial package: the program, its SHA-256,
+`gateway.example.toml`, and from `ALWorkbench.Gateway/trial/` a `gateway.toml` for one test
+service tier (every permission, `allow_unsigned`, placeholders for the computer and tier names)
+and a `README.txt`. The README runs the gateway in an administrator's command prompt with
+`ALWorkbench.Gateway run` after `register`, not as a service, so whoever is trying it can watch
+it and stop it with Ctrl+C; `uninstall` cleans up afterwards. The trial file is for a test server
+only, and a test keeps it valid once its placeholders are filled in.
+
 **Updating is manual.** No self-update (supply-chain risk; an MSI and auto-update are out of
 scope). On the gateway's server, as an administrator:
 

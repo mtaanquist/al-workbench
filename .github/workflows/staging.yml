@@ -40,6 +40,11 @@ jobs:
   # Workbench treats as a preview: never refused for its version and never
   # listed as out of date. The staging image itself carries no release stamp, so
   # its Gateways page offers no download and says so.
+  #
+  # The artifact is a trial package: the program, a gateway.toml for one test
+  # service tier and a README that runs it in a command prompt window
+  # ("ALWorkbench.Gateway run") rather than as a service. GitHub hands an
+  # artifact out as a zip, so the download is that zip.
   gateway:
     runs-on: windows-latest
     permissions:
@@ -69,15 +74,17 @@ jobs:
           [IO.File]::WriteAllText("out\ALWorkbench.Gateway.exe.sha256", "$hash  ALWorkbench.Gateway.exe`n")
           "version=$version" >> $env:GITHUB_OUTPUT
           "sha256=$hash" >> $env:GITHUB_OUTPUT
+          # The trial package: only what someone trying the gateway needs, beside the
+          # program. The trial settings go in as gateway.toml, the name the gateway reads.
+          New-Item -ItemType Directory package | Out-Null
+          Copy-Item out\ALWorkbench.Gateway.exe, out\ALWorkbench.Gateway.exe.sha256, out\gateway.example.toml package\
+          Copy-Item ALWorkbench.Gateway\trial\gateway.toml, ALWorkbench.Gateway\trial\README.txt package\
 
       - name: Keep the gateway on the run
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: gateway-${{ steps.publish.outputs.version }}
-          path: |
-            out/ALWorkbench.Gateway.exe
-            out/ALWorkbench.Gateway.exe.sha256
-            out/gateway.example.toml
+          name: al-workbench-gateway-${{ steps.publish.outputs.version }}
+          path: package/
           if-no-files-found: error
           retention-days: 14
 
@@ -91,7 +98,7 @@ jobs:
           @(
             "### Staging gateway published"
             ""
-            "Built from ``$env:REF_NAME`` as version ``$env:VERSION``, unsigned. Download it from this run's artifacts (kept 14 days)."
+            "Built from ``$env:REF_NAME`` as version ``$env:VERSION``, unsigned. Download the trial package (a zip with the program, a gateway.toml for one test service tier and a README) from this run's artifacts, kept 14 days."
             ""
             "SHA-256: ``$env:SHA256``"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
