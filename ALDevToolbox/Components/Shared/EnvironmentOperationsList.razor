@@ -12,11 +12,10 @@
         <div>
             <h2 class="card__title env-ops__counted">Operations<span class="badge">@Operations.Count</span></h2>
             <p class="card__sub">
-                What Business Central has done on @EnvironmentName, whoever asked for it - this
-                workbench, the admin centre, or Microsoft.
+                Everything Business Central recorded, whoever started it.
                 @if (HistoryHref is { } history)
                 {
-                    <text>What was done from AL Workbench, including updates still booked, is under <a href="@history">Workbench history</a>.</text>
+                    <text>What was done from AL Workbench is under <a href="@history">Workbench history</a>.</text>
                 }
             </p>
         </div>

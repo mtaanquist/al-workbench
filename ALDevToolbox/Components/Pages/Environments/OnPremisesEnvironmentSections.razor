@@ -124,14 +124,7 @@ else if (!ShowApps)
         <div class="card__head">
             <div>
                 <h2 class="card__title">Service tier</h2>
-                <p class="card__sub">The Business Central server behind this environment, as reported by the AL Workbench gateway on the customer's network.</p>
             </div>
-            @* The one thing a consultant whose customer says Business Central is stuck came
-               for. Outline, like every button on this page. *@
-            @if (tier is not null && TierActions is { CanManage: true } actions && Lead(actions) is { } lead)
-            {
-                @TierButton(lead, actions)
-            }
         </div>
         @* Why restart and stop are held back, said once and before the buttons rather than
            under one of them: it is the first thing someone with a stuck customer needs. *@
@@ -162,11 +155,6 @@ else if (!ShowApps)
                 {
                     <FieldError Class="env-detail__later">The gateway couldn't read the service tier last time: @error</FieldError>
                 }
-                <p class="u-muted onprem__note">
-                    Microsoft's platform updates don't reach an on-premises server, so there is no update
-                    to schedule here. The customer's own IT decides whether this is Production, Test or
-                    Development.
-                </p>
             }
         </div>
         @if (tier is not null && TierActions is { } view)
@@ -200,10 +188,13 @@ else if (!ShowApps)
                 }
                 @if (view.CanManage)
                 {
-                    var others = view.Choices.Where(c => c.Action != Lead(view)?.Action).ToList();
+                    // Every action on one row: restart (or start) first, the one a consultant
+                    // whose customer says Business Central is stuck came for.
+                    var lead = Lead(view);
+                    var others = view.Choices.Where(c => c.Action != lead?.Action).ToList();
                     var stop = others.FirstOrDefault(c => c.Action == ServiceTierAction.Stop);
-                    var rest = others.Where(c => c.Action != ServiceTierAction.Stop).ToList();
-                    @if (others.Count > 0)
+                    var rest = (lead is null ? others : others.Prepend(lead)).Where(c => c.Action != ServiceTierAction.Stop).ToList();
+                    @if (view.Choices.Count > 0)
                     {
                         <div class="onprem__action-row">
                             @foreach (var choice in rest)
@@ -251,12 +242,7 @@ else if (!ShowApps)
         <div class="card__head">
             <div>
                 <h2 class="card__title">Licence</h2>
-                <p class="card__sub">The Business Central licence the service tier runs, as the gateway last read it.</p>
             </div>
-            @if (CanManage && tier is not null)
-            {
-                @ImportButton
-            }
         </div>
         @if (LicenceError is { } licenceError)
         {
@@ -271,7 +257,7 @@ else if (!ShowApps)
             @if (Licence.Installed is not { } installed)
             {
                 <EmptyState Icon="key-round" Title="No licence read yet">
-                    <Text>The gateway reads the licence every 15 minutes while it is online. It appears here after the next reading.</Text>
+                    <Text>It appears here after the gateway's next reading.</Text>
                 </EmptyState>
             }
             else
@@ -335,7 +321,7 @@ else if (!ShowApps)
                     }
                     else if (upload.State is LicenceImportState.Running)
                     {
-                        <p class="u-muted onprem__upload-detail">The gateway is importing it and restarting the service tiers. This page shows the result when it is done.</p>
+                        <p class="u-muted onprem__upload-detail">The gateway is importing it. This page shows the result when it is done.</p>
                     }
                     else if (upload.Message is { } message && upload.State is LicenceImportState.Failed)
                     {
@@ -354,6 +340,10 @@ else if (!ShowApps)
                 {
                     <p class="u-muted onprem__upload-detail">Only people who manage this Solution can import a licence.</p>
                 }
+                else if (tier is not null)
+                {
+                    <div class="onprem__action-row">@ImportButton</div>
+                }
             </div>
         }
     </div>
@@ -364,7 +354,10 @@ else
         <div class="card__head">
             <div>
                 <h2 class="card__title">Installed apps</h2>
-                <p class="card__sub">What the gateway last reported as installed@(tier is { Multitenant: true } ? $" in tenant {tier.TenantId}" : "").</p>
+                @if (tier is { Multitenant: true })
+                {
+                    <p class="card__sub">In tenant @tier.TenantId.</p>
+                }
             </div>
         </div>
         @if (Apps is null)
@@ -374,7 +367,7 @@ else
         else if (Apps.Count == 0)
         {
             <EmptyState Icon="package" Title="No apps reported yet">
-                <Text>The gateway reads the installed apps every 15 minutes while it is online. They appear here after its next reading.</Text>
+                <Text>They appear here after the gateway's next reading.</Text>
             </EmptyState>
         }
         else
@@ -448,10 +441,6 @@ else
     [Parameter] public string? HistoryHref { get; set; }
 
     /// <summary>
-    /// The action the card's head offers: restart a tier that runs, start one that is
-    /// stopped. The rest sit in the row under the facts.
-    /// </summary>
-    /// <summary>
     /// The tier's state: the inventory's word, unless an action finished since the inventory
     /// last read the tier, which then says what it left the tier in.
     /// </summary>
@@ -459,6 +448,7 @@ else
         ? state
         : FleetRowState.StatusWord(Row, now);
 
+    /// <summary>The action that leads the row: restart a tier that runs, start one that is stopped.</summary>
     private static ServiceTierActionChoice? Lead(ServiceTierActionsView view) =>
         view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Restart)
         ?? view.Choices.FirstOrDefault(c => c.Action == ServiceTierAction.Start);
@@ -483,7 +473,7 @@ else
         : action switch
         {
             ServiceTierAction.RestartAll => $"{ServiceTierActionDialog.RestartAllLabel(view.GroupTierCount)}...",
-            ServiceTierAction.Stop => "Stop service tier (stays stopped)...",
+            ServiceTierAction.Stop => "Stop service tier...",
             ServiceTierAction.Start => "Start service tier...",
             _ => "Restart service tier...",
         };
