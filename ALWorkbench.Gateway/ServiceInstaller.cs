@@ -12,14 +12,15 @@ namespace ALWorkbench.Gateway;
 ///
 /// <para><b>The account.</b> By default the service runs as its own virtual account,
 /// <c>NT SERVICE\ALWorkbenchGateway</c>: Windows creates and manages it, it has no
-/// password, it is not an administrator, and on the network it acts as the computer
-/// account. <c>install --account DOMAIN\name$</c> uses a group managed service
+/// password, and on the network it acts as the computer account. <c>install</c> makes
+/// it a local administrator (<see cref="LocalAdministrators"/>), because Business
+/// Central's administration cmdlets accept nobody else. <c>install --account DOMAIN\name$</c> uses a group managed service
 /// account instead, for when the gateway must reach other machines as a domain
 /// identity (remote service control, #1373); that account must already be installed
 /// on this computer and hold "Log on as a service". The gateway never stores a
-/// password, so an ordinary user account is not offered. What the account may do in
-/// Business Central (the administration PowerShell module, the database) is granted
-/// by customer IT and described in the setup guide (#1376).</para>
+/// password, so an ordinary user account is not offered. What else the account needs
+/// (remote service control, the database) is granted by customer IT and described in
+/// the setup guide (#1376).</para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal static class ServiceInstaller

@@ -61,6 +61,19 @@ public static class InventoryNormaliser
             }
         }
 
+        // Without the instance itself nothing else means much: the cmdlets refused or
+        // failed outright (most often the service account not being a local
+        // administrator, which Business Central's cmdlets insist on). Report it as not
+        // read, with Business Central's own reason, rather than as a tier with no state.
+        if (Text(root["state"]) is null && unavailable.TryGetValue("instance", out var instanceWhy))
+        {
+            var hint = instanceWhy.Contains("Administrators", StringComparison.OrdinalIgnoreCase)
+                ? " The gateway's service account must be a member of the local Administrators group on that server; running the gateway's setup again adds it."
+                : string.Empty;
+            return Failed(tier, $"Business Central did not report on {tier.Tier.Instance}: {instanceWhy}{hint}",
+                PowerShellWord(Text(root["powerShell"])));
+        }
+
         var (tenants, tenantsCut) = Tenants(root["tenants"]);
         var sessions = root["sessions"] as JsonObject;
         IReadOnlyList<string>? users = null;

@@ -981,6 +981,29 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task After_gateway_toml_changes_the_tiers_are_read_again_without_waiting_for_the_next_round()
+    {
+        _policy.InForce = GatewayInventoryParsingTests.Policy;
+        var heartbeats = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.HeartbeatPath)
+            {
+                // The second heartbeat finds the file edited.
+                if (Interlocked.Increment(ref heartbeats) == 2)
+                    _policy.Snapshot = _policy.Snapshot with { Version = _policy.Snapshot.Version + 1 };
+                return FakeWorkbench.Heartbeat(approved: true);
+            }
+            if (request.Path == GatewayProtocol.NextCommandPath && Volatile.Read(ref heartbeats) >= 4) _stop.Cancel();
+            return FakeWorkbench.NoContent();
+        };
+
+        await RunAsync(new ALWorkbench.Gateway.Core.Inventory.GatewayInventory(_reader));
+
+        InventoryPosts().Should().HaveCount(6, "one round at start and one after the edit, well inside 15 minutes");
+    }
+
+    [Fact]
     public async Task Nothing_is_read_while_the_gateways_files_are_not_safe()
     {
         _policy.InForce = GatewayInventoryParsingTests.Policy;

@@ -348,6 +348,9 @@ public sealed class GatewayRunner
         }, ct).ConfigureAwait(false);
         if (sendPolicy)
         {
+            // An edited gateway.toml can list a tier the last round did not read, or
+            // stop listing one: read them again now rather than at the next round.
+            if (_policySentVersion != -1 && policy.Version != _policySentVersion) RequestInventory();
             _policySentVersion = policy.Version;
             _policySentAt = _clock.Timestamp();
         }

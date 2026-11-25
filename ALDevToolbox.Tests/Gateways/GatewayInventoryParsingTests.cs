@@ -115,6 +115,32 @@ public sealed class GatewayInventoryParsingTests
     }
 
     [Fact]
+    public void A_tier_whose_cmdlets_refuse_the_service_account_is_reported_as_not_read_with_the_reason()
+    {
+        // What BC 25 answers when the gateway's account is not a local administrator:
+        // every part refused, the service itself still readable.
+        const string denied = "Access is denied. You need to be a member of the local Administrators group on the server to run this cmdlet.";
+        var output = new JsonObject
+        {
+            ["schema"] = InventoryScript.OutputSchema,
+            ["powerShell"] = "5.1.20348.2849",
+            ["service"] = new JsonObject { ["state"] = "Running" },
+            ["unavailable"] = new JsonObject
+            {
+                ["instance"] = denied,
+                ["configuration"] = denied,
+                ["tenants"] = denied,
+            },
+        };
+
+        var inventory = InventoryNormaliser.FromScriptOutput(output, Tier("BC250"));
+
+        inventory.Error.Should().Contain("BC250").And.Contain(denied)
+            .And.Contain("must be a member of the local Administrators group");
+        inventory.State.Should().BeNull();
+    }
+
+    [Fact]
     public void Session_user_names_are_kept_only_where_the_policy_allows_session_users()
     {
         var sample = Sample("bc14-hybrid.json");
