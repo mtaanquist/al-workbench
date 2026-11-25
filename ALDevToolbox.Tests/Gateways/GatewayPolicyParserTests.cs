@@ -155,6 +155,28 @@ public sealed class GatewayPolicyParserTests
         odd.Find(new TierRef(Local, "BC \"25\\0\"")).Should().NotBeNull();
     }
 
+    [Theory]
+    [InlineData("localhost")]
+    [InlineData("LOCALHOST")]
+    [InlineData(".")]
+    [InlineData("127.0.0.1")]
+    [InlineData("::1")]
+    public void Localhost_means_this_computer(string machine)
+    {
+        var policy = Valid($$"""
+            [[instance]]
+            machine = "{{machine}}"
+            name = "BC250"
+            allow = ["inventory", "publish"]
+
+            [[database]]
+            name = "CRONUS"
+            publish_on = { machine = "{{machine}}", instance = "BC250" }
+            """);
+
+        policy.Find(new TierRef(Local, "BC250"))!.Allows(PolicyPermission.Publish).Should().BeTrue();
+    }
+
     [Fact]
     public void An_empty_file_is_valid_and_allows_nothing()
     {

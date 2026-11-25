@@ -69,6 +69,16 @@ public static partial class GatewayPolicyParser
 
         public Reader(string localMachine) => _localMachine = localMachine;
 
+        /// <summary>
+        /// The names Windows itself uses for "this computer" (localhost, ".", the loopback
+        /// addresses) mean the local machine, so a tier written as localhost is the same
+        /// tier as one written with the computer's name.
+        /// </summary>
+        private string ThisComputer(string machine) =>
+            machine.Trim() is var m && (m.Equals("localhost", StringComparison.OrdinalIgnoreCase) || m is "." or "127.0.0.1" or "::1")
+                ? _localMachine
+                : machine;
+
         public PolicyParseResult Read(string text)
         {
             var document = SyntaxParser.Parse(text, GatewayPolicyParser.FileName, true);
@@ -162,7 +172,7 @@ public static partial class GatewayPolicyParser
             var publishers = ReadTextList(values, "publishers", allowEmpty: false);
             _instances.Add(new RawInstance(
                 Line(table),
-                machine is null || name is null ? null : new TierRef(machine, name),
+                machine is null || name is null ? null : new TierRef(ThisComputer(machine), name),
                 environment,
                 ReadAllow(values),
                 ReadHours(values),
@@ -494,7 +504,7 @@ public static partial class GatewayPolicyParser
                 Error(table, $"{key} must give both machine and instance, like {{ machine = \"CRONUS-BC01\", instance = \"BC140\" }}.");
             }
             if (machine is null || instance is null) return null;
-            return new TierRef(machine, instance);
+            return new TierRef(ThisComputer(machine), instance);
         }
 
         private List<TierRef>? ReadTierList(KeyValueSyntax kv, string key)
