@@ -413,7 +413,7 @@ public sealed partial class OnPremisesTierActionService
     };
 
     /// <summary>The gateway computer's time zone, when its settings report named one this server knows.</summary>
-    private static TimeZoneInfo? GatewayZone(OnPremisesDeployFacts facts)
+    internal static TimeZoneInfo? GatewayZone(OnPremisesDeployFacts facts)
     {
         if (facts.Policy?.TimeZone is not { Length: > 0 } id) return null;
         try
@@ -439,14 +439,16 @@ public sealed partial class OnPremisesTierActionService
             .FirstOrDefault(h => h is not null);
     }
 
-    private static IEnumerable<ChangeHours> AllChangeHours(OnPremisesDeployFacts facts, IReadOnlyList<string> tiers) =>
+    internal static IEnumerable<ChangeHours> AllChangeHours(OnPremisesDeployFacts facts, IReadOnlyList<string> tiers) =>
         facts.Policy is not { } policy
             ? []
             : tiers.Select(t => ChangeHours.Parse(PolicyEntry(policy, t)?.ChangeHours)).OfType<ChangeHours>();
 
-    private DateTime DefaultRunAt(TimeZoneInfo? zone, ChangeHours? hours)
+    private DateTime DefaultRunAt(TimeZoneInfo? zone, ChangeHours? hours) => DefaultRunAt(Now, zone, hours);
+
+    /// <summary>The time a booking form starts on, UTC: the change hours' next opening in the gateway's zone, else the next full hour.</summary>
+    internal static DateTime DefaultRunAt(DateTime now, TimeZoneInfo? zone, ChangeHours? hours)
     {
-        var now = Now;
         if (zone is null || hours is null)
         {
             var next = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(1);

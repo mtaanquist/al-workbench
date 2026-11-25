@@ -4,8 +4,9 @@ using ALDevToolbox.Services.Workers;
 namespace ALDevToolbox.Services.Gateways;
 
 /// <summary>
-/// Sends the service tier restarts booked for later (#1788) when they come due, and tells
-/// the person who booked one when it was refused or the gateway failed it. The pending row
+/// Sends the service tier restarts (#1788) and the app uploads (#1786) booked for later on
+/// on-premises environments when they come due, and tells the person who booked one when
+/// it was refused or the gateway failed it. The pending row
 /// in Postgres is the queue, as for <see cref="ObjectExplorer.Bc.UpgradeActionWorker"/>, so a
 /// booking for tonight survives this afternoon's deploy.
 ///
@@ -57,18 +58,51 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
 
     private async Task SweepOrganizationAsync(int orgId, bool isSystem, CancellationToken ct)
     {
-        List<(int Id, int? RequestedBy)> due;
-        List<int> failedLater;
-        using (AmbientOrganizationScope.Enter(AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
-        await using (var scope = _services.CreateAsyncScope())
+        var restarts = await SettleAsync(orgId, isSystem, "restarts", async services =>
         {
-            var service = scope.ServiceProvider.GetRequiredService<OnPremisesTierActionService>();
-            due = await service.DueBookingsAsync(ct).ConfigureAwait(false);
-            failedLater = await service.SettleFailedBookingsAsync(ct).ConfigureAwait(false);
-            var notifier = scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>();
-            foreach (var id in failedLater) await notifier.NotifyAsync(id, ct: ct).ConfigureAwait(false);
-        }
+            var tiers = services.GetRequiredService<OnPremisesTierActionService>();
+            return (await tiers.DueBookingsAsync(ct).ConfigureAwait(false), await tiers.SettleFailedBookingsAsync(ct).ConfigureAwait(false));
+        }, ct).ConfigureAwait(false);
+        // Apart from the restarts, so one failing cannot cost the other its sends or its notices.
+        var uploads = await SettleAsync(orgId, isSystem, "uploads", async services =>
+        {
+            var apps = services.GetRequiredService<OnPremisesAppUploadService>();
+            return (await apps.DueBookingsAsync(ct).ConfigureAwait(false), await apps.SettleFailedBookingsAsync(ct).ConfigureAwait(false));
+        }, ct).ConfigureAwait(false);
 
+        await RunEachAsync(orgId, isSystem, restarts, "Booked restart",
+            (services, id, token) => services.GetRequiredService<OnPremisesTierActionService>().RunBookingAsync(id, byWorker: true, token), ct).ConfigureAwait(false);
+        await RunEachAsync(orgId, isSystem, uploads, "Booked upload",
+            (services, id, token) => services.GetRequiredService<OnPremisesAppUploadService>().RunBookingAsync(id, token), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads one kind's due bookings and settles its failed ones, telling each booker straight
+    /// after the settle that marked their row, so a notice is never lost to a later failure.
+    /// Returns the due bookings; none when the read failed (it is tried on the next sweep).
+    /// </summary>
+    private async Task<List<(int Id, int? RequestedBy)>> SettleAsync(int orgId, bool isSystem, string what,
+        Func<IServiceProvider, Task<(List<(int Id, int? RequestedBy)> Due, List<int> Failed)>> read, CancellationToken ct)
+    {
+        try
+        {
+            using var ambient = AmbientOrganizationScope.Enter(AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
+            await using var scope = _services.CreateAsyncScope();
+            var (due, failed) = await read(scope.ServiceProvider).ConfigureAwait(false);
+            var notifier = scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>();
+            foreach (var id in failed) await notifier.NotifyAsync(id, ct: ct).ConfigureAwait(false);
+            return due;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Reading the booked {What} failed for organisation {OrganizationId}; tried again on the next sweep.", what, orgId);
+            return [];
+        }
+    }
+
+    private async Task RunEachAsync(int orgId, bool isSystem, List<(int Id, int? RequestedBy)> due, string what,
+        Func<IServiceProvider, int, CancellationToken, Task<ServiceTierBookingRun>> run, CancellationToken ct)
+    {
         foreach (var (id, requestedBy) in due)
         {
             if (ct.IsCancellationRequested) break;
@@ -79,8 +113,7 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
                 using var ambient = AmbientOrganizationScope.Enter(
                     AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem, requestedBy));
                 await using var scope = _services.CreateAsyncScope();
-                var outcome = await scope.ServiceProvider.GetRequiredService<OnPremisesTierActionService>()
-                    .RunBookingAsync(id, byWorker: true, ct).ConfigureAwait(false);
+                var outcome = await run(scope.ServiceProvider, id, ct).ConfigureAwait(false);
                 if (outcome == ServiceTierBookingRun.Failed)
                 {
                     await scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>().NotifyAsync(id, ct: ct).ConfigureAwait(false);
@@ -88,7 +121,7 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                _logger.LogError(ex, "Booked restart {ActionId} could not be run; it is tried again on the next sweep.", id);
+                _logger.LogError(ex, "{What} {ActionId} could not be run; it is tried again on the next sweep.", what, id);
             }
         }
     }

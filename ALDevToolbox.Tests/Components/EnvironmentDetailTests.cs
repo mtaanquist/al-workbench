@@ -59,6 +59,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.GatewayCommandService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesLicenceService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesTierActionService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesAppUploadService>();
         _ctx.Services.AddScoped<UpgradeActionService>();
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddSingleton<IBcAdminClient>(_admin);

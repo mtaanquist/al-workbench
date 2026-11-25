@@ -526,6 +526,13 @@ else
                     <p class="card__sub">In tenant @tier.TenantId.</p>
                 }
             </div>
+            @if (CanManage && tier is not null && OnUploadApps.HasDelegate)
+            {
+                <button type="button" class="btn btn--sm @(UploadingApps ? "btn--loading" : "")" disabled="@UploadingApps" @onclick="OnUploadApps">
+                    <Icon Name="upload" Width="14" Height="14" />
+                    <span>Upload apps</span>
+                </button>
+            }
         </div>
         @if (Apps is null)
         {
@@ -639,6 +646,12 @@ else
 
     /// <summary>The Workbench history tab's address.</summary>
     [Parameter] public string? HistoryHref { get; set; }
+
+    /// <summary>Opens the upload of apps another company sent (#1786); the button shows only when set and the person manages the Solution.</summary>
+    [Parameter] public EventCallback OnUploadApps { get; set; }
+
+    /// <summary>True while an upload is being sent.</summary>
+    [Parameter] public bool UploadingApps { get; set; }
 
     /// <summary>
     /// The tier's state: the inventory's word, unless an action finished since the inventory

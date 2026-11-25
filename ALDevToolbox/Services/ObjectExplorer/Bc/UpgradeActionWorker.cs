@@ -266,7 +266,10 @@ public sealed partial class UpgradeActionWorker : BackgroundService
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var installs = db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp);
+            .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
+            // An upload to an on-premises environment goes through its gateway (#1786),
+            // sent by ServiceTierBookingWorker; it takes no turn here.
+            .Where(a => a.Environment!.Kind == OeEnvironmentKind.Online);
         // The first due row in the order one organisation sends them (#1568): a move to a
         // window's next opening rewrites ExecuteAfter, so an install that has waited since
         // last night ties with one booked for tonight, and its booking time breaks the tie
