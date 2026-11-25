@@ -131,6 +131,31 @@ public sealed class GatewayPolicyParserTests
     }
 
     [Fact]
+    public void The_starter_file_setup_writes_lists_the_tiers_it_found_for_inventory_only()
+    {
+        var text = StarterPolicy.Create(Local, ["BC250", "BC140TEST", "BC250"]);
+
+        text.Should().MatchRegex(@"^[\x09\x0A\x0D\x20-\x7E]*$", "it is opened in Notepad");
+        var policy = Valid(text);
+        policy.Instances.Should().HaveCount(2, "a tier found twice is listed once");
+        foreach (var name in new[] { "BC250", "BC140TEST" })
+        {
+            var tier = policy.Find(new TierRef(Local, name))!;
+            tier.Allow.Should().Equal([PolicyPermission.Inventory], "nothing is published or restarted until customer IT says so");
+            tier.Environment.Should().Be(PolicyEnvironment.Production);
+        }
+    }
+
+    [Fact]
+    public void The_starter_file_is_valid_when_setup_found_no_tiers_and_quotes_odd_names()
+    {
+        Valid(StarterPolicy.Create(Local, [])).Instances.Should().BeEmpty();
+
+        var odd = Valid(StarterPolicy.Create(Local, ["BC \"25\\0\""]));
+        odd.Find(new TierRef(Local, "BC \"25\\0\"")).Should().NotBeNull();
+    }
+
+    [Fact]
     public void An_empty_file_is_valid_and_allows_nothing()
     {
         Valid("# nothing yet\n").Instances.Should().BeEmpty();

@@ -17,10 +17,11 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging.EventLog;
 
-// The program customer IT runs. Five commands:
+// The program customer IT runs. Six commands:
 //   register --url <address> --code <code>   make a key, exchange the code, print the fingerprint
 //   install [--account DOMAIN\name$]           create the Windows service (see ServiceInstaller)
 //   uninstall                                  remove the service, the key and the stored settings
+//   init                                       write a starter gateway.toml listing this computer's tiers (setup runs it)
 //   check [--inventory <folder>]               read gateway.toml and try each local tier, changing nothing;
 //                                              with --inventory, also save what the inventory reads from each
 //   run                                        the service itself; Windows starts it with this, and from an
@@ -55,6 +56,7 @@ internal static class GatewayProgram
                 "install" => Install(Options(args)),
                 "uninstall" => Uninstall(),
                 "check" => await CheckAsync(Options(args)),
+                "init" => Init(),
                 "run" => await RunAsync(args),
                 _ => Usage(command),
             };
@@ -92,6 +94,11 @@ internal static class GatewayProgram
                   Connects this computer to AL Workbench. An Admin gets the code in
                   AL Workbench under Administration → Gateways → Add gateway, and then
                   approves the gateway there.
+
+              ALWorkbench.Gateway init
+                  Writes a gateway.toml beside the program that lists the Business
+                  Central service tiers on this computer, allowed only to be reported on.
+                  Does nothing if gateway.toml already exists. Setup runs this for you.
 
               ALWorkbench.Gateway check [--inventory <folder>]
                   Reads gateway.toml beside the program, shows what it allows for each
@@ -229,6 +236,34 @@ internal static class GatewayProgram
         {
             Console.WriteLine("Next, register it: ALWorkbench.Gateway register --url <AL Workbench address> --code <registration code>");
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// Writes the starter <c>gateway.toml</c> (#1778): this computer's service tiers,
+    /// inventory only. Never replaces an existing file, which is customer IT's. The file
+    /// lands in the program folder and inherits its rights, which only administrators
+    /// can change.
+    /// </summary>
+    private static int Init()
+    {
+        RequireAdministrator();
+        var options = GatewayWorker.PolicyOptions();
+        if (File.Exists(options.PolicyFile))
+        {
+            Console.WriteLine($"{options.PolicyFile} already exists, so it was left as it is.");
+            return 0;
+        }
+        const string prefix = "MicrosoftDynamicsNavServer$";
+        var tiers = System.ServiceProcess.ServiceController.GetServices()
+            .Select(s => s.ServiceName)
+            .Where(n => n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && n.Length > prefix.Length)
+            .Select(n => n[prefix.Length..])
+            .ToList();
+        File.WriteAllText(options.PolicyFile, StarterPolicy.Create(Environment.MachineName, tiers), new UTF8Encoding(false));
+        Console.WriteLine(tiers.Count == 0
+            ? $"Wrote {options.PolicyFile}. No Business Central service tiers were found on this computer; add them as gateway.example.toml shows."
+            : $"Wrote {options.PolicyFile} with {tiers.Count} service tier(s), allowed only to be reported on: {string.Join(", ", tiers.Order(StringComparer.OrdinalIgnoreCase))}.");
         return 0;
     }
 

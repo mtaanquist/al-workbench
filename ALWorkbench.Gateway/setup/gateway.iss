@@ -12,8 +12,9 @@
 ; Upgrading: running a newer setup over an older one stops the service (waiting while
 ; it finishes what it is doing), replaces the program and starts the service again.
 ; A service installed by hand from another folder is refused, not upgraded. The registration, the key and gateway.toml
-; are left as they were. gateway.toml is never installed or removed by setup: it is
-; customer IT's file.
+; are left as they were. Setup never replaces or removes gateway.toml, which is
+; customer IT's file; when there is none, "init" writes a starter one that lists this
+; computer's service tiers, allowed only to be reported on.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"
@@ -232,6 +233,10 @@ var
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then Exit;
+  { A starter gateway.toml listing this computer's tiers, inventory only, so they show
+    up in AL Workbench straight away. init leaves an existing file alone. }
+  WizardForm.StatusLabel.Caption := 'Writing the starter gateway settings...';
+  Exec(ExpandConstant('{app}\{#Exe}'), 'init', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not ExistedBefore then
   begin
     { A first install creates the service. It starts once the gateway is registered. }
