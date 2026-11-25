@@ -1,7 +1,10 @@
 The AL Workbench Gateway is installed in:
     C:\Program Files\AL Workbench Gateway
 
-What is left to do
+If you upgraded an existing gateway, nothing is left to do: it keeps its
+registration and its gateway.toml, and the service is running again.
+
+What is left to do after a first install
 
 1. Tell the gateway which service tiers it may manage.
    Copy gateway.example.toml to gateway.toml in that folder and edit it as
@@ -15,7 +18,8 @@ What is left to do
        ALWorkbench.Gateway register --url https://your-al-workbench --code THE-CODE
 
 3. In AL Workbench, approve the gateway under Administration > Gateways. Check
-   that the fingerprint shown there matches the one the gateway printed.
+   that the fingerprint shown there matches the one the gateway printed when it
+   registered. It is also in the newest log file (see below).
 
 The service is called "AL Workbench Gateway". Its log files are in
 C:\ProgramData\AL Workbench Gateway\logs.

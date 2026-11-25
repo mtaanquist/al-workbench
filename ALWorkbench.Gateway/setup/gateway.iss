@@ -9,8 +9,9 @@
 ; Built by staging.yml with:
 ;   ISCC.exe /DAppVersion=<version> /DSourceDir=<publish folder> /DOutputDir=<folder> gateway.iss
 ;
-; Upgrading: running a newer setup over an older one stops the service, replaces the
-; program and starts the service again. The registration, the key and gateway.toml
+; Upgrading: running a newer setup over an older one stops the service (waiting while
+; it finishes what it is doing), replaces the program and starts the service again.
+; A service installed by hand from another folder is refused, not upgraded. The registration, the key and gateway.toml
 ; are left as they were. gateway.toml is never installed or removed by setup: it is
 ; customer IT's file.
 
@@ -60,13 +61,8 @@ Source: "{#SourceDir}\{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\gateway.example.toml"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; A first install creates the service. It starts once the gateway is registered.
-Filename: "{app}\{#Exe}"; Parameters: "install"; Flags: runhidden waituntilterminated; \
-  StatusMsg: "Installing the AL Workbench Gateway service..."; Check: not ServiceExisted
-; An upgrade starts the service it stopped.
-Filename: "{sys}\net.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden waituntilterminated; \
-  StatusMsg: "Starting the AL Workbench Gateway service..."; Check: ServiceWasRunning
-; Registering prints the key fingerprint the Admin compares before approving, so it
+; Installing the service (first install) and starting it again (upgrade) happen in
+; CurStepChanged below, where a failure can be shown. Registering prints the key fingerprint the Admin compares before approving, so it
 ; runs in a window that stays open until a key is pressed.
 Filename: "{cmd}"; Parameters: "/c ""{code:RegisterCommand}"""; Flags: waituntilterminated; \
   StatusMsg: "Registering with AL Workbench..."; Check: WantsRegister
@@ -82,8 +78,10 @@ var
   RunningBefore: Boolean;
 
 function ServiceState(): Integer;
-{ 0 = not installed, 1 = installed and stopped, 2 = running. sc query exits with
-  1060 when there is no such service. }
+{ 0 = not installed, 1 = stopped, 2 = starting, stopping or running. sc query
+  exits with 1060 when there is no such service. The state is matched by its
+  number (2 start pending, 3 stop pending, 4 running), which sc prints the same
+  in every Windows language. }
 var
   ResultCode: Integer;
 begin
@@ -91,20 +89,27 @@ begin
   if not Exec(ExpandConstant('{sys}\sc.exe'), 'query {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then Exit;
   if ResultCode <> 0 then Exit;
   Result := 1;
-  { "sc query" prints STATE ... RUNNING; findstr exits 0 when it finds it. }
-  if Exec(ExpandConstant('{cmd}'), '/c sc.exe query {#ServiceName} | findstr /c:"RUNNING"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+  if Exec(ExpandConstant('{cmd}'), '/c sc.exe query {#ServiceName} | findstr /r /c:"STATE *: [234] "', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
      and (ResultCode = 0) then
     Result := 2;
 end;
 
-function ServiceExisted(): Boolean;
+function InstalledProgramPath(): String;
+{ The program the existing service runs, without its quotes and the "run" argument. }
+var
+  ImagePath: String;
+  I: Integer;
 begin
-  Result := ExistedBefore;
-end;
-
-function ServiceWasRunning(): Boolean;
-begin
-  Result := RunningBefore;
+  Result := '';
+  if not RegQueryStringValue(HKLM, 'SYSTEM\CurrentControlSet\Services\{#ServiceName}', 'ImagePath', ImagePath) then Exit;
+  ImagePath := Trim(ImagePath);
+  if Copy(ImagePath, 1, 1) = '"' then
+  begin
+    Delete(ImagePath, 1, 1);
+    I := Pos('"', ImagePath);
+    if I > 0 then ImagePath := Copy(ImagePath, 1, I - 1);
+  end;
+  Result := ImagePath;
 end;
 
 procedure InitializeWizard();
@@ -121,11 +126,27 @@ end;
 function InitializeSetup(): Boolean;
 var
   State: Integer;
+  Existing, Expected: String;
 begin
   State := ServiceState();
   ExistedBefore := State > 0;
   RunningBefore := State = 2;
   Result := True;
+  if ExistedBefore then
+  begin
+    { A gateway installed by hand from another folder would keep running the old
+      program after this setup copied a new one here. }
+    Existing := InstalledProgramPath();
+    Expected := ExpandConstant('{autopf}\AL Workbench Gateway\{#Exe}');
+    if (Existing <> '') and (CompareText(Existing, Expected) <> 0) then
+    begin
+      MsgBox('The AL Workbench Gateway service on this computer runs ' + Existing + '.' + #13#10#13#10 +
+        'This setup installs the gateway in ' + ExtractFileDir(Expected) + '. To move it there, run ' +
+        '"ALWorkbench.Gateway uninstall" from the old folder first, then run this setup again and register the gateway anew.',
+        mbError, MB_OK);
+      Result := False;
+    end;
+  end;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -187,11 +208,45 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  ResultCode: Integer;
+  ResultCode, Waited: Integer;
 begin
   Result := '';
-  { An upgrade replaces the program, so the service must not be holding it. net stop
-    waits until the service has stopped. }
-  if RunningBefore then
-    Exec(ExpandConstant('{sys}\net.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not RunningBefore then Exit;
+  { An upgrade replaces the program, so the service must have stopped first. A
+    gateway in the middle of restarting service tiers can take several minutes to
+    stop, longer than net stop waits, so the state is polled for up to 15 minutes. }
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Waited := 0;
+  while (ServiceState() = 2) and (Waited < 900) do
+  begin
+    Sleep(2000);
+    Waited := Waited + 2;
+  end;
+  if ServiceState() = 2 then
+    Result := 'The AL Workbench Gateway service did not stop within 15 minutes, so nothing was changed. ' +
+      'It may be in the middle of restarting service tiers. Try again later.';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep <> ssPostInstall then Exit;
+  if not ExistedBefore then
+  begin
+    { A first install creates the service. It starts once the gateway is registered. }
+    WizardForm.StatusLabel.Caption := 'Installing the AL Workbench Gateway service...';
+    if not Exec(ExpandConstant('{app}\{#Exe}'), 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      MsgBox('The gateway was copied, but its Windows service could not be installed. Open a command prompt with ' +
+        '"Run as administrator", go to ' + ExpandConstant('{app}') + ' and run "ALWorkbench.Gateway install" to see why.',
+        mbError, MB_OK);
+  end
+  else if RunningBefore then
+  begin
+    { An upgrade starts the service it stopped. }
+    WizardForm.StatusLabel.Caption := 'Starting the AL Workbench Gateway service...';
+    if not Exec(ExpandConstant('{sys}\net.exe'), 'start {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      MsgBox('The gateway was upgraded, but its service did not start. Start "AL Workbench Gateway" in Services, ' +
+        'and look in C:\ProgramData\AL Workbench Gateway\logs if it stops again.', mbError, MB_OK);
+  end;
 end;

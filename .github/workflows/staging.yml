@@ -89,11 +89,16 @@ jobs:
         env:
           VERSION: ${{ steps.publish.outputs.version }}
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
+          # Wherever the installed major version put it, rather than a hard-coded
+          # "Inno Setup 6" that a newer package would silently move.
+          function Find-Iscc { Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not (Find-Iscc)) {
             choco install innosetup -y --no-progress
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          $iscc = (Find-Iscc).FullName
+          if (-not $iscc) { throw "Inno Setup's compiler (ISCC.exe) was not found after installing it." }
+          Write-Host "Using $iscc"
           & $iscc /Qp "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD\out" "/DOutputDir=$PWD\setup-out" ALWorkbench.Gateway\setup\gateway.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $file = Get-Item setup-out\ALWorkbench.Gateway.Setup-*.exe
