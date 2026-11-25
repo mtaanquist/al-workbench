@@ -245,7 +245,8 @@ public sealed class ContentPageTests : IDisposable
 
         var ids = rendered.FindAll("[id]").Select(e => e.Id).ToHashSet();
         var targets = rendered.FindAll(".toc-link")
-            .Select(a => a.GetAttribute("href")!.TrimStart('#'))
+            .Select(a => a.GetAttribute("href")!)
+            .Select(href => href[(href.IndexOf('#') + 1)..])
             .ToList();
 
         targets.Should().NotBeEmpty();
