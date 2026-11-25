@@ -52,6 +52,7 @@ public sealed class ContentArchetypeTests : IDisposable
     [Fact]
     public void DocsPage_renders_head_prose_column_and_a_toc_built_from_data()
     {
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/docs/extensions-whats-next");
         var cut = _ctx.Render<DocsPage>(p => p
             .Add(c => c.Title, "What's next")
             .Add(c => c.Subtitle, "Opening what you downloaded.")
@@ -63,9 +64,25 @@ public sealed class ContentArchetypeTests : IDisposable
         cut.Find(".docs__main > article.prose > h2").Id.Should().Be("wn-open");
 
         var links = cut.FindAll(".docs__toc-list > a.toc-link");
-        links.Select(a => a.GetAttribute("href")).Should().Equal("#wn-open", "#wn-sub");
+        links.Select(a => a.GetAttribute("href")).Should().Equal(
+            ["/docs/extensions-whats-next#wn-open", "/docs/extensions-whats-next#wn-sub"],
+            "the app's <base href=\"/\"> would send a bare #anchor to the home page");
         links[0].ClassList.Should().NotContain("toc-link--sub");
         links[1].ClassList.Should().Contain("toc-link--sub");
+    }
+
+    [Fact]
+    public void No_page_links_to_a_bare_anchor()
+    {
+        // <base href="/"> resolves href="#x" to "/#x", the home page, so an in-page link
+        // must carry its page's path.
+        var offenders = System.IO.Directory.EnumerateFiles(ALDevToolbox.Tests.Infrastructure.RepoRoot.Combine("ALDevToolbox", "Components"), "*.razor", SearchOption.AllDirectories)
+            .SelectMany(file => File.ReadLines(file).Select((line, i) => (file, line, i)))
+            .Where(x => x.line.Contains("href=\"#", StringComparison.Ordinal))
+            .Select(x => $"{Path.GetFileName(x.file)}:{x.i + 1}")
+            .ToList();
+
+        offenders.Should().BeEmpty();
     }
 
     [Fact]
