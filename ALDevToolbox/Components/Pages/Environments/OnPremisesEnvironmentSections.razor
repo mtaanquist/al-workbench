@@ -171,11 +171,11 @@ else if (!ShowApps)
                     </div>
                     @if (last.TierProgress == ServiceTierProgress.Waiting)
                     {
-                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. If this does not change within a minute or two, the gateway may be offline: ask the customer's IT to check it.</p>
+                        <p class="u-muted onprem__upload-detail">If this doesn't change within a few minutes, the gateway may be offline.</p>
                     }
                     else if (last.TierProgress == ServiceTierProgress.Running)
                     {
-                        <p class="u-muted onprem__upload-detail">AL Workbench has sent this to the gateway. It usually takes a minute or two; this page shows the result when it is done.</p>
+                        <p class="u-muted onprem__upload-detail">This usually takes a minute or two.</p>
                     }
                     else if (last.Outcome is { } outcome && last.Status == ALDevToolbox.Domain.Entities.ObjectExplorer.UpgradeActionStatus.Failed)
                     {
@@ -230,7 +230,7 @@ else if (!ShowApps)
                 }
                 @if (view.Latest is not null && !string.IsNullOrEmpty(HistoryHref))
                 {
-                    <p class="onprem__upload-detail"><a href="@HistoryHref">See every action in the Workbench history</a></p>
+                    <p class="onprem__upload-detail"><a href="@HistoryHref">Workbench history</a></p>
                 }
             </div>
         }
@@ -317,11 +317,11 @@ else if (!ShowApps)
                     </p>
                     @if (upload.State is LicenceImportState.Waiting)
                     {
-                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. If this does not change within a few minutes, the gateway may be offline: ask the customer's IT to check it.</p>
+                        <p class="u-muted onprem__upload-detail">If this doesn't change within a few minutes, the gateway may be offline.</p>
                     }
                     else if (upload.State is LicenceImportState.Running)
                     {
-                        <p class="u-muted onprem__upload-detail">The gateway is importing it. This page shows the result when it is done.</p>
+                        <p class="u-muted onprem__upload-detail">This usually takes a minute.</p>
                     }
                     else if (upload.Message is { } message && upload.State is LicenceImportState.Failed)
                     {

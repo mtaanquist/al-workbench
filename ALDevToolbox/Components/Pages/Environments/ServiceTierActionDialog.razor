@@ -97,19 +97,19 @@
         {
             ServiceTierAction.RestartAll => (
                 $"{RestartAllLabel(groupTierCount)}?",
-                "Every service tier on this database stops and starts again. Use this when restarting one service tier did not help.",
+                "Use this when restarting one service tier did not help.",
                 RestartAllLabel(groupTierCount), "btn--danger"),
             ServiceTierAction.Stop => (
                 $"Stop {tierName}?",
-                "The service tier stops and stays stopped until someone starts it again, here or on the server.",
+                "",
                 "Stop service tier", "btn--danger"),
             ServiceTierAction.Start => (
                 $"Start {tierName}?",
-                "The service tier starts, and people can sign in through it again once it is running.",
+                "",
                 "Start service tier", ""),
             _ => (
                 $"Restart {tierName}?",
-                "Use it when people cannot sign in or Business Central has stopped answering. A restart clears stuck sessions and reads the service tier's settings again.",
+                "",
                 "Restart service tier", "btn--danger"),
         };
         var opening = _confirm.OpenAsync(title, message, label, css);
@@ -167,8 +167,8 @@
     }
 
     private string SessionsDetail(ServiceTierActionPlan plan) => plan.Sessions.CountedAt is { } counted
-        ? $"The gateway counted them {Ago(counted)}, so the number may have changed."
-        : "The gateway counts them every 15 minutes.";
+        ? $"Counted {Ago(counted)}."
+        : "";
 
     private static string AfterSentence(ServiceTierActionPlan plan) => plan.Action switch
     {

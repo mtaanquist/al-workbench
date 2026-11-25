@@ -310,7 +310,7 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
         var done = await LatestAsync();
         done.Status.Should().Be(UpgradeActionStatus.Sent);
         done.TierProgress.Should().BeNull();
-        done.Outcome.Should().Be("CRONUS-BC01 / BC250 restarted and is running.");
+        done.Outcome.Should().BeNull("the headline already says it restarted");
     }
 
     [Fact]
@@ -353,7 +353,7 @@ public sealed class OnPremisesTierActionServiceTests : IDisposable
                 a.ExecuteAfter, a.SentAt, a.Outcome, a.CancelledBy, a.CancelledAt, null, null, null, null, null, null, null, null, null, null, false, null, null, false, a.GatewayCommandId, null, null))
             .ToListAsync();
         var read = await ServiceTierActionOutcome.ApplyAsync(ctx, rows, CancellationToken.None);
-        read.Single().Outcome.Should().Be("Restarted 2 service tiers: CRONUS-BC01 / BC250, CRONUS-BC02 / BC250. They are all running.");
+        read.Single().Outcome.Should().Be("Restarted 2 service tiers: CRONUS-BC01 / BC250, CRONUS-BC02 / BC250.");
     }
 
     // ---------------------------------------------------------------- Production
