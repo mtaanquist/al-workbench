@@ -1,0 +1,289 @@
+@*
+    Upload apps by hand to an on-premises environment (#1786). Named user: a consultant
+    whose customer runs Business Central on its own servers, holding an .app another
+    company sent, who wants it installed tonight without remoting into the customer's
+    server, and who knows Business Central but nothing about the gateway.
+
+    The files are read on the spot and checked against everything the workbench knows
+    before anything is stored: the customer's gateway settings, a protected file, a
+    dependency that is neither in the upload nor installed. A refusal is said here and
+    holds the button. When: now, or a time on the customer's server, starting at the
+    opening of the customer's change hours.
+
+    The dialog only collects the answer. The caller uploads it
+    (OnPremisesAppUploadService.InstallAsync), which checks everything again. See
+    .design/on-prem-gateway.md, "Uploading apps by hand, as built (#1786)".
+*@
+@using ALDevToolbox.Services.Gateways
+@inject OnPremisesAppUploadService Uploads
+@inject ILogger<OnPremisesUploadDialog> Log
+@inject TimeProvider Clock
+
+<ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="upload" ConfirmDisabled="@(!CanConfirm)">
+    <div class="onprem-upload">
+        @if (_plan is null && _planError is null)
+        {
+            <LoadingBlock Text="Reading the service tier..." />
+        }
+        else if (_planError is { } planError)
+        {
+            <Alert Tone="AlertTone.Danger"><span>@planError</span></Alert>
+        }
+        else if (_files.Count == 0 && _plan?.Refusal is { } serverRefusal)
+        {
+            <Alert Tone="AlertTone.Danger"><span>@serverRefusal</span></Alert>
+        }
+        else
+        {
+            <div class="onprem-upload__file">
+                <label class="btn btn--sm btn--file" for="onprem-upload-file">
+                    <Icon Name="upload" Width="14" Height="14" />
+                    <span>@(_files.Count == 0 ? "Choose the .app files..." : "Choose different files...")</span>
+                    <InputFile id="onprem-upload-file" OnChange="OnChosenAsync" accept=".app" multiple />
+                </label>
+                @if (_reading)
+                {
+                    <span class="u-muted" role="status">Reading the files...</span>
+                }
+                else if (_fileError is { } fileError)
+                {
+                    <FieldError Message="@fileError" />
+                }
+                else if (_files.Count == 0)
+                {
+                    <span class="u-muted">Choose one or more .app files to continue.</span>
+                }
+            </div>
+            @if (_files.Count > 0 && _plan is { } plan)
+            {
+                @if (plan.Apps.Count > 0)
+                {
+                    <ol class="onprem-upload__list">
+                        @foreach (var app in plan.Apps)
+                        {
+                            <li class="onprem-upload__item">
+                                <span>@app.Name @app.Version</span>
+                                <span class="u-muted">@app.Publisher</span>
+                                <span class="u-muted">@FileSize(app.Size)</span>
+                            </li>
+                        }
+                    </ol>
+                    @if (plan.Apps.Count > 1)
+                    {
+                        <small class="field__hint">They install in this order, dependencies first.</small>
+                    }
+                }
+                @if (plan.Refusal is { } refusal)
+                {
+                    <Alert Tone="AlertTone.Danger"><span>@refusal</span></Alert>
+                }
+            }
+
+            <fieldset class="onprem-upload__when">
+                <legend class="onprem-upload__legend">When should it install?</legend>
+                <label class="onprem-upload__opt">
+                    <input type="radio" name="onprem-upload-when" checked="@(!_later)" @onchange="() => _later = false" />
+                    <span>Now</span>
+                </label>
+                @if (!_later && _plan is { InsideChangeHoursNow: false })
+                {
+                    <FieldError Message="@($"The customer allows changes only from {ChangeHoursText}. Pick a time in that window.")" />
+                }
+                <label class="onprem-upload__opt">
+                    <input type="radio" name="onprem-upload-when" checked="@_later" @onchange="() => _later = true" />
+                    <span>At a time I pick</span>
+                </label>
+                @if (_later)
+                {
+                    <div class="onprem-upload__pick">
+                        <input type="datetime-local" class="input" required aria-label="Install at"
+                               min="@LocalText(Clock.GetUtcNow().UtcDateTime + OnPremisesAppUploadService.MinBookingAhead)"
+                               max="@LocalText(Clock.GetUtcNow().UtcDateTime + OnPremisesAppUploadService.MaxBookingAhead)"
+                               @bind="_runAtLocal" @bind:event="oninput" />
+                        @if (WhenError is { } whenError)
+                        {
+                            <FieldError Message="@whenError" />
+                        }
+                        else
+                        {
+                            <small class="field__hint">@WhenHint</small>
+                        }
+                    </div>
+                }
+            </fieldset>
+
+            @if (_plan is { IsProduction: true })
+            {
+                <label class="check check--ack @(_ack ? "is-checked" : "")">
+                    <input type="checkbox" checked="@_ack" @onchange="e => _ack = (bool)(e.Value ?? false)" />
+                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                    <span>I understand @_plan.EnvironmentName is production, and installing restarts its service tiers, which signs everyone out.</span>
+                </label>
+            }
+        }
+    </div>
+</ConfirmDialog>
+
+@code {
+    /// <summary>What the person chose: the files, and when (null for now).</summary>
+    public sealed record Upload(IReadOnlyList<OnPremisesUploadFile> Files, DateTime? RunAtUtc, int Count);
+
+    private ConfirmDialog? _confirm;
+    private int _environmentId;
+    private OnPremisesUploadPlan? _plan;
+    private string? _planError;
+    private List<OnPremisesUploadFile> _files = new();
+    private string? _fileError;
+    private bool _reading;
+    private bool _later;
+    private bool _ack;
+    private DateTime _runAtLocal;
+    private TimeZoneInfo _zone = TimeZoneInfo.Utc;
+
+    private bool CanConfirm => _plan is { Refusal: null, Apps.Count: > 0 } plan && !_reading
+        && (_later ? WhenError is null : plan.InsideChangeHoursNow)
+        && (!plan.IsProduction || _ack);
+
+    private string ChangeHoursText => _plan?.ChangeHours?.Replace("-", " to ") ?? string.Empty;
+
+    private string WhenHint => _zone == TimeZoneInfo.Utc
+        // An older gateway does not say its time zone, so its hours cannot be put in UTC here.
+        ? (_plan?.ChangeHours is not null ? $"The customer allows changes from {ChangeHoursText} on their server's clock, which may not be UTC. " : "") + "Time in UTC."
+        : (_plan?.ChangeHours is not null ? $"The customer allows changes from {ChangeHoursText}. " : "") + $"Time on the customer's server ({_zone.StandardName}).";
+
+    /// <summary>The server's rules for the time, mirrored so the person sees them by the field; the server checks them again.</summary>
+    private string? WhenError
+    {
+        get
+        {
+            var utc = ToUtc(_runAtLocal);
+            var now = Clock.GetUtcNow().UtcDateTime;
+            if (utc < now + OnPremisesAppUploadService.MinBookingAhead) return "Pick a time at least a few minutes from now, or install now.";
+            if (utc > now + OnPremisesAppUploadService.MaxBookingAhead) return "Pick a time within the next 30 days.";
+            if (_zone != TimeZoneInfo.Utc && OnPremisesTierActionService.ChangeHours.Parse(_plan?.ChangeHours) is { } hours
+                && !hours.Contains(TimeOnly.FromDateTime(_runAtLocal)))
+            {
+                return $"The customer allows changes only from {hours.StartText} to {hours.EndText}. Pick a time in that window.";
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Asks for the files and when. Null when the person backed out. The caller uploads them,
+    /// which checks everything again.
+    /// </summary>
+    public async Task<Upload?> OpenAsync(int environmentId, string environmentName)
+    {
+        if (_confirm is null) return null;
+        _environmentId = environmentId;
+        _plan = null;
+        _planError = null;
+        _files = new();
+        _fileError = null;
+        _later = false;
+        _ack = false;
+        StateHasChanged();
+        var opening = _confirm.OpenAsync($"Upload apps to {environmentName}",
+            "For apps another company built and sent you as .app files. Apps you build yourself go through Deployments instead.",
+            "Upload and install", "btn--danger");
+        await LoadPlanAsync(setTime: true);
+        var confirmed = await opening;
+        var files = _files;
+        var plan = _plan;
+        _files = new();
+        if (!confirmed || files.Count == 0 || plan is null) return null;
+        return new Upload(files, _later ? ToUtc(_runAtLocal) : null, plan.Apps.Count);
+    }
+
+    private async Task LoadPlanAsync(bool setTime)
+    {
+        try
+        {
+            var plan = await Uploads.PlanAsync(_environmentId, _files);
+            if (plan is null)
+            {
+                _planError = "This environment is no longer linked to a service tier.";
+            }
+            else
+            {
+                _plan = plan;
+                _zone = plan.TimeZone is { } id ? ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UpdateWindow.ResolveTimeZone(id) : TimeZoneInfo.Utc;
+                if (setTime)
+                {
+                    _runAtLocal = TimeZoneInfo.ConvertTimeFromUtc(plan.DefaultRunAt, _zone);
+                    // Outside the customer's hours, later is the only answer that can go through.
+                    _later = !plan.InsideChangeHoursNow;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogWarning(ex, "Checking an app upload for environment {EnvironmentId} failed.", _environmentId);
+            _planError = "Couldn't check the upload against the service tier. Close this and try again.";
+        }
+        StateHasChanged();
+    }
+
+    private async Task OnChosenAsync(InputFileChangeEventArgs e)
+    {
+        _files = new();
+        _fileError = null;
+        if (e.FileCount > OnPremisesAppUploadService.MaxApps)
+        {
+            _fileError = $"Choose at most {OnPremisesAppUploadService.MaxApps} apps at a time.";
+            return;
+        }
+        var chosen = e.GetMultipleFiles(OnPremisesAppUploadService.MaxApps);
+        if (chosen.FirstOrDefault(f => !f.Name.EndsWith(".app", StringComparison.OrdinalIgnoreCase)) is { } wrong)
+        {
+            _fileError = $"{wrong.Name} isn't an extension package - choose files ending in .app.";
+            return;
+        }
+        if (chosen.FirstOrDefault(f => f.Size > OnPremisesAppUploadService.MaxAppBytes) is { } tooBig)
+        {
+            _fileError = $"{tooBig.Name} is over {OnPremisesAppUploadService.MaxAppBytes / (1024 * 1024)} MB, the largest app AL Workbench takes.";
+            return;
+        }
+
+        _reading = true;
+        StateHasChanged();
+        try
+        {
+            var read = new List<OnPremisesUploadFile>(chosen.Count);
+            foreach (var file in chosen)
+            {
+                await using var stream = file.OpenReadStream(OnPremisesAppUploadService.MaxAppBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                read.Add(new OnPremisesUploadFile(buffer.ToArray(), file.Name));
+            }
+            _files = read;
+            await LoadPlanAsync(setTime: false);
+        }
+        catch (IOException ex)
+        {
+            Log.LogWarning(ex, "Reading an uploaded app failed.");
+            _fileError = "Couldn't read one of the files. Choose them again.";
+            _files = new();
+        }
+        finally
+        {
+            _reading = false;
+        }
+    }
+
+    private string LocalText(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, _zone).ToString("yyyy-MM-ddTHH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
+    private DateTime ToUtc(DateTime local)
+    {
+        var wall = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+        // A wall time that does not exist (the hour the clocks skip): an hour later does.
+        return _zone.IsInvalidTime(wall) ? TimeZoneInfo.ConvertTimeToUtc(wall.AddHours(1), _zone) : TimeZoneInfo.ConvertTimeToUtc(wall, _zone);
+    }
+
+    private static string FileSize(int bytes) => bytes < 1024 * 1024
+        ? $"{Math.Max(1, bytes / 1024)} KB"
+        : $"{bytes / (1024d * 1024d):0.0} MB";
+}

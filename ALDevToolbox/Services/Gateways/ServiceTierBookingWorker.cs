@@ -4,8 +4,9 @@ using ALDevToolbox.Services.Workers;
 namespace ALDevToolbox.Services.Gateways;
 
 /// <summary>
-/// Sends the service tier restarts booked for later (#1788) when they come due, and tells
-/// the person who booked one when it was refused or the gateway failed it. The pending row
+/// Sends the service tier restarts (#1788) and the app uploads (#1786) booked for later on
+/// on-premises environments when they come due, and tells the person who booked one when
+/// it was refused or the gateway failed it. The pending row
 /// in Postgres is the queue, as for <see cref="ObjectExplorer.Bc.UpgradeActionWorker"/>, so a
 /// booking for tonight survives this afternoon's deploy.
 ///
@@ -57,18 +58,30 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
 
     private async Task SweepOrganizationAsync(int orgId, bool isSystem, CancellationToken ct)
     {
-        List<(int Id, int? RequestedBy)> due;
-        List<int> failedLater;
+        List<(int Id, int? RequestedBy)> restarts;
+        List<(int Id, int? RequestedBy)> uploads;
         using (AmbientOrganizationScope.Enter(AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
         await using (var scope = _services.CreateAsyncScope())
         {
-            var service = scope.ServiceProvider.GetRequiredService<OnPremisesTierActionService>();
-            due = await service.DueBookingsAsync(ct).ConfigureAwait(false);
-            failedLater = await service.SettleFailedBookingsAsync(ct).ConfigureAwait(false);
+            var tiers = scope.ServiceProvider.GetRequiredService<OnPremisesTierActionService>();
+            var apps = scope.ServiceProvider.GetRequiredService<OnPremisesAppUploadService>();
+            restarts = await tiers.DueBookingsAsync(ct).ConfigureAwait(false);
+            uploads = await apps.DueBookingsAsync(ct).ConfigureAwait(false);
+            var failedLater = await tiers.SettleFailedBookingsAsync(ct).ConfigureAwait(false);
+            failedLater.AddRange(await apps.SettleFailedBookingsAsync(ct).ConfigureAwait(false));
             var notifier = scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>();
             foreach (var id in failedLater) await notifier.NotifyAsync(id, ct: ct).ConfigureAwait(false);
         }
 
+        await RunEachAsync(orgId, isSystem, restarts, "Booked restart",
+            (services, id, token) => services.GetRequiredService<OnPremisesTierActionService>().RunBookingAsync(id, byWorker: true, token), ct).ConfigureAwait(false);
+        await RunEachAsync(orgId, isSystem, uploads, "Booked upload",
+            (services, id, token) => services.GetRequiredService<OnPremisesAppUploadService>().RunBookingAsync(id, token), ct).ConfigureAwait(false);
+    }
+
+    private async Task RunEachAsync(int orgId, bool isSystem, List<(int Id, int? RequestedBy)> due, string what,
+        Func<IServiceProvider, int, CancellationToken, Task<ServiceTierBookingRun>> run, CancellationToken ct)
+    {
         foreach (var (id, requestedBy) in due)
         {
             if (ct.IsCancellationRequested) break;
@@ -79,8 +92,7 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
                 using var ambient = AmbientOrganizationScope.Enter(
                     AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem, requestedBy));
                 await using var scope = _services.CreateAsyncScope();
-                var outcome = await scope.ServiceProvider.GetRequiredService<OnPremisesTierActionService>()
-                    .RunBookingAsync(id, byWorker: true, ct).ConfigureAwait(false);
+                var outcome = await run(scope.ServiceProvider, id, ct).ConfigureAwait(false);
                 if (outcome == ServiceTierBookingRun.Failed)
                 {
                     await scope.ServiceProvider.GetRequiredService<UpgradeActionNotifier>().NotifyAsync(id, ct: ct).ConfigureAwait(false);
@@ -88,7 +100,7 @@ public sealed class ServiceTierBookingWorker : PolledScheduler
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                _logger.LogError(ex, "Booked restart {ActionId} could not be run; it is tried again on the next sweep.", id);
+                _logger.LogError(ex, "{What} {ActionId} could not be run; it is tried again on the next sweep.", what, id);
             }
         }
     }

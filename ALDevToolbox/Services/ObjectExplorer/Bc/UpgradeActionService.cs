@@ -433,6 +433,8 @@ public sealed class UpgradeActionService
         // A service tier action on an on-premises tier is a gateway command; how it went is
         // read from there (#1371).
         rows = await Gateways.ServiceTierActionOutcome.ApplyAsync(_db, rows, ct);
+        // So is an app uploaded by hand to an on-premises tier (#1786).
+        rows = await Gateways.OnPremisesUploadResult.ApplyAsync(_db, rows, ct);
         return await WithWhatTheyWaitForAsync(projectId, environmentId, rows, ct);
     }
 

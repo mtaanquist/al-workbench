@@ -12,6 +12,7 @@
 @inject ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService OnPremisesLinks
 @inject ALDevToolbox.Services.Gateways.OnPremisesLicenceService Licences
 @inject ALDevToolbox.Services.Gateways.OnPremisesTierActionService TierActions
+@inject ALDevToolbox.Services.Gateways.OnPremisesAppUploadService OnPremisesUploads
 @inject DeliveryService Deliveries
 @inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
 @inject ILogger<EnvironmentDetail> Log
@@ -291,6 +292,88 @@
                                                    OnBookRestart="BookRestartAsync" OnRunBooking="RunBookingAsync" OnCancelBooking="CancelBookingAsync"
                                                    BookingBusy="_bookingBusy"
                                                    HistoryHref="@TabHref(Section.History)" />
+                    @if (_tab == Section.Apps)
+                    {
+                        @* Apps uploaded by hand for later (#1786): ours until their time, so they
+                           can be started early or called off, as online. *@
+                        <div class="card">
+                            <div class="card__head">
+                                <div>
+                                    <h2 class="card__title">Scheduled installs</h2>
+                                    <p class="card__sub">Apps booked to install on this environment later.</p>
+                                </div>
+                                @if (_canManage && BookedInstalls.Count > 0)
+                                {
+                                    <button type="button" class="btn btn--sm" disabled="@_settingSaving" @onclick="UploadOnPremisesAsync">
+                                        <Icon Name="upload" Width="14" Height="14" />
+                                        <span>Upload apps</span>
+                                    </button>
+                                }
+                            </div>
+                            @if (BookedInstalls.Count == 0)
+                            {
+                                <EmptyState Icon="calendar" Title="Nothing waiting to install" Quiet="true">
+                                    <Text>An app another company sent you can be installed now or booked for tonight. Apps you build yourself go through Deployments.</Text>
+                                    <Action>
+                                        @if (_canManage)
+                                        {
+                                            <button type="button" class="btn btn--sm" disabled="@_settingSaving" @onclick="UploadOnPremisesAsync">
+                                                <Icon Name="upload" Width="14" Height="14" />
+                                                <span>Upload apps</span>
+                                            </button>
+                                        }
+                                    </Action>
+                                </EmptyState>
+                            }
+                            else
+                            {
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th scope="col">App</th>
+                                            <th scope="col">Version</th>
+                                            <th scope="col">Installs</th>
+                                            @if (_canManage)
+                                            {
+                                                <th scope="col" class="data-table__actions">Actions</th>
+                                            }
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var booked in BookedInstalls)
+                                        {
+                                            <tr @key="@($"booked-{booked.Id}")">
+                                                <td>
+                                                    @(booked.AppName ?? booked.PackageFileName ?? "An app")
+                                                    @if (BatchPlace(booked) is { } place)
+                                                    {
+                                                        <span class="u-muted">@place</span>
+                                                    }
+                                                </td>
+                                                <td class="u-num env-detail__mono">@(booked.TargetVersion ?? "-")</td>
+                                                <td>@BookedWhen(booked)</td>
+                                                @if (_canManage)
+                                                {
+                                                    <td class="data-table__actions">
+                                                        @if (booked.SentAt is null)
+                                                        {
+                                                            @if (booked.ExecuteAfter > Clock.GetUtcNow().UtcDateTime)
+                                                            {
+                                                                <button type="button" class="btn btn--sm" disabled="@_settingSaving"
+                                                                        @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                            }
+                                                            <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
+                                                                    @onclick="() => CancelBookedInstallAsync(booked)">Cancel install</button>
+                                                        }
+                                                    </td>
+                                                }
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+                    }
                 }
                 else if (_tab == Section.Overview)
                 {
@@ -1171,6 +1254,7 @@
 </ConfirmDialog>
 
 <UploadAppDialog @ref="_uploadDialog" />
+<OnPremisesUploadDialog @ref="_onPremisesUploadDialog" />
 <RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="OnPipelineRescheduledAsync" />
 <CopyEnvironmentDialog @ref="_copyDialog" />
 
@@ -1229,6 +1313,7 @@
     private readonly InstallTimingPicker.TimingChoice _updateWhen = new();
 
     private UploadAppDialog? _uploadDialog;
+    private OnPremisesUploadDialog? _onPremisesUploadDialog;
     private CopyEnvironmentDialog? _copyDialog;
 
     /// <summary>What the app in the update dialog waits for, and so what moves with it. Empty for a ready app.</summary>
@@ -1469,10 +1554,7 @@
                 await LoadLicenceAsync();
                 await LoadTierActionsAsync();
             }
-            else
-            {
-                await LoadBookedInstallsAsync();
-            }
+            await LoadBookedInstallsAsync();
         }
         if (_env is null) return;
 
@@ -2615,6 +2697,31 @@
             async () => outcome = await Connection.InstallUploadedAppsAsync(Row.ProjectId, Id, packages, upload.Timing, upload.At),
             "Couldn't book the upload. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
             () => UploadAppDialog.DoneMessage(upload, outcome!, Row.EnvironmentName, Zone));
+    }
+
+    /// <summary>Uploads apps by hand to an on-premises environment, now or booked (#1786).</summary>
+    private async Task UploadOnPremisesAsync()
+    {
+        if (_onPremisesUploadDialog is null) return;
+        var upload = await _onPremisesUploadDialog.OpenAsync(Id, Row.EnvironmentName);
+        if (upload is null) return;
+        var what = upload.Count == 1 ? "The app" : $"The {upload.Count} apps";
+        _settingSaving = true;
+        _settingBusy = "upload";
+        try
+        {
+            await TierBookingWriteAsync(
+                () => OnPremisesUploads.InstallAsync(Id, upload.Files, upload.RunAtUtc),
+                upload.RunAtUtc is { } at
+                    ? $"{what} will install on {Row.EnvironmentName} at {BookedSlotText(at)}. Until then you can start or cancel {(upload.Count == 1 ? "it" : "them")} under Scheduled installs, and you'll be told if it doesn't go through."
+                    : $"{what} {(upload.Count == 1 ? "was" : "were")} sent to the gateway. Workbench history shows how {(upload.Count == 1 ? "it goes" : "they go")}.");
+        }
+        finally
+        {
+            _settingSaving = false;
+            _settingBusy = null;
+        }
+        await LoadBookedInstallsAsync();
     }
 
     /// <summary>

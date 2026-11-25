@@ -1,0 +1,57 @@
+/* Uploading apps by hand to an on-premises environment (#1786). Matches the online upload dialog. */
+.onprem-upload { min-width: 0; display: grid; gap: var(--space-3); }
+
+.onprem-upload__file {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+}
+
+/* The chosen apps, numbered: the order they install in. */
+.onprem-upload__list {
+    margin: 0;
+    padding-left: var(--space-5);
+    display: grid;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+}
+
+.onprem-upload__item {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    align-items: baseline;
+}
+
+.onprem-upload__when {
+    margin: 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--surface-2);
+    display: grid;
+    gap: var(--space-2);
+}
+
+.onprem-upload__legend {
+    padding: 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+.onprem-upload__opt {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}
+
+.onprem-upload__pick {
+    display: grid;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-1) calc(var(--space-2) + 1em);
+}

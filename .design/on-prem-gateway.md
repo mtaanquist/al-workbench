@@ -792,7 +792,8 @@ multitenant server. Where it differs from, or adds to, the decision above:
   environment's tenant at the gateway's last reading, where `session_users` allows; otherwise the
   count and who can share the names, #1787; no end-session action), Server settings (#1795) and
   Workbench history. Operations is Business Central online's live read and is not offered; an
-  address naming it lands on Overview. Upload and Copy are not offered. Who is signed in is not in
+  address naming it lands on Overview. Copy is not offered; uploading an app by hand is (#1786, "Uploading
+  apps by hand, as built"). Who is signed in is not in
   the MCP tools, online or on premises.
 
 ### Readers of `OeProjectEnvironments`
@@ -2003,6 +2004,48 @@ failed once), notifies the person who booked it through `UpgradeActionNotifier`,
 actions do. A success sends nothing. Booking, cancelling and sending are each audited on the
 environment. There is no MCP write tool for tier actions, so none for bookings either;
 `list_environment_history` shows them.
+
+### Uploading apps by hand, as built (#1786)
+
+For an app another company sent, which no pipeline here builds: the Apps tab's **Scheduled
+installs** card has **Upload apps** for whoever manages the Solution, as online. The dialog reads
+the chosen `.app` files at once (at most ten, 50 MB each, as online) and asks
+`OnPremisesAppUploadService.PlanAsync` what would happen before anything is stored: the apps in
+dependency order, read from each manifest with `DependencyOrder`, and any refusal, said in the
+dialog and holding the button. The refusals: the tier is unlinked, missing or not running; the
+customer's settings do not allow `publish`, or the shared restart (`shared_restart`); an app's
+publisher is not in `publishers`; an app is unsigned and `allow_unsigned` is off; a file is not an
+app or cannot be read (a protected vendor app: the gateway must be told its id, publisher and
+version, so it cannot be placed); two files share a name or an app id; and a dependency neither in
+the upload nor installed on the tenant at the version asked for, checked against the gateway's app
+list (skipped when the gateway has reported none, since a check against nothing would refuse
+everything). Signers are left to the gateway, which can check a signature; the workbench cannot.
+A production environment asks for the same tick as a restart, since the install restarts its tiers.
+
+**When.** Now, or a time on the gateway's clock (its reported zone, else UTC, as a booked restart),
+two minutes to 30 days ahead, inside every restarted tier's `change_hours`. The form starts on the
+change hours' next opening, and on "later" when it is outside them now, since an install now would be
+refused. On-premises has no "at the next update": a booking is a time.
+
+**Now** queues one `publish-install` command with the files inline, in order, sync mode Add,
+unpublishing the previous version only where the tier allows `unpublish`, and writes one
+`UploadApp` history row per app (`BatchId`/`BatchOrder` for several) as Sent with the command's
+id, in one transaction. No copy of the file stays on the row. How each app went is read from the
+command (`OnPremisesUploadResult`, matched by file name, worded as a pipeline deployment's app):
+installing while it runs, then installed, already installed, refused (a settings refusal said as
+the restart's is) or failed with the gateway's reason.
+
+**Booked** rows are Pending with the file on the row and no command, so the Scheduled installs
+list, **Install now** and **Cancel install** are the online ones unchanged (`UpgradeActionService`;
+Install now moves the batch's time to now). `ServiceTierBookingWorker` sends due uploads too, one
+batch at a time, as the person who booked it, through `RunBookingAsync`: everything is checked again
+from the stored files; a disabled booker, one who no longer manages the Solution, a refusal, a time
+outside the change hours or more than two hours late fail the batch's waiting rows with the reason
+and tell the booker. Sending claims the rows compare-and-set before the command is queued, so a
+cancel of one app wins and the rest go without it. `UpgradeActionWorker` sends only online rows,
+including its install turn. A booked upload the gateway later fails or lets expire is settled once
+per batch (`SettleFailedBookingsAsync`), as a booked restart is. There is no MCP upload tool, online
+or on premises; `list_environment_history` shows the rows.
 
 ### The Windows service, as built (#1362)
 
