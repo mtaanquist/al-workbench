@@ -2128,6 +2128,21 @@ and a `README.txt`. The README runs the gateway in an administrator's command pr
 it and stop it with Ctrl+C; `uninstall` cleans up afterwards. The trial file is for a test server
 only, and a test keeps it valid once its placeholders are filled in.
 
+**Setup program** (#1778). Beside the trial package, `staging.yml` builds a setup exe with Inno
+Setup from `ALWorkbench.Gateway/setup/gateway.iss`. A setup exe rather than an MSI was the
+maintainer's choice (2026-11-25): a gateway goes on one or two servers per customer, installed by
+hand, so central rollout through Intune or Group Policy is not needed. It is unsigned until #1363
+has a certificate; Consortio installs the gateways itself for now, so the SmartScreen warning is
+accepted. The setup program does nothing the commands do not: it copies the program and
+`gateway.example.toml` to `C:\Program Files\AL Workbench Gateway` (the folder is not offered as a
+choice, since the gateway refuses a folder ordinary users can change), runs `install` on a first
+install, and can take the address and a registration code and run `register` in a window that
+stays open, so the fingerprint can be read. It never installs or removes `gateway.toml`, which is
+customer IT's file. Running a newer setup over an older one stops the service, replaces the
+program and starts it again, keeping the registration and the key, and skips the registration
+page. Uninstalling from Settings > Apps runs `uninstall`, so the key and settings go and the logs
+stay, as at a command prompt. `release.yml` does not build it yet; that comes with #1363.
+
 **Updating is manual.** No self-update (supply-chain risk; an MSI and auto-update are out of
 scope). On the gateway's server, as an administrator:
 
