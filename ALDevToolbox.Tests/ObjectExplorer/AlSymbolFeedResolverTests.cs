@@ -286,6 +286,34 @@ public sealed class AlSymbolFeedResolverTests : IDisposable
         plainZip.Position = 0;
         AppPackageReader.TryReadManifest(plainZip).Should().BeNull();
     }
+
+    [Fact]
+    public async Task Exact_mode_takes_only_the_named_version_and_leaves_dependencies_alone()
+    {
+        SeedCoreAndSystemApp();
+
+        var outcome = await Resolver().ResolveAsync(new SymbolFeedRequest(
+            [new SymbolDependency(CoreId, "Continia Core", "28.5.0.1")], _target, new HashSet<string>(),
+            ApplicationVersion: null, Country: null, ExactVersion: true, IncludeDependencies: false));
+
+        outcome.Unresolved.Should().BeEmpty();
+        outcome.Resolved.Select(r => (r.Name, r.Version)).Should().Equal(("Continia Core", "28.5.0.1"));
+        AppIdsInTarget().Should().Equal(CoreId);
+    }
+
+    [Fact]
+    public async Task Exact_mode_reports_a_missing_version_instead_of_taking_a_newer_one()
+    {
+        SeedCoreAndSystemApp();
+
+        var outcome = await Resolver().ResolveAsync(new SymbolFeedRequest(
+            [new SymbolDependency(CoreId, "Continia Core", "28.6.0.0")], _target, new HashSet<string>(),
+            ApplicationVersion: null, Country: null, ExactVersion: true, IncludeDependencies: false));
+
+        outcome.Resolved.Should().BeEmpty();
+        outcome.Unresolved.Should().ContainSingle().Which.Reason.Should().Contain("28.6.0.0");
+        AppIdsInTarget().Should().BeEmpty();
+    }
 }
 
 /// <summary>
