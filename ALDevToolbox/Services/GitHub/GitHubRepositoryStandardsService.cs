@@ -156,10 +156,13 @@ public sealed class GitHubRepositoryStandardsService
             var input = files[i];
             if (input.Id is int id && existingById.TryGetValue(id, out var row))
             {
-                row.Path = input.Path.Trim();
-                row.Content = input.Content ?? string.Empty;
+                var path = input.Path.Trim();
+                var content = input.Content ?? string.Empty;
+                // Only a real change moves UpdatedAt, which the Repositories page reads.
+                if (row.Path != path || row.Content != content) row.UpdatedAt = now;
+                row.Path = path;
+                row.Content = content;
                 row.Ordering = i;
-                row.UpdatedAt = now;
             }
             else
             {

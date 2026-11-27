@@ -79,6 +79,15 @@
             <Alert Tone="AlertTone.Warn" Role="alert"><span>@error</span></Alert>
         }
 
+        @if (_rows is { Count: > 0 } && _canUseGitHub && _filesChanged)
+        {
+            @* The column is only read on a check, so a file added since would otherwise
+               never show up as something to roll out. *@
+            <Alert Tone="AlertTone.Info" Role="">
+                <span>Workspace files have changed since the last check. Check all again to see which repositories need them.</span>
+            </Alert>
+        }
+
         @if (_rows is { Count: > 0 } && _canUseGitHub)
         {
             <div class="freshness">
@@ -326,6 +335,7 @@
     private List<RepositoryListRow>? _rows;
     private bool _loadFailed;
     private bool _canUseGitHub;
+    private bool _filesChanged;
     private GitHubRepositoryReadiness? _readiness;
     private bool _busy;
     private bool _openingAll;
@@ -375,7 +385,9 @@
         {
             await using var scope = Scopes.CreateAsyncScope();
             var services = scope.ServiceProvider;
-            _rows = await services.GetRequiredService<RepositoryListService>().GetAsync();
+            var list = services.GetRequiredService<RepositoryListService>();
+            _rows = await list.GetAsync();
+            _filesChanged = await list.WorkspaceFilesChangedSinceCheckAsync();
             _canUseGitHub = await CanUseGitHubAsync(services);
         }
         catch (Exception ex)

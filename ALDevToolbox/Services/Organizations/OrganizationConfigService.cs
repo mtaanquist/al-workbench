@@ -462,24 +462,36 @@ public class OrganizationConfigService
         var inputIds = inputs.Where(i => i.Id is not null).Select(i => i.Id!.Value).ToHashSet();
 
         var now = DateTime.UtcNow;
+        var added = new List<OrganizationFile>();
         for (var i = 0; i < inputs.Count; i++)
         {
             var input = inputs[i];
             var path = input.Path.Trim();
             if (input.Id is int id && existingById.TryGetValue(id, out var row))
             {
+                var content = input.Content ?? string.Empty;
+                // Only a real change moves UpdatedAt: the Repositories page reads it to say
+                // the workspace files need checking again.
+                if (row.Path != path || row.Content != content
+                    || row.MustacheEnabled != input.MustacheEnabled || row.Scope != input.Scope)
+                {
+                    row.UpdatedAt = now;
+                }
                 row.Path = path;
-                row.Content = input.Content ?? string.Empty;
+                row.Content = content;
                 row.MustacheEnabled = input.MustacheEnabled;
                 row.Scope = input.Scope;
                 row.Ordering = i;
-                row.UpdatedAt = now;
             }
             else
             {
-                _db.OrganizationFiles.Add(NewOrganizationFile(orgId, input, i, now));
+                var file = NewOrganizationFile(orgId, input, i, now);
+                _db.OrganizationFiles.Add(file);
+                added.Add(file);
             }
         }
+
+        if (added.Count > 0) await AddToEveryTemplateAsync(orgId, added, ct);
 
         foreach (var row in existing)
         {
@@ -491,6 +503,38 @@ public class OrganizationConfigService
 
         _logger.LogInformation(
             "Saved {Count} always-included file(s) for org {OrgId}.", inputs.Count, orgId);
+    }
+
+    /// <summary>
+    /// Ticks newly added files on every live template, after the ones it already
+    /// includes, so an always-included file is included without a second trip to each
+    /// template. A template can still untick it; only files new in this save are added,
+    /// so one unticked earlier stays unticked.
+    /// </summary>
+    private async Task AddToEveryTemplateAsync(int orgId, List<OrganizationFile> added, CancellationToken ct)
+    {
+        var templates = await _db.RuntimeTemplates
+            .Where(t => t.OrganizationId == orgId && t.DeletedAt == null)
+            .Select(t => new
+            {
+                t.Id,
+                NextOrdering = t.IncludedFiles.Select(j => (int?)j.Ordering).Max() + 1 ?? 0,
+            })
+            .ToListAsync(ct);
+
+        foreach (var t in templates)
+        {
+            for (var i = 0; i < added.Count; i++)
+            {
+                _db.RuntimeTemplateIncludedFiles.Add(new RuntimeTemplateIncludedFile
+                {
+                    OrganizationId = orgId,
+                    RuntimeTemplateId = t.Id,
+                    OrganizationFile = added[i],
+                    Ordering = t.NextOrdering + i,
+                });
+            }
+        }
     }
 
     internal static void Validate(OrganizationSettingsInput input)
