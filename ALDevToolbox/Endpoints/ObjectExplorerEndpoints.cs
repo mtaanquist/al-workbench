@@ -106,7 +106,9 @@ internal static class ObjectExplorerEndpoints
                         RedirectQueued(ctx, staged.ReleaseId);
                         break;
                     case ReleaseImportOutcome.QueuedPackage package:
-                        ctx.Response.Redirect($"/admin/object-explorer?ok=queued-package&id={package.ReleaseIds.Count}");
+                        ctx.Response.Redirect(package.ReleaseIds.Count == package.GroupCount
+                            ? $"/admin/object-explorer?ok=queued-package&id={package.ReleaseIds.Count}"
+                            : $"/admin/object-explorer?ok=queued-package-partly&id={package.ReleaseIds.Count}&skipped={package.GroupCount}");
                         break;
                 }
             }

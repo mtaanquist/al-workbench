@@ -24,8 +24,9 @@ public sealed partial class ContiniaPackageLayout : IThirdPartyPackageLayout
 {
     public string Name => "Continia";
 
-    // "BC 29.0 (BC 2026 Wave 2)" or "BC 29.1"
-    [GeneratedRegex(@"^BC\s+(?<ver>\d+\.\d+)\b", RegexOptions.IgnoreCase)]
+    // "BC 29.0 (BC 2026 Wave 2)", "BC 29.1", "BC 29" or "BC29.0". The digits are
+    // bounded so a hostile folder name can't overflow the version parse.
+    [GeneratedRegex(@"^BC\s*(?<major>\d{1,4})(?:\.(?<minor>\d{1,4}))?(?!\d)", RegexOptions.IgnoreCase)]
     private static partial Regex BcFolder();
 
     // "Continia Banking - CSV Import 29.1.1.257932 - 29.0", "Core 29.1.0.244450 - 29.1 (BC 2026 Wave 2 CU1)",
@@ -130,15 +131,17 @@ public sealed partial class ContiniaPackageLayout : IThirdPartyPackageLayout
             var bc = BcFolder().Match(segments[i + 1]);
             if (!bc.Success) continue;
             var product = i + 2 < segments.Length - 1 ? segments[i + 2] : null;
-            return (bc.Groups["ver"].Value, product, segments[^1]);
+            var minor = bc.Groups["minor"].Success ? bc.Groups["minor"].Value : "0";
+            return ($"{int.Parse(bc.Groups["major"].Value)}.{int.Parse(minor)}", product, segments[^1]);
         }
         return null;
     }
 
+    // Directly in Source/ or in a folder below it (Source/<Product>/...).
     private static bool IsInSourceFolder(string normalizedFullName)
     {
         var segments = normalizedFullName.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        return segments.Length >= 2 && string.Equals(segments[^2], "Source", StringComparison.OrdinalIgnoreCase);
+        return segments.Take(segments.Length - 1).Any(s => string.Equals(s, "Source", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string Normalize(string fullName) => fullName.Replace('\\', '/');

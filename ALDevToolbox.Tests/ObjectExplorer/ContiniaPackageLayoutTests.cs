@@ -125,6 +125,29 @@ public sealed class ContiniaPackageLayoutTests
     }
 
     [Fact]
+    public void A_folder_named_with_the_major_version_alone_counts_as_its_dot_zero()
+    {
+        using var archive = Open(
+        [
+            Root + "BC 29 (BC 2026 Wave 2)/Core/Core 29.1.0.244450 - 29.0.app",
+            Root + "BC29.1/Core/Core 29.1.0.244450 - 29.1.app",
+            Root + "Source/Core/Core 29.1.0.244450 - 29.0-Source.zip",
+        ]);
+        var plan = (PackagePlan.Split)new ContiniaPackageLayout().Plan(archive);
+
+        plan.Groups.Select(g => g.BcVersion).Should().Equal("29.0", "29.1");
+        plan.Groups.Should().OnlyContain(g => g.Apps.Single().Source != null,
+            "a source zip in a folder below Source pairs too");
+    }
+
+    [Fact]
+    public void An_absurd_version_in_a_folder_name_is_not_a_business_central_folder()
+    {
+        using var archive = Open([Root + "BC 99999999999.0/Core/Core 29.1.0.244450 - 29.0.app"]);
+        new ContiniaPackageLayout().Matches(archive).Should().BeFalse();
+    }
+
+    [Fact]
     public void Backslash_separated_entries_are_read_the_same()
     {
         using var archive = Open(PackageEntries.Select(p => p.Replace('/', '\\')));

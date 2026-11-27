@@ -1039,6 +1039,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
 
         var package = outcome.Should().BeOfType<ReleaseImportOutcome.QueuedPackage>().Subject;
         package.ReleaseIds.Should().HaveCount(2);
+        package.GroupCount.Should().Be(2);
 
         await using var read = _db.NewContext();
         var releases = await read.OeReleases.AsNoTracking()
@@ -1067,6 +1068,46 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
                 .Should().NotBeNull();
             walked.Single(e => e.FileName.StartsWith("Core ")).SourceZipEntry.Should().BeNull();
         }
+    }
+
+    [Fact]
+    public async Task A_continia_package_with_a_blank_label_is_refused_before_anything_is_created()
+    {
+        await using var ctx = _db.NewContext();
+        var bytes = ContiniaPackageLayoutTests.Zip(ContiniaPackageLayoutTests.PackageEntries);
+        var queue = new ReleaseImportQueue();
+        var before = await ctx.OeReleases.CountAsync();
+
+        var act = () => NewService(ctx, queue).SubmitAsync(Submission(
+            label: "  ", kind: "third_party",
+            folderZip: new UploadedFile("p.zip", bytes.Length, () => new MemoryStream(bytes, writable: false))));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Label");
+        (await ctx.OeReleases.CountAsync()).Should().Be(before);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_test_folder_in_a_vendor_package_still_marks_its_apps_as_tests()
+    {
+        await using var ctx = _db.NewContext();
+        var bytes = ContiniaPackageLayoutTests.Zip(
+        [
+            "P/Apps/BC 29.0 (W2)/Core/Core 29.1.0.244450 - 29.0.app",
+            "P/Apps/BC 29.0 (W2)/Tests/Core Tests 29.1.0.244450 - 29.0.app",
+        ]);
+        var queue = new ReleaseImportQueue();
+
+        await NewService(ctx, queue).SubmitAsync(Submission(
+            label: "Continia", kind: "third_party",
+            folderZip: new UploadedFile("p.zip", bytes.Length, () => new MemoryStream(bytes, writable: false))));
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        var staged = (ReleaseImportSource.StagedZip)job!.Source;
+        Track(staged.TempPath);
+        using var zip = ZipFile.OpenRead(staged.TempPath);
+        FolderZipWalker.Walk(zip).Single(e => e.FileName.StartsWith("Core Tests")).IsTest.Should().BeTrue();
+        FolderZipWalker.Walk(zip).Single(e => e.FileName.StartsWith("Core 29")).IsTest.Should().BeFalse();
     }
 
     [Fact]
