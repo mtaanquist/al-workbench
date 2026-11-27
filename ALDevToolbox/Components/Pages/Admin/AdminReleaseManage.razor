@@ -31,6 +31,10 @@
                         <span> · BC @_release.BcVersion</span>
                     }
                     <span> · @_release.ModuleCount module(s)</span>
+                    @if (_release.Status == "ready" && _release.SkippedApps is { Count: > 0 } skippedCount)
+                    {
+                        <span> · @skippedCount.Count app(s) left out</span>
+                    }
                     @if (_release.DeletedAt is not null)
                     {
                         <span> · soft-deleted</span>
@@ -133,6 +137,38 @@
             </div>
             </div>
         </section>
+
+        @if (_release.Status == "ready" && _release.SkippedApps is { Count: > 0 } skipped)
+        {
+            <section class="card">
+                <div class="card__head">
+                    <h2 class="card__title">
+                        Apps left out
+                        <StatusPill Tone="warn">partial</StatusPill>
+                    </h2>
+                </div>
+                <div class="card__body">
+                <p class="form-sec__cap">
+                    These apps couldn't be read and aren't in this release. To add an encrypted app,
+                    use Add modules with the app and its source zip.
+                </p>
+                <table class="data-table">
+                    <thead>
+                        <tr><th>File</th><th>Why</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var app in skipped)
+                        {
+                            <tr>
+                                <td>@app.FileName</td>
+                                <td class="u-muted">@app.Reason</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                </div>
+            </section>
+        }
 
         @if (_release.Kind == OeRelease.ProjectBuildKind && _buildResults.Count > 0)
         {

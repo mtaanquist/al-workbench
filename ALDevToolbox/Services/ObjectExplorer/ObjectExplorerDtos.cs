@@ -1,4 +1,5 @@
 using ALDevToolbox.Services.ObjectExplorer.Explore;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 namespace ALDevToolbox.Services.ObjectExplorer;
 
 /// <summary>
@@ -28,7 +29,8 @@ public sealed record ReleaseListItem(
     DateTime? DeletedAt,
     string? StatusMessage = null,
     string? PipelineName = null,
-    bool IsPrerelease = false);
+    bool IsPrerelease = false,
+    bool HasSkippedApps = false);
 
 /// <summary>
 /// Release detail surface for the header bar — adds module count and the
@@ -48,7 +50,8 @@ public sealed record ReleaseDetail(
     DateTime ImportedAt,
     DateTime? DeletedAt,
     int ModuleCount,
-    bool IsPrerelease = false);
+    bool IsPrerelease = false,
+    IReadOnlyList<ReleaseSkippedApp>? SkippedApps = null);
 
 /// <summary>One per-app row of a project build's report — drives the manage page's build panel and seeds the future Artifacts surface. Carries the source provenance (repo + commit) when known.</summary>
 public sealed record ProjectBuildResultRow(

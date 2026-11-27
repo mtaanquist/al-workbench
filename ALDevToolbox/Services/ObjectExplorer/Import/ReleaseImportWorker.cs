@@ -827,6 +827,12 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             0 => string.Empty,
             1 => " 1 was already in the release and was skipped.",
             var n => $" {n} were already in the release and were skipped.",
+        }
+        + (summary.Unreadable?.Count ?? 0) switch
+        {
+            0 => string.Empty,
+            1 => " 1 app couldn't be read and was left out; the release's manage page names it.",
+            var n => $" {n} apps couldn't be read and were left out; the release's manage page names them.",
         };
 
     private static string FriendlyMessage(Exception ex) =>

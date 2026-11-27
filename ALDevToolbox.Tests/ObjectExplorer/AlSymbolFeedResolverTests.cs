@@ -286,6 +286,59 @@ public sealed class AlSymbolFeedResolverTests : IDisposable
         plainZip.Position = 0;
         AppPackageReader.TryReadManifest(plainZip).Should().BeNull();
     }
+
+    [Fact]
+    public async Task Exact_mode_takes_only_the_named_version_and_leaves_dependencies_alone()
+    {
+        SeedCoreAndSystemApp();
+
+        var outcome = await Resolver().ResolveAsync(new SymbolFeedRequest(
+            [new SymbolDependency(CoreId, "Continia Core", "28.5.0.1")], _target, new HashSet<string>(),
+            ApplicationVersion: null, Country: null, ExactVersion: true, IncludeDependencies: false));
+
+        outcome.Unresolved.Should().BeEmpty();
+        outcome.Resolved.Select(r => (r.Name, r.Version)).Should().Equal(("Continia Core", "28.5.0.1"));
+        AppIdsInTarget().Should().Equal(CoreId);
+    }
+
+    [Fact]
+    public async Task Exact_mode_does_not_take_a_newer_version_from_the_cache()
+    {
+        SeedCoreAndSystemApp();
+        await Resolver().ResolveAsync(Request("29.0", new SymbolDependency(CoreId, "Continia Core", "25.0.0.0")));
+        foreach (var f in Directory.EnumerateFiles(_target)) File.Delete(f);
+
+        var outcome = await Resolver().ResolveAsync(new SymbolFeedRequest(
+            [new SymbolDependency(CoreId, "Continia Core", "28.5.0.1")], _target, new HashSet<string>(),
+            ApplicationVersion: null, Country: null, ExactVersion: true, IncludeDependencies: false));
+
+        outcome.Resolved.Select(r => r.Version).Should().Equal("28.5.0.1");
+    }
+
+    [Fact]
+    public async Task A_feed_version_listed_with_three_parts_meets_a_four_part_floor_ending_in_zero()
+    {
+        _feeds.Add("appsource", CoreSymbols, CoreId, "Continia Core", "28.5.0", application: "28.0.0");
+
+        var outcome = await Resolver().ResolveAsync(Request("28.0", new SymbolDependency(CoreId, "Continia Core", "28.5.0.0")));
+
+        outcome.Unresolved.Should().BeEmpty();
+        outcome.Resolved.Select(r => r.Version).Should().Equal("28.5.0");
+    }
+
+    [Fact]
+    public async Task Exact_mode_reports_a_missing_version_instead_of_taking_a_newer_one()
+    {
+        SeedCoreAndSystemApp();
+
+        var outcome = await Resolver().ResolveAsync(new SymbolFeedRequest(
+            [new SymbolDependency(CoreId, "Continia Core", "28.6.0.0")], _target, new HashSet<string>(),
+            ApplicationVersion: null, Country: null, ExactVersion: true, IncludeDependencies: false));
+
+        outcome.Resolved.Should().BeEmpty();
+        outcome.Unresolved.Should().ContainSingle().Which.Reason.Should().Contain("28.6.0.0");
+        AppIdsInTarget().Should().BeEmpty();
+    }
 }
 
 /// <summary>

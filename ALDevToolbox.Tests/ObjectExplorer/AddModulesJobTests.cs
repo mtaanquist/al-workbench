@@ -84,6 +84,12 @@ public sealed class AddModulesJobTests : IDisposable
             .Should().Be(expected);
 
     [Fact]
+    public void The_finished_note_names_how_many_apps_could_not_be_read() =>
+        ReleaseImportWorker.AddModulesNote(new ReleaseImportSummary(1, 1, 0, 0, 0, 0, 0,
+                [new ReleaseSkippedApp("a.app", ReleaseSkippedApp.EncryptedReason), new ReleaseSkippedApp("b.app", ReleaseSkippedApp.EncryptedReason)]))
+            .Should().Be("Added 1 module. 2 apps couldn't be read and were left out; the release's manage page names them.");
+
+    [Fact]
     public async Task The_worker_adds_the_queued_modules_and_hands_the_release_back_ready()
     {
         var releaseId = await SeedReadyReleaseAsync("BC 25.18 DK (add modules)");

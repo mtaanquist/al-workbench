@@ -1294,6 +1294,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
         return new ReleaseImportRequestService(
             importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds, Access(ctx),
             new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance),
+            new ALDevToolbox.Services.ObjectExplorer.Import.Packages.ThirdPartyPackageLayouts([]),
             NullLogger<ReleaseImportRequestService>.Instance);
     }
 

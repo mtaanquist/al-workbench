@@ -139,7 +139,8 @@ public class ObjectExplorerService
                 DeletedAt: r.DeletedAt,
                 StatusMessage: r.StatusMessage,
                 PipelineName: null,
-                IsPrerelease: r.IsPrerelease))
+                IsPrerelease: r.IsPrerelease,
+                HasSkippedApps: r.SkippedAppsJson != null))
             .ToListAsync(ct);
 
         // Sort in memory: active rows first, then by BC version descending
@@ -252,7 +253,7 @@ public class ObjectExplorerService
             .Select(r => new
             {
                 r.Id, r.Label, r.Kind, r.Status, r.StatusMessage, r.BcVersion, r.ParentReleaseId, r.ImportedAt,
-                r.Publisher, r.ProjectName, r.DeletedAt, r.IsPrerelease,
+                r.Publisher, r.ProjectName, r.DeletedAt, r.IsPrerelease, r.SkippedAppsJson,
                 ParentLabel = r.ParentRelease != null ? r.ParentRelease.Label : null,
             })
             .SingleOrDefaultAsync(ct);
@@ -275,7 +276,8 @@ public class ObjectExplorerService
             ImportedAt: row.ImportedAt,
             DeletedAt: row.DeletedAt,
             ModuleCount: moduleCount,
-            IsPrerelease: row.IsPrerelease);
+            IsPrerelease: row.IsPrerelease,
+            SkippedApps: ReleaseSkippedApp.Deserialize(row.SkippedAppsJson));
     }
 
     /// <summary>
