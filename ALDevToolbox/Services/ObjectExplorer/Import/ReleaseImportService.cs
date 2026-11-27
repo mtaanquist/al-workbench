@@ -906,6 +906,32 @@ public class ReleaseImportService
     }
 
     /// <summary>
+    /// The Business Central version a third-party release made from a split
+    /// vendor package was cut for, so a Retry or Add modules with the whole
+    /// package imports only that version's apps (#1802). Read from the
+    /// <c>(BC x.y)</c> label suffix the split gives it, else from its parent's
+    /// version. Null for a release that is not third-party (or not found);
+    /// <see cref="PackageTarget.BcVersion"/> is null when neither says.
+    /// </summary>
+    public async Task<PackageTarget?> GetPackageTargetAsync(int releaseId, CancellationToken ct = default)
+    {
+        var release = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.Id == releaseId && r.Kind == "third_party")
+            .Select(r => new { r.Label, ParentVersion = r.ParentRelease != null ? r.ParentRelease.BcVersion : null })
+            .FirstOrDefaultAsync(ct);
+        if (release is null) return null;
+        var suffix = PackageLabelSuffix().Match(release.Label);
+        if (suffix.Success) return new PackageTarget(suffix.Groups["v"].Value);
+        var parent = AlSymbolFeedResolver.ParseVersion(release.ParentVersion);
+        return new PackageTarget(parent is null ? null : $"{parent.Major}.{parent.Minor}");
+    }
+
+    private static readonly Regex PackageLabelSuffixPattern =
+        new(@"\(BC (?<v>\d{1,4}\.\d{1,4})\)\s*$", RegexOptions.Compiled);
+
+    private static Regex PackageLabelSuffix() => PackageLabelSuffixPattern;
+
+    /// <summary>
     /// The parent id arrives from a form field, so it is read back through the
     /// org-filtered <c>OeReleases</c> set rather than trusted: the chain walk in
     /// <see cref="Explore.ReleaseAncestrySql"/> follows parent pointers in raw SQL,
@@ -2258,3 +2284,6 @@ public class ReleaseImportService
         await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
     }
 }
+
+/// <summary>What <see cref="ReleaseImportService.GetPackageTargetAsync"/> found: the Business Central version a split release was cut for, when known.</summary>
+public sealed record PackageTarget(string? BcVersion);

@@ -72,6 +72,14 @@ public sealed class EncryptedAppSymbols
             }
 
             var why = outcome.Unresolved.FirstOrDefault()?.Reason ?? $"it is not on the {AlSymbolFeedResolver.AppSourceFeedName}";
+            // A feed or download failure carries its exception text in brackets: log
+            // it, and keep the reason an admin reads on the release plain.
+            if (why.Contains('(', StringComparison.Ordinal))
+            {
+                _logger.LogWarning("Could not fetch the symbols of {App} {Version}: {Reason}", manifest.Name, manifest.Version, why);
+                return EncryptedAppSymbolsResult.NotFound(
+                    $"encrypted, and its symbols for {manifest.Version} could not be fetched from the {AlSymbolFeedResolver.AppSourceFeedName}. Try adding it again later");
+            }
             return EncryptedAppSymbolsResult.NotFound($"encrypted, and its symbols for {manifest.Version} could not be found: {why}");
         }
         finally
