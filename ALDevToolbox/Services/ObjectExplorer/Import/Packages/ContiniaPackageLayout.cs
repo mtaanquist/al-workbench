@@ -11,6 +11,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import.Packages;
 /// &lt;Package&gt;/Apps/Source/&lt;App&gt; 29.1.1.257932 - 29.0-Source.zip
 /// &lt;Package&gt;/Apps/Scripts/...
 /// </code>
+/// Some packages (Document Capture, Expense Management) name the folder
+/// <c>App</c> rather than <c>Apps</c> and carry installers, documentation and
+/// sample files beside it; both names are read and everything else is ignored.
 /// Each <c>BC x.y</c> folder holds the same app versions rebuilt for that
 /// Business Central version, so each becomes its own release: imported together
 /// they would collide on app id and version. The source zips are shared by all of
@@ -116,7 +119,7 @@ public sealed partial class ContiniaPackageLayout : IThirdPartyPackageLayout
         System.Version.TryParse(value.Contains('.') ? value : value + ".0", out var v) ? v : null;
 
     /// <summary>
-    /// Where an <c>.app</c> sits when it is under <c>Apps/BC x.y/</c>: the
+    /// Where an <c>.app</c> sits when it is under <c>Apps/BC x.y/</c> (or <c>App/BC x.y/</c>): the
     /// Business Central version from the folder name, and the product folder
     /// below it (Banking, Base, ...) when there is one. Null for anything else.
     /// </summary>
@@ -124,10 +127,11 @@ public sealed partial class ContiniaPackageLayout : IThirdPartyPackageLayout
     {
         if (!normalizedFullName.EndsWith(".app", StringComparison.OrdinalIgnoreCase)) return null;
         var segments = normalizedFullName.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        // The last segment is the file; a BC folder needs an "Apps" segment before it.
+        // The last segment is the file; a BC folder needs an "Apps" or "App" segment before it.
         for (var i = 0; i < segments.Length - 2; i++)
         {
-            if (!string.Equals(segments[i], "Apps", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(segments[i], "Apps", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(segments[i], "App", StringComparison.OrdinalIgnoreCase)) continue;
             var bc = BcFolder().Match(segments[i + 1]);
             if (!bc.Success) continue;
             var product = i + 2 < segments.Length - 1 ? segments[i + 2] : null;

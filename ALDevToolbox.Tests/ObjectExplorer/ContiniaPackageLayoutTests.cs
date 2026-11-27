@@ -154,4 +154,52 @@ public sealed class ContiniaPackageLayoutTests
         var plan = new ContiniaPackageLayout().Plan(archive).Should().BeOfType<PackagePlan.Split>().Subject;
         plan.Groups.Should().HaveCount(2);
     }
+    /// <summary>
+    /// The Document Capture and Expense Management package: the folder is "App",
+    /// not "Apps", there is no wrapper folder, and installers, docs and sample
+    /// files sit beside it.
+    /// </summary>
+    internal static readonly string[] DocumentCapturePackage =
+    [
+        "setup.exe",
+        "App/BC 29.0 (BC 2026 Wave 2)/Install.ps1",
+        "App/BC 29.0 (BC 2026 Wave 2)/Base/Continia AI - Core 29.1.0.244431 - 29.0.app",
+        "App/BC 29.0 (BC 2026 Wave 2)/Core/Core 29.1.0.244450 - 29.0 (BC 2026 Wave 2).app",
+        "App/BC 29.0 (BC 2026 Wave 2)/Document Capture/DC 29.1.1.254656 - 29.0 (BC 2026 Wave 2).app",
+        "App/BC 29.0 (BC 2026 Wave 2)/Document Capture/DC on-premises 29.1.1.254656 - 29.0 (BC 2026 Wave 2).app",
+        "App/BC 29.0 (BC 2026 Wave 2)/Expense Management/EM 29.1.0.250661 - 29.0 (BC 2026 Wave 2).app",
+        "App/BC 29.1 (BC 2026 Wave 2 CU1)/Base/Continia AI - Core 29.1.0.244431 - 29.1.app",
+        "App/BC 29.1 (BC 2026 Wave 2 CU1)/Core/Core 29.1.0.244450 - 29.1 (BC 2026 Wave 2 CU1).app",
+        "App/BC 29.1 (BC 2026 Wave 2 CU1)/Document Capture/DC 29.1.1.254656 - 29.1 (BC 2026 Wave 2 CU1).app",
+        "App/BC 29.1 (BC 2026 Wave 2 CU1)/Document Capture/DC on-premises 29.1.1.254656 - 29.1 (BC 2026 Wave 2 CU1).app",
+        "App/BC 29.1 (BC 2026 Wave 2 CU1)/Expense Management/EM 29.1.0.250661 - 29.1 (BC 2026 Wave 2 CU1).app",
+        "App/Scripts/excludeApps.json",
+        "App/Scripts/Misc/Install-UI.ps1",
+        "App/Source/DC 29.1.1.254656 - 29 (BC 2026 Wave 2) Source.zip",
+        "App/Source/DC on-premises 29.1.1.254656 - 29 (BC 2026 Wave 2) Source.zip",
+        "App/Source/EM 29.1.0.250661 - 29 (BC 2026 Wave 2) Source.zip",
+        "Documentation/Document Capture/0.0 - Documentation and Resources.htm",
+        "Software/File Service/Continia File Service.msi",
+        "Software/Service Tier/Files/GdPicture.NET.14.dll",
+        "Support Files/Document Capture/Test PDF/W1 - BC online - Purchase Invoice 1 - First Up Consultant - 44444444.pdf",
+    ];
+
+    [Fact]
+    public void A_package_with_an_App_folder_and_installers_beside_it_splits_the_same_way()
+    {
+        using var archive = Open(DocumentCapturePackage);
+        new ContiniaPackageLayout().Matches(archive).Should().BeTrue();
+
+        var plan = new ContiniaPackageLayout().Plan(archive).Should().BeOfType<PackagePlan.Split>().Subject;
+        plan.Groups.Select(g => g.BcVersion).Should().Equal("29.0", "29.1");
+        plan.Groups.Should().AllSatisfy(g => g.Apps.Should().HaveCount(5));
+
+        var byName = plan.Groups[1].Apps.ToDictionary(a => Path.GetFileName(a.App.FullName));
+        byName["DC 29.1.1.254656 - 29.1 (BC 2026 Wave 2 CU1).app"].Source!.Name
+            .Should().Be("DC 29.1.1.254656 - 29 (BC 2026 Wave 2) Source.zip");
+        byName["DC on-premises 29.1.1.254656 - 29.1 (BC 2026 Wave 2 CU1).app"].Source!.Name
+            .Should().Be("DC on-premises 29.1.1.254656 - 29 (BC 2026 Wave 2) Source.zip");
+        byName["Core 29.1.0.244450 - 29.1 (BC 2026 Wave 2 CU1).app"].Source.Should().BeNull("this package ships no source for Core");
+        byName["EM 29.1.0.250661 - 29.1 (BC 2026 Wave 2 CU1).app"].ProductGroup.Should().Be("Expense Management");
+    }
 }
