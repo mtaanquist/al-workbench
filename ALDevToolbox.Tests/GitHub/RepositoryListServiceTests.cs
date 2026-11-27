@@ -154,6 +154,70 @@ public sealed class RepositoryListServiceTests : IDisposable
         row.LastBuild!.Id.Should().Be(branchBuild);
     }
 
+    [Fact]
+    public async Task An_always_included_file_saved_after_the_last_check_asks_for_a_new_check()
+    {
+        // Just after the seeded files and standards, which a fresh database already holds.
+        var checkedAt = DateTime.UtcNow.AddMinutes(1);
+        await SeedFileCheckAsync(RepoA, checkedAt);
+        (await FilesChangedAsync()).Should().BeFalse();
+
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Path = "AGENTS.md",
+                Content = "# Agents",
+                Ordering = 99,
+                UpdatedAt = checkedAt.AddMinutes(5),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await FilesChangedAsync()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_standard_saved_after_only_some_checks_still_asks_for_a_new_check()
+    {
+        var now = DateTime.UtcNow;
+        await SeedFileCheckAsync(RepoA, now.AddHours(-2));
+        await SeedFileCheckAsync(RepoB, now.AddMinutes(1));
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.GitHubRepositoryStandardFiles.Add(new GitHubRepositoryStandardFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Path = "CLAUDE.md",
+                Content = "# Claude",
+                UpdatedAt = now.AddHours(-1),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await FilesChangedAsync()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Nothing_checked_yet_is_not_a_change_since_the_last_check()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Path = "AGENTS.md",
+                Content = "# Agents",
+                Ordering = 99,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await FilesChangedAsync()).Should().BeFalse();
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private async Task<List<RepositoryListRow>> ListAsync()
@@ -169,6 +233,33 @@ public sealed class RepositoryListServiceTests : IDisposable
             new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext),
             _db.OrgContext);
         return await service.GetAsync();
+    }
+
+    private async Task<bool> FilesChangedAsync()
+    {
+        await using var ctx = _db.NewContext();
+        var client = _db.NewGitHubAppClient(ctx, new FakeGitHubApi());
+        var access = _db.NewGitHubAccessService(ctx, client);
+        var drift = _db.NewDependencyDriftService(ctx, client, access);
+        var service = new RepositoryListService(
+            ctx,
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext),
+            drift,
+            new CatalogService(ctx, NullLogger<CatalogService>.Instance, _db.OrgContext),
+            _db.OrgContext);
+        return await service.WorkspaceFilesChangedSinceCheckAsync();
+    }
+
+    private async Task SeedFileCheckAsync(string fullName, DateTime checkedAt)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.GitHubRepositoryFileChecks.Add(new GitHubRepositoryFileCheck
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Repository = fullName,
+            CheckedAt = checkedAt,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     private async Task<(int ProjectId, int RepositoryId)> SeedSolutionAsync(

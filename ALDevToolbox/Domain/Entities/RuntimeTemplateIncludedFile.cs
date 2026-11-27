@@ -2,9 +2,9 @@ namespace ALDevToolbox.Domain.Entities;
 
 /// <summary>
 /// Join row linking a <see cref="RuntimeTemplate"/> to one of the
-/// organisation's always-included files. New <see cref="OrganizationFile"/>
-/// rows are off-by-default — a template only emits the files it has
-/// explicitly opted into via this list.
+/// organisation's always-included files. A template only emits the files in
+/// this list. A file added on the Always-included files page is put on every
+/// live template when it is saved; a template can untick it afterwards.
 /// </summary>
 public class RuntimeTemplateIncludedFile
 {
