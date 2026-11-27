@@ -262,7 +262,7 @@ public sealed class AlSymbolFeedResolver
         var candidates = OrderCandidates(versions, want.MinVersion);
         if (request.ExactVersion && want.MinVersion is { } exact)
         {
-            candidates = candidates.Where(c => ParseVersion(c) == exact).ToList();
+            candidates = candidates.Where(c => SameVersion(ParseVersion(c), exact)).ToList();
             if (candidates.Count == 0)
             {
                 reasons.Add($"the {feedName} does not have version {exact}");
@@ -312,8 +312,8 @@ public sealed class AlSymbolFeedResolver
         versions
             .Where(s => !s.Contains('-', StringComparison.Ordinal))
             .Select(s => (Raw: s, Parsed: ParseVersion(s)))
-            .Where(x => x.Parsed is not null && (floor is null || x.Parsed >= floor))
-            .OrderBy(x => x.Parsed)
+            .Where(x => x.Parsed is not null && (floor is null || Pad(x.Parsed) >= Pad(floor)))
+            .OrderBy(x => Pad(x.Parsed!))
             .Select(x => x.Raw)
             .ToList();
 
@@ -456,7 +456,7 @@ public sealed class AlSymbolFeedResolver
         foreach (var dir in Directory.EnumerateDirectories(appDir)
             .Where(d => !Path.GetFileName(d).StartsWith('.'))
             .Select(d => (Dir: d, Version: ParseVersion(Path.GetFileName(d))))
-            .Where(x => x.Version is not null && (floor is null || (exact ? x.Version == floor : x.Version >= floor)))
+            .Where(x => x.Version is not null && (floor is null || (exact ? SameVersion(x.Version, floor) : Pad(x.Version) >= Pad(floor))))
             .OrderByDescending(x => x.Version))
         {
             var package = TryLoadCached(dir.Dir, appId);
@@ -609,7 +609,7 @@ public sealed class AlSymbolFeedResolver
     }
 
     private static bool Satisfies(Version? have, Version? floor) =>
-        floor is null || (have is not null && have >= floor);
+        floor is null || (have is not null && Pad(have) >= Pad(floor));
 
     // ── HTTP ────────────────────────────────────────────────────────────
 
@@ -691,6 +691,18 @@ public sealed class AlSymbolFeedResolver
 
     internal static string NormalizeId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? string.Empty : id.Trim().Trim('{', '}').ToLowerInvariant();
+
+    /// <summary>
+    /// Version equality that treats a missing part as zero: NuGet lists
+    /// <c>28.5.0.0</c> as <c>28.5.0</c>, and <see cref="Version"/> holds those as
+    /// unequal (an absent revision is -1, so <c>28.5.0</c> also sorts below
+    /// <c>28.5.0.0</c>). Floors and ordering compare padded versions for the same reason.
+    /// </summary>
+    internal static bool SameVersion(Version? a, Version? b) =>
+        a is not null && b is not null && Pad(a) == Pad(b);
+
+    internal static Version Pad(Version v) =>
+        new(v.Major, v.Minor, Math.Max(v.Build, 0), Math.Max(v.Revision, 0));
 
     internal static Version? ParseVersion(string? raw)
     {

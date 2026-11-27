@@ -39,8 +39,9 @@ public sealed class EncryptedAppSymbols
         {
             manifest = ReadAppJson(sourceZip);
         }
-        catch (InvalidDataException)
+        catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
         {
+            // InvalidOperationException: an app.json over the size cap.
             return EncryptedAppSymbolsResult.NotFound("encrypted, and its source zip could not be read");
         }
         if (manifest is null || !Guid.TryParse(manifest.Id, out _) || AlSymbolFeedResolver.ParseVersion(manifest.Version) is null)
@@ -87,8 +88,8 @@ public sealed class EncryptedAppSymbols
 
     /// <summary>
     /// The <c>app.json</c> at the root of the source zip, or one wrapper folder
-    /// down, shallowest first. Deeper ones belong to nested apps (a test app, a
-    /// sample) and never name the app the zip was shipped beside.
+    /// down, shallowest first. Deeper ones, and a test folder's, belong to nested
+    /// apps and never name the app the zip was shipped beside.
     /// </summary>
     internal static AppJsonManifest? ReadAppJson(Stream sourceZip)
     {
@@ -97,9 +98,10 @@ public sealed class EncryptedAppSymbols
         var entry = archive.Entries
             .Select(e => (Entry: e, Path: e.FullName.Replace('\\', '/').TrimStart('/')))
             .Where(e => string.Equals(Path.GetFileName(e.Path), "app.json", StringComparison.OrdinalIgnoreCase))
-            .Select(e => (e.Entry, Depth: e.Path.Count(c => c == '/')))
-            .Where(e => e.Depth <= 1)
+            .Select(e => (e.Entry, e.Path, Depth: e.Path.Count(c => c == '/')))
+            .Where(e => e.Depth == 0 || (e.Depth == 1 && !AppJsonManifestParser.IsTestSegment(e.Path[..e.Path.IndexOf('/')])))
             .OrderBy(e => e.Depth)
+            .ThenBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
             .Select(e => e.Entry)
             .FirstOrDefault();
         if (entry is null) return null;

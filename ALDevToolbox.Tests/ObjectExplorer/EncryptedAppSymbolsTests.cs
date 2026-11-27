@@ -131,6 +131,60 @@ public sealed class EncryptedAppSymbolsTests : IDisposable
         found.Reason.Should().StartWith("encrypted, and");
     }
 
+    private static MemoryStream ZipOf(params (string Path, string Content)[] entries)
+    {
+        var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var (path, content) in entries)
+            {
+                using var w = new StreamWriter(zip.CreateEntry(path).Open());
+                w.Write(content);
+            }
+        }
+        ms.Position = 0;
+        return ms;
+    }
+
+    private static string AppJson(string id, string version) =>
+        $$"""{ "id": "{{id}}", "name": "Continia Banking", "publisher": "Continia Software", "version": "{{version}}" }""";
+
+    [Fact]
+    public async Task A_version_ending_in_zero_matches_the_feed_listing_it_with_three_parts()
+    {
+        PublishBanking("29.1.0");
+
+        await using var source = SourceZip("29.1.0.0");
+        var found = await Lookup().FindAsync(source);
+
+        found.Reason.Should().BeNull();
+        found.SymbolsApp.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task An_oversized_app_json_is_reported_rather_than_thrown()
+    {
+        await using var source = ZipOf(("app.json", AppJson(BankingId, "29.1.1.257932") + new string(' ', 2 * 1024 * 1024)));
+        var found = await Lookup().FindAsync(source);
+
+        found.SymbolsApp.Should().BeNull();
+        found.Reason.Should().StartWith("encrypted, and");
+    }
+
+    [Fact]
+    public void The_root_app_json_wins_and_a_test_folder_beside_the_app_is_passed_over()
+    {
+        using (var rooted = ZipOf(("Test/app.json", AppJson("00000000-0000-0000-0000-000000000001", "1.0.0.0")),
+                   ("app.json", AppJson(BankingId, "29.1.1.257932"))))
+        {
+            EncryptedAppSymbols.ReadAppJson(rooted)!.Id.Should().Be(BankingId);
+        }
+
+        using var siblings = ZipOf(("Test/app.json", AppJson("00000000-0000-0000-0000-000000000001", "1.0.0.0")),
+            ("Banking/app.json", AppJson(BankingId, "29.1.1.257932")));
+        EncryptedAppSymbols.ReadAppJson(siblings)!.Id.Should().Be(BankingId);
+    }
+
     private ReleaseImportService NewService(Data.AppDbContext ctx, EncryptedAppSymbols? lookup) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
             new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext)),
