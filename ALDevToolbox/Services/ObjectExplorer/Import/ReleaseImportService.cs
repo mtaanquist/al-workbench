@@ -879,6 +879,28 @@ public class ReleaseImportService
     }
 
     /// <summary>
+    /// The Microsoft release a vendor package's apps for Business Central
+    /// <paramref name="bcMajorMinor"/> ("29.1") sit on (#1802): a ready, released
+    /// first-party release of that version. <paramref name="preferredId"/> (the
+    /// parent the admin picked on the form) wins when it is one of them, so an
+    /// admin with a W1 and a DK release of the same version still decides;
+    /// otherwise the newest import. With none of that version, the admin's pick
+    /// stands (or null without one).
+    /// </summary>
+    public async Task<int?> FindParentForBcVersionAsync(string bcMajorMinor, int? preferredId, CancellationToken ct = default)
+    {
+        var prefix = bcMajorMinor + ".";
+        var candidates = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.Kind == "first_party" && r.Status == "ready" && !r.IsPrerelease && r.DeletedAt == null
+                && r.BcVersion != null && (r.BcVersion == bcMajorMinor || r.BcVersion.StartsWith(prefix)))
+            .OrderByDescending(r => r.ImportedAt)
+            .Select(r => r.Id)
+            .ToListAsync(ct);
+        if (preferredId is { } preferred && candidates.Contains(preferred)) return preferred;
+        return candidates.Count > 0 ? candidates[0] : preferredId;
+    }
+
+    /// <summary>
     /// The parent id arrives from a form field, so it is read back through the
     /// org-filtered <c>OeReleases</c> set rather than trusted: the chain walk in
     /// <see cref="Explore.ReleaseAncestrySql"/> follows parent pointers in raw SQL,
