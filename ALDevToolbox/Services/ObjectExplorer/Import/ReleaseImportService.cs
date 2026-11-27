@@ -228,6 +228,7 @@ public class ReleaseImportService
                 ct.ThrowIfCancellationRequested();
                 await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference, ct);
             }
+            ThrowIfNothingReadable(totals);
 
             // SourceTable propagation for pageextensions. The symbol
             // package only carries SourceTable on the base page; the
@@ -269,6 +270,7 @@ public class ReleaseImportService
             var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct)
                 ?? throw new InvalidOperationException($"Release {release.Id} disappeared mid-ingest.");
             ready.BcVersion = await InferBcVersionAsync(release.Id, ct);
+            ready.SkippedAppsJson = ReleaseSkippedApp.Serialize(totals.Unreadable);
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
 
@@ -305,7 +307,8 @@ public class ReleaseImportService
                 ObjectsImported: totals.ObjectsImported,
                 ReferencesImported: totals.ReferencesImported,
                 SourceFilesImported: totals.SourceFilesImported,
-                TranslationsImported: totals.TranslationsImported);
+                TranslationsImported: totals.TranslationsImported,
+                Unreadable: totals.Unreadable);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -322,7 +325,11 @@ public class ReleaseImportService
                 release.Id, totals.ModulesImported);
             // Stamp the release as failed so the UI can show the operator which
             // upload didn't make it.
-            await StampFailedAsync(release.Id, ex.Message);
+            // A refusal's own words name the app that caused it; the exception's
+            // Message is only the generic "plan has N errors" summary.
+            await StampFailedAsync(release.Id, ex is PlanValidationException { Errors.Count: > 0 } pve
+                ? string.Join(" ", pve.Errors.Values)
+                : ex.Message);
             throw;
         }
     }
@@ -573,6 +580,7 @@ public class ReleaseImportService
                 // Amend (#216) doesn't expose the store-symbol-reference option.
                 await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference: false, ct);
             }
+            ThrowIfNothingReadable(totals);
 
             // Same post-passes as ImportReleaseAsync (lines ~130–147). The
             // first two are idempotent UPDATEs; the third (call-site
@@ -602,6 +610,10 @@ public class ReleaseImportService
                 ready.BcVersion = inferred;
             }
 
+            // An amend only adds, so the apps it could not read join the ones
+            // the earlier imports already left out.
+            ready.SkippedAppsJson = ReleaseSkippedApp.Serialize(
+                ReleaseSkippedApp.Merge(ReleaseSkippedApp.Deserialize(ready.SkippedAppsJson), totals.Unreadable));
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
 
@@ -661,7 +673,8 @@ public class ReleaseImportService
             ObjectsImported: totals.ObjectsImported,
             ReferencesImported: totals.ReferencesImported,
             SourceFilesImported: totals.SourceFilesImported,
-            TranslationsImported: totals.TranslationsImported);
+            TranslationsImported: totals.TranslationsImported,
+                Unreadable: totals.Unreadable);
     }
 
     /// <summary>
@@ -966,6 +979,7 @@ public class ReleaseImportService
 
         release.Status = "ingesting";
         release.StatusMessage = null;
+        release.SkippedAppsJson = null;
         release.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
@@ -1006,6 +1020,7 @@ public class ReleaseImportService
 
         release.Status = "ingesting";
         release.StatusMessage = null;
+        release.SkippedAppsJson = null;
         release.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
@@ -1077,12 +1092,18 @@ public class ReleaseImportService
         {
             pkg = await AppPackageReader.ReadAsync(upload.AppStream, storeSymbolReference, captureTranslations, ct);
         }
-        catch (NeaEncryptedAppException ex)
+        catch (NeaEncryptedAppException)
         {
-            throw new PlanValidationException(new Dictionary<string, string>
-            {
-                [$"Uploads.{upload.FileName}"] = $"{upload.FileName}: {ex.Message}",
-            });
+            // One encrypted app must not sink the rest of the upload (#1801):
+            // vendors such as Continia ship encrypted .app files beside readable
+            // ones. Skip it, record why, and let the release go ready with the
+            // skipped list on it. An upload where nothing was readable still
+            // fails, in the caller.
+            _logger.LogWarning(
+                "Skipping encrypted app {File} in ReleaseId={ReleaseId}",
+                upload.FileName, release.Id);
+            totals.Unreadable.Add(new ReleaseSkippedApp(upload.FileName, ReleaseSkippedApp.EncryptedReason));
+            return;
         }
 
         // Idempotency: if this Release already has a module with the same
@@ -2088,6 +2109,21 @@ public class ReleaseImportService
 
     // ── Mutable tally ───────────────────────────────────────────────────
 
+    /// <summary>
+    /// Refuses an upload in which every app was unreadable: a release with none of
+    /// the uploaded apps in it is a failure, not a partial import (#1801). The
+    /// message names each app so the admin knows what to replace.
+    /// </summary>
+    private static void ThrowIfNothingReadable(ImportTotals totals)
+    {
+        if (totals.Unreadable.Count == 0 || totals.ModulesImported > 0 || totals.ModulesSkipped > 0) return;
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["Uploads"] = "None of the uploaded apps could be read: "
+                + string.Join("; ", totals.Unreadable.Select(a => $"{a.FileName} ({a.Reason})")),
+        });
+    }
+
     private sealed class ImportTotals
     {
         public int ModulesImported;
@@ -2100,6 +2136,10 @@ public class ReleaseImportService
         // which don't capture translations). Admins can still add more via
         // TranslationImportService's explicit upload paths afterwards.
         public int TranslationsImported;
+        // Apps the import could not read and left out (#1801), in upload
+        // order. Distinct from ModulesSkipped, which counts byte-identical
+        // re-uploads that were already there.
+        public List<ReleaseSkippedApp> Unreadable { get; } = new();
     }
 
     /// <summary>

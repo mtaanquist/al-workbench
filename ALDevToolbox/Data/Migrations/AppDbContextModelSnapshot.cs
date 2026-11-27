@@ -4325,6 +4325,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(200)")
                         .HasColumnName("publisher");
 
+                    b.Property<string>("SkippedAppsJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("skipped_apps_json");
+
                     b.Property<long>("SourceContentLength")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("bigint")
