@@ -105,6 +105,9 @@ internal static class ObjectExplorerEndpoints
                     case ReleaseImportOutcome.StagingFailed staged:
                         RedirectQueued(ctx, staged.ReleaseId);
                         break;
+                    case ReleaseImportOutcome.QueuedPackage package:
+                        ctx.Response.Redirect($"/admin/object-explorer?ok=queued-package&id={package.ReleaseIds.Count}");
+                        break;
                 }
             }
             catch (PlanValidationException ex)

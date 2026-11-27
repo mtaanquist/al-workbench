@@ -1011,6 +1011,96 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             .Which.Errors.Should().ContainKey("Kind");
     }
 
+    // ── Vendor packages (#1802) ─────────────────────────────────────────
+
+    [Fact]
+    public async Task A_continia_package_queues_one_release_per_business_central_version_on_its_matching_parent()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        Domain.Entities.ObjectExplorer.OeRelease FirstParty(string label, string bcVersion, DateTime importedAt) => new()
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = label, Kind = "first_party", Status = "ready",
+            BcVersion = bcVersion, ImportedAt = importedAt, CreatedAt = now, UpdatedAt = now,
+        };
+        var w1290 = FirstParty("BC 29.0 W1", "29.0.40000.0", now.AddDays(-2));
+        var dk290 = FirstParty("BC 29.0 DK", "29.0.40000.0", now.AddDays(-1));
+        var w1291 = FirstParty("BC 29.1 W1", "29.1.41000.0", now.AddDays(-3));
+        ctx.OeReleases.AddRange(w1290, dk290, w1291);
+        await ctx.SaveChangesAsync();
+
+        var bytes = ContiniaPackageLayoutTests.Zip(ContiniaPackageLayoutTests.PackageEntries);
+        var queue = new ReleaseImportQueue();
+        var outcome = await NewService(ctx, queue).SubmitAsync(Submission(
+            label: "Continia 29.1.1", kind: "third_party", publisher: "Continia Software",
+            // The admin's pick wins where it fits (29.0 has two candidates), and is ignored where it does not.
+            parentReleaseId: w1290.Id,
+            folderZip: new UploadedFile("CBA 29.1.1.257932 - W1.zip", bytes.Length, () => new MemoryStream(bytes, writable: false))));
+
+        var package = outcome.Should().BeOfType<ReleaseImportOutcome.QueuedPackage>().Subject;
+        package.ReleaseIds.Should().HaveCount(2);
+
+        await using var read = _db.NewContext();
+        var releases = await read.OeReleases.AsNoTracking()
+            .Where(r => package.ReleaseIds.Contains(r.Id))
+            .OrderBy(r => r.Id)
+            .Select(r => new { r.Label, r.Kind, r.Status, r.ParentReleaseId, r.Publisher })
+            .ToListAsync();
+        releases.Select(r => r.Label).Should().Equal("Continia 29.1.1 (BC 29.0)", "Continia 29.1.1 (BC 29.1)");
+        releases.Select(r => r.ParentReleaseId).Should().Equal(w1290.Id, w1291.Id);
+        releases.Should().OnlyContain(r => r.Kind == "third_party" && r.Status == "ingesting" && r.Publisher == "Continia Software");
+
+        var jobs = new List<ReleaseImportJob>();
+        while (queue.Reader.TryRead(out var job)) jobs.Add(job);
+        jobs.Select(j => j.ReleaseId).Should().Equal(package.ReleaseIds);
+        var staged = jobs.Select(j => j.Source).Cast<ReleaseImportSource.StagedZip>().ToList();
+        staged.ForEach(s => Track(s.TempPath));
+        staged.Should().OnlyContain(s => !s.IsDvd);
+
+        // The repackaged 29.1 ZIP: the background walk pairs each app with the
+        // source beside it, so the shared 29.0 source sits next to the 29.1 app.
+        using (var zip = ZipFile.OpenRead(staged[1].TempPath))
+        {
+            var walked = FolderZipWalker.Walk(zip);
+            walked.Should().HaveCount(4);
+            walked.Single(e => e.FileName == "Continia Banking 29.1.1.257932 - 29.1.app").SourceZipEntry
+                .Should().NotBeNull();
+            walked.Single(e => e.FileName.StartsWith("Core ")).SourceZipEntry.Should().BeNull();
+        }
+    }
+
+    [Fact]
+    public async Task A_plain_third_party_zip_is_still_imported_as_one_release()
+    {
+        await using var ctx = _db.NewContext();
+        var bytes = ContiniaPackageLayoutTests.Zip(["applications/Contoso_Thing_1.0.0.0.app"]);
+        var queue = new ReleaseImportQueue();
+
+        var outcome = await NewService(ctx, queue).SubmitAsync(Submission(
+            kind: "third_party",
+            folderZip: new UploadedFile("apps.zip", bytes.Length, () => new MemoryStream(bytes, writable: false))));
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        Track(((ReleaseImportSource.StagedZip)job!.Source).TempPath);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_first_party_zip_laid_out_like_a_vendor_package_is_not_split()
+    {
+        await using var ctx = _db.NewContext();
+        var bytes = ContiniaPackageLayoutTests.Zip(ContiniaPackageLayoutTests.PackageEntries);
+        var queue = new ReleaseImportQueue();
+
+        var outcome = await NewService(ctx, queue).SubmitAsync(Submission(
+            kind: "first_party",
+            folderZip: new UploadedFile("p.zip", bytes.Length, () => new MemoryStream(bytes, writable: false))));
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        while (queue.Reader.TryRead(out var job)) Track(((ReleaseImportSource.StagedZip)job.Source).TempPath);
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
 
     private static ReleaseImportSubmission Submission(
@@ -1094,6 +1184,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             new ProjectAccess(ctx, _db.OrgContext),
             lifetime ?? new Microsoft.Extensions.Hosting.Internal.ApplicationLifetime(
                 NullLogger<Microsoft.Extensions.Hosting.Internal.ApplicationLifetime>.Instance),
+            new ALDevToolbox.Services.ObjectExplorer.Import.Packages.ThirdPartyPackageLayouts(
+                [new ALDevToolbox.Services.ObjectExplorer.Import.Packages.ContiniaPackageLayout()]),
             NullLogger<ReleaseImportRequestService>.Instance);
     }
 
