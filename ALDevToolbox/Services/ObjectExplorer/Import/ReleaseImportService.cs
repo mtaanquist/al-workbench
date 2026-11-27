@@ -610,10 +610,12 @@ public class ReleaseImportService
                 ready.BcVersion = inferred;
             }
 
-            // An amend only adds, so the apps it could not read join the ones
-            // the earlier imports already left out.
+            // The apps this amend could not read join the ones the earlier
+            // imports left out, and a left-out app it did import (a readable
+            // copy under the same file name, the fix the manage page suggests)
+            // comes off the list.
             ready.SkippedAppsJson = ReleaseSkippedApp.Serialize(
-                ReleaseSkippedApp.Merge(ReleaseSkippedApp.Deserialize(ready.SkippedAppsJson), totals.Unreadable));
+                ReleaseSkippedApp.Merge(ReleaseSkippedApp.Deserialize(ready.SkippedAppsJson), totals.Unreadable, totals.ImportedFileNames));
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
 
@@ -1436,6 +1438,7 @@ public class ReleaseImportService
         }
 
         totals.ModulesImported++;
+        totals.ImportedFileNames.Add(upload.FileName);
 
         // First-party (Microsoft) release ingest now extracts the module's
         // Translations/*.xlf and feeds the org-wide translation memory. Only
@@ -2140,6 +2143,9 @@ public class ReleaseImportService
         // order. Distinct from ModulesSkipped, which counts byte-identical
         // re-uploads that were already there.
         public List<ReleaseSkippedApp> Unreadable { get; } = new();
+        // File names that landed as modules, so an amend that adds a readable
+        // copy of a left-out app takes it off the skipped list.
+        public HashSet<string> ImportedFileNames { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>

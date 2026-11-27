@@ -31,7 +31,7 @@
                         <span> · BC @_release.BcVersion</span>
                     }
                     <span> · @_release.ModuleCount module(s)</span>
-                    @if (_release.SkippedApps is { Count: > 0 } skippedCount)
+                    @if (_release.Status == "ready" && _release.SkippedApps is { Count: > 0 } skippedCount)
                     {
                         <span> · @skippedCount.Count app(s) left out</span>
                     }
@@ -138,7 +138,7 @@
             </div>
         </section>
 
-        @if (_release.SkippedApps is { Count: > 0 } skipped)
+        @if (_release.Status == "ready" && _release.SkippedApps is { Count: > 0 } skipped)
         {
             <section class="card">
                 <div class="card__head">

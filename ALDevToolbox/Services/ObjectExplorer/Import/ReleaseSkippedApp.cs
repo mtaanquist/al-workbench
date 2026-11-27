@@ -39,10 +39,12 @@ public sealed record ReleaseSkippedApp(
     /// <summary>
     /// The skipped list after an amend: the earlier entries, then the new ones,
     /// one entry per file name (the latest reason wins) so re-uploading the same
-    /// encrypted app does not list it twice.
+    /// encrypted app does not list it twice. Entries named in
+    /// <paramref name="imported"/> are dropped: the amend brought them in.
     /// </summary>
     public static IReadOnlyList<ReleaseSkippedApp> Merge(
-        IReadOnlyList<ReleaseSkippedApp> existing, IReadOnlyList<ReleaseSkippedApp> added)
+        IReadOnlyList<ReleaseSkippedApp> existing, IReadOnlyList<ReleaseSkippedApp> added,
+        IReadOnlySet<string>? imported = null)
     {
         var byName = new Dictionary<string, ReleaseSkippedApp>(StringComparer.OrdinalIgnoreCase);
         var order = new List<string>();
@@ -51,6 +53,6 @@ public sealed record ReleaseSkippedApp(
             if (!byName.ContainsKey(app.FileName)) order.Add(app.FileName);
             byName[app.FileName] = app;
         }
-        return order.Select(n => byName[n]).ToList();
+        return order.Where(n => imported is null || !imported.Contains(n)).Select(n => byName[n]).ToList();
     }
 }

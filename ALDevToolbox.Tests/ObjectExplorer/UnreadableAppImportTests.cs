@@ -146,6 +146,34 @@ public sealed class UnreadableAppImportTests : IDisposable
     }
 
     [Fact]
+    public async Task Adding_a_readable_copy_of_a_left_out_app_takes_it_off_the_list()
+    {
+        int releaseId;
+        await using (var ctx = _db.NewContext())
+        {
+            releaseId = await BeginAsync(ctx, "Continia (replacement)");
+            await using var app = DkCore();
+            await using var encrypted = EncryptedApp();
+            await NewService(ctx).ProcessReleaseAsync(releaseId,
+            [
+                new AppFileUpload("Microsoft_DK_Core.app", app, null),
+                new AppFileUpload("Microsoft_OIOUBL.app", encrypted, null),
+            ]);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            await using var readable = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
+            await NewService(ctx).AmendReleaseAsync(releaseId, [new AppFileUpload("Microsoft_OIOUBL.app", readable, null)]);
+        }
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.SkippedAppsJson.Should().BeNull("the app that was left out is now in the release");
+        (await read.OeModules.CountAsync(m => m.ReleaseId == releaseId)).Should().Be(2);
+    }
+
+    [Fact]
     public async Task Adding_only_unreadable_apps_is_refused_and_the_release_stays_as_it_was()
     {
         int releaseId;
