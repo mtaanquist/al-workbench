@@ -24,6 +24,7 @@ internal sealed class ReleaseConfiguration : IEntityTypeConfiguration<OeRelease>
         entity.Property(e => e.ApplicationVersionId).HasColumnName("application_version_id");
         entity.Property(e => e.Status).HasColumnName("status").IsRequired();
         entity.Property(e => e.StatusMessage).HasColumnName("status_message");
+        entity.Property(e => e.SkippedAppsJson).HasColumnName("skipped_apps_json").HasColumnType("jsonb");
         entity.Property(e => e.ImportedAt).HasColumnName("imported_at").IsRequired();
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();

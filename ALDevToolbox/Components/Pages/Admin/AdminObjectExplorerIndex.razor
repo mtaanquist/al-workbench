@@ -141,6 +141,10 @@
                         <td>@(string.IsNullOrEmpty(r.ProjectName) ? "—" : r.ProjectName)</td>
                         <td>
                             @FormatStatus(r.Status, r.Kind)
+                            @if (r.Status == "ready" && r.HasSkippedApps)
+                            {
+                                <StatusPill Tone="warn" Class="status-pill--inline" title="Some uploaded apps couldn't be read and were left out. Open Manage to see which.">partial</StatusPill>
+                            }
                             @if (r.Status == "failed" && !string.IsNullOrEmpty(r.StatusMessage))
                             {
                                 <FieldError Message="@r.StatusMessage" />

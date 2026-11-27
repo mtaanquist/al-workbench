@@ -2599,7 +2599,7 @@ public sealed class ProjectBuildService
             }
 
             _logger.LogWarning(ex, "Failed to ingest vendor symbols {Label}; the build continues without them.", label);
-            lines.Add($"Could not add {label} to the Object Explorer: {ex.Message}");
+            lines.Add($"Could not add {label} to the Object Explorer: {(ex is PlanValidationException { Errors.Count: > 0 } pve ? string.Join(" ", pve.Errors.Values) : ex.Message)}");
             return null;
         }
     }
