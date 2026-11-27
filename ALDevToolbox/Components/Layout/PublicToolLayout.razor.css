@@ -1,0 +1,89 @@
+/* Same column as MainLayout's .app-frame: banner, then the sign-in row, then
+   the content filling what is left and scrolling on its own. */
+.public-frame {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    background: var(--bg);
+}
+
+/* No border and no surface: the row should read as page margin, not a bar. */
+.public-top {
+    flex: none;
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--space-2) var(--space-6);
+}
+
+.public-signin {
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+    text-decoration: none;
+    padding: var(--space-1) var(--space-2);
+    /* The padding is hit area, not spacing: pull it back out so the text
+       lines up with the content's right edge. */
+    margin-inline-end: calc(-1 * var(--space-2));
+    border-radius: var(--r-control);
+}
+
+.public-signin:hover {
+    color: var(--ink);
+    text-decoration: underline;
+}
+
+.public-signin:focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
+}
+
+.public-content {
+    flex: 1 1 auto;
+}
+
+.public-content > .app__content {
+    height: 100%;
+}
+
+/* Without the sidebar the tool would run edge to edge on a wide screen, so on
+   desktop it sits in a centred column, with the sign-in row on the same
+   column. Phone width keeps the full width. */
+@media (min-width: 701px) {
+    .public-top,
+    .app__content-inner {
+        width: 100%;
+        max-width: 1200px;
+        margin-inline: auto;
+        box-sizing: border-box;
+    }
+
+    /* Diff's .pw frame is built to fill the window: give it the page gutter
+       back and an edge, so it reads as a panel inside the column. */
+    .public-frame:has(.pw) .app__content-inner {
+        max-width: 1600px;
+        padding: 0 var(--space-6) var(--space-6);
+    }
+
+    .public-frame:has(.pw) .public-top {
+        max-width: 1600px;
+    }
+
+    .app__content-inner ::deep .pw {
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        overflow: hidden;
+    }
+}
+
+@media (max-width: 700px) {
+    /* Matches shell.css's phone gutter for .app__content-inner. */
+    .public-top {
+        padding-inline: var(--space-4);
+    }
+
+    .public-signin {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+    }
+}
