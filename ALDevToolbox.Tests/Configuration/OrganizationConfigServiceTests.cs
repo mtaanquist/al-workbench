@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
@@ -169,6 +170,92 @@ public sealed class OrganizationConfigServiceTests : IDisposable
             snapshot.Files.Single(f => f.Path == ".editorconfig").MustacheEnabled.Should().BeTrue();
             snapshot.Files.Should().Contain(f => f.Path == "docs/notes.md");
             snapshot.Files.Should().NotContain(f => f.Path == "README.md");
+        }
+    }
+
+    [Fact]
+    public async Task SaveFiles_puts_a_new_file_on_every_live_template_after_its_own_files()
+    {
+        int liveId, deletedId;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = _db.NewOrganizationConfigService(ctx);
+            await svc.SaveFilesAsync(new[] { new OrganizationFileInput(null, ".gitignore", "bin/", false) });
+            var live = ALDevToolbox.Tests.Builders.TemplateBuilder.Default("live-template");
+            var deleted = ALDevToolbox.Tests.Builders.TemplateBuilder.Default("deleted-template");
+            deleted.DeletedAt = DateTime.UtcNow;
+            ctx.RuntimeTemplates.AddRange(live, deleted);
+            await ctx.SaveChangesAsync();
+            liveId = live.Id;
+            deletedId = deleted.Id;
+        }
+
+        int gitignoreId;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = _db.NewOrganizationConfigService(ctx);
+            gitignoreId = (await svc.GetCurrentAsync()).Files.Single().Id;
+            ctx.RuntimeTemplateIncludedFiles.Add(new RuntimeTemplateIncludedFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                RuntimeTemplateId = liveId,
+                OrganizationFileId = gitignoreId,
+                Ordering = 0,
+            });
+            await ctx.SaveChangesAsync();
+            await svc.SaveFilesAsync(new[]
+            {
+                new OrganizationFileInput(gitignoreId, ".gitignore", "bin/", false),
+                new OrganizationFileInput(null, "CLAUDE.md", "# Claude", false),
+                new OrganizationFileInput(null, "AGENTS.md", "# Agents", false),
+            });
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var joins = await ctx.RuntimeTemplateIncludedFiles.AsNoTracking()
+                .OrderBy(j => j.Ordering)
+                .Select(j => new { j.RuntimeTemplateId, j.OrganizationFile!.Path, j.Ordering })
+                .ToListAsync();
+            // New files go after the ones the template already had.
+            joins.Where(j => j.RuntimeTemplateId == liveId).Select(j => (j.Path, j.Ordering))
+                .Should().Equal((".gitignore", 0), ("CLAUDE.md", 1), ("AGENTS.md", 2));
+            joins.Should().NotContain(j => j.RuntimeTemplateId == deletedId);
+        }
+    }
+
+    [Fact]
+    public async Task SaveFiles_leaves_the_change_time_of_an_unchanged_file_alone()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationConfigService(ctx).SaveFilesAsync(new[]
+            {
+                new OrganizationFileInput(null, "CLAUDE.md", "# Claude", false),
+                new OrganizationFileInput(null, "AGENTS.md", "# Agents", false),
+            });
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OrganizationFiles.ExecuteUpdateAsync(u => u.SetProperty(f => f.UpdatedAt, DateTime.UtcNow.AddDays(-1)));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = _db.NewOrganizationConfigService(ctx);
+            var files = (await svc.GetCurrentAsync()).Files.OrderBy(f => f.Ordering).ToList();
+            await svc.SaveFilesAsync(new[]
+            {
+                new OrganizationFileInput(files[0].Id, "CLAUDE.md", "# Claude", false),
+                new OrganizationFileInput(files[1].Id, "AGENTS.md", "# Agents, edited", false),
+            });
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var stamps = await ctx.OrganizationFiles.AsNoTracking().ToDictionaryAsync(f => f.Path, f => f.UpdatedAt);
+            stamps["CLAUDE.md"].Should().BeBefore(DateTime.UtcNow.AddHours(-1));
+            stamps["AGENTS.md"].Should().BeAfter(DateTime.UtcNow.AddHours(-1));
         }
     }
 

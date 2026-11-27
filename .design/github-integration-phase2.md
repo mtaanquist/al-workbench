@@ -1409,7 +1409,9 @@ organisation has them now. `RepositoryFilesService` owns it.
 - **Stored** in `github_repository_file_checks`, one row per repository with the missing and
   changed paths and the workspace files pull request open when it was read. Replaced per
   repository by "Check again" and for the organisation by "Check all again"; nothing runs it
-  on a schedule yet.
+  on a schedule yet. When an always-included file, a template or a standard was saved
+  after the oldest stored check, the Repositories page says so above "Check all again",
+  so a newly added file does not go unnoticed.
 - **The pull request** is opened with the person's own account on `aldt/workspace-files`,
   added to while open, and started again from the default branch once merged or closed. It
   writes only the files that differ.

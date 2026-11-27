@@ -264,6 +264,27 @@ public sealed class RepositoryListService
     }
 
     /// <summary>
+    /// True when the files the workspace files column compares were edited after at
+    /// least one repository was last checked: an always-included file, a template (which
+    /// files it opts into), or a repository standard. The column is only read on "Check
+    /// all again", so without this a new file would never show up as something to roll
+    /// out. A removed file does not count, as an update pull request never deletes one.
+    /// </summary>
+    public async Task<bool> WorkspaceFilesChangedSinceCheckAsync(CancellationToken ct = default)
+    {
+        _ = _orgContext.CurrentOrganizationId
+            ?? throw new InvalidOperationException("No organization in scope; the repository list was read outside an authenticated request.");
+
+        var oldestCheck = await _db.GitHubRepositoryFileChecks.AsNoTracking()
+            .MinAsync(c => (DateTime?)c.CheckedAt, ct);
+        if (oldestCheck is not { } checkedAt) return false;
+
+        return await _db.OrganizationFiles.AsNoTracking().AnyAsync(f => f.UpdatedAt > checkedAt, ct)
+            || await _db.RuntimeTemplates.AsNoTracking().AnyAsync(t => t.DeletedAt == null && t.UpdatedAt > checkedAt, ct)
+            || await _db.GitHubRepositoryStandardFiles.AsNoTracking().AnyAsync(f => f.UpdatedAt > checkedAt, ct);
+    }
+
+    /// <summary>
     /// An extension as the person knows it: the folder its <c>app.json</c> sits in, or the
     /// repository's own name when the manifest is at the root.
     /// </summary>
