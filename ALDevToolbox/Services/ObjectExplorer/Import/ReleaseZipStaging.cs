@@ -92,7 +92,7 @@ public static class ReleaseZipStaging
     /// is materialised lazily from the central directory, so reading
     /// <see cref="ICollection{T}.Count"/> is cheap relative to opening each entry.
     /// </summary>
-    private static void GuardEntryCount(ZipArchive archive)
+    internal static void GuardEntryCount(ZipArchive archive)
     {
         var count = archive.Entries.Count;
         if (count > MaxArchiveEntries)
