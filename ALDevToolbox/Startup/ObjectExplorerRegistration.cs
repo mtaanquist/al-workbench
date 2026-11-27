@@ -16,6 +16,8 @@ public static class ObjectExplorerRegistration
         // One per process: what is importing now, and the gate whole-release imports share (#1180).
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseIngests>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportService>();
+        // Symbols for encrypted vendor apps that ship their source (#1803).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.EncryptedAppSymbols>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.CalImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.DvdDownloadService>();
         // Resolve + download Microsoft OnPrem artifacts straight from the CDN, and the

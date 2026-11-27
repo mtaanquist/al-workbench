@@ -25,6 +25,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// </summary>
 public class ReleaseImportService
 {
+    // Optional: symbols for encrypted vendor apps from the AppSource feed (#1803).
+    // Hand-built instances (tests) without it leave encrypted apps out, as before.
+    private readonly EncryptedAppSymbols? _encryptedAppSymbols;
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly StorageQuotaGuard _quotaGuard;
@@ -83,9 +86,11 @@ public class ReleaseImportService
         ProjectAccess access,
         ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
         ReleaseIngests? ingests = null,
-        IDbContextFactory<AppDbContext>? blobContexts = null)
+        IDbContextFactory<AppDbContext>? blobContexts = null,
+        EncryptedAppSymbols? encryptedAppSymbols = null)
     {
         _blobContexts = blobContexts;
+        _encryptedAppSymbols = encryptedAppSymbols;
         _db = db;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
@@ -1101,7 +1106,7 @@ public class ReleaseImportService
 
     private async Task ImportOneAppAsync(
         int orgId, OeRelease release, AppFileUpload upload, ImportTotals totals,
-        bool storeSymbolReference, CancellationToken ct)
+        bool storeSymbolReference, CancellationToken ct, bool fromFeed = false)
     {
         // Pull the .app's Translations/*.xlf out only for first-party (Microsoft)
         // releases: those are the DVDs whose language packs seed the org-wide
@@ -1115,6 +1120,29 @@ public class ReleaseImportService
         try
         {
             pkg = await AppPackageReader.ReadAsync(upload.AppStream, storeSymbolReference, captureTranslations, ct);
+        }
+        catch (NeaEncryptedAppException) when (_encryptedAppSymbols is not null && upload.SourceZipStream is not null && !fromFeed)
+        {
+            // An encrypted app that ships its source: read the app from the
+            // AppSource feed's symbols for that exact version, with the source
+            // beside it (#1803). The symbols package is unencrypted, so the
+            // retry reads; if the feed has nothing, the app is left out with why.
+            var source = new MemoryStream();
+            await upload.SourceZipStream.CopyToAsync(source, ct);
+            var found = await _encryptedAppSymbols.FindAsync(source, ct);
+            if (found.SymbolsApp is null)
+            {
+                _logger.LogWarning(
+                    "Skipping encrypted app {File} in ReleaseId={ReleaseId}: {Reason}",
+                    upload.FileName, release.Id, found.Reason);
+                totals.Unreadable.Add(new ReleaseSkippedApp(upload.FileName, found.Reason!));
+                return;
+            }
+            source.Position = 0;
+            await ImportOneAppAsync(orgId, release,
+                upload with { AppStream = new MemoryStream(found.SymbolsApp, writable: false), SourceZipStream = source },
+                totals, storeSymbolReference, ct, fromFeed: true);
+            return;
         }
         catch (NeaEncryptedAppException)
         {
