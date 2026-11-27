@@ -135,6 +135,15 @@ public class OeRelease
     /// <summary>Free-text error context for <c>status = 'failed'</c>; null otherwise.</summary>
     public string? StatusMessage { get; set; }
 
+    /// <summary>
+    /// The uploaded apps a <c>ready</c> import left out because they could not be
+    /// read (an encrypted <c>.app</c>), as a JSON list of
+    /// <see cref="Services.ObjectExplorer.Import.ReleaseSkippedApp"/>; null when
+    /// nothing was left out. Keeps one bad app from failing the whole release
+    /// (#1801).
+    /// </summary>
+    public string? SkippedAppsJson { get; set; }
+
     public DateTime ImportedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

@@ -34,6 +34,8 @@ internal static class LeftoverImportTempFiles
         ReleaseImportRequestService.FolderZipTempPrefix,
         ReleaseImportRequestService.CalTxtTempPrefix,
         ReleaseImportRequestService.AddModulesTempPrefix,
+        EncryptedAppSymbols.TempPrefix,
+        ReleaseImportRequestService.PackageGroupTempPrefix,
         ALDevToolbox.Services.Migration.RepositoryMigrationPreviewer.TempPrefix,
     ];
 

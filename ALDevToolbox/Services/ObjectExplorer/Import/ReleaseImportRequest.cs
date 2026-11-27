@@ -62,7 +62,8 @@ public sealed record AppFileUpload(
 /// <summary>
 /// Summary statistics from an import run — surfaced on the admin UI's
 /// completion screen (PR 5) and exposed to tests so they can pin the exact
-/// counts without re-querying the database.
+/// counts without re-querying the database. <c>Unreadable</c> lists the apps
+/// left out because they could not be read (#1801).
 /// </summary>
 public sealed record ReleaseImportSummary(
     int ReleaseId,
@@ -71,4 +72,5 @@ public sealed record ReleaseImportSummary(
     int ObjectsImported,
     int ReferencesImported,
     int SourceFilesImported,
-    int TranslationsImported);
+    int TranslationsImported,
+    IReadOnlyList<ReleaseSkippedApp>? Unreadable = null);

@@ -167,7 +167,7 @@ public sealed class AlSymbolFeedResolver
             _logger.LogInformation("Resolved symbols for {App} {Version} from the {Feed}{Cached}.",
                 package.Name, package.Version, package.Feed, package.FromCache ? " (cached)" : string.Empty);
 
-            foreach (var dep in package.Dependencies)
+            foreach (var dep in request.IncludeDependencies ? package.Dependencies : [])
             {
                 // The package id is the only name a transitive dependency has
                 // until it is fetched; its publisher.name part reads well enough
@@ -206,7 +206,7 @@ public sealed class AlSymbolFeedResolver
 
     private async Task<CachedPackage?> ResolveOneAsync(Pending want, SymbolFeedRequest request, List<string> reasons, CancellationToken ct)
     {
-        var cached = FindInCache(want.AppId, want.MinVersion, request.ApplicationVersion);
+        var cached = FindInCache(want.AppId, want.MinVersion, request.ApplicationVersion, request.ExactVersion);
         if (cached is not null) return cached;
 
         foreach (var (feedName, indexUrl) in new[]
@@ -260,6 +260,15 @@ public sealed class AlSymbolFeedResolver
             ? v.EnumerateArray().Select(e => e.GetString()).Where(s => s is not null).Select(s => s!).ToList()
             : new List<string>();
         var candidates = OrderCandidates(versions, want.MinVersion);
+        if (request.ExactVersion && want.MinVersion is { } exact)
+        {
+            candidates = candidates.Where(c => SameVersion(ParseVersion(c), exact)).ToList();
+            if (candidates.Count == 0)
+            {
+                reasons.Add($"the {feedName} does not have version {exact}");
+                return null;
+            }
+        }
         if (candidates.Count == 0)
         {
             reasons.Add(want.MinVersion is null
@@ -303,8 +312,8 @@ public sealed class AlSymbolFeedResolver
         versions
             .Where(s => !s.Contains('-', StringComparison.Ordinal))
             .Select(s => (Raw: s, Parsed: ParseVersion(s)))
-            .Where(x => x.Parsed is not null && (floor is null || x.Parsed >= floor))
-            .OrderBy(x => x.Parsed)
+            .Where(x => x.Parsed is not null && (floor is null || Pad(x.Parsed) >= Pad(floor)))
+            .OrderBy(x => Pad(x.Parsed!))
             .Select(x => x.Raw)
             .ToList();
 
@@ -439,7 +448,7 @@ public sealed class AlSymbolFeedResolver
     /// and fits the target, or null. Checked before any feed call, so a rebuild
     /// against the same dependencies makes no network call at all.
     /// </summary>
-    private CachedPackage? FindInCache(string appId, Version? floor, string? applicationVersion)
+    private CachedPackage? FindInCache(string appId, Version? floor, string? applicationVersion, bool exact = false)
     {
         var appDir = Path.Combine(_options.CacheDirectory, appId);
         if (!Directory.Exists(appDir)) return null;
@@ -447,7 +456,7 @@ public sealed class AlSymbolFeedResolver
         foreach (var dir in Directory.EnumerateDirectories(appDir)
             .Where(d => !Path.GetFileName(d).StartsWith('.'))
             .Select(d => (Dir: d, Version: ParseVersion(Path.GetFileName(d))))
-            .Where(x => x.Version is not null && (floor is null || x.Version >= floor))
+            .Where(x => x.Version is not null && (floor is null || (exact ? SameVersion(x.Version, floor) : Pad(x.Version) >= Pad(floor))))
             .OrderByDescending(x => x.Version))
         {
             var package = TryLoadCached(dir.Dir, appId);
@@ -600,7 +609,7 @@ public sealed class AlSymbolFeedResolver
     }
 
     private static bool Satisfies(Version? have, Version? floor) =>
-        floor is null || (have is not null && have >= floor);
+        floor is null || (have is not null && Pad(have) >= Pad(floor));
 
     // ── HTTP ────────────────────────────────────────────────────────────
 
@@ -683,6 +692,18 @@ public sealed class AlSymbolFeedResolver
     internal static string NormalizeId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? string.Empty : id.Trim().Trim('{', '}').ToLowerInvariant();
 
+    /// <summary>
+    /// Version equality that treats a missing part as zero: NuGet lists
+    /// <c>28.5.0.0</c> as <c>28.5.0</c>, and <see cref="Version"/> holds those as
+    /// unequal (an absent revision is -1, so <c>28.5.0</c> also sorts below
+    /// <c>28.5.0.0</c>). Floors and ordering compare padded versions for the same reason.
+    /// </summary>
+    internal static bool SameVersion(Version? a, Version? b) =>
+        a is not null && b is not null && Pad(a) == Pad(b);
+
+    internal static Version Pad(Version v) =>
+        new(v.Major, v.Minor, Math.Max(v.Build, 0), Math.Max(v.Revision, 0));
+
     internal static Version? ParseVersion(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -712,12 +733,16 @@ public sealed class AlSymbolFeedResolver
 /// <param name="ProvidedAppIds">Lower-cased app ids something else supplies (siblings the build compiles, stored uploads); never fetched.</param>
 /// <param name="ApplicationVersion">The Business Central Major.Minor the build compiles against; a package built for a newer one is passed over.</param>
 /// <param name="Country">The build's country, to pick a localised Microsoft package over the worldwide one.</param>
+/// <param name="ExactVersion">Fetch exactly each dependency's version rather than the newest at or above it (#1803: symbols to pair with a vendor's source for that version).</param>
+/// <param name="IncludeDependencies">Also fetch what each package depends on; a build needs them, a single app's symbols do not.</param>
 public sealed record SymbolFeedRequest(
     IReadOnlyList<SymbolDependency> Dependencies,
     string TargetDirectory,
     IReadOnlySet<string> ProvidedAppIds,
     string? ApplicationVersion,
-    string? Country);
+    string? Country,
+    bool ExactVersion = false,
+    bool IncludeDependencies = true);
 
 /// <summary>One app a build needs, by id, with the lowest version it accepts.</summary>
 public sealed record SymbolDependency(string AppId, string? Name, string? MinVersion);

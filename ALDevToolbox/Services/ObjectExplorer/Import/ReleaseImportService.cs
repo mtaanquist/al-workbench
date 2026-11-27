@@ -25,6 +25,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// </summary>
 public class ReleaseImportService
 {
+    // Optional: symbols for encrypted vendor apps from the AppSource feed (#1803).
+    // Hand-built instances (tests) without it leave encrypted apps out, as before.
+    private readonly EncryptedAppSymbols? _encryptedAppSymbols;
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly StorageQuotaGuard _quotaGuard;
@@ -83,9 +86,11 @@ public class ReleaseImportService
         ProjectAccess access,
         ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
         ReleaseIngests? ingests = null,
-        IDbContextFactory<AppDbContext>? blobContexts = null)
+        IDbContextFactory<AppDbContext>? blobContexts = null,
+        EncryptedAppSymbols? encryptedAppSymbols = null)
     {
         _blobContexts = blobContexts;
+        _encryptedAppSymbols = encryptedAppSymbols;
         _db = db;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
@@ -228,6 +233,7 @@ public class ReleaseImportService
                 ct.ThrowIfCancellationRequested();
                 await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference, ct);
             }
+            ThrowIfNothingReadable(totals);
 
             // SourceTable propagation for pageextensions. The symbol
             // package only carries SourceTable on the base page; the
@@ -269,6 +275,7 @@ public class ReleaseImportService
             var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct)
                 ?? throw new InvalidOperationException($"Release {release.Id} disappeared mid-ingest.");
             ready.BcVersion = await InferBcVersionAsync(release.Id, ct);
+            ready.SkippedAppsJson = ReleaseSkippedApp.Serialize(totals.Unreadable);
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
 
@@ -305,7 +312,8 @@ public class ReleaseImportService
                 ObjectsImported: totals.ObjectsImported,
                 ReferencesImported: totals.ReferencesImported,
                 SourceFilesImported: totals.SourceFilesImported,
-                TranslationsImported: totals.TranslationsImported);
+                TranslationsImported: totals.TranslationsImported,
+                Unreadable: totals.Unreadable);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -322,7 +330,11 @@ public class ReleaseImportService
                 release.Id, totals.ModulesImported);
             // Stamp the release as failed so the UI can show the operator which
             // upload didn't make it.
-            await StampFailedAsync(release.Id, ex.Message);
+            // A refusal's own words name the app that caused it; the exception's
+            // Message is only the generic "plan has N errors" summary.
+            await StampFailedAsync(release.Id, ex is PlanValidationException { Errors.Count: > 0 } pve
+                ? string.Join(" ", pve.Errors.Values)
+                : ex.Message);
             throw;
         }
     }
@@ -573,6 +585,7 @@ public class ReleaseImportService
                 // Amend (#216) doesn't expose the store-symbol-reference option.
                 await ImportOneAppAsync(orgId, release, upload, totals, storeSymbolReference: false, ct);
             }
+            ThrowIfNothingReadable(totals);
 
             // Same post-passes as ImportReleaseAsync (lines ~130–147). The
             // first two are idempotent UPDATEs; the third (call-site
@@ -602,6 +615,12 @@ public class ReleaseImportService
                 ready.BcVersion = inferred;
             }
 
+            // The apps this amend could not read join the ones the earlier
+            // imports left out, and a left-out app it did import (a readable
+            // copy under the same file name, the fix the manage page suggests)
+            // comes off the list.
+            ready.SkippedAppsJson = ReleaseSkippedApp.Serialize(
+                ReleaseSkippedApp.Merge(ReleaseSkippedApp.Deserialize(ready.SkippedAppsJson), totals.Unreadable, totals.ImportedFileNames));
             ready.Status = "ready";
             ready.UpdatedAt = DateTime.UtcNow;
 
@@ -661,7 +680,8 @@ public class ReleaseImportService
             ObjectsImported: totals.ObjectsImported,
             ReferencesImported: totals.ReferencesImported,
             SourceFilesImported: totals.SourceFilesImported,
-            TranslationsImported: totals.TranslationsImported);
+            TranslationsImported: totals.TranslationsImported,
+                Unreadable: totals.Unreadable);
     }
 
     /// <summary>
@@ -864,6 +884,54 @@ public class ReleaseImportService
     }
 
     /// <summary>
+    /// The Microsoft release a vendor package's apps for Business Central
+    /// <paramref name="bcMajorMinor"/> ("29.1") sit on (#1802): a ready, released
+    /// first-party release of that version. <paramref name="preferredId"/> (the
+    /// parent the admin picked on the form) wins when it is one of them, so an
+    /// admin with a W1 and a DK release of the same version still decides;
+    /// otherwise the newest import. With none of that version, the admin's pick
+    /// stands (or null without one).
+    /// </summary>
+    public async Task<int?> FindParentForBcVersionAsync(string bcMajorMinor, int? preferredId, CancellationToken ct = default)
+    {
+        var prefix = bcMajorMinor + ".";
+        var candidates = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.Kind == "first_party" && r.Status == "ready" && !r.IsPrerelease && r.DeletedAt == null
+                && r.BcVersion != null && (r.BcVersion == bcMajorMinor || r.BcVersion.StartsWith(prefix)))
+            .OrderByDescending(r => r.ImportedAt)
+            .Select(r => r.Id)
+            .ToListAsync(ct);
+        if (preferredId is { } preferred && candidates.Contains(preferred)) return preferred;
+        return candidates.Count > 0 ? candidates[0] : preferredId;
+    }
+
+    /// <summary>
+    /// The Business Central version a third-party release made from a split
+    /// vendor package was cut for, so a Retry or Add modules with the whole
+    /// package imports only that version's apps (#1802). Read from the
+    /// <c>(BC x.y)</c> label suffix the split gives it, else from its parent's
+    /// version. Null for a release that is not third-party (or not found);
+    /// <see cref="PackageTarget.BcVersion"/> is null when neither says.
+    /// </summary>
+    public async Task<PackageTarget?> GetPackageTargetAsync(int releaseId, CancellationToken ct = default)
+    {
+        var release = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.Id == releaseId && r.Kind == "third_party")
+            .Select(r => new { r.Label, ParentVersion = r.ParentRelease != null ? r.ParentRelease.BcVersion : null })
+            .FirstOrDefaultAsync(ct);
+        if (release is null) return null;
+        var suffix = PackageLabelSuffix().Match(release.Label);
+        if (suffix.Success) return new PackageTarget(suffix.Groups["v"].Value);
+        var parent = AlSymbolFeedResolver.ParseVersion(release.ParentVersion);
+        return new PackageTarget(parent is null ? null : $"{parent.Major}.{parent.Minor}");
+    }
+
+    private static readonly Regex PackageLabelSuffixPattern =
+        new(@"\(BC (?<v>\d{1,4}\.\d{1,4})\)\s*$", RegexOptions.Compiled);
+
+    private static Regex PackageLabelSuffix() => PackageLabelSuffixPattern;
+
+    /// <summary>
     /// The parent id arrives from a form field, so it is read back through the
     /// org-filtered <c>OeReleases</c> set rather than trusted: the chain walk in
     /// <see cref="Explore.ReleaseAncestrySql"/> follows parent pointers in raw SQL,
@@ -966,6 +1034,7 @@ public class ReleaseImportService
 
         release.Status = "ingesting";
         release.StatusMessage = null;
+        release.SkippedAppsJson = null;
         release.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
@@ -1006,6 +1075,7 @@ public class ReleaseImportService
 
         release.Status = "ingesting";
         release.StatusMessage = null;
+        release.SkippedAppsJson = null;
         release.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
@@ -1062,7 +1132,7 @@ public class ReleaseImportService
 
     private async Task ImportOneAppAsync(
         int orgId, OeRelease release, AppFileUpload upload, ImportTotals totals,
-        bool storeSymbolReference, CancellationToken ct)
+        bool storeSymbolReference, CancellationToken ct, bool fromFeed = false)
     {
         // Pull the .app's Translations/*.xlf out only for first-party (Microsoft)
         // releases: those are the DVDs whose language packs seed the org-wide
@@ -1077,12 +1147,41 @@ public class ReleaseImportService
         {
             pkg = await AppPackageReader.ReadAsync(upload.AppStream, storeSymbolReference, captureTranslations, ct);
         }
-        catch (NeaEncryptedAppException ex)
+        catch (NeaEncryptedAppException) when (_encryptedAppSymbols is not null && upload.SourceZipStream is not null && !fromFeed)
         {
-            throw new PlanValidationException(new Dictionary<string, string>
+            // An encrypted app that ships its source: read the app from the
+            // AppSource feed's symbols for that exact version, with the source
+            // beside it (#1803). The symbols package is unencrypted, so the
+            // retry reads; if the feed has nothing, the app is left out with why.
+            var source = new MemoryStream();
+            await upload.SourceZipStream.CopyToAsync(source, ct);
+            var found = await _encryptedAppSymbols.FindAsync(source, ct);
+            if (found.SymbolsApp is null)
             {
-                [$"Uploads.{upload.FileName}"] = $"{upload.FileName}: {ex.Message}",
-            });
+                _logger.LogWarning(
+                    "Skipping encrypted app {File} in ReleaseId={ReleaseId}: {Reason}",
+                    upload.FileName, release.Id, found.Reason);
+                totals.Unreadable.Add(new ReleaseSkippedApp(upload.FileName, found.Reason!));
+                return;
+            }
+            source.Position = 0;
+            await ImportOneAppAsync(orgId, release,
+                upload with { AppStream = new MemoryStream(found.SymbolsApp, writable: false), SourceZipStream = source },
+                totals, storeSymbolReference, ct, fromFeed: true);
+            return;
+        }
+        catch (NeaEncryptedAppException)
+        {
+            // One encrypted app must not sink the rest of the upload (#1801):
+            // vendors such as Continia ship encrypted .app files beside readable
+            // ones. Skip it, record why, and let the release go ready with the
+            // skipped list on it. An upload where nothing was readable still
+            // fails, in the caller.
+            _logger.LogWarning(
+                "Skipping encrypted app {File} in ReleaseId={ReleaseId}",
+                upload.FileName, release.Id);
+            totals.Unreadable.Add(new ReleaseSkippedApp(upload.FileName, ReleaseSkippedApp.EncryptedReason));
+            return;
         }
 
         // Idempotency: if this Release already has a module with the same
@@ -1415,6 +1514,7 @@ public class ReleaseImportService
         }
 
         totals.ModulesImported++;
+        totals.ImportedFileNames.Add(upload.FileName);
 
         // First-party (Microsoft) release ingest now extracts the module's
         // Translations/*.xlf and feeds the org-wide translation memory. Only
@@ -2088,6 +2188,21 @@ public class ReleaseImportService
 
     // ── Mutable tally ───────────────────────────────────────────────────
 
+    /// <summary>
+    /// Refuses an upload in which every app was unreadable: a release with none of
+    /// the uploaded apps in it is a failure, not a partial import (#1801). The
+    /// message names each app so the admin knows what to replace.
+    /// </summary>
+    private static void ThrowIfNothingReadable(ImportTotals totals)
+    {
+        if (totals.Unreadable.Count == 0 || totals.ModulesImported > 0 || totals.ModulesSkipped > 0) return;
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["Uploads"] = "None of the uploaded apps could be read: "
+                + string.Join("; ", totals.Unreadable.Select(a => $"{a.FileName} ({a.Reason})")),
+        });
+    }
+
     private sealed class ImportTotals
     {
         public int ModulesImported;
@@ -2100,6 +2215,13 @@ public class ReleaseImportService
         // which don't capture translations). Admins can still add more via
         // TranslationImportService's explicit upload paths afterwards.
         public int TranslationsImported;
+        // Apps the import could not read and left out (#1801), in upload
+        // order. Distinct from ModulesSkipped, which counts byte-identical
+        // re-uploads that were already there.
+        public List<ReleaseSkippedApp> Unreadable { get; } = new();
+        // File names that landed as modules, so an amend that adds a readable
+        // copy of a left-out app takes it off the skipped list.
+        public HashSet<string> ImportedFileNames { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -2162,3 +2284,6 @@ public class ReleaseImportService
         await _db.Database.ExecuteSqlRawAsync(sql, new object[] { releaseId }, ct);
     }
 }
+
+/// <summary>What <see cref="ReleaseImportService.GetPackageTargetAsync"/> found: the Business Central version a split release was cut for, when known.</summary>
+public sealed record PackageTarget(string? BcVersion);

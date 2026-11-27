@@ -80,6 +80,13 @@ internal static class ObjectExplorerEndpoints
                 {
                     case ReleaseImportOutcome.Imported imported:
                         var summary = imported.Summary;
+                        // Apps left out are listed only on the manage page, so send
+                        // the admin there rather than to a release that looks complete.
+                        if (summary.Unreadable is { Count: > 0 })
+                        {
+                            ctx.Response.Redirect($"/admin/object-explorer/release/{summary.ReleaseId}/manage");
+                            break;
+                        }
                         var query = $"/object-explorer/release/{summary.ReleaseId}"
                             + $"?ok=imported"
                             + $"&modules={summary.ModulesImported}"
@@ -97,6 +104,11 @@ internal static class ObjectExplorerEndpoints
                         break;
                     case ReleaseImportOutcome.StagingFailed staged:
                         RedirectQueued(ctx, staged.ReleaseId);
+                        break;
+                    case ReleaseImportOutcome.QueuedPackage package:
+                        ctx.Response.Redirect(package.ReleaseIds.Count == package.GroupCount
+                            ? $"/admin/object-explorer?ok=queued-package&id={package.ReleaseIds.Count}"
+                            : $"/admin/object-explorer?ok=queued-package-partly&id={package.ReleaseIds.Count}&skipped={package.GroupCount}");
                         break;
                 }
             }

@@ -16,6 +16,8 @@ public static class ObjectExplorerRegistration
         // One per process: what is importing now, and the gate whole-release imports share (#1180).
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseIngests>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportService>();
+        // Symbols for encrypted vendor apps that ship their source (#1803).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.EncryptedAppSymbols>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.CalImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.DvdDownloadService>();
         // Resolve + download Microsoft OnPrem artifacts straight from the CDN, and the
@@ -53,6 +55,12 @@ public static class ObjectExplorerRegistration
         // staged to disk, and what goes on the queue. The endpoints only read the
         // form and redirect on the outcome.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportRequestService>();
+        // Vendor package layouts a third-party folder ZIP is checked against, in
+        // order; the generic layout is always last (#1802). A new vendor format is
+        // one more line here.
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.Packages.IThirdPartyPackageLayout,
+            ALDevToolbox.Services.ObjectExplorer.Import.Packages.ContiniaPackageLayout>();
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.Packages.ThirdPartyPackageLayouts>();
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportWorker>();
         // Builds have their own line (#1137). Every possible worker is registered, and the
         // queue's limit decides how many build at once: the site setting, else
