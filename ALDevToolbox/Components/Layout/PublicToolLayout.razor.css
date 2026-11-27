@@ -13,7 +13,7 @@
     flex: none;
     display: flex;
     justify-content: flex-end;
-    padding: var(--space-2) var(--space-6) 0;
+    padding: var(--space-2) var(--space-6);
 }
 
 .public-signin {
@@ -45,21 +45,40 @@
     height: 100%;
 }
 
-/* On the full-bleed .pw frame (Diff) the row joins the frame's white head
-   instead of sitting on the page background as a strip above it. */
-.public-frame:has(.pw) .public-top {
-    background: var(--surface);
-    padding: var(--space-1) var(--space-3) 0;
+/* Without the sidebar the tool would run edge to edge on a wide screen, so on
+   desktop it sits in a centred column, with the sign-in row on the same
+   column. Phone width keeps the full width. */
+@media (min-width: 701px) {
+    .public-top,
+    .app__content-inner {
+        width: 100%;
+        max-width: 1200px;
+        margin-inline: auto;
+        box-sizing: border-box;
+    }
+
+    /* Diff's .pw frame is built to fill the window: give it the page gutter
+       back and an edge, so it reads as a panel inside the column. */
+    .public-frame:has(.pw) .app__content-inner {
+        max-width: 1600px;
+        padding: 0 var(--space-6) var(--space-6);
+    }
+
+    .public-frame:has(.pw) .public-top {
+        max-width: 1600px;
+    }
+
+    .app__content-inner ::deep .pw {
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        overflow: hidden;
+    }
 }
 
 @media (max-width: 700px) {
     /* Matches shell.css's phone gutter for .app__content-inner. */
     .public-top {
         padding-inline: var(--space-4);
-    }
-
-    .public-frame:has(.pw) .public-top {
-        padding-inline: var(--space-3);
     }
 
     .public-signin {
