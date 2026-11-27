@@ -1070,6 +1070,93 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         }
     }
 
+    private async Task<int> SeedSplitReleaseAsync(Data.AppDbContext ctx, string label, string status)
+    {
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = label, Kind = "third_party", Status = status,
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        return release.Id;
+    }
+
+    private static UploadedFile ContiniaPackage()
+    {
+        var bytes = ContiniaPackageLayoutTests.Zip(ContiniaPackageLayoutTests.PackageEntries);
+        return new UploadedFile("CBA 29.1.1.257932 - W1.zip", bytes.Length, () => new MemoryStream(bytes, writable: false));
+    }
+
+    private static List<string> WalkedAppNames(string zipPath)
+    {
+        using var zip = ZipFile.OpenRead(zipPath);
+        return FolderZipWalker.Walk(zip).Select(e => e.FileName).ToList();
+    }
+
+    [Fact]
+    public async Task Retrying_a_split_release_with_the_whole_package_imports_only_its_business_central_version()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedSplitReleaseAsync(ctx, "Continia 29.1.1 (BC 29.1)", "failed");
+        var queue = new ReleaseImportQueue();
+
+        var outcome = await NewService(ctx, queue).RetryAsync(releaseId, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false,
+            FolderZip: ContiniaPackage(), CalTxtFile: null));
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        var staged = job!.Source.Should().BeOfType<ReleaseImportSource.StagedZip>().Subject;
+        Track(staged.TempPath);
+        WalkedAppNames(staged.TempPath).Should().HaveCount(4).And.OnlyContain(n => n.Contains(" - 29.1"));
+    }
+
+    [Fact]
+    public async Task Adding_the_whole_package_to_a_split_release_adds_only_its_business_central_version()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedSplitReleaseAsync(ctx, "Continia 29.1.1 (BC 29.0)", "ready");
+        var queue = new ReleaseImportQueue();
+
+        await NewService(ctx, queue).AmendAsync(releaseId, ContiniaPackage(), [], []);
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        var staged = job!.Source.Should().BeOfType<ReleaseImportSource.AddModules>().Subject;
+        Track(staged.TempPath);
+        WalkedAppNames(staged.TempPath).Should().HaveCount(5).And.OnlyContain(n => n.Contains(" - 29.0"));
+    }
+
+    [Fact]
+    public async Task A_package_with_no_folder_for_the_release_version_is_refused_and_the_release_is_untouched()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedSplitReleaseAsync(ctx, "Continia 28.0 (BC 28.0)", "ready");
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).AmendAsync(releaseId, ContiniaPackage(), [], []);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["AppFiles"].Should().Contain("28.0");
+        (await StatusAsync(releaseId)).Should().Be("ready");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Retrying_a_release_of_unknown_version_with_a_package_of_several_versions_is_refused()
+    {
+        await using var ctx = _db.NewContext();
+        var releaseId = await SeedSplitReleaseAsync(ctx, "Continia", "failed");
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).RetryAsync(releaseId, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false,
+            FolderZip: ContiniaPackage(), CalTxtFile: null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Retry");
+        (await StatusAsync(releaseId)).Should().Be("failed");
+    }
+
     [Fact]
     public async Task A_continia_package_with_a_blank_label_is_refused_before_anything_is_created()
     {

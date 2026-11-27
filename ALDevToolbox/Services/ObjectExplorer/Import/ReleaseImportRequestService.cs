@@ -300,19 +300,30 @@ public sealed class ReleaseImportRequestService
         }
         // Paired before anything changes, so a clash is refused with the release untouched.
         var pairs = folderZip is null ? PairIndividualFiles(appFiles, sourceZips) : null;
+        // A whole vendor package added to one of its split releases: only that
+        // release's Business Central version, also refused before anything changes.
+        var groupZip = folderZip is null ? null : await TryExtractPackageGroupAsync(releaseId, folderZip, "AppFiles", ct);
 
         // From the flip on the release reads as importing; until the job row says so,
         // this tracker tells a build waiting on it that someone is (#1180).
         using var tracking = _importer.Ingests.Track(releaseId);
-        await _importer.BeginAmendAsync(releaseId, ct);
+        try
+        {
+            await _importer.BeginAmendAsync(releaseId, ct);
+        }
+        catch
+        {
+            if (groupZip is not null) TryDelete(groupZip);
+            throw;
+        }
 
-        string? stagedPath = null;
+        string? stagedPath = groupZip;
         long? jobRowId = null;
         try
         {
             try
             {
-                stagedPath = pairs is null
+                stagedPath ??= pairs is null
                     ? await StageUploadToTempAsync(folderZip!, AddModulesTempPrefix, ".zip", ct)
                     : await StagePairsToTempZipAsync(pairs, ct);
             }
@@ -481,6 +492,11 @@ public sealed class ReleaseImportRequestService
         {
             await _dvdDownloader.ValidateUrlForQueueAsync(urlToUse, ct);
         }
+        // A whole vendor package re-uploaded for one of its split releases: only
+        // that release's Business Central version, refused before anything changes.
+        var groupZip = hasFolderZip && urlToUse is null && visible
+            ? await TryExtractPackageGroupAsync(releaseId, folderZip!, "Retry", ct)
+            : null;
 
         // Flip failed → ingesting (validates state) and wipe the previous
         // attempt's partial modules so the re-run can't skip a
@@ -488,7 +504,15 @@ public sealed class ReleaseImportRequestService
         // the job is queued only after it: until then nothing else says the release
         // is being worked on, so a build polling it would take it for abandoned (#1180).
         using var reopened = _importer.Ingests.Track(releaseId);
-        await _importer.ReopenForRetryAsync(releaseId, visible, ct);
+        try
+        {
+            await _importer.ReopenForRetryAsync(releaseId, visible, ct);
+        }
+        catch
+        {
+            if (groupZip is not null) TryDelete(groupZip);
+            throw;
+        }
 
         // From the reopen on the release reads as importing, but nothing works on it
         // until its job is queued. Anything that stops the steps below (leaving the
@@ -498,7 +522,7 @@ public sealed class ReleaseImportRequestService
         // and the earlier attempt's modules stay; a failure after it (the blob reclaim,
         // staging, the job row) leaves them already removed. Either way the next Retry
         // starts by wiping again.
-        string? stagedPath = null;
+        string? stagedPath = groupZip;
         long? jobRowId = null;
         try
         {
@@ -512,6 +536,10 @@ public sealed class ReleaseImportRequestService
             else if (urlToUse is not null)
             {
                 source = new ReleaseImportSource.Url(urlToUse);
+            }
+            else if (groupZip is not null)
+            {
+                source = new ReleaseImportSource.StagedZip(groupZip, IsDvd: false);
             }
             else if (hasFolderZip)
             {
@@ -621,19 +649,27 @@ public sealed class ReleaseImportRequestService
             for (var i = 0; i < groupZips.Count; i++)
             {
                 var (group, groupZip) = groupZips[i];
-                int releaseId;
+                var handedOver = false;
                 try
                 {
                     var parentId = await _importer.FindParentForBcVersionAsync(group.BcVersion, metadata.ParentReleaseId, ct);
-                    releaseId = await _importer.BeginReleaseAsync(metadata with
+                    var releaseId = await _importer.BeginReleaseAsync(metadata with
                     {
                         Label = $"{metadata.Label.Trim()} (BC {group.BcVersion})",
                         ParentReleaseId = parentId,
                     }, ct);
+
+                    // Hands the temp ZIP to the job, or fails the release and deletes it.
+                    handedOver = true;
+                    await StageAndQueueNewAsync(
+                        releaseId, upload: null,
+                        _ => new ReleaseImportSource.StagedZip(groupZip, IsDvd: false),
+                        storeSymbolReference, ct, unqueuedPath: groupZip);
+                    releaseIds.Add(releaseId);
                 }
                 catch (Exception ex)
                 {
-                    groupZips.Skip(i).ToList().ForEach(g => TryDelete(g.Path));
+                    groupZips.Skip(handedOver ? i + 1 : i).ToList().ForEach(g => TryDelete(g.Path));
                     // Releases already queued stay and import; say so rather than
                     // send the admin back to a form whose resubmit would repeat them.
                     if (releaseIds.Count > 0 && ex is not OperationCanceledException)
@@ -643,19 +679,75 @@ public sealed class ReleaseImportRequestService
                     }
                     throw;
                 }
-
-                // Hands the temp ZIP to the job, or fails the release and deletes it.
-                await StageAndQueueNewAsync(
-                    releaseId, upload: null,
-                    _ => new ReleaseImportSource.StagedZip(groupZip, IsDvd: false),
-                    storeSymbolReference, ct, unqueuedPath: groupZip);
-                releaseIds.Add(releaseId);
             }
 
             _logger.LogInformation(
                 "Queued {Layout} package {File} as {Count} release(s): {ReleaseIds}",
                 layout.Name, upload.FileName, releaseIds.Count, releaseIds);
             return new ReleaseImportOutcome.QueuedPackage(releaseIds, split.Groups.Count);
+        }
+    }
+
+    /// <summary>
+    /// For a Retry or Add modules on a third-party release: when the ZIP is a vendor
+    /// package that the layouts split, writes only the group for the release's
+    /// Business Central version to a temp ZIP and returns its path, so a re-upload
+    /// of the whole package does what the admin means instead of colliding on app
+    /// id and version across versions (#1802). Null when the ZIP is not a split
+    /// package (or the release is not third-party): the caller stages it as
+    /// uploaded. Refuses, on <paramref name="field"/>, a package with no folder
+    /// for that version.
+    /// </summary>
+    private async Task<string?> TryExtractPackageGroupAsync(
+        int releaseId, UploadedFile zip, string field, CancellationToken ct)
+    {
+        var target = await _importer.GetPackageTargetAsync(releaseId, ct);
+        if (target is null) return null;
+
+        await using var stream = zip.OpenRead();
+        if (!stream.CanSeek) return null;
+        ZipArchive archive;
+        try
+        {
+            archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+            ReleaseZipStaging.GuardEntryCount(archive);
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+
+        using (archive)
+        {
+            var layout = _layouts.Resolve(archive);
+            if (layout.Plan(archive) is not PackagePlan.Split { Groups.Count: > 0 } split) return null;
+
+            var group = target.BcVersion is { } version
+                ? split.Groups.FirstOrDefault(g => g.BcVersion == version)
+                : split.Groups.Count == 1 ? split.Groups[0] : null;
+            if (group is null)
+            {
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    [field] = target.BcVersion is { } v
+                        ? $"This {layout.Name} package has no apps for Business Central {v}, the version this release is for."
+                        : $"This {layout.Name} package holds several Business Central versions. Upload a ZIP of just the folder for this release's version.",
+                });
+            }
+
+            try
+            {
+                var (path, _) = await WriteGroupZipAsync(group, MaxPackageRepackBytes, ct);
+                return path;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException)
+            {
+                _logger.LogWarning(ex, "Could not unpack the {Layout} package {File} for release {ReleaseId}.", layout.Name, zip.FileName, releaseId);
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    [field] = $"The {layout.Name} package could not be unpacked: {ex.Message}",
+                });
+            }
         }
     }
 
