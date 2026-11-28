@@ -5,12 +5,13 @@
 @using ALDevToolbox.Services.Tools
 @inject IToolAvailability ToolAvailability
 @inject DashboardService Dashboard
+@inject ALDevToolbox.Services.SingleTenant.ISingleTenantMode SingleTenant
 
 <PageTitle>AL Workbench</PageTitle>
 
 @*
     Tools home, on page archetype 1 ("tool launcher"). Cards stay visible for
-    unauthenticated visitors - each card just points at /login?returnUrl=<tool>
+    unauthenticated visitors - each card just points at /login?return=<tool>
     instead of the tool itself, and we add a small lock badge so it's obvious
     sign-in is needed first. The MCP card is additionally gated on the site-wide
     MCP enable flag (no point linking to a feature the SiteAdmin turned off).
@@ -51,8 +52,18 @@
         <LauncherPage Title="AL Workbench" Subtitle="Pick a tool to get started." Groups="@Groups(signedIn: true)" />
     </Authorized>
     <NotAuthorized>
-        <LauncherPage Title="AL Workbench" Subtitle="Sign in to open these tools. Diff works without an account."
-                      Groups="@Groups(signedIn: false)" />
+        @* Single-tenant there is nothing to sell: a signed-out visitor sees the
+           tools that work without an account and nothing else (MainLayout
+           drops the shell to match). *@
+        @if (SingleTenant.IsEnabled)
+        {
+            <LauncherPage Title="Tools" Groups="@PublicGroups()" />
+        }
+        else
+        {
+            <LauncherPage Title="AL Workbench" Subtitle="Sign in to open these tools. Diff and Piper work without an account."
+                          Groups="@Groups(signedIn: false)" />
+        }
     </NotAuthorized>
 </AuthorizeView>
 
@@ -122,12 +133,22 @@
                 Tile(ToolKey.Translator, "Translator", "Edit an XLIFF file's translation units, filter by state, and fill the gaps.", "languages", "/translator"),
                 // Diff works without an account - link it directly, no lock.
                 Tile(ToolKey.Compare, "Diff", "Paste two texts side by side and see what changed.", "git-compare", "/diff", needsAccount: false),
-                Tile(ToolKey.Piper, "Piper", "Turn a list of values into a pipe-separated filter, an SQL IN list, or another format.", "git-merge", "/piper"),
+                Tile(ToolKey.Piper, "Piper", "Turn a list of values into a pipe-separated filter, an SQL IN list, or another format.", "git-merge", "/piper", needsAccount: false),
                 Tile(ToolKey.Sealed, "Sealed", "Send a password or client secret as a link that opens a set number of times, instead of pasting it into an email.", "lock", "/sealed")),
             Group("Connect an assistant",
                 Tile(ToolKey.Mcp, "MCP", "Let Claude, Cursor, or another AI assistant read your templates, recipes and BC objects.", "bot", "/tools/mcp")),
         };
     }
+
+    /// <summary>
+    /// The signed-out tiles that open without an account, in one unlabelled
+    /// group: a heading over two tiles would only name what they are.
+    /// </summary>
+    private IReadOnlyList<LauncherGroup> PublicGroups() => new[]
+    {
+        new LauncherGroup(string.Empty,
+            Groups(signedIn: false).SelectMany(g => g.Tiles).Where(t => !t.Locked).ToList()),
+    };
 
     private string TemplatesMeta() => _counts.Templates == 0
         ? "None yet - ask an admin to import some"

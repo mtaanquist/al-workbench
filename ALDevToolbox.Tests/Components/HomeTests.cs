@@ -30,6 +30,12 @@ public sealed class HomeTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly MutableSingleTenant _singleTenant = new();
+
+    private sealed class MutableSingleTenant : ALDevToolbox.Services.SingleTenant.ISingleTenantMode
+    {
+        public bool IsEnabled { get; set; }
+    }
     private readonly ToolAvailabilityState _tools;
 
     public HomeTests()
@@ -45,6 +51,7 @@ public sealed class HomeTests : IDisposable
             .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
         _ctx.Services.AddScoped<DashboardService>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.SingleTenant.ISingleTenantMode>(_singleTenant);
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
     }
@@ -95,8 +102,8 @@ public sealed class HomeTests : IDisposable
             // The generators are the two that were wrong: Workspace pointed at
             // the Projects tool's create page and Extension at a route that does
             // not exist, so signing in from either landed somewhere else.
-            hrefs.Should().Contain("/login?returnUrl=%2Ftemplates%2Fworkspace");
-            hrefs.Should().Contain("/login?returnUrl=%2Ftemplates%2Fextension");
+            hrefs.Should().Contain("/login?return=%2Ftemplates%2Fworkspace");
+            hrefs.Should().Contain("/login?return=%2Ftemplates%2Fextension");
             hrefs.Should().NotContain(h => h!.Contains("%2Fprojects%2Fnew"));
             hrefs.Should().NotContain(h => h!.Contains("%2Fprojects%2Fextension"));
             // Diff needs no account, so it is the one tile that links straight through.
@@ -104,13 +111,13 @@ public sealed class HomeTests : IDisposable
 
             // Every tile either links straight to its tool or signs you in and
             // sends you there. One rule catches both original bugs: a tile that
-            // is missing, and a tile whose returnUrl points somewhere else.
+            // is missing, and a tile whose return address points somewhere else.
             foreach (var tool in ToolCatalog.All)
             {
                 hrefs.Should().Contain(
                     h => tool.RoutePrefixes.Any(p =>
                         h!.StartsWith(p, StringComparison.Ordinal)
-                        || h.StartsWith("/login?returnUrl=" + Uri.EscapeDataString(p), StringComparison.Ordinal)),
+                        || h.StartsWith("/login?return=" + Uri.EscapeDataString(p), StringComparison.Ordinal)),
                     $"{tool.Key}'s signed-out tile must lead back to {tool.Key}");
             }
         });
@@ -239,6 +246,42 @@ public sealed class HomeTests : IDisposable
             metas.Should().Contain("1 template");
             metas.Should().Contain("2 recipes", "the plural arm is a separate branch from the singular one");
         });
+    }
+
+    /// <summary>
+    /// Single-tenant, a signed-out visitor got here from a Sealed, Piper or
+    /// Diff link. They see the tools that need no account and nothing about
+    /// the rest of the product.
+    /// </summary>
+    [Fact]
+    public void Single_tenant_signed_out_shows_only_the_tools_that_need_no_account()
+    {
+        _singleTenant.IsEnabled = true;
+        Anonymous();
+
+        var cut = _ctx.Render<Home>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".tool-tile").Select(t => t.GetAttribute("href"))
+                .Should().BeEquivalentTo("/diff", "/piper");
+            cut.FindAll(".tool-tile--locked").Should().BeEmpty();
+            cut.FindAll(".section-label").Should().BeEmpty();
+            cut.FindAll(".page__hero-sub").Should().BeEmpty();
+            cut.Markup.Should().NotContain("Object Explorer");
+        });
+    }
+
+    [Fact]
+    public void Single_tenant_signed_in_gets_the_full_launcher()
+    {
+        _singleTenant.IsEnabled = true;
+        Authorize();
+
+        var cut = _ctx.Render<Home>();
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll(".tool-tile").Should().HaveCountGreaterThan(2));
     }
 
     /// <summary>Registers the auth services and leaves the visitor signed out.</summary>

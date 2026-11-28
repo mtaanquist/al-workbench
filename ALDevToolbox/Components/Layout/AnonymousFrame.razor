@@ -1,0 +1,70 @@
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services.SingleTenant
+@inject NavigationManager Nav
+@inject ISingleTenantMode SingleTenant
+
+@*
+    The signed-out frame: the Sealed recipient's idea of chrome. No brand, no
+    sidebar, no top bar - the page and one "Sign in" top right that returns to
+    it. PublicToolLayout uses it for Piper and Diff; MainLayout uses it for
+    every page when the instance is single-tenant, because there is no product
+    to show a visitor there, only the tools they may already have a link to.
+
+    Single-tenant, the sign-in is a button rather than a quiet link: it is the
+    only way onward from the tools-only home page.
+
+    The content keeps MainLayout's .shell-root / .app__content /
+    .app__content-inner nesting, because the pages' own sheets size against
+    it: pages-power.css fills the .pw frame from .app__content-inner:has(.pw),
+    and the phone-width rules are container queries against .shell-root.
+
+    #blazor-error-ui is repeated for the same reason AuthLayout repeats it:
+    Piper is @@rendermode InteractiveServer.
+*@
+
+<div class="public-frame">
+    <SiteBanner />
+    <header class="public-top">
+        @if (SingleTenant.IsEnabled)
+        {
+            <a href="@SignInHref" class="btn public-signin--button">
+                <Icon Name="log-in" Width="15" Height="15" />
+                <span>Sign in</span>
+            </a>
+        }
+        else
+        {
+            <a href="@SignInHref" class="public-signin">Sign in</a>
+        }
+    </header>
+    <div class="shell-root public-content">
+        <main class="app__content">
+            <div class="app__content-inner">
+                @ChildContent
+            </div>
+        </main>
+    </div>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">×</span>
+</div>
+
+@code {
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    /// <summary>
+    /// Back to this page after signing in, using the same <c>return</c>
+    /// parameter <see cref="RedirectToLogin"/> sends. The home page needs none.
+    /// </summary>
+    private string SignInHref
+    {
+        get
+        {
+            var path = new Uri(Nav.Uri).PathAndQuery;
+            return path == "/" ? "/login" : $"/login?return={Uri.EscapeDataString(path)}";
+        }
+    }
+}

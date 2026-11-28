@@ -4,6 +4,7 @@
 @using ALDevToolbox.Domain.Tools
 @inject IHttpContextAccessor Http
 @inject NavigationManager Nav
+@inject ALDevToolbox.Services.SingleTenant.ISingleTenantMode SingleTenant
 
 <PageTitle>Connect an AI assistant · AL Workbench</PageTitle>
 
@@ -33,6 +34,15 @@
     YOUR-SERVER placeholder, which is one fewer thing for the reader to work
     out and get wrong.
 *@
+
+@* Anonymous so a colleague can read it before they have an account. A
+   single-tenant instance shows a signed-out visitor nothing beyond the public
+   tools, and this page is a tour of the product, so there it asks for sign-in. *@
+@if (_redirectToLogin)
+{
+    <RedirectToLogin />
+    return;
+}
 
 <DocsPage Title="Connect an AI assistant"
           Subtitle="Let Claude, Cursor, Copilot or another assistant use AL Workbench on your behalf."
@@ -421,8 +431,19 @@
             "Save. OpenWebUI picks it up straight away - choose a model that supports tools and ask it to use AL Workbench."),
     };
 
-    protected override void OnInitialized()
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
+
+    private bool _redirectToLogin;
+
+    protected override async Task OnInitializedAsync()
     {
+        if (SingleTenant.IsEnabled && AuthStateTask is not null)
+        {
+            var state = await AuthStateTask;
+            _redirectToLogin = state.User.Identity?.IsAuthenticated != true;
+            if (_redirectToLogin) return;
+        }
+
         _client = Clients.Any(c => c.Key == Client) ? Client! : Clients[0].Key;
 
         var ctx = Http.HttpContext;

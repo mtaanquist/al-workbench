@@ -1,21 +1,10 @@
 @inherits LayoutComponentBase
-@using ALDevToolbox.Components.Shared
-@inject NavigationManager Nav
 
 @*
     The layout for the tools that work without an account (Piper, Diff).
-    Signed in, it is MainLayout. Signed out, it is the Sealed recipient's
-    idea of chrome: no brand, no sidebar, no top bar - the tool and one quiet
-    "Sign in" link top right, so a link shared with someone outside the
-    organisation opens on the tool rather than on our product.
-
-    The content keeps MainLayout's .shell-root / .app__content /
-    .app__content-inner nesting, because the pages' own sheets size against
-    it: pages-power.css fills the .pw frame from .app__content-inner:has(.pw),
-    and the phone-width rules are container queries against .shell-root.
-
-    #blazor-error-ui is repeated for the same reason AuthLayout repeats it:
-    Piper is @@rendermode InteractiveServer.
+    Signed in, it is MainLayout. Signed out, it is AnonymousFrame, so a link
+    shared with someone outside the organisation opens on the tool rather than
+    on our product.
 *@
 
 <AuthorizeView>
@@ -23,33 +12,6 @@
         <LayoutView Layout="typeof(MainLayout)">@Body</LayoutView>
     </Authorized>
     <NotAuthorized>
-        <div class="public-frame">
-            <SiteBanner />
-            <header class="public-top">
-                <a href="@SignInHref" class="public-signin">Sign in</a>
-            </header>
-            <div class="shell-root public-content">
-                <main class="app__content">
-                    <div class="app__content-inner">
-                        @Body
-                    </div>
-                </main>
-            </div>
-        </div>
-
-        <div id="blazor-error-ui" data-nosnippet>
-            An unhandled error has occurred.
-            <a href="." class="reload">Reload</a>
-            <span class="dismiss">×</span>
-        </div>
+        <AnonymousFrame>@Body</AnonymousFrame>
     </NotAuthorized>
 </AuthorizeView>
-
-@code {
-    /// <summary>
-    /// Back to this tool after signing in, using the same <c>return</c>
-    /// parameter <see cref="RedirectToLogin"/> sends.
-    /// </summary>
-    private string SignInHref =>
-        $"/login?return={Uri.EscapeDataString(new Uri(Nav.Uri).PathAndQuery)}";
-}
