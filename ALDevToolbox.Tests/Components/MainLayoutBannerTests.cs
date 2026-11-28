@@ -25,6 +25,7 @@ public sealed class MainLayoutBannerTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly ALDevToolbox.Services.SingleTenant.SingleTenantModeState _singleTenant = new(false);
 
     public MainLayoutBannerTests()
     {
@@ -40,6 +41,7 @@ public sealed class MainLayoutBannerTests : IDisposable
         _ctx.Services.AddSingleton<Microsoft.AspNetCore.Http.IHttpContextAccessor>(
             new Microsoft.AspNetCore.Http.HttpContextAccessor());
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.SingleTenant.ISingleTenantMode>(_singleTenant);
         _ctx.Services.AddSingleton<IToolAvailability>(new AllToolsOn());
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(

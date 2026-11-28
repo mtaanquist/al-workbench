@@ -26,12 +26,19 @@ namespace ALDevToolbox.Tests.Components;
 public sealed class ContentPageTests : IDisposable
 {
     private readonly BunitContext _ctx = new();
+    private readonly MutableSingleTenant _singleTenant = new();
+
+    private sealed class MutableSingleTenant : ALDevToolbox.Services.SingleTenant.ISingleTenantMode
+    {
+        public bool IsEnabled { get; set; }
+    }
     private readonly HttpContextAccessor _http = new() { HttpContext = new DefaultHttpContext() };
 
     public ContentPageTests()
     {
         _ctx.Services.AddSingleton<IHttpContextAccessor>(_http);
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.SingleTenant.ISingleTenantMode>(_singleTenant);
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
     }
@@ -156,6 +163,36 @@ public sealed class ContentPageTests : IDisposable
         snippet.Should().NotContain("--url");
         System.Text.RegularExpressions.Regex.Replace(snippet, @"\s*\\\s*\n\s*", " ").Should().StartWith(
             "claude mcp add --transport http aldevtoolbox https://workbench.cronus.example/mcp --header");
+    }
+
+    /// <summary>
+    /// Anonymous on purpose, except single-tenant: there a signed-out visitor
+    /// sees only the public tools, and this page is a tour of the product.
+    /// </summary>
+    [Fact]
+    public void Single_tenant_sends_a_signed_out_reader_to_sign_in()
+    {
+        _singleTenant.IsEnabled = true;
+        _ctx.AddAuthorization().SetNotAuthorized();
+        Navigate("/docs/mcp");
+
+        var page = _ctx.Render<McpDocs>();
+
+        page.FindAll(".prose").Should().BeEmpty();
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().Uri
+            .Should().EndWith("/login?return=%2Fdocs%2Fmcp");
+    }
+
+    [Fact]
+    public void Single_tenant_still_shows_the_page_to_a_signed_in_reader()
+    {
+        _singleTenant.IsEnabled = true;
+        _ctx.AddAuthorization().SetAuthorized("user@cronus.example");
+        Navigate("/docs/mcp");
+
+        var page = _ctx.Render<McpDocs>();
+
+        page.FindAll(".prose").Should().NotBeEmpty();
     }
 
     /// <summary>

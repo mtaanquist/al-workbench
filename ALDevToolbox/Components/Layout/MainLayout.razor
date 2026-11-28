@@ -3,7 +3,9 @@
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Services
 @using ALDevToolbox.Services.Organizations
+@using ALDevToolbox.Services.SingleTenant
 @inject OrganizationConfigService Config
+@inject ISingleTenantMode SingleTenant
 
 @*
     App shell on the design system's `shell.css`. The grid is 2x2 with named
@@ -19,6 +21,16 @@
 @* The shell grid is height-bound (height: 100%), so the site banner cannot be
    a third grid child without redrawing the areas. A flex column above it gives
    the strip its own row and leaves the shell to fill what is left. *@
+@* Single-tenant and signed out, there is no product to show: a visitor here
+   followed a Sealed, Piper or Diff link and should see those tools and a way
+   to sign in, not the sidebar's map of everything else. Multi-tenant keeps
+   the shell, where it is how a prospective organisation sees what it gets. *@
+@if (_anonymous)
+{
+    <AnonymousFrame>@Body</AnonymousFrame>
+    return;
+}
+
 <div class="app-frame">
 <SiteBanner />
 <div class="shell-root">
@@ -164,6 +176,7 @@
 @code {
     [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
 
+    private bool _anonymous;
     private string? _liveOrgName;
     private string? _claimOrgName;
 
@@ -190,6 +203,7 @@
     {
         if (AuthStateTask is null) return;
         var state = await AuthStateTask;
+        _anonymous = SingleTenant.IsEnabled && state.User.Identity?.IsAuthenticated != true;
         _claimOrgName = state.User.FindFirst("org_name")?.Value;
         var orgIdClaim = state.User.FindFirst(HttpOrganizationContext.OrganizationIdClaim)?.Value;
         if (int.TryParse(orgIdClaim, out var orgId))

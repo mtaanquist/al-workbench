@@ -47,6 +47,7 @@ On subsequent starts the app applies any pending migrations and starts serving.
 
 - **Storage quotas** — the SiteAdmin "Storage quotas" settings tab and the per-org "Storage" page are removed, the sidebar capacity bar is hidden, the usage-snapshot scheduler is skipped, and `StorageQuotaGuard` never blocks a write (no invisible limits). The quota and storage endpoints 404.
 - **Tenant snapshots** — the "Tenant snapshots" tab and its endpoints are removed and `BackupScheduler` skips the per-tenant snapshot loop. The system-level `pg_dump` ("Database" tab) is unaffected and keeps running.
+- **Signed-out visitors** — with no product to show a prospective organisation, a signed-out visitor sees only what they may already have a link to. Every page drops the app shell for the bare frame Sealed, Piper and Diff use, with a Sign in button top right; the home page shows only the tools that work without an account; `/docs/mcp` asks for sign-in. Multi-tenant keeps the shell and the full launcher for signed-out visitors.
 - **Signup** — the org-name/short-ID fields are hidden and `AccountService` refuses to provision a new organisation. Existing-org onboarding (claimed email domain, admin invite) still works; self-service org creation does not.
 
 What's deliberately kept: the cross-org Site Admin user/audit views and `pg_dump` backups. The lone organisation **is** the Default/system org, so the per-org Administration and template-authoring pages — normally hidden in the system org — are surfaced again, letting that one org manage its own content.

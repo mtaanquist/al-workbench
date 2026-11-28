@@ -37,6 +37,10 @@
     outline-offset: var(--focus-offset);
 }
 
+.public-signin--button {
+    text-decoration: none;
+}
+
 .public-content {
     flex: 1 1 auto;
 }
@@ -81,7 +85,8 @@
         padding-inline: var(--space-4);
     }
 
-    .public-signin {
+    .public-signin,
+    .public-signin--button {
         min-height: 44px;
         display: inline-flex;
         align-items: center;

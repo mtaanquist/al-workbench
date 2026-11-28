@@ -28,6 +28,7 @@ public sealed class PublicToolLayoutTests : IDisposable
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
     private readonly BunitAuthorizationContext _auth;
+    private readonly MutableSingleTenant _singleTenant = new();
 
     public PublicToolLayoutTests()
     {
@@ -48,7 +49,7 @@ public sealed class PublicToolLayoutTests : IDisposable
             new Microsoft.AspNetCore.Http.HttpContextAccessor());
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton<IToolAvailability>(new AllToolsOn());
-        _ctx.Services.AddSingleton<ISingleTenantMode>(new SingleTenantOff());
+        _ctx.Services.AddSingleton<ISingleTenantMode>(_singleTenant);
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(
             typeof(Microsoft.Extensions.Logging.ILogger<>),
@@ -60,9 +61,9 @@ public sealed class PublicToolLayoutTests : IDisposable
         public bool IsSiteEnabled(ToolKey key) => true;
     }
 
-    private sealed class SingleTenantOff : ISingleTenantMode
+    private sealed class MutableSingleTenant : ISingleTenantMode
     {
-        public bool IsEnabled => false;
+        public bool IsEnabled { get; set; }
     }
 
     public void Dispose()
@@ -105,5 +106,62 @@ public sealed class PublicToolLayoutTests : IDisposable
         cut.WaitForAssertion(() => cut.Find(".app__brand").Should().NotBeNull());
         cut.Find(".app__content .tool-body").TextContent.Should().Be("tool");
         cut.FindAll(".public-signin").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Single_tenant_signed_out_makes_sign_in_a_button()
+    {
+        _singleTenant.IsEnabled = true;
+
+        var cut = RenderAt("/piper");
+
+        cut.WaitForAssertion(() => cut.Find(".tool-body").Should().NotBeNull());
+        var signIn = cut.Find("a.public-signin--button");
+        signIn.ClassList.Should().Contain("btn");
+        signIn.TextContent.Trim().Should().Be("Sign in");
+        signIn.GetAttribute("href").Should().Be("/login?return=%2Fpiper");
+        cut.FindAll(".app__nav").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Single_tenant_signed_out_drops_the_shell_from_every_page()
+    {
+        _singleTenant.IsEnabled = true;
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/");
+
+        var cut = _ctx.Render<MainLayout>(p => p.Add(l => l.Body,
+            (RenderFragment)(b => b.AddMarkupContent(0, "<div class=\"tool-body\">home</div>"))));
+
+        cut.WaitForAssertion(() => cut.Find(".tool-body").TextContent.Should().Be("home"));
+        cut.FindAll(".app__brand").Should().BeEmpty();
+        cut.FindAll(".app__nav").Should().BeEmpty();
+        cut.FindAll(".app__top").Should().BeEmpty();
+        cut.Markup.Should().NotContain("AL Workbench");
+        cut.Find("a.public-signin--button").GetAttribute("href").Should().Be("/login");
+    }
+
+    [Fact]
+    public void Multi_tenant_signed_out_keeps_the_shell_on_other_pages()
+    {
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/");
+
+        var cut = _ctx.Render<MainLayout>(p => p.Add(l => l.Body,
+            (RenderFragment)(b => b.AddMarkupContent(0, "<div class=\"tool-body\">home</div>"))));
+
+        cut.WaitForAssertion(() => cut.Find(".app__brand").Should().NotBeNull());
+        cut.FindAll(".public-frame").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Single_tenant_signed_in_gets_the_normal_shell()
+    {
+        _singleTenant.IsEnabled = true;
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>(p => p.Add(l => l.Body,
+            (RenderFragment)(b => b.AddMarkupContent(0, "<div class=\"tool-body\">home</div>"))));
+
+        cut.WaitForAssertion(() => cut.Find(".app__brand").Should().NotBeNull());
+        cut.FindAll(".public-frame").Should().BeEmpty();
     }
 }

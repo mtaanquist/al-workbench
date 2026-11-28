@@ -32,6 +32,7 @@ public sealed class InFlightCommandTrackerWiringTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly ALDevToolbox.Services.SingleTenant.SingleTenantModeState _singleTenant = new(false);
 
     public InFlightCommandTrackerWiringTests()
     {
@@ -45,6 +46,7 @@ public sealed class InFlightCommandTrackerWiringTests : IDisposable
                 Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
         _ctx.Services.AddScoped<DashboardService>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.SingleTenant.ISingleTenantMode>(_singleTenant);
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
     }

@@ -14,12 +14,18 @@
 <div class="page">
     <div class="page__hero">
         <h1 class="page__hero-title">@Title</h1>
-        <p class="page__hero-sub">@Subtitle</p>
+        @if (!string.IsNullOrEmpty(Subtitle))
+        {
+            <p class="page__hero-sub">@Subtitle</p>
+        }
     </div>
 
     @foreach (var group in Groups.Where(g => g.Tiles.Count > 0))
     {
-        <p class="section-label">@group.Label</p>
+        @if (!string.IsNullOrEmpty(group.Label))
+        {
+            <p class="section-label">@group.Label</p>
+        }
         <div class="tool-grid">
             @foreach (var tile in group.Tiles)
             {
@@ -45,11 +51,11 @@
 
 @code {
     [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
-    [Parameter, EditorRequired] public string Subtitle { get; set; } = string.Empty;
+    [Parameter] public string? Subtitle { get; set; }
 
     /// <summary>In display order. Empty groups are skipped, so no heading is left over nothing.</summary>
     [Parameter, EditorRequired] public IReadOnlyList<LauncherGroup> Groups { get; set; } = Array.Empty<LauncherGroup>();
 
     private static string HrefFor(LauncherTile tile) =>
-        tile.Locked ? "/login?returnUrl=" + Uri.EscapeDataString(tile.Href) : tile.Href;
+        tile.Locked ? "/login?return=" + Uri.EscapeDataString(tile.Href) : tile.Href;
 }

@@ -70,7 +70,7 @@ public sealed class LauncherPageTests : IDisposable
 
         var tile = cut.Find("a.tool-tile");
         tile.ClassList.Should().Contain("tool-tile--locked");
-        tile.GetAttribute("href").Should().Be("/login?returnUrl=%2Ftemplates%2Fworkspace");
+        tile.GetAttribute("href").Should().Be("/login?return=%2Ftemplates%2Fworkspace");
         tile.Children.Select(e => e.ClassName).Should().Equal("tool-tile__icon", "tool-tile__lock", "tool-tile__body");
         tile.QuerySelector(".tool-tile__lock > span")!.TextContent.Should().Be("Sign in");
     }
