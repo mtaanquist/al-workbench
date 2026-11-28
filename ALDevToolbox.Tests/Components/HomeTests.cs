@@ -273,6 +273,22 @@ public sealed class HomeTests : IDisposable
     }
 
     [Fact]
+    public void Single_tenant_signed_out_with_both_public_tools_off_says_to_sign_in()
+    {
+        _singleTenant.IsEnabled = true;
+        _tools.Set(new[] { ToolKey.Compare, ToolKey.Piper });
+        Anonymous();
+
+        var cut = _ctx.Render<Home>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".tool-tile").Should().BeEmpty();
+            cut.Find(".page__hero-sub").TextContent.Should().Be("Sign in to continue.");
+        });
+    }
+
+    [Fact]
     public void Single_tenant_signed_in_gets_the_full_launcher()
     {
         _singleTenant.IsEnabled = true;

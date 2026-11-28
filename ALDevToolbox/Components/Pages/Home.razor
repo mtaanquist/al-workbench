@@ -57,7 +57,11 @@
            drops the shell to match). *@
         @if (SingleTenant.IsEnabled)
         {
-            <LauncherPage Title="Tools" Groups="@PublicGroups()" />
+            var publicGroups = PublicGroups();
+            @* Both public tools can be switched off site-wide; then the
+               heading alone would read as a broken page. *@
+            <LauncherPage Title="Tools" Groups="@publicGroups"
+                          Subtitle="@(publicGroups[0].Tiles.Count == 0 ? "Sign in to continue." : null)" />
         }
         else
         {
